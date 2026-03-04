@@ -1,0 +1,30 @@
+#main {
+  height: 100%;
+}
+
+#log {
+  height: 1fr;
+  border: solid $primary;
+  scrollbar-size-vertical: 3;
+  scrollbar-visibility: visible;
+}
+
+#approval-bar {
+  height: auto;
+  padding: 0 1;
+  background: $surface;
+}
+
+#status {
+  height: 1;
+  padding: 0 1;
+  background: $boost;
+}
+
+#input {
+  height: 3;
+}
+
+#spinner {
+  width: 40;
+}
