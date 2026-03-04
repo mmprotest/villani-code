@@ -74,6 +74,8 @@ def build_keybindings(
     def _enter(_event):
         if state.active_modal == ActiveModal.PALETTE and palette_submit:
             palette_submit()
+            return
+        _event.current_buffer.validate_and_handle()
 
     @kb.add("c-b")
     def _background(_event):
