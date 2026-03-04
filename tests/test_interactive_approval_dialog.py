@@ -36,6 +36,16 @@ class FakeStatusController:
         self.updated_calls.append((phase, detail))
 
 
+class FakePromptSession:
+    def __init__(self, response: str):
+        self.response = response
+        self.calls = 0
+
+    def prompt(self):
+        self.calls += 1
+        return self.response
+
+
 def test_approval_prompt_uses_dialog_and_suspends(monkeypatch, tmp_path: Path) -> None:
     shell = InteractiveShell(DummyRunner(), tmp_path)
     fake_status = FakeStatusController()
@@ -65,3 +75,16 @@ def test_bottom_toolbar_includes_spinner_frame_and_detail(tmp_path: Path) -> Non
         shell.status_controller._frame_index = 0
 
     assert "[-] Using tool: Read — Reading: src/main.py" in shell._bottom_toolbar()
+
+
+def test_prompt_for_input_suspends_status_before_prompt(tmp_path: Path) -> None:
+    shell = InteractiveShell(DummyRunner(), tmp_path)
+    fake_status = FakeStatusController()
+    shell.status_controller = fake_status
+    fake_session = FakePromptSession("hello")
+
+    text = shell._prompt_for_input(fake_session)
+
+    assert text == "hello"
+    assert fake_session.calls == 1
+    assert fake_status.suspended is True

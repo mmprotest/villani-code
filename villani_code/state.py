@@ -30,6 +30,7 @@ class Runner:
         model: str,
         max_tokens: int = 4096,
         stream: bool = True,
+        print_stream: bool = True,
         thinking: Any = None,
         unsafe: bool = False,
         verbose: bool = False,
@@ -46,6 +47,7 @@ class Runner:
         self.model = model
         self.max_tokens = max_tokens
         self.stream = stream
+        self.print_stream = print_stream
         self.thinking = thinking
         self.unsafe = unsafe
         self.verbose = verbose
@@ -199,6 +201,7 @@ class Runner:
                         if not self.approval_callback(tool_name, tool_input):
                             result = {"content": "User denied tool execution", "is_error": True}
                         else:
+                            self.event_callback({"type": "tool_started", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
                             result = execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
                     elif self.plan_mode and tool_name in {"Write", "Patch"}:
                         result = {"content": "Plan mode: edit not executed", "is_error": False}
@@ -206,8 +209,10 @@ class Runner:
                         if tool_name in {"Write", "Patch"}:
                             file_path = Path(tool_input.get("file_path", ""))
                             self.checkpoints.create([file_path], message_index=len(messages))
+                        self.event_callback({"type": "tool_started", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
                         result = execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
                 self.hooks.run_event("PostToolUse", {"event": "PostToolUse", "tool": tool_name, "input": tool_input, "result": result})
+                self.event_callback({"type": "tool_finished", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id, "is_error": result["is_error"]})
 
                 transcript["tool_invocations"].append({"name": tool_name, "input": tool_input, "id": tool_use_id})
                 transcript["tool_results"].append(result)
@@ -276,7 +281,10 @@ class Runner:
         if event.get("type") == "message_stop":
             tail = self._coalescer.flush()
             if tail:
-                print(tail, end="", flush=True)
+                if self.print_stream:
+                    print(tail, end="", flush=True)
+                else:
+                    self.event_callback({"type": "stream_text", "text": tail})
             return
         if event.get("type") != "content_block_delta":
             return
@@ -292,6 +300,13 @@ class Runner:
             if appended:
                 emit = self._coalescer.consume(appended)
                 if emit:
-                    print(emit, end="", flush=True)
+                    if self.print_stream:
+                        print(emit, end="", flush=True)
+                    else:
+                        self.event_callback({"type": "stream_text", "text": emit})
         if self.verbose and delta.get("type") == "input_json_delta":
-            self.console.print(f"[dim]tool delta: {delta.get('partial_json','')[:200]}[/dim]")
+            partial = f"[dim]tool delta: {delta.get('partial_json','')[:200]}[/dim]"
+            if self.print_stream:
+                self.console.print(partial)
+            else:
+                self.event_callback({"type": "stream_text", "text": partial})
