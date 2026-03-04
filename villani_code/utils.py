@@ -33,6 +33,18 @@ def normalize_content_blocks(content: Any) -> list[dict[str, Any]]:
     return []
 
 
+def is_effectively_empty_content(blocks: Any) -> bool:
+    normalized = normalize_content_blocks(blocks)
+    if not normalized:
+        return True
+    for block in normalized:
+        if block.get("type") != "text":
+            return False
+        if str(block.get("text", "")).strip():
+            return False
+    return True
+
+
 def merge_extra_json(payload: dict[str, Any], extra_json: str | None) -> dict[str, Any]:
     if not extra_json:
         return payload

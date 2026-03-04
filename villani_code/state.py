@@ -16,7 +16,7 @@ from villani_code.skills import discover_skills
 from villani_code.streaming import assemble_anthropic_stream
 from villani_code.tools import execute_tool, tool_specs
 from villani_code.transcripts import save_transcript
-from villani_code.utils import ensure_dir, merge_extra_json, normalize_content_blocks, now_stamp
+from villani_code.utils import ensure_dir, is_effectively_empty_content, merge_extra_json, normalize_content_blocks, now_stamp
 
 
 class Runner:
@@ -77,6 +77,7 @@ class Runner:
             "streamed_events_count": 0,
         }
         self._save_session_snapshot(messages)
+        empty_turn_retries = 0
 
         while True:
             payload = {
@@ -110,6 +111,25 @@ class Runner:
             messages.append(assistant_message)
 
             tool_uses = [b for b in response.get("content", []) if b.get("type") == "tool_use"]
+            empty = is_effectively_empty_content(response.get("content", []))
+            if not tool_uses and empty and empty_turn_retries < 2:
+                empty_turn_retries += 1
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Continue. You ended your previous turn with no output. Resume the task from where you left off and either call the next tool or provide the next part of the answer.",
+                            }
+                        ],
+                    }
+                )
+                continue
+
+            if tool_uses or not empty:
+                empty_turn_retries = 0
+
             if not tool_uses:
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
