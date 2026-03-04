@@ -92,6 +92,11 @@ class StatusController:
             self._spinning = False
         self._render()
 
+    def suspend(self) -> None:
+        with self._lock:
+            self._spinning = False
+        self._clear_line()
+
     def update_phase(self, phase: str, detail: str = "") -> None:
         with self._lock:
             self.current_phase = phase
@@ -111,7 +116,10 @@ class StatusController:
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
-            self._render()
+            with self._lock:
+                spinning = self._spinning
+            if spinning:
+                self._render()
             time.sleep(self._interval)
 
     def _render(self) -> None:

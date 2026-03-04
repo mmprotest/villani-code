@@ -11,7 +11,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.shortcuts import prompt
+from prompt_toolkit.shortcuts import radiolist_dialog
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -165,7 +165,7 @@ class InteractiveShell:
         return len(prompt_text.split()) + 20
 
     def _approval_prompt(self, tool_name: str, payload: dict[str, Any]) -> bool:
-        self.status_controller.start_waiting(f"Awaiting approval: {tool_name}", self._detail_for_tool(tool_name, payload))
+        self.status_controller.suspend()
         target = PermissionEngine._target_for(self.runner.permissions, tool_name, payload)
         key = (tool_name, target)
         if key in self._session_approval_allowlist:
@@ -173,19 +173,28 @@ class InteractiveShell:
 
         self.console.print(f"[yellow]Approval required[/yellow]: {tool_name} -> {target}")
         self.console.print(self._format_payload_preview(payload))
-        while True:
-            answer = prompt("Allow? [y]es / [n]o / [a]lways for this target: ").strip().lower()
-            if answer in {"y", "yes"}:
-                self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
-                return True
-            if answer in {"n", "no"}:
-                self.status_controller.update_phase("Approval denied", tool_name)
-                return False
-            if answer in {"a", "always"}:
-                self._session_approval_allowlist.add(key)
-                self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
-                return True
-            self.console.print("Please answer y, n, or a.")
+        choice = radiolist_dialog(
+            title=f"Approval required: {tool_name}",
+            text=(
+                f"Target: {target}\n\n"
+                f"{self._format_payload_preview(payload)}\n\n"
+                "Use ↑/↓ to choose, Enter to confirm."
+            ),
+            values=[
+                ("yes", "Yes (once)"),
+                ("always", "Always for this target (session)"),
+                ("no", "No"),
+            ],
+        ).run()
+        if choice == "yes":
+            self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
+            return True
+        if choice == "always":
+            self._session_approval_allowlist.add(key)
+            self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
+            return True
+        self.status_controller.update_phase("Approval denied", tool_name)
+        return False
 
     def _format_payload_preview(self, payload: dict[str, Any]) -> str:
         prominent = [k for k in ("file_path", "command", "url") if payload.get(k)]
