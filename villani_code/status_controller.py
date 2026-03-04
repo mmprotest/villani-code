@@ -72,11 +72,11 @@ class StatusController:
 
     def start_waiting(self, phase: str, detail: str = "") -> None:
         with self._lock:
-            self.current_phase = phase
-            self.current_detail = detail
             self._theme = self._rng.choice(self._themes)
             self._active_slogan = self._rng.choice(self._theme.slogans)
             self._active_micro = self._rng.choice(self._theme.micros)
+            self.current_phase = self._active_slogan if phase == "Thinking" else phase
+            self.current_detail = ""
             self._frame_index = 0
             self._spinning = True
             if self._thread is None or not self._thread.is_alive():
@@ -127,12 +127,7 @@ class StatusController:
             frame = self._theme.frames[self._frame_index % len(self._theme.frames)] if self._spinning else "*"
             if self._spinning:
                 self._frame_index += 1
-            recent = " | ".join(list(self.recent_actions)[:3])
-            detail = f" — {self.current_detail}" if self.current_detail else ""
-            flair = f" · {self._active_slogan} · {self._active_micro}" if self._spinning else ""
-            line = f"[{frame}] {self.current_phase}{detail}{flair}"
-            if recent:
-                line += f" || recent: {recent}"
+            line = f"[{frame}] {self.current_phase}"
         width = shutil.get_terminal_size((120, 20)).columns
         clipped = line if len(line) <= width else line[: max(0, width - 3)] + "..."
         sys.stdout.write("\r\033[2K" + clipped)

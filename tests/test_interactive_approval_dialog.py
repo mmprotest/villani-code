@@ -42,11 +42,7 @@ def test_approval_prompt_uses_dialog_and_suspends(monkeypatch, tmp_path: Path) -
 
     monkeypatch.setattr("villani_code.interactive.PermissionEngine._target_for", lambda *_args, **_kwargs: "repo/**")
 
-    class _Dialog:
-        def run(self):
-            return "always"
-
-    monkeypatch.setattr("villani_code.interactive.radiolist_dialog", lambda **_kwargs: _Dialog())
+    monkeypatch.setattr(shell, "_approval_choice_dialog", lambda *_args, **_kwargs: "always")
 
     approved = shell._approval_prompt("Read", {"file_path": "README.md"})
 

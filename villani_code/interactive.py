@@ -8,10 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
 from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.shortcuts import radiolist_dialog
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit
+from prompt_toolkit.widgets import Box, Frame, Label, RadioList
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -87,7 +90,7 @@ class InteractiveShell:
                         continue
                 self.task_manager.create_task("model-call", "Model response")
                 self.task_manager.update_status("model-call", TaskStatus.IN_PROGRESS, progress=0.2)
-                self.status_controller.start_waiting("Thinking", self.runner.model)
+                self.status_controller.start_waiting("Thinking")
                 result = self.runner.run(text)
                 tokens = self._extract_total_tokens(result.get("response", {}), text)
                 self._record_token_usage(tokens)
@@ -171,21 +174,7 @@ class InteractiveShell:
         if key in self._session_approval_allowlist:
             return True
 
-        self.console.print(f"[yellow]Approval required[/yellow]: {tool_name} -> {target}")
-        self.console.print(self._format_payload_preview(payload))
-        choice = radiolist_dialog(
-            title=f"Approval required: {tool_name}",
-            text=(
-                f"Target: {target}\n\n"
-                f"{self._format_payload_preview(payload)}\n\n"
-                "Use ↑/↓ to choose, Enter to confirm."
-            ),
-            values=[
-                ("yes", "Yes (once)"),
-                ("always", "Always for this target (session)"),
-                ("no", "No"),
-            ],
-        ).run()
+        choice = self._approval_choice_dialog(tool_name, target, payload)
         if choice == "yes":
             self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
             return True
@@ -195,6 +184,42 @@ class InteractiveShell:
             return True
         self.status_controller.update_phase("Approval denied", tool_name)
         return False
+
+    def _approval_choice_dialog(self, tool_name: str, target: str, payload: dict[str, Any]) -> str | None:
+        options = [
+            ("yes", "Yes (once)"),
+            ("always", "Always for this target (session)"),
+            ("no", "No"),
+        ]
+        radio = RadioList(options)
+        help_text = (
+            f"Approval required: {tool_name}\n"
+            f"Target: {target}\n\n"
+            f"{self._format_payload_preview(payload)}\n\n"
+            "Use ↑/↓ to move, Enter to confirm."
+        )
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _accept(event):
+            event.app.exit(result=radio.current_value)
+
+        @kb.add("c-c")
+        @kb.add("escape")
+        def _cancel(event):
+            event.app.exit(result=None)
+
+        root = Box(
+            body=HSplit(
+                [
+                    Label(text=help_text),
+                    Frame(body=radio, title="Select approval option"),
+                ]
+            ),
+            padding=1,
+        )
+        app = Application(layout=Layout(root, focused_element=radio), key_bindings=kb, full_screen=False)
+        return app.run()
 
     def _format_payload_preview(self, payload: dict[str, Any]) -> str:
         prominent = [k for k in ("file_path", "command", "url") if payload.get(k)]
@@ -352,7 +377,7 @@ class InteractiveShell:
     def _on_runner_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if etype == "model_request_started":
-            self.status_controller.start_waiting("Thinking", str(event.get("model", "")))
+            self.status_controller.start_waiting("Thinking")
             return
         if etype == "first_text_delta":
             self.status_controller.stop_spinner("Streaming")
