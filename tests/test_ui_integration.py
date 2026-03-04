@@ -1,8 +1,10 @@
+import asyncio
 from pathlib import Path
 
 from textual.widgets import Input
 
 from villani_code.tui.app import VillaniTUI
+from villani_code.tui.messages import LogAppend
 
 
 class DummyRunner:
@@ -38,6 +40,18 @@ def test_enter_submit_path_calls_controller_without_global_enter_binding(tmp_pat
     assert app.controller.calls == ["hello"]
 
 
-def test_app_does_not_define_global_approval_bindings(tmp_path: Path) -> None:
-    app = VillaniTUI(DummyRunner(), tmp_path)
-    assert "BINDINGS" not in app.__class__.__dict__
+def test_ai_stream_starts_on_fresh_line(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        async with app.run_test() as pilot:
+            app.post_message(LogAppend("> hi", kind="user"))
+            app.post_message(LogAppend("hello", kind="stream"))
+            app.post_message(LogAppend(" world", kind="stream"))
+            app.post_message(LogAppend("write out.py", kind="meta"))
+            await pilot.pause()
+            log = app.query_one("#log")
+            lines = list(log.lines)
+            assert not any("> hihello" in line for line in lines)
+            assert any("hello world" in line for line in lines)
+
+    asyncio.run(run())

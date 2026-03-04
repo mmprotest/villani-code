@@ -41,7 +41,8 @@ class VillaniTUI(App[None]):
         self.runner = runner
         self.repo = repo
         self.follow_tail = True
-        self._streaming = False
+        self._ai_streaming = False
+        self._ai_started = False
         self.controller = RunnerController(runner, self)
 
     def compose(self) -> ComposeResult:
@@ -72,9 +73,15 @@ class VillaniTUI(App[None]):
             return
         self.controller.run_prompt(text)
 
-    def _close_stream_if_open(self) -> None:
-        if self._streaming:
-            self._streaming = False
+    def _end_ai_stream_if_open(self, log: VillaniLog) -> None:
+        if self._ai_streaming:
+            log.write("\n", scroll_end=self.follow_tail)
+            self._ai_streaming = False
+
+    def _start_ai_boundary(self, log: VillaniLog) -> None:
+        if not self._ai_started:
+            log.write("\n", scroll_end=self.follow_tail)
+            self._ai_started = True
 
     def on_log_append(self, message: LogAppend) -> None:
         log = self.query_one(VillaniLog)
@@ -82,28 +89,31 @@ class VillaniTUI(App[None]):
         kind = message.kind
 
         if kind in {"user", "meta"}:
-            self._close_stream_if_open()
+            self._end_ai_stream_if_open(log)
+            self._ai_started = False
             log.write_line(text, scroll_end=self.follow_tail)
             return
 
         if kind == "ai":
-            self._close_stream_if_open()
-            log.write_line("", scroll_end=self.follow_tail)
-            for line in text.split("\n"):
+            self._end_ai_stream_if_open(log)
+            self._start_ai_boundary(log)
+            for line in text.rstrip("\n").split("\n"):
                 log.write_line(line, scroll_end=self.follow_tail)
+            self._ai_streaming = False
             return
 
         if kind == "stream":
-            if not self._streaming:
-                log.write_line("", scroll_end=self.follow_tail)
-                self._streaming = True
+            if not self._ai_streaming:
+                self._start_ai_boundary(log)
+                self._ai_streaming = True
             parts = text.split("\n")
             log.write(parts[0], scroll_end=self.follow_tail)
             for line in parts[1:]:
                 log.write_line(line, scroll_end=self.follow_tail)
             return
 
-        self._close_stream_if_open()
+        self._end_ai_stream_if_open(log)
+        self._ai_started = False
         log.write_line(text, scroll_end=self.follow_tail)
 
     def on_status_update(self, message: StatusUpdate) -> None:

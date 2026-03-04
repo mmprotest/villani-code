@@ -35,6 +35,10 @@ class ApprovalBar(Vertical):
         options = self.query_one("#approval-options", OptionList)
         options.clear_options()
         options.add_options([choice.capitalize() for choice in choices])
+        options.styles.height = len(choices)
+        options.styles.min_height = len(choices)
+        self.styles.height = 1 + len(choices)
+        self.styles.min_height = 1 + len(choices)
         options.highlighted = 0
         options.focus()
 

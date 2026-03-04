@@ -18,14 +18,12 @@
 
 #approval-prompt {
   width: 1fr;
-  padding: 0 0 1 0;
   content-align: left middle;
 }
 
 #approval-options {
   width: 1fr;
-  height: 3;
-  border: round $panel;
+  height: auto;
 }
 
 #approval-options > .option-list--option-highlighted {
