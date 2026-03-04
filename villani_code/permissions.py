@@ -15,6 +15,12 @@ class Decision(str, Enum):
 
 
 @dataclass
+class PolicyDecision:
+    decision: Decision
+    reason: str
+
+
+@dataclass
 class PermissionRule:
     tool: str
     pattern: str
@@ -48,21 +54,36 @@ class PermissionEngine:
         self.repo = repo.resolve()
 
     def evaluate(self, tool: str, payload: dict, bypass: bool = False, auto_accept_edits: bool = False) -> Decision:
+        return self.evaluate_with_reason(tool, payload, bypass=bypass, auto_accept_edits=auto_accept_edits).decision
+
+    def evaluate_with_reason(self, tool: str, payload: dict, bypass: bool = False, auto_accept_edits: bool = False) -> PolicyDecision:
         target = self._target_for(tool, payload)
         for rule in self.config.deny:
             if self._matches(rule, tool, target):
-                return Decision.DENY
+                return PolicyDecision(Decision.DENY, f"Matched deny rule: {rule.tool}({rule.pattern})")
         for rule in self.config.ask:
             if self._matches(rule, tool, target):
-                return Decision.ASK
+                return PolicyDecision(Decision.ASK, f"Matched ask rule: {rule.tool}({rule.pattern})")
         for rule in self.config.allow:
             if self._matches(rule, tool, target):
-                if auto_accept_edits and tool in {"Edit", "Write", "Patch"}:
-                    return Decision.ALLOW
-                return Decision.ALLOW
+                return PolicyDecision(Decision.ALLOW, f"Matched allow rule: {rule.tool}({rule.pattern})")
+
+        if tool == "Bash" and self._is_bashsafe_enabled():
+            safe = classify_bash_command(str(payload.get("command", "")))
+            if safe.decision == Decision.ALLOW:
+                return safe
+            if safe.decision == Decision.DENY:
+                return safe
+
         if bypass:
-            return Decision.ALLOW
-        return Decision.ASK
+            return PolicyDecision(Decision.ALLOW, "Bypass flag enabled")
+
+        if tool == "Bash":
+            return PolicyDecision(Decision.ASK, "Bash defaults to ask unless explicitly allowlisted")
+        return PolicyDecision(Decision.ASK, "Default ask policy")
+
+    def _is_bashsafe_enabled(self) -> bool:
+        return any(rule.tool == "BashSafe" for rule in self.config.allow)
 
     def _target_for(self, tool: str, payload: dict) -> str:
         if tool == "Bash":
@@ -81,6 +102,77 @@ class PermissionEngine:
         if tool in {"Read", "Write", "Patch", "Edit"}:
             return path_matches(rule.pattern, target, self.repo)
         return fnmatch.fnmatch(target, rule.pattern)
+
+
+@dataclass
+class BashClassification:
+    decision: Decision
+    reason: str
+
+
+_DISALLOWED_SHELL_TOKENS = {"&&", "||", ";", "|", "(", ")"}
+_REDIRECTION_PREFIXES = (">", "<", "2>", "1>")
+_SAFE_EXACT = {
+    ("pwd",),
+    ("ls",),
+    ("dir",),
+    ("cat",),
+    ("type",),
+    ("rg",),
+    ("grep",),
+    ("find",),
+    ("pytest",),
+    ("npm", "test"),
+    ("pnpm", "test"),
+    ("uv", "run", "pytest"),
+    ("poetry", "run", "pytest"),
+    ("python", "--version"),
+    ("node", "--version"),
+    ("git", "status"),
+    ("git", "diff"),
+    ("git", "log"),
+    ("git", "show"),
+}
+
+
+_INSTALL_PREFIXES = {
+    ("pip", "install"),
+    ("python", "-m", "pip", "install"),
+    ("uv", "pip", "install"),
+    ("uv", "sync"),
+    ("poetry", "add"),
+    ("poetry", "install"),
+    ("npm", "install"),
+    ("pnpm", "install"),
+}
+
+
+
+def classify_bash_command(command: str) -> BashClassification:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return BashClassification(Decision.ASK, "Command parse error; requires approval")
+    if not tokens:
+        return BashClassification(Decision.ASK, "Empty command")
+
+    if any(t in _DISALLOWED_SHELL_TOKENS for t in tokens):
+        return BashClassification(Decision.ASK, "Shell chaining/subshell operators require approval")
+    if any(t.startswith(_REDIRECTION_PREFIXES) for t in tokens):
+        return BashClassification(Decision.ASK, "Redirection requires approval")
+    if any("$(" in t or "`" in t for t in tokens):
+        return BashClassification(Decision.ASK, "Subshell expansion requires approval")
+
+    lowered = tuple(t.lower() for t in tokens)
+    for pfx in _INSTALL_PREFIXES:
+        if lowered[: len(pfx)] == pfx:
+            return BashClassification(Decision.ASK, "Install command requires explicit approval")
+
+    for exact in _SAFE_EXACT:
+        if lowered[: len(exact)] == exact:
+            return BashClassification(Decision.ALLOW, f"BashSafe allowlist matched: {' '.join(exact)}")
+
+    return BashClassification(Decision.ASK, "Not in BashSafe allowlist")
 
 
 def bash_matches(pattern: str, command: str) -> bool:

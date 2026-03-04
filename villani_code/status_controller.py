@@ -18,7 +18,7 @@ class SpinnerTheme:
 
 
 class StatusController:
-    def __init__(self, fps: float = 10.0, recent_max: int = 4) -> None:
+    def __init__(self, fps: float = 10.0, recent_max: int = 4, render_to_stdout: bool = True) -> None:
         self.current_phase = "Idle"
         self.current_detail = ""
         self.recent_actions: deque[str] = deque(maxlen=recent_max)
@@ -34,6 +34,7 @@ class StatusController:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._render_to_stdout = render_to_stdout
 
     def _build_themes(self) -> list[SpinnerTheme]:
         slogans = [
@@ -176,11 +177,20 @@ class StatusController:
             if self._spinning:
                 self._frame_index += 1
             line = f"[{frame}] {self.current_phase}"
+        if not self._render_to_stdout:
+            return
         width = shutil.get_terminal_size((120, 20)).columns
         clipped = line if len(line) <= width else line[: max(0, width - 3)] + "..."
         sys.stdout.write("\r\033[2K" + clipped)
         sys.stdout.flush()
 
     def _clear_line(self) -> None:
+        if not self._render_to_stdout:
+            return
         sys.stdout.write("\r\033[2K")
         sys.stdout.flush()
+
+    def status_line(self) -> str:
+        with self._lock:
+            detail = f" — {self.current_detail}" if self.current_detail else ""
+            return f"{self.current_phase}{detail}"

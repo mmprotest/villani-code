@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from villani_code.patch_apply import PatchApplyError, apply_unified_diff
+
 
 class LsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -60,7 +62,7 @@ class WriteInput(BaseModel):
 
 class PatchInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    file_path: str
+    file_path: str = ""
     unified_diff: str
 
 
@@ -223,11 +225,13 @@ def _run_write(data: WriteInput, repo: Path) -> str:
 
 
 def _run_patch(data: PatchInput, repo: Path) -> str:
-    path = _safe_path(repo, data.file_path)
-    proc = subprocess.run(["patch", str(path), "--forward", "--reject-file=-"], input=data.unified_diff, text=True, capture_output=True, cwd=str(repo))
-    if proc.returncode != 0:
-        raise ValueError(proc.stderr or proc.stdout)
-    return proc.stdout.strip() or "Patch applied"
+    if data.file_path:
+        _safe_path(repo, data.file_path)
+    try:
+        touched = apply_unified_diff(repo, data.unified_diff, default_file_path=data.file_path or None)
+    except PatchApplyError as exc:
+        raise ValueError(str(exc)) from exc
+    return f"Patch applied to {len(touched)} file(s)"
 
 
 def _run_webfetch(data: WebFetchInput) -> str:

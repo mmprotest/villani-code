@@ -31,6 +31,7 @@ from ui.themes import get_theme
 from villani_code.permissions import PermissionEngine
 from villani_code.status_controller import StatusController
 from villani_code.state import Runner
+from villani_code.tools import execute_tool
 
 
 class InteractiveShell:
@@ -68,7 +69,7 @@ class InteractiveShell:
         self.token_events: deque[tuple[datetime, int]] = deque(maxlen=128)
         self.pending_action: CommandAction | None = None
         self._session_approval_allowlist: set[tuple[str, str]] = set()
-        self.status_controller = StatusController(fps=10.0)
+        self.status_controller = StatusController(fps=10.0, render_to_stdout=False)
         self.runner.approval_callback = self._approval_prompt
         self.runner.event_callback = self._on_runner_event
 
@@ -165,7 +166,7 @@ class InteractiveShell:
 
     def _bottom_toolbar(self) -> str:
         width = self.console.size.width
-        return self.status_bar.format(width)
+        return self.status_bar.format(width) + f" | {self.status_controller.status_line()}"
 
     def _record_token_usage(self, tokens: int) -> None:
         now = datetime.now(timezone.utc)
@@ -360,7 +361,7 @@ class InteractiveShell:
 
     def _handle_slash(self, line: str) -> bool:
         if line in {"/", "/help"}:
-            self.console.print("/help /tasks /jobs /kill <pid> /diff /settings /rewind /export [name] /fork [name] /mcp /hooks /exit")
+            self.console.print("/help /tasks /jobs /kill <pid> /diff /settings /rewind /export [name] /fork [name] /propose [/path] /edits /show <id> /apply <id> /reject <id> /mcp /hooks /exit")
             return True
         if line == "/exit":
             raise EOFError
@@ -400,6 +401,47 @@ class InteractiveShell:
                 subprocess.run(["git", "checkout", "-b", name], cwd=str(self.repo), capture_output=True)
                 self.console.print(f"Forked session as {name}")
             return True
+        if line.startswith("/propose"):
+            self.runner.capture_next_diff_proposal = True
+            self.console.print("Will capture the next assistant diff as a proposal.")
+            return True
+        if line == "/edits":
+            edits = self.runner.proposals.list()
+            if not edits:
+                self.console.print("No edit proposals.")
+                return True
+            for edit in edits:
+                self.console.print(f"{edit.id} [{edit.status}] {edit.summary}")
+            return True
+        if line.startswith("/show "):
+            edit_id = line.split(maxsplit=1)[1]
+            edit = self.runner.proposals.get(edit_id)
+            if not edit:
+                self.console.print(f"Unknown proposal: {edit_id}")
+                return True
+            files = self.diff_viewer.parse(edit.diff_text)
+            self.console.print(self.diff_viewer.render_plain(files) or edit.diff_text)
+            return True
+        if line.startswith("/apply "):
+            edit_id = line.split(maxsplit=1)[1]
+            edit = self.runner.proposals.get(edit_id)
+            if not edit:
+                self.console.print(f"Unknown proposal: {edit_id}")
+                return True
+            result = execute_tool("Patch", {"unified_diff": edit.diff_text, "file_path": ""}, self.repo, unsafe=self.runner.unsafe)
+            if result.get("is_error"):
+                self.console.print(f"Apply failed: {result.get('content')}")
+            else:
+                edit.status = "applied"
+                self.console.print(f"Applied proposal {edit.id}")
+            return True
+        if line.startswith("/reject "):
+            edit_id = line.split(maxsplit=1)[1]
+            if self.runner.proposals.reject(edit_id):
+                self.console.print(f"Rejected proposal {edit_id}")
+            else:
+                self.console.print(f"Unknown proposal: {edit_id}")
+            return True
         if line == "/jobs":
             for pid, proc in self.jobs.items():
                 self.console.print(f"{pid} running={proc.poll() is None}")
@@ -436,6 +478,13 @@ class InteractiveShell:
             outcome = "ok" if not event.get("is_error") else "error"
             self.status_controller.push_action(f"{tool_name} finished ({outcome})")
             self.status_controller.start_waiting("Thinking")
+            return
+        if etype == "command_policy":
+            line = f"{event.get('outcome')} bash @ {event.get('cwd')}: {event.get('reason')}"
+            self.task_manager.record_event("BashPolicy", line)
+            return
+        if etype == "edit_proposed":
+            self.task_manager.record_event("EditProposed", f"{event.get('proposal_id')} {event.get('summary')}")
 
     def _detail_for_tool(self, tool_name: str, payload: dict[str, Any]) -> str:
         payload = self._redact_payload(payload)

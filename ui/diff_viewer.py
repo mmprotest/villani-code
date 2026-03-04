@@ -40,6 +40,12 @@ class DiffViewer:
                 right = line.split(" b/")[-1]
                 current_file = DiffFile(path=right)
                 current_hunk = None
+            elif line.startswith("+++ ") and not current_file:
+                path = line[4:].strip()
+                if path.startswith("b/"):
+                    path = path[2:]
+                current_file = DiffFile(path=path)
+                current_hunk = None
             elif line.startswith("@@") and current_file:
                 current_hunk = DiffHunk(header=line, lines=[])
                 current_file.hunks.append(current_hunk)

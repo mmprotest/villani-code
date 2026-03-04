@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from villani_code.permissions import Decision, PermissionConfig, PermissionEngine, bash_matches
+from villani_code.permissions import Decision, PermissionConfig, PermissionEngine, bash_matches, classify_bash_command
 
 
 def test_permissions_precedence_deny_ask_allow(tmp_path: Path):
@@ -18,3 +18,20 @@ def test_permissions_precedence_deny_ask_allow(tmp_path: Path):
 def test_bash_operator_aware_matching():
     assert bash_matches("npm run test *", "npm run test unit")
     assert not bash_matches("npm run test *", "npm run test && rm -rf /")
+
+
+def test_bashsafe_allows_readonly_commands():
+    cls = classify_bash_command("git status")
+    assert cls.decision == Decision.ALLOW
+
+
+def test_bashsafe_rejects_chaining_and_install():
+    assert classify_bash_command("pwd && whoami").decision == Decision.ASK
+    assert classify_bash_command("pip install x").decision == Decision.ASK
+
+
+def test_bash_defaults_to_ask_without_bashsafe(tmp_path: Path):
+    cfg = PermissionConfig.from_strings(deny=[], ask=[], allow=["Read(*)"])
+    engine = PermissionEngine(cfg, tmp_path)
+    decision = engine.evaluate_with_reason("Bash", {"command": "pwd"})
+    assert decision.decision == Decision.ASK

@@ -77,3 +77,23 @@ def assemble_anthropic_stream(events: Iterable[dict[str, Any]]) -> dict[str, Any
             break
 
     return response
+
+
+class StreamCoalescer:
+    def __init__(self) -> None:
+        self._pending_ws = ""
+
+    def consume(self, text: str) -> str:
+        if not text:
+            return ""
+        if text.isspace():
+            self._pending_ws += text
+            return ""
+        out = self._pending_ws + text
+        self._pending_ws = ""
+        return out
+
+    def flush(self) -> str:
+        out = self._pending_ws
+        self._pending_ws = ""
+        return out

@@ -171,3 +171,54 @@ def test_loop_stops_after_retry_limit_on_empty_turns(tmp_path: Path):
 
     assert client.calls == 3
     assert result["response"]["content"] == []
+
+
+class FakeClientDiffProposal:
+    def __init__(self):
+        self.calls = 0
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        return {
+            "id": "1",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"}],
+        }
+
+
+def test_loop_captures_diff_proposal(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("old\n", encoding="utf-8")
+    runner = Runner(client=FakeClientDiffProposal(), repo=tmp_path, model="m", stream=False)
+    runner.run("propose")
+    proposals = runner.proposals.list()
+    assert proposals
+    assert proposals[0].files_touched == ["a.txt"]
+
+
+class FakeClientStall:
+    def __init__(self):
+        self.calls = 0
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        return {"id": str(self.calls), "role": "assistant", "content": [{"type": "text", "text": "ok"}]}
+
+
+def test_stall_recovery_injects_instruction(tmp_path: Path):
+    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False)
+    runner.run("x")
+    found = False
+    for p in runner.client.payloads[1:]:
+        for m in p["messages"]:
+            if m["role"] == "user" and m["content"] and "RECOVERY MODE" in m["content"][0].get("text", ""):
+                found = True
+    assert found
+
+
+def test_stall_final_stop_after_recovery_attempts(tmp_path: Path):
+    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False)
+    result = runner.run("x")
+    text_blocks = [b.get("text","") for b in result["response"]["content"] if b.get("type")=="text"]
+    assert any("still blocked" in t for t in text_blocks)
