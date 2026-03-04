@@ -14,6 +14,7 @@ from villani_code.permissions import Decision, PermissionConfig, PermissionEngin
 from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.skills import discover_skills
 from villani_code.streaming import assemble_anthropic_stream
+from villani_code.live_display import apply_live_display_delta
 from villani_code.tools import execute_tool, tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.utils import ensure_dir, is_effectively_empty_content, merge_extra_json, normalize_content_blocks, now_stamp
@@ -36,6 +37,7 @@ class Runner:
         auto_accept_edits: bool = False,
         plan_mode: bool = False,
         approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.client = client
         self.repo = repo
@@ -51,7 +53,10 @@ class Runner:
         self.auto_accept_edits = auto_accept_edits
         self.plan_mode = plan_mode
         self.approval_callback = approval_callback or (lambda _n, _i: True)
+        self.event_callback = event_callback or (lambda _event: None)
         self.console = Console()
+        self._live_stream_buffer = ""
+        self._live_stream_started = False
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
                 deny=["Read(.env)", "Read(secrets/**)", "Bash(curl *)", "Bash(wget *)"],
@@ -80,6 +85,8 @@ class Runner:
         empty_turn_retries = 0
 
         while True:
+            self._live_stream_buffer = ""
+            self._live_stream_started = False
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -92,6 +99,7 @@ class Runner:
                 payload["thinking"] = self.thinking
             payload = merge_extra_json(payload, self.extra_json)
             transcript["requests"].append(payload)
+            self.event_callback({"type": "model_request_started", "model": self.model})
 
             raw = self.client.create_message(payload, stream=self.stream)
             if self.stream:
@@ -141,6 +149,7 @@ class Runner:
                 tool_name = block.get("name", "")
                 tool_input = block.get("input", {})
                 tool_use_id = str(block.get("id"))
+                self.event_callback({"type": "tool_use", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
 
                 hook_pre = self.hooks.run_event("PreToolUse", {"event": "PreToolUse", "tool": tool_name, "input": tool_input})
                 if not hook_pre.allow:
@@ -149,8 +158,12 @@ class Runner:
                     decision = self.permissions.evaluate(tool_name, tool_input, bypass=self.bypass_permissions, auto_accept_edits=self.auto_accept_edits)
                     if decision == Decision.DENY:
                         result = {"content": "Denied by permission policy", "is_error": True}
-                    elif decision == Decision.ASK and not self.approval_callback(tool_name, tool_input):
-                        result = {"content": "User denied tool execution", "is_error": True}
+                    elif decision == Decision.ASK:
+                        self.event_callback({"type": "approval_required", "name": tool_name, "input": tool_input})
+                        if not self.approval_callback(tool_name, tool_input):
+                            result = {"content": "User denied tool execution", "is_error": True}
+                        else:
+                            result = execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
                     elif self.plan_mode and tool_name in {"Write", "Patch"}:
                         result = {"content": "Plan mode: edit not executed", "is_error": False}
                     else:
@@ -162,6 +175,7 @@ class Runner:
 
                 transcript["tool_invocations"].append({"name": tool_name, "input": tool_input, "id": tool_use_id})
                 transcript["tool_results"].append(result)
+                self.event_callback({"type": "tool_result", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id, "is_error": result["is_error"]})
                 tool_results.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]})
 
             messages.append({"role": "user", "content": tool_results})
@@ -177,6 +191,14 @@ class Runner:
             return
         delta = event.get("delta", {})
         if delta.get("type") == "text_delta":
-            print(delta.get("text", ""), end="", flush=True)
+            raw_text = delta.get("text", "")
+            before = self._live_stream_buffer
+            self._live_stream_buffer, updated_started = apply_live_display_delta(before, raw_text, self._live_stream_started)
+            if updated_started and not self._live_stream_started:
+                self.event_callback({"type": "first_text_delta"})
+            self._live_stream_started = updated_started
+            appended = self._live_stream_buffer[len(before) :]
+            if appended:
+                print(appended, end="", flush=True)
         if self.verbose and delta.get("type") == "input_json_delta":
             self.console.print(f"[dim]tool delta: {delta.get('partial_json','')[:200]}[/dim]")

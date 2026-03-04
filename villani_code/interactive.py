@@ -24,6 +24,7 @@ from ui.status_bar import StatusBar
 from ui.task_board import TaskManager, TaskStatus
 from ui.themes import get_theme
 from villani_code.permissions import PermissionEngine
+from villani_code.status_controller import StatusController
 from villani_code.state import Runner
 
 
@@ -49,7 +50,9 @@ class InteractiveShell:
         self.token_events: deque[tuple[datetime, int]] = deque(maxlen=128)
         self.pending_action: CommandAction | None = None
         self._session_approval_allowlist: set[tuple[str, str]] = set()
+        self.status_controller = StatusController(fps=10.0)
         self.runner.approval_callback = self._approval_prompt
+        self.runner.event_callback = self._on_runner_event
 
     def run(self) -> None:
         kb = self._build_keybindings()
@@ -62,34 +65,40 @@ class InteractiveShell:
             bottom_toolbar=self._bottom_toolbar,
             style=self.theme.prompt_toolkit_style,
         )
-        while True:
-            self._poll_settings()
-            self._execute_pending_action()
-            try:
-                text = session.prompt()
-            except EOFError:
-                return
-            except KeyboardInterrupt:
-                self.console.print("[yellow]Cancelled[/yellow]")
-                continue
-            if not text.strip():
-                continue
-            if text.strip().startswith("!"):
-                self._run_bash_line(text[1:])
-                continue
-            if text.strip().startswith("/"):
-                if self._handle_slash(text.strip()):
+        try:
+            while True:
+                self._poll_settings()
+                self._execute_pending_action()
+                try:
+                    text = session.prompt()
+                except EOFError:
+                    return
+                except KeyboardInterrupt:
+                    self.console.print("[yellow]Cancelled[/yellow]")
+                    self.status_controller.update_phase("Idle")
                     continue
-            self.task_manager.create_task("model-call", "Model response")
-            self.task_manager.update_status("model-call", TaskStatus.IN_PROGRESS, progress=0.2)
-            result = self.runner.run(text)
-            tokens = self._extract_total_tokens(result.get("response", {}), text)
-            self._record_token_usage(tokens)
-            self.status_bar.update(connected=True, last_heartbeat=datetime.now(timezone.utc))
-            self.task_manager.update_status("model-call", TaskStatus.COMPLETED, progress=1.0)
-            for block in result["response"].get("content", []):
-                if block.get("type") == "text":
-                    self._render_response(block.get("text", ""))
+                if not text.strip():
+                    continue
+                if text.strip().startswith("!"):
+                    self._run_bash_line(text[1:])
+                    continue
+                if text.strip().startswith("/"):
+                    if self._handle_slash(text.strip()):
+                        continue
+                self.task_manager.create_task("model-call", "Model response")
+                self.task_manager.update_status("model-call", TaskStatus.IN_PROGRESS, progress=0.2)
+                self.status_controller.start_waiting("Thinking", self.runner.model)
+                result = self.runner.run(text)
+                tokens = self._extract_total_tokens(result.get("response", {}), text)
+                self._record_token_usage(tokens)
+                self.status_bar.update(connected=True, last_heartbeat=datetime.now(timezone.utc))
+                self.task_manager.update_status("model-call", TaskStatus.COMPLETED, progress=1.0)
+                self.status_controller.update_phase("Idle")
+                for block in result["response"].get("content", []):
+                    if block.get("type") == "text":
+                        self._render_response(block.get("text", ""))
+        finally:
+            self.status_controller.shutdown()
 
     def _build_keybindings(self) -> KeyBindings:
         kb = KeyBindings()
@@ -156,6 +165,7 @@ class InteractiveShell:
         return len(prompt_text.split()) + 20
 
     def _approval_prompt(self, tool_name: str, payload: dict[str, Any]) -> bool:
+        self.status_controller.start_waiting(f"Awaiting approval: {tool_name}", self._detail_for_tool(tool_name, payload))
         target = PermissionEngine._target_for(self.runner.permissions, tool_name, payload)
         key = (tool_name, target)
         if key in self._session_approval_allowlist:
@@ -166,11 +176,14 @@ class InteractiveShell:
         while True:
             answer = prompt("Allow? [y]es / [n]o / [a]lways for this target: ").strip().lower()
             if answer in {"y", "yes"}:
+                self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
                 return True
             if answer in {"n", "no"}:
+                self.status_controller.update_phase("Approval denied", tool_name)
                 return False
             if answer in {"a", "always"}:
                 self._session_approval_allowlist.add(key)
+                self.status_controller.start_waiting(f"Using tool: {tool_name}", self._detail_for_tool(tool_name, payload))
                 return True
             self.console.print("Please answer y, n, or a.")
 
@@ -188,6 +201,7 @@ class InteractiveShell:
 
     def _run_bash_line(self, command: str) -> None:
         self.task_manager.record_event("ToolStart", command)
+        self.status_controller.start_waiting("Using tool: bash", self._summarize_command(command))
         self.status_bar.update(active_tools=self.status_bar.snapshot.active_tools + 1, last_tool_name="bash")
         proc = subprocess.Popen(command, shell=True, cwd=str(self.repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.jobs[proc.pid] = proc
@@ -196,6 +210,7 @@ class InteractiveShell:
         self.jobs.pop(proc.pid, None)
         self.status_bar.update(active_tools=max(0, self.status_bar.snapshot.active_tools - 1))
         self.task_manager.record_event("ToolEnd", command)
+        self.status_controller.update_phase("Idle")
 
     def _render_tool_output(self, tool_name: str, output: str) -> None:
         preview = output if len(output) < 600 else output[:600] + "\n[output truncated, use /tasks details to expand]"
@@ -324,3 +339,66 @@ class InteractiveShell:
                 self.jobs[pid].kill()
             return True
         return False
+
+    def _on_runner_event(self, event: dict[str, Any]) -> None:
+        etype = event.get("type")
+        if etype == "model_request_started":
+            self.status_controller.start_waiting("Thinking", str(event.get("model", "")))
+            return
+        if etype == "first_text_delta":
+            self.status_controller.stop_spinner("Streaming")
+            return
+        if etype == "tool_use":
+            tool_name = str(event.get("name", ""))
+            tool_input = event.get("input", {}) if isinstance(event.get("input"), dict) else {}
+            detail = self._detail_for_tool(tool_name, tool_input)
+            self.status_controller.start_waiting(f"Using tool: {tool_name}", detail)
+            self.status_controller.push_action(f"{tool_name}: {detail}" if detail else tool_name)
+            return
+        if etype == "approval_required":
+            tool_name = str(event.get("name", ""))
+            detail = self._detail_for_tool(tool_name, event.get("input", {}))
+            self.status_controller.update_phase(f"Awaiting approval: {tool_name}", detail)
+            return
+        if etype == "tool_result":
+            tool_name = str(event.get("name", ""))
+            outcome = "ok" if not event.get("is_error") else "error"
+            self.status_controller.push_action(f"{tool_name} finished ({outcome})")
+            self.status_controller.start_waiting("Thinking")
+
+    def _detail_for_tool(self, tool_name: str, payload: dict[str, Any]) -> str:
+        payload = self._redact_payload(payload)
+        if tool_name in {"Read", "Write", "Patch"} and payload.get("file_path"):
+            prefix = "Editing" if tool_name in {"Write", "Patch"} else "Reading"
+            return f"{prefix}: {payload.get('file_path')}"
+        if tool_name in {"Grep", "Search", "Ls", "Glob"} and payload.get("path"):
+            return f"Path: {payload.get('path')}"
+        if tool_name.startswith("Git"):
+            op = tool_name.replace("Git", "").lower() or "operation"
+            return f"git {op} @ {self.repo}"
+        if tool_name == "Bash":
+            return self._summarize_command(str(payload.get("command", "")))
+        if "url" in payload:
+            return f"URL: {payload.get('url')}"
+        for key in ("file", "target", "cwd"):
+            if payload.get(key):
+                return f"{key}: {payload.get(key)}"
+        return ""
+
+    def _summarize_command(self, command: str) -> str:
+        cmd = command.strip().replace("\n", " ")
+        summary = cmd[:80] + ("..." if len(cmd) > 80 else "")
+        if "cd " in cmd:
+            chunks = cmd.split("cd ", 1)[1].split(" ", 1)
+            return f"cmd: {summary} | path: {chunks[0]}"
+        return f"cmd: {summary}"
+
+    def _redact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        redacted: dict[str, Any] = {}
+        for key, value in payload.items():
+            lowered = key.lower()
+            if any(token in lowered for token in ("token", "key", "secret")):
+                redacted[key] = "***"
+            else:
+                redacted[key] = value
+        return redacted
