@@ -21,7 +21,9 @@ class LsInput(BaseModel):
 class ReadInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     file_path: str
-    max_bytes: int = 200000
+    max_bytes: int = 40000
+    offset_lines: int = 0
+    limit_lines: int = 2000
 
 
 class GrepInput(BaseModel):
@@ -29,7 +31,8 @@ class GrepInput(BaseModel):
     pattern: str
     path: str = "."
     include_hidden: bool = False
-    max_results: int = 200
+    max_results: int = 100
+    head_limit: int = 200
 
 
 class GlobInput(BaseModel):
@@ -95,6 +98,26 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
 
 DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
 
+SCHEMA_ALLOWED_KEYS = {
+    "type",
+    "properties",
+    "required",
+    "additionalProperties",
+    "items",
+    "enum",
+    "description",
+    "default",
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "anyOf",
+    "oneOf",
+    "allOf",
+}
+
 
 def _error(message: str) -> dict[str, Any]:
     return {"content": message, "is_error": True}
@@ -106,15 +129,64 @@ def _ok(content: str) -> dict[str, Any]:
 
 def tool_specs() -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
-    for name, model in TOOL_MODELS.items():
+    names = list(TOOL_MODELS.items())
+    for i, (name, model) in enumerate(names):
+        raw = model.model_json_schema()
+        cleaned = sanitize_json_schema(raw)
+        spec: dict[str, Any] = {
+            "name": name,
+            "description": f"{name} tool for Villani Code.",
+            "input_schema": cleaned,
+        }
+        if i == len(names) - 1:
+            spec["cache_control"] = {"type": "ephemeral"}
         specs.append(
-            {
-                "name": name,
-                "description": f"{name} tool for Villani Code.",
-                "input_schema": model.model_json_schema(),
-            }
+            spec
         )
     return specs
+
+
+def sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    defs = schema.get("$defs", {})
+
+    def _resolve_ref(ref: str) -> dict[str, Any]:
+        prefix = "#/$defs/"
+        if ref.startswith(prefix):
+            return defs.get(ref[len(prefix) :], {})
+        return {}
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        if not isinstance(node, dict):
+            return node
+
+        if "$ref" in node:
+            resolved = _resolve_ref(str(node.get("$ref")))
+            merged = {**resolved, **{k: v for k, v in node.items() if k != "$ref"}}
+            node = merged
+
+        cleaned: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in {"$schema", "$defs", "title", "examples", "$ref"}:
+                continue
+            if key not in SCHEMA_ALLOWED_KEYS:
+                continue
+            cleaned[key] = _walk(value)
+
+        if cleaned.get("type") == "object":
+            cleaned.setdefault("properties", {})
+            cleaned["additionalProperties"] = False
+            if "required" not in cleaned:
+                cleaned["required"] = []
+
+        return cleaned
+
+    result = _walk(schema)
+    if isinstance(result, dict) and result.get("type") == "object":
+        result.setdefault("required", [])
+        result["additionalProperties"] = False
+    return result if isinstance(result, dict) else {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
 
 
 def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool = False) -> dict[str, Any]:
@@ -172,8 +244,13 @@ def _run_ls(data: LsInput, repo: Path) -> str:
 
 def _run_read(data: ReadInput, repo: Path) -> str:
     path = _safe_path(repo, data.file_path)
-    raw = path.read_bytes()[: data.max_bytes]
-    return raw.decode("utf-8", errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    start = max(0, data.offset_lines)
+    end = start + max(1, data.limit_lines)
+    window = lines[start:end]
+    numbered = "\n".join(f"{start + i + 1}: {line}" for i, line in enumerate(window))
+    return _truncate_tool_output(numbered, data.max_bytes, "Use offset_lines and limit_lines to read the next window.")
 
 
 def _run_grep(data: GrepInput, repo: Path) -> str:
@@ -184,7 +261,11 @@ def _run_grep(data: GrepInput, repo: Path) -> str:
         if data.include_hidden:
             cmd.append("--hidden")
         proc = subprocess.run(cmd, capture_output=True, text=True)
-        return "\n".join(proc.stdout.splitlines()[: data.max_results])
+        lines = proc.stdout.splitlines()[: data.max_results]
+        joined = "\n".join(lines)
+        if data.head_limit > 0:
+            return _truncate_tool_output(joined, data.head_limit, "Reduce scope or increase head_limit for more grep output.")
+        return joined
     return ""
 
 
@@ -241,7 +322,7 @@ def _run_webfetch(data: WebFetchInput) -> str:
 def _run_git(name: str, data: GitSimpleInput, repo: Path) -> str:
     mapping = {
         "GitStatus": ["status", "--short"],
-        "GitDiff": ["diff"],
+        "GitDiff": ["diff", "--unified=1"],
         "GitLog": ["log", "--oneline", "-20"],
         "GitBranch": ["branch"],
         "GitCheckout": ["checkout"],
@@ -250,3 +331,12 @@ def _run_git(name: str, data: GitSimpleInput, repo: Path) -> str:
     cmd = ["git", *mapping[name], *data.args]
     proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True)
     return proc.stdout or proc.stderr
+
+
+def _truncate_tool_output(text: str, max_bytes: int, hint: str) -> str:
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) <= max_bytes:
+        return text
+    cutoff = max(0, max_bytes)
+    truncated = raw[:cutoff].decode("utf-8", errors="ignore")
+    return f"{truncated}\n...[truncated] {hint}"

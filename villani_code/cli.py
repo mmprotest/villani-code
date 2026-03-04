@@ -20,7 +20,7 @@ app.add_typer(plugin_app, name="plugin")
 console = Console()
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: bool) -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: bool, max_prompt_chars: int) -> Runner:
     client = AnthropicClient(base_url=base_url)
     thinking_obj = None
     if thinking:
@@ -28,7 +28,7 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = json.loads(thinking)
         except json.JSONDecodeError:
             thinking_obj = thinking
-    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode)
+    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_prompt_chars=max_prompt_chars)
 
 
 @app.command()
@@ -47,8 +47,9 @@ def run(
     dangerously_skip_permissions: bool = typer.Option(False, "--dangerously-skip-permissions"),
     auto_accept_edits: bool = typer.Option(False, "--auto-accept-edits"),
     plan_mode: bool = typer.Option(False, "--plan-mode"),
+    max_prompt_chars: int = typer.Option(200000, "--max-prompt-chars"),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode)
+    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_prompt_chars)
     result = runner.run(instruction)
     for block in result["response"].get("content", []):
         if block.get("type") == "text":
@@ -62,8 +63,9 @@ def interactive(
     repo: Path = typer.Option(Path("."), "--repo"),
     max_tokens: int = typer.Option(4096, "--max-tokens"),
     resume: str | None = typer.Option(None, "--resume"),
+    max_prompt_chars: int = typer.Option(200000, "--max-prompt-chars"),
 ):
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False)
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False, max_prompt_chars)
     InteractiveShell(runner, repo.resolve(), base_url=base_url, resume=resume).run()
 
 

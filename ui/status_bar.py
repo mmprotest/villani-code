@@ -11,6 +11,9 @@ class StatusSnapshot:
     last_heartbeat: datetime | None = None
     total_tokens: int = 0
     tokens_last_minute: int = 0
+    last_input_tokens: int = 0
+    last_output_tokens: int = 0
+    cache_read_tokens: int = 0
     active_tools: int = 0
     last_tool_name: str = "-"
     settings_hint: str = "Ctrl+P"
@@ -50,7 +53,7 @@ class StatusBar:
         net = "connected" if self.snapshot.connected else "disconnected"
         segments = [
             f"net:{net}/{heart_age}",
-            f"tok:{self.snapshot.total_tokens} ({self.snapshot.tokens_last_minute}/m)",
+            f"tok:{self.snapshot.total_tokens} in:{self.snapshot.last_input_tokens} out:{self.snapshot.last_output_tokens} cache:{self.snapshot.cache_read_tokens}",
             f"tools:{self.snapshot.active_tools}:{self.snapshot.last_tool_name}",
             f"settings:{self.snapshot.settings_hint}",
         ]

@@ -180,6 +180,7 @@ class InteractiveShell:
         self.diff_viewer = DiffViewer(repo)
         self.settings = SettingsManager(repo)
         self.applied_settings = self.settings.load()
+        self.runner.max_prompt_chars = self.applied_settings.max_prompt_chars
         self.theme = get_theme(self.applied_settings.theme)
         self.session_store = SessionStore(repo, runner.model, base_url, session_id=resume)
         self.resume_id = resume
@@ -218,7 +219,7 @@ class InteractiveShell:
             kind = event.get("type")
             if kind == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta":
                 enqueue_event({"kind": "model_delta_text", "text": event.get("delta", {}).get("text", "")})
-            elif kind in {"model_start", "model_stop"}:
+            elif kind in {"model_start", "model_stop", "usage_update"}:
                 enqueue_event({"kind": kind, **event})
 
         def _on_tool_event(kind: str, payload: dict) -> None:
@@ -368,12 +369,18 @@ class InteractiveShell:
                     self.status_bar.update(connected=True, last_heartbeat=datetime.now(timezone.utc))
                     transcript.set_activity("Model", "Running...")
                 elif kind == "model_stop":
-                    usage = event.get("usage", {}) or {}
-                    total = int(usage.get("output_tokens", 0)) + int(usage.get("input_tokens", 0))
-                    self.status_bar.update(connected=True, last_heartbeat=datetime.now(timezone.utc), total_tokens=self.status_bar.snapshot.total_tokens + total, tokens_last_minute=total)
+                    self.status_bar.update(connected=True, last_heartbeat=datetime.now(timezone.utc))
                     transcript.flush_tool_summary()
                     transcript.clear_activity()
                     self.session_store.save(controller.messages or [])
+                elif kind == "usage_update":
+                    self.status_bar.update(
+                        total_tokens=int(event.get("total_tokens", self.status_bar.snapshot.total_tokens)),
+                        tokens_last_minute=int(event.get("input_tokens", 0)) + int(event.get("output_tokens", 0)),
+                        last_input_tokens=int(event.get("input_tokens", 0)),
+                        last_output_tokens=int(event.get("output_tokens", 0)),
+                        cache_read_tokens=int(event.get("cache_read_input_tokens", 0)),
+                    )
                 elif kind == "tool_use":
                     transcript.append_tool_call(event.get("name", ""), event.get("input", {}))
                 elif kind == "tool_start":

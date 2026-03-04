@@ -8,6 +8,7 @@ from rich.console import Console
 
 from villani_code.anthropic_client import AnthropicClient
 from villani_code.checkpoints import CheckpointManager
+from villani_code.compression import compress_messages, estimate_size
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
@@ -18,6 +19,8 @@ from villani_code.tools import execute_tool, tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.turn_validation import repair_messages, validate_tool_turns
 from villani_code.utils import ensure_dir, merge_extra_json, normalize_content_blocks, now_stamp
+
+MAX_TOOL_RESULT_CHARS = 40000
 
 
 class Runner:
@@ -40,6 +43,7 @@ class Runner:
         stream_event_handler: Callable[[dict[str, Any]], None] | None = None,
         tool_event_handler: Callable[[str, dict[str, Any]], None] | None = None,
         interactive_mode: bool = False,
+        max_prompt_chars: int = 200000,
     ):
         self.client = client
         self.repo = repo
@@ -58,6 +62,7 @@ class Runner:
         self.stream_event_handler = stream_event_handler
         self.tool_event_handler = tool_event_handler
         self.interactive_mode = interactive_mode
+        self.max_prompt_chars = max_prompt_chars
         self.console = Console()
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
@@ -71,6 +76,9 @@ class Runner:
         self.checkpoints = CheckpointManager(self.repo)
         self.skills = discover_skills(self.repo)
         self.mcp = load_mcp_config(self.repo)
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_cache_read_input_tokens = 0
 
     def run(self, instruction: str, messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
@@ -89,6 +97,7 @@ class Runner:
 
         while True:
             messages = repair_messages(messages)
+            messages = compress_messages(messages, max_chars=self.max_prompt_chars)
             try:
                 validate_tool_turns(messages)
             except ValueError as exc:
@@ -121,6 +130,9 @@ class Runner:
             if self.thinking is not None:
                 payload["thinking"] = self.thinking
             payload = merge_extra_json(payload, self.extra_json)
+            prompt_chars = estimate_size(messages)
+            if self.verbose:
+                self.console.print(f"[dim]approx prompt chars: {prompt_chars}[/dim]")
             transcript["requests"].append(payload)
             if self.stream_event_handler:
                 self.stream_event_handler({"type": "model_start", "model": self.model})
@@ -139,12 +151,28 @@ class Runner:
                 response = raw
 
             response["content"] = normalize_content_blocks(response.get("content"))
+            usage = response.get("usage", {}) or {}
+            input_tokens = int(usage.get("input_tokens", 0) or 0)
+            output_tokens = int(usage.get("output_tokens", 0) or 0)
+            cache_read_input_tokens = int(usage.get("cache_read_input_tokens", 0) or 0)
+            self.total_input_tokens += input_tokens
+            self.total_output_tokens += output_tokens
+            self.total_cache_read_input_tokens += cache_read_input_tokens
             if self.stream_event_handler:
                 self.stream_event_handler(
                     {
                         "type": "model_stop",
-                        "usage": response.get("usage", {}),
+                        "usage": usage,
                         "stop_reason": response.get("stop_reason"),
+                    }
+                )
+                self.stream_event_handler(
+                    {
+                        "type": "usage_update",
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cache_read_input_tokens": cache_read_input_tokens,
+                        "total_tokens": self.total_input_tokens + self.total_output_tokens,
                     }
                 )
             transcript["responses"].append(response)
@@ -205,7 +233,8 @@ class Runner:
                     self.tool_event_handler("tool_end", {"name": tool_name, "result": result, "id": tool_use_id, "is_error": bool(result.get("is_error")), "preview": preview})
                     self.tool_event_handler("tool_result", {"name": tool_name, "result": result, "id": tool_use_id})
                 transcript["tool_results"].append(result)
-                tool_result_blocks.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]})
+                compact_content = _compact_tool_result_content(str(result["content"]))
+                tool_result_blocks.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": compact_content, "is_error": result["is_error"]})
 
             messages.append({"role": "user", "content": tool_result_blocks})
             pending_tool_use_ids -= {str(block.get("tool_use_id")) for block in tool_result_blocks}
@@ -224,3 +253,9 @@ class Runner:
             print(delta.get("text", ""), end="", flush=True)
         if self.verbose and delta.get("type") == "input_json_delta":
             self.console.print(f"[dim]tool delta: {delta.get('partial_json','')[:200]}[/dim]")
+
+
+def _compact_tool_result_content(content: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    if len(content) <= limit:
+        return content
+    return f"{content[:limit]}\n...[truncated] Request narrower tool inputs for more detail."

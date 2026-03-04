@@ -14,6 +14,7 @@ class UserSettings:
     verbose: bool = False
     auto_accept_edits: bool = False
     pin_user_theme: bool = False
+    max_prompt_chars: int = 200000
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "UserSettings":
@@ -24,6 +25,7 @@ class UserSettings:
             verbose=bool(payload.get("verbose", False)),
             auto_accept_edits=bool(payload.get("auto_accept_edits", False)),
             pin_user_theme=bool(payload.get("pin_user_theme", False)),
+            max_prompt_chars=int(payload.get("max_prompt_chars", 200000)),
         )
 
 
