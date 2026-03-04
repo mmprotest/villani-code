@@ -21,7 +21,7 @@ dependencies = [
 villani-code = "villani_code.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["villani_code*"]
+include = ["villani_code*", "ui*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
