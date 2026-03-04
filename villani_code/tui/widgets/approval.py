@@ -36,10 +36,10 @@ class ApprovalBar(Vertical):
         options.clear()
         for choice in choices:
             options.append(ListItem(Label(choice.capitalize())))
-        options.styles.height = len(choices)
-        options.styles.min_height = len(choices)
-        self.styles.height = 1 + len(choices)
-        self.styles.min_height = 1 + len(choices)
+        options.styles.height = len(choices) + 1
+        options.styles.min_height = len(choices) + 1
+        self.styles.height = 2 + len(choices)
+        self.styles.min_height = 2 + len(choices)
         options.index = 0
         self._sync_selected_style()
         options.focus()
