@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.layout import ConditionalContainer, Dimension, Float, FloatContainer, FormattedTextControl, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl
@@ -131,14 +132,34 @@ class TUIApp:
         self.app = Application(layout=Layout(self._build_container(palette_modal, help_modal, settings_modal, output_modal)), key_bindings=key_bindings, full_screen=True, style=style)
 
     def _build_container(self, palette_modal: Any, help_modal: Any, settings_modal: Any, output_modal: Any):
+        @Condition
+        def show_side_panels() -> bool:
+            return (self.state.show_tasks or self.state.show_diff) and not self.state.focus_mode
+
+        @Condition
+        def show_palette_modal() -> bool:
+            return self.state.active_modal == ActiveModal.PALETTE
+
+        @Condition
+        def show_help_modal() -> bool:
+            return self.state.active_modal == ActiveModal.HELP
+
+        @Condition
+        def show_settings_modal() -> bool:
+            return self.state.active_modal == ActiveModal.SETTINGS
+
+        @Condition
+        def show_output_modal() -> bool:
+            return self.state.active_modal == ActiveModal.OUTPUT
+
         transcript_frame = Frame(self.transcript.window, title="Transcript")
         body = VSplit(
             [
                 transcript_frame,
-                ConditionalContainer(self.right_panel, filter=lambda: (self.state.show_tasks or self.state.show_diff) and not self.state.focus_mode),
+                ConditionalContainer(self.right_panel, filter=show_side_panels),
             ]
         )
-        bottom_panels = ConditionalContainer(self.bottom_panel, filter=lambda: (self.state.show_tasks or self.state.show_diff) and not self.state.focus_mode)
+        bottom_panels = ConditionalContainer(self.bottom_panel, filter=show_side_panels)
         content = HSplit(
             [
                 body,
@@ -148,10 +169,10 @@ class TUIApp:
             ]
         )
         floats = [
-            Float(content=ConditionalContainer(palette_modal, filter=lambda: self.state.active_modal == ActiveModal.PALETTE)),
-            Float(content=ConditionalContainer(help_modal, filter=lambda: self.state.active_modal == ActiveModal.HELP)),
-            Float(content=ConditionalContainer(settings_modal, filter=lambda: self.state.active_modal == ActiveModal.SETTINGS)),
-            Float(content=ConditionalContainer(output_modal, filter=lambda: self.state.active_modal == ActiveModal.OUTPUT)),
+            Float(content=ConditionalContainer(palette_modal, filter=show_palette_modal)),
+            Float(content=ConditionalContainer(help_modal, filter=show_help_modal)),
+            Float(content=ConditionalContainer(settings_modal, filter=show_settings_modal)),
+            Float(content=ConditionalContainer(output_modal, filter=show_output_modal)),
         ]
         return FloatContainer(content=content, floats=floats)
 

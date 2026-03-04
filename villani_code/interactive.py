@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from prompt_toolkit.completion import FuzzyWordCompleter
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout import ConditionalContainer, HSplit
 
 from ui.command_palette import CommandAction, CommandPalette
@@ -101,9 +102,17 @@ class InteractiveShell:
 
         input_bar.textarea.accept_handler = _accept
 
+        @Condition
+        def show_tasks() -> bool:
+            return state.show_tasks
+
+        @Condition
+        def show_diff() -> bool:
+            return state.show_diff
+
         right_panel = HSplit([
-            ConditionalContainer(task_panel.container, filter=lambda: state.show_tasks),
-            ConditionalContainer(diff_panel.container, filter=lambda: state.show_diff),
+            ConditionalContainer(task_panel.container, filter=show_tasks),
+            ConditionalContainer(diff_panel.container, filter=show_diff),
         ])
         bottom_panel = right_panel
         app = TUIApp(
