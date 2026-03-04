@@ -34,6 +34,19 @@ from villani_code.state import Runner
 
 
 class InteractiveShell:
+    LAUNCH_BANNER = (
+        "+------------------------------------------------------------------------------+\n"
+        "|  /\\_/\\                                                                       |\n"
+        "| ( o.o )    _    _ _ _ _             _    _____          _                    |\n"
+        "|  > ^ <    | |  | (_) | |           (_)  / ____|        | |                   |\n"
+        "|           | |  | |_| | | __ _ _ __  _  | |     ___   __| | ___               |\n"
+        "|           | |  | | | | |/ _` | '_ \\| | | |    / _ \\ / _` |/ _ \\              |\n"
+        "|           | |__| | | | | (_| | | | | | | |___| (_) | (_| |  __/              |\n"
+        "|            \\____/|_|_|_|\\__,_|_| |_|_|  \\_____\\___/ \\__,_|\\___/              |\n"
+        "|                     (villani-fying your terminal, one token at a time)       |\n"
+        "+------------------------------------------------------------------------------+"
+    )
+
     def __init__(self, runner: Runner, repo: Path):
         self.runner = runner
         self.repo = repo
@@ -60,6 +73,7 @@ class InteractiveShell:
         self.runner.event_callback = self._on_runner_event
 
     def run(self) -> None:
+        self.console.print(self.LAUNCH_BANNER)
         kb = self._build_keybindings()
         completer = FuzzyWordCompleter([i.trigger for i in self.palette.items], WORD=True)
         session = PromptSession(
