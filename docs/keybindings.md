@@ -11,8 +11,8 @@
 - `Esc`: Close the active modal.
 
 ## Transcript and tool output
-- `Enter`: Toggle fold for selected long code block.
-- `e`: Open full output overlay for selected tool result.
+- `Ctrl+G`: Toggle fold for selected long code block.
+- `Ctrl+E`: Open full output overlay for selected tool result.
 
 ## Diff viewer panel
 - `Up` and `Down`: Move selected file.
