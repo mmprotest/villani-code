@@ -77,7 +77,11 @@ class InteractiveShell:
         self._max_recent_files = 5
         self._tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
         self._tool_io: dict[str, dict[str, list[str]]] = {}
-        self.status_controller = StatusController(fps=10.0, render_to_stdout=True)
+        self.status_controller = StatusController(
+            fps=10.0,
+            render_to_stdout=False,
+            on_update=self._invalidate_ui,
+        )
         self.runner.print_stream = False
         self.runner.approval_callback = self._approval_prompt
         self.runner.event_callback = self._on_runner_event
@@ -295,8 +299,22 @@ class InteractiveShell:
         if text == self._last_activity_line:
             return
         self._last_activity_line = text
-        self.status_controller.print_persistent(text)
+
+        app = get_app_or_none()
+        if app is not None:
+            try:
+                app.run_in_terminal(lambda: self.console.print(text))
+            except Exception:
+                self.console.print(text)
+        else:
+            self.status_controller.print_persistent(text)
+
         self.task_manager.record_event("Activity", text)
+
+    def _invalidate_ui(self) -> None:
+        app = get_app_or_none()
+        if app is not None:
+            app.invalidate()
 
     def _note_file_read(self, path: str) -> None:
         if not path:
@@ -667,7 +685,7 @@ class InteractiveShell:
 
     def _invalidate_toolbar_loop(self, session: PromptSession, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
-            time.sleep(0.1)
+            time.sleep(0.25)
             try:
                 app = getattr(session, "app", None) or get_app_or_none()
                 if app is not None:
