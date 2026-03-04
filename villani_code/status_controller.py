@@ -8,6 +8,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,13 @@ class SpinnerTheme:
 
 
 class StatusController:
-    def __init__(self, fps: float = 10.0, recent_max: int = 4, render_to_stdout: bool = True) -> None:
+    def __init__(
+        self,
+        fps: float = 10.0,
+        recent_max: int = 4,
+        render_to_stdout: bool = True,
+        on_update: Callable[[], None] | None = None,
+    ) -> None:
         self.current_phase = "Idle"
         self.current_detail = ""
         self.recent_actions: deque[str] = deque(maxlen=recent_max)
@@ -35,6 +42,16 @@ class StatusController:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._render_to_stdout = render_to_stdout
+        self._on_update = on_update
+
+    def _notify(self) -> None:
+        cb = self._on_update
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            return
 
     def _build_themes(self) -> list[SpinnerTheme]:
         slogans = [
@@ -130,6 +147,7 @@ class StatusController:
                 self._thread = threading.Thread(target=self._run, daemon=True)
                 self._thread.start()
         self._render()
+        self._notify()
 
     def stop_spinner(self, phase: str = "Responding", detail: str = "") -> None:
         with self._lock:
@@ -140,28 +158,33 @@ class StatusController:
             self._render()
         else:
             self._clear_line()
+        self._notify()
 
     def suspend(self) -> None:
         with self._lock:
             self._spinning = False
         self._clear_line()
+        self._notify()
 
     def update_phase(self, phase: str, detail: str = "") -> None:
         with self._lock:
             self.current_phase = phase
             self.current_detail = detail
         self._render()
+        self._notify()
 
     def push_action(self, action: str) -> None:
         with self._lock:
             self.recent_actions.appendleft(action)
         self._render()
+        self._notify()
 
     def shutdown(self) -> None:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.3)
         self._clear_line()
+        self._notify()
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -179,11 +202,13 @@ class StatusController:
             detail = f" — {self.current_detail}" if self.current_detail else ""
             line = f"[{frame}] {self.current_phase}{detail}"
         if not self._render_to_stdout:
+            self._notify()
             return
         width = shutil.get_terminal_size((120, 20)).columns
         clipped = line if len(line) <= width else line[: max(0, width - 3)] + "..."
         sys.stdout.write("\r\033[2K" + clipped)
         sys.stdout.flush()
+        self._notify()
 
     def _clear_line(self) -> None:
         if not self._render_to_stdout:
