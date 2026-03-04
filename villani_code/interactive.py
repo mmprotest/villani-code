@@ -80,7 +80,7 @@ class InteractiveShell:
 
         self.log_lines: deque[str] = deque(maxlen=self.MAX_LOG_HISTORY)
         self._log_text = ""
-        self.log_area = TextArea(text="", read_only=True, scrollbar=True, focusable=True)
+        self.log_area = TextArea(text="", read_only=True, scrollbar=False, focusable=True)
         self._configure_scrollbar_interaction(self.log_area)
         self.input_field = TextArea(
             multiline=False,
@@ -824,6 +824,7 @@ class InteractiveShell:
         """Use explicit scrollbar margins so click/drag interactions work reliably."""
         if area.window is None:
             return
+        area.window.scrollbar = False
         area.window.right_margins = [
             ScrollbarMargin(display_arrows=True),
             ScrollbarMargin(display_arrows=False),
