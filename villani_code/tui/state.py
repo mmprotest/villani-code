@@ -31,3 +31,7 @@ class UIState:
     total_tokens: int = 0
     last_tool_name: str = "-"
     output_view_id: str | None = None
+    pending_approval_id: int | None = None
+    ctrl_c_armed: bool = False
+    ctrl_c_armed_until: float = 0.0
+    transient_message: str = ""
