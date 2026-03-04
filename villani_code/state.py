@@ -16,6 +16,7 @@ from villani_code.skills import discover_skills
 from villani_code.streaming import assemble_anthropic_stream
 from villani_code.tools import execute_tool, tool_specs
 from villani_code.transcripts import save_transcript
+from villani_code.turn_validation import repair_messages, validate_tool_turns
 from villani_code.utils import ensure_dir, merge_extra_json, normalize_content_blocks, now_stamp
 
 
@@ -73,8 +74,10 @@ class Runner:
 
     def run(self, instruction: str, messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
+        messages = repair_messages(messages)
         system = build_system_blocks(self.repo)
         tools = tool_specs()
+        pending_tool_use_ids: set[str] = set()
         transcript: dict[str, Any] = {
             "requests": [],
             "responses": [],
@@ -85,6 +88,28 @@ class Runner:
         self._save_session_snapshot(messages)
 
         while True:
+            messages = repair_messages(messages)
+            try:
+                validate_tool_turns(messages)
+            except ValueError as exc:
+                error_text = f"Invalid conversation state before model call: {exc}"
+                if self.stream_event_handler:
+                    self.stream_event_handler({"type": "error", "error": error_text})
+                transcript["error"] = error_text
+                transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+                self._save_session_snapshot(messages)
+                return {"error": error_text, "messages": messages, "transcript_path": str(transcript_path), "transcript": transcript}
+
+            if pending_tool_use_ids:
+                pending = ", ".join(sorted(pending_tool_use_ids))
+                error_text = f"Pending tool_use ids not resolved before model call: {pending}"
+                if self.stream_event_handler:
+                    self.stream_event_handler({"type": "error", "error": error_text})
+                transcript["error"] = error_text
+                transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+                self._save_session_snapshot(messages)
+                return {"error": error_text, "messages": messages, "transcript_path": str(transcript_path), "transcript": transcript}
+
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -126,14 +151,18 @@ class Runner:
 
             assistant_message = {"role": "assistant", "content": response.get("content", [])}
             messages.append(assistant_message)
+            messages = repair_messages(messages)
 
-            tool_uses = [b for b in response.get("content", []) if b.get("type") == "tool_use"]
+            merged_assistant_content = messages[-1].get("content", []) if messages else []
+            tool_uses = [b for b in merged_assistant_content if b.get("type") == "tool_use"]
             if not tool_uses:
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
                 self._save_session_snapshot(messages)
                 return {"response": response, "messages": messages, "transcript_path": str(transcript_path), "transcript": transcript}
 
+            pending_tool_use_ids = {str(block.get("id")) for block in tool_uses}
+            tool_result_blocks: list[dict[str, Any]] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 if self.tool_event_handler:
@@ -155,8 +184,6 @@ class Runner:
                         if approval_decision == "deny":
                             result = {"content": "User denied tool execution", "is_error": True}
                         else:
-                            if approval_decision == "background_allow" and self.tool_event_handler:
-                                self.tool_event_handler("tool_backgrounded", {"name": tool_name, "id": tool_use_id})
                             if self.tool_event_handler:
                                 self.tool_event_handler("tool_start", {"name": tool_name, "input": tool_input, "id": tool_use_id})
                             if tool_name in {"Write", "Patch"}:
@@ -178,7 +205,10 @@ class Runner:
                     self.tool_event_handler("tool_end", {"name": tool_name, "result": result, "id": tool_use_id, "is_error": bool(result.get("is_error")), "preview": preview})
                     self.tool_event_handler("tool_result", {"name": tool_name, "result": result, "id": tool_use_id})
                 transcript["tool_results"].append(result)
-                messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]}]})
+                tool_result_blocks.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]})
+
+            messages.append({"role": "user", "content": tool_result_blocks})
+            pending_tool_use_ids -= {str(block.get("tool_use_id")) for block in tool_result_blocks}
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         root = self.repo / ".villani_code" / "sessions"
