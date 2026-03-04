@@ -156,8 +156,7 @@ class TUIApp:
         input_bar: InputBar,
         status_bar: StatusBar,
         key_bindings: Any,
-        right_panel: Any,
-        bottom_panel: Any,
+        panel: Any,
         palette_modal: Any,
         help_modal: Any,
         settings_modal: Any,
@@ -169,8 +168,7 @@ class TUIApp:
         self.transcript = transcript
         self.input_bar = input_bar
         self.status_bar = status_bar
-        self.right_panel = right_panel
-        self.bottom_panel = bottom_panel
+        self.panel = panel
         self.app = Application(layout=Layout(self._build_container(palette_modal, help_modal, settings_modal, output_modal, approval_modal)), key_bindings=key_bindings, full_screen=True, style=style)
 
     def _build_container(self, palette_modal: Any, help_modal: Any, settings_modal: Any, output_modal: Any, approval_modal: Any | None):
@@ -212,16 +210,16 @@ class TUIApp:
         body = VSplit(
             [
                 transcript_frame,
-                ConditionalContainer(self.right_panel, filter=show_side_panels),
+                ConditionalContainer(self.panel, filter=show_side_panels),
             ]
         )
-        bottom_panels = ConditionalContainer(self.bottom_panel, filter=show_bottom_panels)
+        bottom_panels = ConditionalContainer(self.panel, filter=show_bottom_panels)
         content = HSplit(
             [
                 body,
                 bottom_panels,
                 Frame(self.input_bar.textarea, title="Input", height=Dimension.exact(3)),
-                Window(height=1, content=FormattedTextControl(lambda: self.status_bar.format(get_app().output.get_size().columns if get_app() else 120)), style="class:bottom-toolbar"),
+                Window(height=1, content=FormattedTextControl(lambda: self._status_text()), style="class:bottom-toolbar"),
             ]
         )
         floats = [
@@ -233,6 +231,15 @@ class TUIApp:
         if approval_modal is not None:
             floats.append(Float(content=ConditionalContainer(approval_modal, filter=show_approval_modal)))
         return FloatContainer(content=content, floats=floats)
+
+
+    def _status_text(self) -> str:
+        width = get_app().output.get_size().columns if get_app() else 120
+        base = self.status_bar.format(width)
+        if not self.state.transient_message:
+            return base
+        combined = f"{base} | {self.state.transient_message}"
+        return combined[:width]
 
     async def run(self) -> None:
         await self.app.run_async()

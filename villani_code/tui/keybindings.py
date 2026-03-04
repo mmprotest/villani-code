@@ -17,6 +17,9 @@ def build_keybindings(
     focus_palette: Callable[[], None] | None = None,
     close_modal: Callable[[], None] | None = None,
     open_approval_background: Callable[[], None] | None = None,
+    approve_approval: Callable[[], None] | None = None,
+    deny_approval: Callable[[], None] | None = None,
+    ctrl_c_pressed: Callable[[], None] | None = None,
 ) -> KeyBindings:
     kb = KeyBindings()
 
@@ -56,9 +59,17 @@ def build_keybindings(
 
     @kb.add("escape")
     def _esc(_event):
+        if state.active_modal == ActiveModal.APPROVAL and deny_approval:
+            deny_approval()
+            return
         state.active_modal = ActiveModal.NONE
         if close_modal:
             close_modal()
+
+    @kb.add("c-c")
+    def _ctrl_c(_event):
+        if ctrl_c_pressed:
+            ctrl_c_pressed()
 
     @kb.add("up")
     def _up(_event):
@@ -75,11 +86,15 @@ def build_keybindings(
         if state.active_modal == ActiveModal.PALETTE and palette_submit:
             palette_submit()
             return
+        if state.active_modal == ActiveModal.APPROVAL:
+            if approve_approval:
+                approve_approval()
+            return
         _event.current_buffer.validate_and_handle()
 
     @kb.add("c-b")
     def _background(_event):
-        if open_approval_background:
+        if state.active_modal == ActiveModal.APPROVAL and open_approval_background:
             open_approval_background()
 
     @kb.add("c-e")

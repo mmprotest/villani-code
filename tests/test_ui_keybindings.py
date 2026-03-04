@@ -1,5 +1,5 @@
 from villani_code.tui.keybindings import build_keybindings
-from villani_code.tui.state import UIState
+from villani_code.tui.state import ActiveModal, UIState
 
 
 def _binding_strings() -> set[str]:
@@ -37,3 +37,40 @@ def test_enter_key_submits_current_buffer_when_palette_closed() -> None:
     enter_binding.handler(_Event(buffer))
 
     assert buffer.called
+
+
+def test_approval_shortcuts_map_to_callbacks() -> None:
+    state = UIState(active_modal=ActiveModal.APPROVAL)
+    called = {"approve": False, "deny": False}
+    kb = build_keybindings(
+        state,
+        lambda _cmd: None,
+        lambda: None,
+        lambda: None,
+        approve_approval=lambda: called.__setitem__("approve", True),
+        deny_approval=lambda: called.__setitem__("deny", True),
+    )
+    enter_binding = next(binding for binding in kb.bindings if "Keys.ControlM" in "-".join(str(key) for key in binding.keys))
+    esc_binding = next(binding for binding in kb.bindings if "Keys.Escape" in "-".join(str(key) for key in binding.keys))
+
+    class _Event:
+        current_buffer = None
+
+    enter_binding.handler(_Event())
+    esc_binding.handler(_Event())
+
+    assert called["approve"] is True
+    assert called["deny"] is True
+
+
+def test_ctrl_c_binding_invokes_callback() -> None:
+    state = UIState()
+    called = {"ctrl_c": False}
+    kb = build_keybindings(state, lambda _cmd: None, lambda: None, lambda: None, ctrl_c_pressed=lambda: called.__setitem__("ctrl_c", True))
+    binding = next(binding for binding in kb.bindings if "Keys.ControlC" in "-".join(str(key) for key in binding.keys))
+
+    class _Event:
+        current_buffer = None
+
+    binding.handler(_Event())
+    assert called["ctrl_c"] is True

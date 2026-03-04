@@ -35,7 +35,7 @@ class Runner:
         bypass_permissions: bool = False,
         auto_accept_edits: bool = False,
         plan_mode: bool = False,
-        approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        approval_callback: Callable[[str, dict[str, Any], str | None], str] | None = None,
         stream_event_handler: Callable[[dict[str, Any]], None] | None = None,
         tool_event_handler: Callable[[str, dict[str, Any]], None] | None = None,
         interactive_mode: bool = False,
@@ -53,7 +53,7 @@ class Runner:
         self.bypass_permissions = bypass_permissions
         self.auto_accept_edits = auto_accept_edits
         self.plan_mode = plan_mode
-        self.approval_callback = approval_callback or (lambda _n, _i: True)
+        self.approval_callback = approval_callback or (lambda _n, _i, _id=None: "allow_once")
         self.stream_event_handler = stream_event_handler
         self.tool_event_handler = tool_event_handler
         self.interactive_mode = interactive_mode
@@ -148,10 +148,21 @@ class Runner:
                     decision = self.permissions.evaluate(tool_name, tool_input, bypass=self.bypass_permissions, auto_accept_edits=self.auto_accept_edits)
                     if decision == Decision.DENY:
                         result = {"content": "Denied by permission policy", "is_error": True}
-                    elif decision == Decision.ASK and not self.approval_callback(tool_name, tool_input):
-                        result = {"content": "User denied tool execution", "is_error": True}
                     elif self.plan_mode and tool_name in {"Write", "Patch"}:
                         result = {"content": "Plan mode: edit not executed", "is_error": False}
+                    elif decision == Decision.ASK:
+                        approval_decision = self.approval_callback(tool_name, tool_input, tool_use_id)
+                        if approval_decision == "deny":
+                            result = {"content": "User denied tool execution", "is_error": True}
+                        else:
+                            if approval_decision == "background_allow" and self.tool_event_handler:
+                                self.tool_event_handler("tool_backgrounded", {"name": tool_name, "id": tool_use_id})
+                            if self.tool_event_handler:
+                                self.tool_event_handler("tool_start", {"name": tool_name, "input": tool_input, "id": tool_use_id})
+                            if tool_name in {"Write", "Patch"}:
+                                file_path = Path(tool_input.get("file_path", ""))
+                                self.checkpoints.create([file_path], message_index=len(messages))
+                            result = execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
                     else:
                         if self.tool_event_handler:
                             self.tool_event_handler("tool_start", {"name": tool_name, "input": tool_input, "id": tool_use_id})

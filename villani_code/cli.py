@@ -61,9 +61,10 @@ def interactive(
     model: str = typer.Option(..., "--model"),
     repo: Path = typer.Option(Path("."), "--repo"),
     max_tokens: int = typer.Option(4096, "--max-tokens"),
+    resume: str | None = typer.Option(None, "--resume"),
 ):
     runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False)
-    InteractiveShell(runner, repo.resolve()).run()
+    InteractiveShell(runner, repo.resolve(), base_url=base_url, resume=resume).run()
 
 
 @mcp_app.command("list")
