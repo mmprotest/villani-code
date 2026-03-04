@@ -35,3 +35,9 @@ def test_bash_defaults_to_ask_without_bashsafe(tmp_path: Path):
     engine = PermissionEngine(cfg, tmp_path)
     decision = engine.evaluate_with_reason("Bash", {"command": "pwd"})
     assert decision.decision == Decision.ASK
+
+
+def test_public_target_for_exposes_normalized_target(tmp_path: Path):
+    cfg = PermissionConfig.from_strings(deny=[], ask=[], allow=[])
+    engine = PermissionEngine(cfg, tmp_path)
+    assert engine.target_for("Write", {"file_path": "a.txt"}) == "a.txt"

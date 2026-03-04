@@ -64,8 +64,8 @@ class Runner:
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
                 deny=["Read(.env)", "Read(secrets/**)", "Bash(curl *)", "Bash(wget *)"],
-                ask=[],
-                allow=["Read(*)", "Ls(*)", "Grep(*)", "Search(*)", "Glob(*)", "BashSafe(*)", "Write(*)", "Patch(*)", "GitStatus(*)", "GitDiff(*)", "GitLog(*)", "GitBranch(*)", "GitCheckout(*)", "GitCommit(*)"],
+                ask=["Write(*)", "Patch(*)"],
+                allow=["Read(*)", "Ls(*)", "Grep(*)", "Search(*)", "Glob(*)", "BashSafe(*)", "GitStatus(*)", "GitDiff(*)", "GitLog(*)", "GitBranch(*)", "GitCheckout(*)", "GitCommit(*)"],
             ),
             repo=self.repo,
         )

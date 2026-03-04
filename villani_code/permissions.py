@@ -85,6 +85,9 @@ class PermissionEngine:
     def _is_bashsafe_enabled(self) -> bool:
         return any(rule.tool == "BashSafe" for rule in self.config.allow)
 
+    def target_for(self, tool: str, payload: dict) -> str:
+        return self._target_for(tool, payload)
+
     def _target_for(self, tool: str, payload: dict) -> str:
         if tool == "Bash":
             return str(payload.get("command", ""))
