@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 from collections import deque
@@ -23,13 +24,16 @@ from ui.settings import SettingsManager
 from ui.status_bar import StatusBar
 from ui.task_board import TaskManager, TaskStatus
 from ui.themes import get_theme
-from villani_code.permissions import PermissionEngine
 from villani_code.status_controller import StatusController
 from villani_code.state import Runner
 from villani_code.tools import execute_tool
 
 
 class InteractiveShell:
+    MAX_LOG_HISTORY = 2000
+    PREVIEW_MAX_LINES = 80
+    PREVIEW_MAX_LINE_CHARS = 160
+
     LAUNCH_BANNER = (
         "+------------------------------------------------------------------------------+\n"
         "|  /\\_/\\                                                                       |\n"
@@ -75,7 +79,8 @@ class InteractiveShell:
         self._approval_event: threading.Event | None = None
         self._palette_mode = False
 
-        self.log_lines: deque[str] = deque(maxlen=2000)
+        self.log_lines: deque[str] = deque(maxlen=self.MAX_LOG_HISTORY)
+        self._log_text = ""
         self.log_area = TextArea(text="", read_only=True, scrollbar=True, focusable=False)
         self.stream_area = TextArea(text="", read_only=True, scrollbar=True, focusable=False)
         self.input_field = TextArea(
@@ -142,7 +147,16 @@ class InteractiveShell:
             ]
         )
         self._approval_radio = radio
-        return Dialog(title="Approval required", body=radio)
+        self._approval_preview = TextArea(
+            text="",
+            read_only=True,
+            focusable=False,
+            scrollbar=True,
+            height=16,
+            style="class:dialog.body",
+        )
+        body = HSplit([self._approval_preview, radio], padding=1)
+        return Dialog(title="Approval required", body=body)
 
     def _build_keybindings(self) -> KeyBindings:
         kb = KeyBindings()
@@ -296,8 +310,14 @@ class InteractiveShell:
         if text == self._last_activity_line:
             return False
         self._last_activity_line = text
+        had_existing_lines = bool(self.log_lines)
         self.log_lines.append(text)
-        self.log_area.text = "\n".join(self.log_lines)
+        if len(self.log_lines) == self.log_lines.maxlen and had_existing_lines:
+            # Once we hit max history, rebuild from the bounded deque only when old lines are trimmed.
+            self._log_text = "\n".join(self.log_lines)
+        else:
+            self._log_text += ("\n" if had_existing_lines else "") + text
+        self.log_area.text = self._log_text
         self.log_area.buffer.cursor_position = len(self.log_area.text)
         self.task_manager.record_event("Activity", text)
         self._invalidate_ui()
@@ -321,10 +341,6 @@ class InteractiveShell:
     def _bottom_toolbar(self) -> str:
         width = 120
         return self.status_bar.format(width) + f" | {self.status_controller.status_line()}"
-
-    def _prompt_for_input(self, session: Any) -> str:
-        self.status_controller.suspend()
-        return session.prompt()
 
     def _invalidate_ui(self) -> None:
         self.app.invalidate()
@@ -360,10 +376,7 @@ class InteractiveShell:
     def _approval_prompt(self, tool_name: str, payload: dict[str, Any]) -> bool:
         self.status_controller.suspend()
         permissions = getattr(self.runner, "permissions", None)
-        if permissions is not None and hasattr(permissions, "target_for"):
-            target = permissions.target_for(tool_name, payload)
-        else:
-            target = PermissionEngine._target_for(permissions, tool_name, payload)
+        target = permissions.target_for(tool_name, payload) if permissions else "<unknown>"
         key = (tool_name, target)
         if key in self._session_approval_allowlist:
             return True
@@ -396,7 +409,38 @@ class InteractiveShell:
         self._approval_event = request["event"]
         tool = request["tool"]
         target = request["target"]
+        self._approval_preview.text = self._format_approval_preview(tool, target, request.get("payload", {}))
         self._append_log(f"approval> {tool} target={target}")
+
+    def _format_approval_preview(self, tool_name: str, target: str, payload: dict[str, Any]) -> str:
+        payload = payload if isinstance(payload, dict) else {"payload": payload}
+        header = [f"tool: {tool_name}", f"target: {target}"]
+        hint = self._approval_payload_hint(payload)
+        if hint:
+            header.append(hint)
+        body = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
+        return "\n".join(header + ["", "payload:", self._truncate_preview_text(body)])
+
+    def _approval_payload_hint(self, payload: dict[str, Any]) -> str:
+        hints: list[str] = []
+        if "path" in payload:
+            hints.append(f"path: {payload.get('path')}")
+        if "diff" in payload:
+            diff_lines = len(str(payload.get("diff", "")).splitlines())
+            hints.append(f"diff: {diff_lines} lines (use /diff to inspect)")
+        if "content" in payload:
+            hints.append(f"content: {len(str(payload.get('content', '')))} chars")
+        return " | ".join(hints)
+
+    def _truncate_preview_text(self, text: str) -> str:
+        lines = text.splitlines()
+        clipped_lines = [line[: self.PREVIEW_MAX_LINE_CHARS] for line in lines[: self.PREVIEW_MAX_LINES]]
+        was_truncated = len(lines) > self.PREVIEW_MAX_LINES or any(
+            len(line) > self.PREVIEW_MAX_LINE_CHARS for line in lines[: self.PREVIEW_MAX_LINES]
+        )
+        if was_truncated:
+            clipped_lines.append("... (truncated)")
+        return "\n".join(clipped_lines)
 
     def _resolve_approval(self, choice: str) -> None:
         if not self._approval_request or not self._approval_event:
