@@ -56,9 +56,7 @@ def assemble_anthropic_stream(events: Iterable[dict[str, Any]]) -> dict[str, Any
                 block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
             elif dtype == "text_delta":
                 block["text"] = block.get("text", "") + delta.get("text", "")
-            elif "partial_json" in dtype if isinstance(dtype, str) else False:
-                partial_json[index] = partial_json.get(index, "") + delta.get("partial_json", "")
-            elif dtype == "input_json_delta":
+            elif dtype in {"input_json_delta", "partial_json_delta"}:
                 partial_json[index] = partial_json.get(index, "") + delta.get("partial_json", "")
         elif etype == "content_block_stop":
             index = event.get("index", 0)

@@ -5,11 +5,13 @@ import threading
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import prompt
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -21,6 +23,7 @@ from ui.settings import SettingsManager
 from ui.status_bar import StatusBar
 from ui.task_board import TaskManager, TaskStatus
 from ui.themes import get_theme
+from villani_code.permissions import PermissionEngine
 from villani_code.state import Runner
 
 
@@ -45,6 +48,8 @@ class InteractiveShell:
         self.theme = get_theme(self.applied_settings.theme)
         self.token_events: deque[tuple[datetime, int]] = deque(maxlen=128)
         self.pending_action: CommandAction | None = None
+        self._session_approval_allowlist: set[tuple[str, str]] = set()
+        self.runner.approval_callback = self._approval_prompt
 
     def run(self) -> None:
         kb = self._build_keybindings()
@@ -78,7 +83,7 @@ class InteractiveShell:
             self.task_manager.create_task("model-call", "Model response")
             self.task_manager.update_status("model-call", TaskStatus.IN_PROGRESS, progress=0.2)
             result = self.runner.run(text)
-            tokens = len(text.split()) + 20
+            tokens = self._extract_total_tokens(result.get("response", {}), text)
             self._record_token_usage(tokens)
             self.status_bar.update(connected=True, last_heartbeat=datetime.now(timezone.utc))
             self.task_manager.update_status("model-call", TaskStatus.COMPLETED, progress=1.0)
@@ -139,6 +144,47 @@ class InteractiveShell:
         cutoff = now.timestamp() - 60
         rate = sum(t for at, t in self.token_events if at.timestamp() >= cutoff)
         self.status_bar.update(total_tokens=self.status_bar.snapshot.total_tokens + tokens, tokens_last_minute=rate)
+
+    def _extract_total_tokens(self, response: dict[str, Any], prompt_text: str) -> int:
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            if "input_tokens" in usage or "output_tokens" in usage:
+                return int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+            for key in ("total_tokens", "tokens"):
+                if key in usage:
+                    return int(usage.get(key, 0))
+        return len(prompt_text.split()) + 20
+
+    def _approval_prompt(self, tool_name: str, payload: dict[str, Any]) -> bool:
+        target = PermissionEngine._target_for(self.runner.permissions, tool_name, payload)
+        key = (tool_name, target)
+        if key in self._session_approval_allowlist:
+            return True
+
+        self.console.print(f"[yellow]Approval required[/yellow]: {tool_name} -> {target}")
+        self.console.print(self._format_payload_preview(payload))
+        while True:
+            answer = prompt("Allow? [y]es / [n]o / [a]lways for this target: ").strip().lower()
+            if answer in {"y", "yes"}:
+                return True
+            if answer in {"n", "no"}:
+                return False
+            if answer in {"a", "always"}:
+                self._session_approval_allowlist.add(key)
+                return True
+            self.console.print("Please answer y, n, or a.")
+
+    def _format_payload_preview(self, payload: dict[str, Any]) -> str:
+        prominent = [k for k in ("file_path", "command", "url") if payload.get(k)]
+        lines = [f"  {key}: {self._truncate_preview(str(payload.get(key, '')))}" for key in prominent]
+        raw = str(payload)
+        if len(raw) > 500:
+            raw = raw[:500] + "..."
+        lines.append(f"  payload: {raw}")
+        return "\n".join(lines)
+
+    def _truncate_preview(self, value: str, max_len: int = 120) -> str:
+        return value if len(value) <= max_len else value[:max_len] + "..."
 
     def _run_bash_line(self, command: str) -> None:
         self.task_manager.record_event("ToolStart", command)
