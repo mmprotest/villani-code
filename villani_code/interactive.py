@@ -14,7 +14,7 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyPressEvent
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.widgets import TextArea
@@ -74,6 +74,8 @@ class InteractiveShell:
         self._approval_request: dict[str, Any] | None = None
         self._approval_event: threading.Event | None = None
         self._approval_selection_index = 0
+        self._assistant_streaming = False
+        self._assistant_stream_saw_text = False
         self._palette_mode = False
 
         self.log_lines: deque[str] = deque(maxlen=self.MAX_LOG_HISTORY)
@@ -87,6 +89,8 @@ class InteractiveShell:
             accept_handler=self._on_input_accept,
         )
         self.status_control = FormattedTextControl(self._status_line_text)
+        self.approval_control = FormattedTextControl(self._approval_line_text)
+        self.approval_window = Window(content=self.approval_control, height=1, always_hide_cursor=True)
 
         self.status_controller = StatusController(
             fps=10.0,
@@ -108,7 +112,11 @@ class InteractiveShell:
 
     def _build_application(self) -> Application:
         status_window = Window(content=self.status_control, height=1, always_hide_cursor=True)
-        root = HSplit([self.log_area, status_window, self.input_field])
+        approval_container = ConditionalContainer(
+            content=self.approval_window,
+            filter=Condition(lambda: self._approval_request is not None),
+        )
+        root = HSplit([self.log_area, approval_container, status_window, self.input_field])
         return Application(
             layout=Layout(root, focused_element=self.input_field),
             full_screen=True,
@@ -177,6 +185,14 @@ class InteractiveShell:
         @kb.add("pageup", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
         def _log_page_up(_):
             self._scroll_area(self.log_area, -15)
+
+        @kb.add("<scroll-up>", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
+        def _log_scroll_up(_):
+            self._scroll_area(self.log_area, -8)
+
+        @kb.add("<scroll-down>", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
+        def _log_scroll_down(_):
+            self._scroll_area(self.log_area, 8)
 
         @kb.add("pagedown", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
         def _log_page_down(_):
@@ -285,6 +301,8 @@ class InteractiveShell:
 
     def _run_model_turn(self, text: str) -> None:
         self._schedule_ui(lambda: self._append_log(f"you> {text}"))
+        self._assistant_streaming = False
+        self._assistant_stream_saw_text = False
         self.task_manager.create_task("model-call", "Model response")
         self.task_manager.update_status("model-call", TaskStatus.IN_PROGRESS, progress=0.2)
         result = self.runner.run(text)
@@ -296,8 +314,45 @@ class InteractiveShell:
             for block in result.get("response", {}).get("content", [])
             if block.get("type") == "text"
         ).strip()
-        if response_text:
+        if response_text and not self._assistant_stream_saw_text:
             self._schedule_ui(lambda: self._append_log(f"assistant> {response_text}"))
+
+    def _append_log_line_raw(self, line: str) -> None:
+        should_autoscroll = self._is_area_scrolled_to_bottom(self.log_area)
+        had_existing_lines = bool(self.log_lines)
+        self.log_lines.append(line)
+        if len(self.log_lines) == self.log_lines.maxlen and had_existing_lines:
+            self._log_text = "\n".join(self.log_lines)
+        else:
+            self._log_text += ("\n" if had_existing_lines else "") + line
+        self.log_area.text = self._log_text
+        if should_autoscroll:
+            self.log_area.buffer.cursor_position = len(self.log_area.text)
+        self._invalidate_ui()
+
+    def _set_last_log_line(self, line: str) -> None:
+        if not self.log_lines:
+            self._append_log_line_raw(line)
+            return
+        self.log_lines[-1] = line
+        head, _, _tail = self._log_text.rpartition("\n")
+        self._log_text = f"{head}\n{line}" if head else line
+        self.log_area.text = self._log_text
+
+    def _append_stream_delta(self, text: str) -> None:
+        if not text:
+            return
+        should_autoscroll = self._is_area_scrolled_to_bottom(self.log_area)
+        if not self._assistant_streaming:
+            self._append_log_line_raw("assistant> ")
+            self._assistant_streaming = True
+        parts = text.split("\n")
+        self._set_last_log_line(f"{self.log_lines[-1]}{parts[0]}")
+        for extra_line in parts[1:]:
+            self._append_log_line_raw(extra_line)
+        if should_autoscroll:
+            self.log_area.buffer.cursor_position = len(self.log_area.text)
+        self._invalidate_ui()
 
     def _run_bash_line(self, command: str) -> None:
         command = command.strip()
@@ -361,13 +416,15 @@ class InteractiveShell:
     def _bottom_toolbar(self) -> StyleAndTextTuples:
         width = 120
         base = self.status_bar.format(width) + f" | {self.status_controller.status_line()}"
+        return [("class:bottom-toolbar", base)]
+
+    def _approval_line_text(self) -> StyleAndTextTuples:
         if self._approval_request is None:
-            return [("class:bottom-toolbar", base)]
+            return []
         yes_style = "class:approval.active" if self._approval_selection_index == 0 else "class:approval.yes"
         always_style = "class:approval.active" if self._approval_selection_index == 1 else "class:approval.always"
         no_style = "class:approval.active" if self._approval_selection_index == 2 else "class:approval.no"
         return [
-            ("class:bottom-toolbar", base + " | "),
             ("class:approval.label", "APPROVAL: "),
             (yes_style, "[ Yes ]"),
             ("class:bottom-toolbar", "   "),
@@ -605,6 +662,8 @@ class InteractiveShell:
     def _on_runner_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if etype == "model_request_started":
+            self._assistant_streaming = False
+            self._assistant_stream_saw_text = False
             self.status_controller.start_waiting("Thinking", "")
             return
         if etype == "first_text_delta":
@@ -651,6 +710,9 @@ class InteractiveShell:
             self.status_controller.stop_spinner("Waiting", "")
             return
         if etype == "stream_text":
+            self._assistant_stream_saw_text = True
+            chunk = str(event.get("text", ""))
+            self._schedule_ui(lambda t=chunk: self._append_stream_delta(t))
             return
         if etype == "command_policy":
             line = f"policy[{event.get('outcome')}] bash @ {event.get('cwd')}: {event.get('reason')}"
@@ -762,7 +824,11 @@ class InteractiveShell:
         """Use explicit scrollbar margins so click/drag interactions work reliably."""
         if area.window is None:
             return
-        area.window.right_margins = [ScrollbarMargin(display_arrows=True)]
+        area.window.right_margins = [
+            ScrollbarMargin(display_arrows=True),
+            ScrollbarMargin(display_arrows=False),
+            ScrollbarMargin(display_arrows=False),
+        ]
         area.window.left_margins = []
 
     def _move_approval_selection(self, delta: int) -> None:

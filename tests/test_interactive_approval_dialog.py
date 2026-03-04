@@ -103,14 +103,14 @@ def test_resolve_approval_always_adds_allowlist_and_reenables_input(tmp_path: Pa
     assert event.is_set()
 
 
-def test_bottom_toolbar_highlights_selected_approval_choice(tmp_path: Path) -> None:
+def test_approval_line_renders_selected_approval_choice(tmp_path: Path) -> None:
     shell = InteractiveShell(DummyRunner(), tmp_path)
     shell._approval_request = {"tool": "Read", "target": "Read:README.md", "choice": None}
     shell._approval_selection_index = 1
 
-    toolbar = shell._bottom_toolbar()
+    approval_line = shell._approval_line_text()
 
-    assert ("class:approval.active", "[ Always (this target) ]") in toolbar
+    assert ("class:approval.active", "[ Always (this target) ]") in approval_line
 
 
 def test_move_approval_selection_wraps(tmp_path: Path) -> None:

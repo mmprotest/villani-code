@@ -47,7 +47,36 @@ def test_append_log_uses_incremental_buffer_update(tmp_path: Path) -> None:
     assert "\n".join(shell.log_lines) == shell.log_area.buffer.text
 
 
-def test_log_uses_clickable_scrollbar_margin(tmp_path: Path) -> None:
+def test_log_uses_three_clickable_scrollbar_margins(tmp_path: Path) -> None:
     shell = InteractiveShell(DummyRunner(), tmp_path)
 
-    assert any(isinstance(margin, ScrollbarMargin) for margin in shell.log_area.window.right_margins)
+    margins = shell.log_area.window.right_margins
+    assert len(margins) == 3
+    assert all(isinstance(margin, ScrollbarMargin) for margin in margins)
+
+
+def test_stream_deltas_append_inline_to_log(tmp_path: Path) -> None:
+    shell = InteractiveShell(DummyRunner(), tmp_path)
+
+    shell._append_log("you> hi")
+    shell._append_stream_delta("hello")
+    shell._append_stream_delta("\nworld")
+
+    assert list(shell.log_lines)[-2:] == ["assistant> hello", "world"]
+
+
+class StreamingRunner(DummyRunner):
+    def __init__(self):
+        self.event_callback = None
+
+    def run(self, _text):
+        self.event_callback({"type": "stream_text", "text": "final"})
+        return {"response": {"content": [{"type": "text", "text": "final"}]}}
+
+
+def test_streaming_response_is_not_duplicated_on_final_append(tmp_path: Path) -> None:
+    shell = InteractiveShell(StreamingRunner(), tmp_path)
+
+    shell._run_model_turn("hi")
+
+    assert shell.log_area.text.count("assistant> final") == 1

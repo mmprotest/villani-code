@@ -23,7 +23,7 @@ THEMES: dict[str, ThemeSpec] = {
                 "approval.yes": "bg:#1f3b2b #a6e22e bold",
                 "approval.always": "bg:#1f2e3b #66d9ef bold",
                 "approval.no": "bg:#3b1f1f #ff6188 bold",
-                "approval.active": "#00afff bold",
+                "approval.active": "bg:#00afff #000000 bold",
                 "banner": "#66d9ef",
                 "banner.model": "italic #a0a0a0",
             }
@@ -41,7 +41,7 @@ THEMES: dict[str, ThemeSpec] = {
                 "approval.yes": "bg:#000000 #00ff00 bold",
                 "approval.always": "bg:#000000 #00ffff bold",
                 "approval.no": "bg:#000000 #ff005f bold",
-                "approval.active": "#0000ff bold",
+                "approval.active": "bg:#0000ff #ffffff bold",
                 "banner": "#005f87",
                 "banner.model": "#444444",
             }
