@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import threading
 from collections import deque
@@ -11,11 +10,15 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import StyleAndTextTuples
+from prompt_toolkit.key_binding import KeyPressEvent
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Dimension
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import ConditionalContainer, Float, FloatContainer, HSplit, Window
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.widgets import Dialog, RadioList, TextArea
+from prompt_toolkit.layout.processors import ConditionalProcessor, HighlightSearchProcessor
+from prompt_toolkit.widgets import TextArea
 from rich.console import Console
 
 from ui.command_palette import CommandAction, CommandPalette
@@ -31,9 +34,6 @@ from villani_code.tools import execute_tool
 
 class InteractiveShell:
     MAX_LOG_HISTORY = 2000
-    PREVIEW_MAX_LINES = 80
-    PREVIEW_MAX_LINE_CHARS = 160
-
     LAUNCH_BANNER = (
         "+------------------------------------------------------------------------------+\n"
         "|  /\\_/\\                                                                       |\n"
@@ -81,8 +81,13 @@ class InteractiveShell:
 
         self.log_lines: deque[str] = deque(maxlen=self.MAX_LOG_HISTORY)
         self._log_text = ""
-        self.log_area = TextArea(text="", read_only=True, scrollbar=True, focusable=False)
-        self.stream_area = TextArea(text="", read_only=True, scrollbar=True, focusable=False)
+        self.log_area = TextArea(text="", read_only=True, scrollbar=True, focusable=True)
+        self.stream_area = TextArea(text="", read_only=True, scrollbar=True, focusable=True)
+        self.banner_area = Window(
+            content=FormattedTextControl(self._banner_text),
+            height=Dimension.exact(self.LAUNCH_BANNER.count("\n") + 2),
+            always_hide_cursor=True,
+        )
         self.input_field = TextArea(
             multiline=False,
             prompt="🤖 Villani Code > ",
@@ -104,8 +109,6 @@ class InteractiveShell:
         self.app = self._build_application()
 
     def run(self) -> None:
-        self.console.print(self.LAUNCH_BANNER)
-        self.console.print(f"[dim]Model: {self.runner.model}[/dim]")
         self._append_log("Ready. Type /help for commands.")
         self.app.run()
         self.status_controller.shutdown()
@@ -116,47 +119,22 @@ class InteractiveShell:
             content=self.stream_area,
             filter=Condition(lambda: bool(self._live_stream_text)),
         )
-        approval_container = ConditionalContainer(
-            content=self._build_approval_dialog(),
-            filter=Condition(lambda: self._approval_request is not None),
-        )
-        root = FloatContainer(
-            content=HSplit(
-                [
-                    self.log_area,
-                    stream_container,
-                    status_window,
-                    self.input_field,
-                ]
-            ),
-            floats=[Float(content=approval_container)],
+        root = HSplit(
+            [
+                self.banner_area,
+                self.log_area,
+                stream_container,
+                status_window,
+                self.input_field,
+            ]
         )
         return Application(
             layout=Layout(root, focused_element=self.input_field),
             full_screen=True,
             key_bindings=self.kb,
             style=self.theme.prompt_toolkit_style,
+            mouse_support=True,
         )
-
-    def _build_approval_dialog(self) -> Dialog:
-        radio = RadioList(
-            [
-                ("yes", "Yes (once)"),
-                ("always", "Always for this target (session)"),
-                ("no", "No"),
-            ]
-        )
-        self._approval_radio = radio
-        self._approval_preview = TextArea(
-            text="",
-            read_only=True,
-            focusable=False,
-            scrollbar=True,
-            height=16,
-            style="class:dialog.body",
-        )
-        body = HSplit([self._approval_preview, radio], padding=1)
-        return Dialog(title="Approval required", body=body)
 
     def _build_keybindings(self) -> KeyBindings:
         kb = KeyBindings()
@@ -196,6 +174,42 @@ class InteractiveShell:
             self._show_shortcuts_help()
 
         @kb.add("c-s")
+        def _focus_stream(event: KeyPressEvent):
+            event.app.layout.focus(self.stream_area)
+
+        @kb.add("c-k")
+        def _focus_log(event: KeyPressEvent):
+            event.app.layout.focus(self.log_area)
+
+        @kb.add("c-j")
+        def _focus_input(event: KeyPressEvent):
+            event.app.layout.focus(self.input_field)
+
+        @kb.add("escape", "up")
+        def _scroll_log_up(_):
+            self._scroll_area(self.log_area, -3)
+
+        @kb.add("escape", "down")
+        def _scroll_log_down(_):
+            self._scroll_area(self.log_area, 3)
+
+        @kb.add("pageup", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
+        def _log_page_up(_):
+            self._scroll_area(self.log_area, -15)
+
+        @kb.add("pagedown", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
+        def _log_page_down(_):
+            self._scroll_area(self.log_area, 15)
+
+        @kb.add("home", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
+        def _log_home(_):
+            self._scroll_area_to_edge(self.log_area, top=True)
+
+        @kb.add("end", filter=Condition(lambda: self.app.layout.has_focus(self.log_area)))
+        def _log_end(_):
+            self._scroll_area_to_edge(self.log_area, top=False)
+
+        @kb.add("f2")
         def _save_checkpoint(_):
             self._run_action(CommandAction(id="save", title="save", category="action", target="save_checkpoint"))
 
@@ -211,11 +225,21 @@ class InteractiveShell:
                 return
             event.app.exit()
 
+        @kb.add("y", filter=Condition(lambda: self._approval_request is not None))
+        def _approve_yes(_):
+            self._resolve_approval("yes")
+
+        @kb.add("a", filter=Condition(lambda: self._approval_request is not None))
+        def _approve_always(_):
+            self._resolve_approval("always")
+
+        @kb.add("n", filter=Condition(lambda: self._approval_request is not None))
+        @kb.add("escape", filter=Condition(lambda: self._approval_request is not None))
+        def _approve_no(_):
+            self._resolve_approval("no")
+
         @kb.add("enter")
-        def _approve_on_enter(event):
-            if self._approval_request is not None:
-                self._resolve_approval(self._approval_radio.current_value)
-                return
+        def _default_enter(event):
             event.app.current_buffer.validate_and_handle()
 
         return kb
@@ -310,6 +334,7 @@ class InteractiveShell:
         if text == self._last_activity_line:
             return False
         self._last_activity_line = text
+        should_autoscroll = self._is_area_scrolled_to_bottom(self.log_area)
         had_existing_lines = bool(self.log_lines)
         self.log_lines.append(text)
         if len(self.log_lines) == self.log_lines.maxlen and had_existing_lines:
@@ -318,7 +343,8 @@ class InteractiveShell:
         else:
             self._log_text += ("\n" if had_existing_lines else "") + text
         self.log_area.text = self._log_text
-        self.log_area.buffer.cursor_position = len(self.log_area.text)
+        if should_autoscroll:
+            self.log_area.buffer.cursor_position = len(self.log_area.text)
         self.task_manager.record_event("Activity", text)
         self._invalidate_ui()
         return True
@@ -334,13 +360,24 @@ class InteractiveShell:
         preview = output if len(output) < 600 else output[:600] + "\n[output truncated]"
         self._append_log(f"tool[{tool_name}]> {preview.strip()}")
 
-    def _status_line_text(self) -> str:
+    def _status_line_text(self) -> StyleAndTextTuples:
         self._drain_ui_actions()
         return self._bottom_toolbar()
 
-    def _bottom_toolbar(self) -> str:
+    def _bottom_toolbar(self) -> StyleAndTextTuples:
         width = 120
-        return self.status_bar.format(width) + f" | {self.status_controller.status_line()}"
+        base = self.status_bar.format(width) + f" | {self.status_controller.status_line()}"
+        if self._approval_request is None:
+            return [("class:bottom-toolbar", base)]
+        return [
+            ("class:bottom-toolbar", base + " | "),
+            ("class:approval.label", "APPROVAL: "),
+            ("class:approval.yes", "[Y] Yes"),
+            ("class:bottom-toolbar", "   "),
+            ("class:approval.always", "[A] Always (this target)"),
+            ("class:bottom-toolbar", "   "),
+            ("class:approval.no", "[N] No"),
+        ]
 
     def _invalidate_ui(self) -> None:
         self.app.invalidate()
@@ -392,8 +429,13 @@ class InteractiveShell:
             self.status_controller.update_phase("Approval denied", tool_name)
             return False
         event = threading.Event()
-        request = {"tool": tool_name, "target": target, "payload": payload, "event": event, "choice": "no"}
-        self._schedule_ui(lambda: self._open_approval_modal(request))
+        request = {"tool": tool_name, "target": target, "payload": payload, "event": event, "choice": None}
+        self._approval_request = request
+        self._approval_event = event
+        self._schedule_ui(lambda: self._append_log(f"⏸ Approval required: {tool_name} — {target}"))
+        self._schedule_ui(lambda: self._append_log("Press Y/A/N to approve (input disabled until decision)."))
+        self._schedule_ui(self._begin_approval)
+        self._schedule_ui(self._invalidate_ui)
         event.wait()
         choice = str(request["choice"])
         if choice == "always":
@@ -404,51 +446,29 @@ class InteractiveShell:
     def _approval_choice_dialog(self, _tool_name: str, _target: str, _payload: dict[str, Any]) -> str | None:
         return "no"
 
-    def _open_approval_modal(self, request: dict[str, Any]) -> None:
-        self._approval_request = request
-        self._approval_event = request["event"]
-        tool = request["tool"]
-        target = request["target"]
-        self._approval_preview.text = self._format_approval_preview(tool, target, request.get("payload", {}))
-        self._append_log(f"approval> {tool} target={target}")
-
-    def _format_approval_preview(self, tool_name: str, target: str, payload: dict[str, Any]) -> str:
-        payload = payload if isinstance(payload, dict) else {"payload": payload}
-        header = [f"tool: {tool_name}", f"target: {target}"]
-        hint = self._approval_payload_hint(payload)
-        if hint:
-            header.append(hint)
-        body = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
-        return "\n".join(header + ["", "payload:", self._truncate_preview_text(body)])
-
-    def _approval_payload_hint(self, payload: dict[str, Any]) -> str:
-        hints: list[str] = []
-        if "path" in payload:
-            hints.append(f"path: {payload.get('path')}")
-        if "diff" in payload:
-            diff_lines = len(str(payload.get("diff", "")).splitlines())
-            hints.append(f"diff: {diff_lines} lines (use /diff to inspect)")
-        if "content" in payload:
-            hints.append(f"content: {len(str(payload.get('content', '')))} chars")
-        return " | ".join(hints)
-
-    def _truncate_preview_text(self, text: str) -> str:
-        lines = text.splitlines()
-        clipped_lines = [line[: self.PREVIEW_MAX_LINE_CHARS] for line in lines[: self.PREVIEW_MAX_LINES]]
-        was_truncated = len(lines) > self.PREVIEW_MAX_LINES or any(
-            len(line) > self.PREVIEW_MAX_LINE_CHARS for line in lines[: self.PREVIEW_MAX_LINES]
-        )
-        if was_truncated:
-            clipped_lines.append("... (truncated)")
-        return "\n".join(clipped_lines)
+    def _begin_approval(self) -> None:
+        self.input_field.read_only = True
+        self._invalidate_ui()
 
     def _resolve_approval(self, choice: str) -> None:
         if not self._approval_request or not self._approval_event:
             return
+        tool = str(self._approval_request.get("tool", ""))
+        target = str(self._approval_request.get("target", ""))
         self._approval_request["choice"] = choice
+        if choice == "always":
+            self._session_approval_allowlist.add((tool, target))
+            self._append_log("✅ Approved: always")
+        elif choice == "yes":
+            self._append_log("✅ Approved: yes")
+        else:
+            self._append_log("⛔ Denied")
         self._approval_request = None
         self._approval_event.set()
         self._approval_event = None
+        if not self._running:
+            self.input_field.read_only = False
+        self.app.layout.focus(self.input_field)
         self._invalidate_ui()
 
     def _run_action(self, action: CommandAction) -> None:
@@ -470,7 +490,10 @@ class InteractiveShell:
             self._show_shortcuts_help()
 
     def _show_shortcuts_help(self) -> None:
-        self._append_log("Ctrl+P palette | Ctrl+D diff | Ctrl+F focus | Ctrl+O verbose | Ctrl+T tasks | Ctrl+/ help")
+        self._append_log(
+            "Ctrl+P palette | Ctrl+D diff | Ctrl+F focus | Ctrl+O verbose | Ctrl+T tasks | Ctrl+/ help | "
+            "Ctrl+K log | Ctrl+J input | Ctrl+S stream | Alt+Up/Down scroll log"
+        )
 
     def _show_tasks_panel(self) -> None:
         self._append_log("Task Board:")
@@ -582,7 +605,6 @@ class InteractiveShell:
     def _on_runner_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if etype == "model_request_started":
-            self._schedule_ui(lambda: self._append_log("🤔 Thinking…"))
             self.status_controller.start_waiting("Thinking", "")
             return
         if etype == "first_text_delta":
@@ -626,8 +648,6 @@ class InteractiveShell:
                         self._note_file_written(path, "Write")
                     if tool_name == "Patch" and path:
                         self._note_file_written(path, "Patch")
-            outcome = "ok" if not event.get("is_error") else "error"
-            self._schedule_ui(lambda: self._emit_activity(f"✓ Tool finished: {tool_name} ({outcome})"))
             self.status_controller.stop_spinner("Waiting", "")
             return
         if etype == "stream_text":
@@ -719,3 +739,29 @@ class InteractiveShell:
                 if source != "/dev/null":
                     return source
         return ""
+
+    def _banner_text(self) -> StyleAndTextTuples:
+        model_name = getattr(self.runner, "model", "unknown")
+        return [
+            ("class:banner", self.LAUNCH_BANNER + "\n"),
+            ("class:banner.model", f"Model: {model_name}"),
+        ]
+
+    def _is_area_scrolled_to_bottom(self, area: TextArea) -> bool:
+        info = area.window.render_info if area.window else None
+        if info is None:
+            return True
+        return info.vertical_scroll + info.window_height >= info.content_height
+
+    def _scroll_area(self, area: TextArea, amount: int) -> None:
+        if area.window is None:
+            return
+        new_scroll = max(0, area.window.vertical_scroll + amount)
+        area.window.vertical_scroll = new_scroll
+        self._invalidate_ui()
+
+    def _scroll_area_to_edge(self, area: TextArea, *, top: bool) -> None:
+        if area.window is None:
+            return
+        area.window.vertical_scroll = 0 if top else 10**9
+        self._invalidate_ui()

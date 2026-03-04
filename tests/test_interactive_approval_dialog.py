@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 from villani_code.interactive import InteractiveShell
@@ -84,4 +85,19 @@ def test_bottom_toolbar_includes_spinner_frame_and_detail(tmp_path: Path) -> Non
         shell.status_controller._spinning = True
         shell.status_controller._frame_index = 0
 
-    assert "[-] Using tool: Read — Reading: src/main.py" in shell._bottom_toolbar()
+    toolbar = "".join(part for _style, part in shell._bottom_toolbar())
+    assert "[-] Using tool: Read — Reading: src/main.py" in toolbar
+
+
+def test_resolve_approval_always_adds_allowlist_and_reenables_input(tmp_path: Path) -> None:
+    shell = InteractiveShell(DummyRunner(), tmp_path)
+    event = threading.Event()
+    shell._approval_request = {"tool": "Read", "target": "Read:README.md", "choice": None}
+    shell._approval_event = event
+    shell.input_field.read_only = True
+
+    shell._resolve_approval("always")
+
+    assert ("Read", "Read:README.md") in shell._session_approval_allowlist
+    assert shell.input_field.read_only is False
+    assert event.is_set()

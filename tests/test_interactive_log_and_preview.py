@@ -24,23 +24,12 @@ class DummyRunner:
         return {"response": {"content": [{"type": "text", "text": "ok"}]}}
 
 
-def test_payload_preview_truncation_and_hints(tmp_path: Path) -> None:
+def test_banner_text_includes_model_line(tmp_path: Path) -> None:
     shell = InteractiveShell(DummyRunner(), tmp_path)
-    payload = {
-        "path": "src/main.py",
-        "diff": "\n".join(f"line {i}" for i in range(100)),
-        "content": "x" * 300,
-        "blob": "y" * 400,
-    }
+    banner = "".join(text for _style, text in shell._banner_text())
 
-    preview = shell._format_approval_preview("Patch", "src/main.py", payload)
-
-    assert "tool: Patch" in preview
-    assert "target: src/main.py" in preview
-    assert "diff: 100 lines (use /diff to inspect)" in preview
-    assert "content: 300 chars" in preview
-    assert "... (truncated)" in preview
-    assert max(len(line) for line in preview.splitlines()) <= 160
+    assert "villani-fying your terminal" in banner
+    assert "Model:" in banner
 
 
 def test_append_log_uses_incremental_buffer_update(tmp_path: Path) -> None:
