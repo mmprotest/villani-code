@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from villani_code.interactive import InteractiveShell
+from villani_code.status_controller import SpinnerTheme
 
 
 class DummyCheckpoints:
@@ -50,3 +51,17 @@ def test_approval_prompt_uses_dialog_and_suspends(monkeypatch, tmp_path: Path) -
     assert fake_status.suspended is True
     assert ("Read", "repo/**") in shell._session_approval_allowlist
     assert any(call[0].startswith("Using tool: Read") for call in fake_status.waiting_calls)
+
+
+def test_bottom_toolbar_includes_spinner_frame_and_detail(tmp_path: Path) -> None:
+    shell = InteractiveShell(DummyRunner(), tmp_path)
+    theme = SpinnerTheme(["-", "\\"], ["slogan"], ["micro"])
+    with shell.status_controller._lock:
+        shell.status_controller._themes = [theme]
+        shell.status_controller._theme = theme
+        shell.status_controller.current_phase = "Using tool: Read"
+        shell.status_controller.current_detail = "Reading: src/main.py"
+        shell.status_controller._spinning = True
+        shell.status_controller._frame_index = 0
+
+    assert "[-] Using tool: Read — Reading: src/main.py" in shell._bottom_toolbar()

@@ -24,6 +24,7 @@ villani-code --help
 ## Key features
 
 - Interactive REPL with slash commands, history, and `!` bash mode.
+- Animated bottom-toolbar status spinner in interactive mode, including current tool/detail context.
 - Permission engine (`deny -> ask -> allow`) with Bash ASK-by-default and optional `BashSafe` auto-approval for safe read/build/test commands.
 - First-class edit proposals with `/propose`, `/edits`, `/show <id>`, `/apply <id>`, `/reject <id>`.
 - Checkpoints and rewind stored under `.villani_code/checkpoints/`.

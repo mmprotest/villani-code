@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
+from prompt_toolkit.application.current import get_app_or_none
 from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
@@ -86,6 +88,9 @@ class InteractiveShell:
             bottom_toolbar=self._bottom_toolbar,
             style=self.theme.prompt_toolkit_style,
         )
+        invalidate_stop = threading.Event()
+        invalidate_thread = threading.Thread(target=self._invalidate_toolbar_loop, args=(session, invalidate_stop), daemon=True)
+        invalidate_thread.start()
         try:
             while True:
                 self._poll_settings()
@@ -119,6 +124,8 @@ class InteractiveShell:
                     if block.get("type") == "text":
                         self._render_response(block.get("text", ""))
         finally:
+            invalidate_stop.set()
+            invalidate_thread.join(timeout=0.3)
             self.status_controller.shutdown()
 
     def _build_keybindings(self) -> KeyBindings:
@@ -491,15 +498,18 @@ class InteractiveShell:
         if tool_name in {"Read", "Write", "Patch"} and payload.get("file_path"):
             prefix = "Editing" if tool_name in {"Write", "Patch"} else "Reading"
             return f"{prefix}: {payload.get('file_path')}"
+        for key in ("file_path", "path", "target_file"):
+            if payload.get(key):
+                return f"path: {payload.get(key)}"
         if tool_name in {"Grep", "Search", "Ls", "Glob"} and payload.get("path"):
             return f"Path: {payload.get('path')}"
         if tool_name.startswith("Git"):
             op = tool_name.replace("Git", "").lower() or "operation"
             return f"git {op} @ {self.repo}"
-        if tool_name == "Bash":
+        if tool_name.lower() == "bash":
             return self._summarize_command(str(payload.get("command", "")))
-        if "url" in payload:
-            return f"URL: {payload.get('url')}"
+        if payload.get("url"):
+            return f"URL: {self._truncate_preview(str(payload.get('url')))}"
         for key in ("file", "target", "cwd"):
             if payload.get(key):
                 return f"{key}: {payload.get(key)}"
@@ -512,6 +522,16 @@ class InteractiveShell:
             chunks = cmd.split("cd ", 1)[1].split(" ", 1)
             return f"cmd: {summary} | path: {chunks[0]}"
         return f"cmd: {summary}"
+
+    def _invalidate_toolbar_loop(self, session: PromptSession, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            time.sleep(0.1)
+            try:
+                app = getattr(session, "app", None) or get_app_or_none()
+                if app is not None:
+                    app.invalidate()
+            except Exception:
+                continue
 
     def _redact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         redacted: dict[str, Any] = {}

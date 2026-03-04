@@ -122,7 +122,7 @@ class StatusController:
             self._active_slogan = self._rng.choice(self._theme.slogans)
             self._active_micro = self._rng.choice(self._theme.micros)
             self.current_phase = self._active_slogan if phase == "Thinking" else phase
-            self.current_detail = ""
+            self.current_detail = detail
             self._frame_index = 0
             self._spinning = True
             if self._thread is None or not self._thread.is_alive():
@@ -173,10 +173,11 @@ class StatusController:
 
     def _render(self) -> None:
         with self._lock:
-            frame = self._theme.frames[self._frame_index % len(self._theme.frames)] if self._spinning else "*"
+            frame = self._current_frame_locked() if self._spinning else "*"
             if self._spinning:
                 self._frame_index += 1
-            line = f"[{frame}] {self.current_phase}"
+            detail = f" — {self.current_detail}" if self.current_detail else ""
+            line = f"[{frame}] {self.current_phase}{detail}"
         if not self._render_to_stdout:
             return
         width = shutil.get_terminal_size((120, 20)).columns
@@ -193,4 +194,9 @@ class StatusController:
     def status_line(self) -> str:
         with self._lock:
             detail = f" — {self.current_detail}" if self.current_detail else ""
-            return f"{self.current_phase}{detail}"
+            if self._spinning:
+                return f"[{self._current_frame_locked()}] {self.current_phase}{detail}"
+            return f"[*] {self.current_phase}{detail}"
+
+    def _current_frame_locked(self) -> str:
+        return self._theme.frames[self._frame_index % len(self._theme.frames)]
