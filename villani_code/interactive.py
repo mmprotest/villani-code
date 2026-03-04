@@ -74,6 +74,7 @@ class InteractiveShell:
 
     def run(self) -> None:
         self.console.print(self.LAUNCH_BANNER)
+        self.console.print(f"[dim]Model: {self.runner.model}[/dim]")
         kb = self._build_keybindings()
         completer = FuzzyWordCompleter([i.trigger for i in self.palette.items], WORD=True)
         session = PromptSession(
@@ -416,7 +417,7 @@ class InteractiveShell:
             self.status_controller.start_waiting("Thinking")
             return
         if etype == "first_text_delta":
-            self.status_controller.stop_spinner("Streaming")
+            self.status_controller.stop_spinner()
             return
         if etype == "tool_use":
             tool_name = str(event.get("name", ""))

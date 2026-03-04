@@ -85,12 +85,15 @@ class StatusController:
                 self._thread.start()
         self._render()
 
-    def stop_spinner(self, phase: str = "Streaming", detail: str = "") -> None:
+    def stop_spinner(self, phase: str = "", detail: str = "") -> None:
         with self._lock:
             self.current_phase = phase
             self.current_detail = detail
             self._spinning = False
-        self._render()
+        if phase:
+            self._render()
+        else:
+            self._clear_line()
 
     def suspend(self) -> None:
         with self._lock:
