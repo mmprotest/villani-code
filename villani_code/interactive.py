@@ -13,8 +13,10 @@ from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit
-from prompt_toolkit.widgets import Box, Frame, Label, RadioList
+from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import D
+from prompt_toolkit.widgets import Box, Frame, Label
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -191,7 +193,17 @@ class InteractiveShell:
             ("always", "Always for this target (session)"),
             ("no", "No"),
         ]
-        radio = RadioList(options)
+        selected_index = 0
+
+        def _options_text() -> list[tuple[str, str]]:
+            fragments: list[tuple[str, str]] = []
+            for idx, (_value, label) in enumerate(options):
+                style = "fg:ansiblue bold" if idx == selected_index else ""
+                fragments.append((style, f"{label}\n"))
+            return fragments
+
+        options_control = FormattedTextControl(_options_text)
+        options_window = Window(content=options_control, height=D(min=3), always_hide_cursor=True)
         help_text = (
             f"Approval required: {tool_name}\n"
             f"Target: {target}\n\n"
@@ -200,9 +212,19 @@ class InteractiveShell:
         )
         kb = KeyBindings()
 
+        @kb.add("up")
+        def _up(_event):
+            nonlocal selected_index
+            selected_index = (selected_index - 1) % len(options)
+
+        @kb.add("down")
+        def _down(_event):
+            nonlocal selected_index
+            selected_index = (selected_index + 1) % len(options)
+
         @kb.add("enter")
         def _accept(event):
-            event.app.exit(result=radio.current_value)
+            event.app.exit(result=options[selected_index][0])
 
         @kb.add("c-c")
         @kb.add("escape")
@@ -213,12 +235,12 @@ class InteractiveShell:
             body=HSplit(
                 [
                     Label(text=help_text),
-                    Frame(body=radio, title="Select approval option"),
+                    Frame(body=options_window, title="Select approval option"),
                 ]
             ),
             padding=1,
         )
-        app = Application(layout=Layout(root, focused_element=radio), key_bindings=kb, full_screen=False)
+        app = Application(layout=Layout(root, focused_element=options_window), key_bindings=kb, full_screen=False)
         return app.run()
 
     def _format_payload_preview(self, payload: dict[str, Any]) -> str:
