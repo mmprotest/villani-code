@@ -20,3 +20,12 @@ def test_palette_modal_submit_selects_first_match() -> None:
     modal.refresh()
     modal.submit()
     assert calls == ["settings"]
+
+
+def test_palette_modal_navigation() -> None:
+    modal = PaletteModal(CommandPalette(), lambda _action: None)
+    modal.query_area.text = "/"
+    modal.refresh()
+    initial = modal.selection
+    modal.move(1)
+    assert modal.selection >= initial

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import shlex
 from dataclasses import dataclass
 from enum import Enum
@@ -85,10 +86,10 @@ class PermissionEngine:
 
 def bash_matches(pattern: str, command: str) -> bool:
     # operator-aware token matching to avoid prefix exploits like `&& rm -rf /`.
-    c_tokens = shlex.split(command)
-    if any(t in {"&&", "||", ";", "|"} for t in c_tokens):
+    c_tokens = _safe_shell_split(command)
+    if any(t in {"&&", "||", ";", "|", ">", ">>", "<", "2>", "2>>", "&", "|&"} for t in c_tokens):
         return False
-    p_tokens = shlex.split(pattern)
+    p_tokens = _safe_shell_split(pattern)
     if p_tokens == ["*"]:
         return True
     if p_tokens and p_tokens[-1] == "*":
@@ -102,6 +103,50 @@ def bash_matches(pattern: str, command: str) -> bool:
         if p != c:
             return False
     return True
+
+
+def _safe_shell_split(value: str) -> list[str]:
+    primary_posix = os.name != "nt"
+    for posix in (primary_posix, not primary_posix):
+        try:
+            return shlex.split(value, posix=posix)
+        except ValueError:
+            continue
+    return _conservative_split(value)
+
+
+def _conservative_split(value: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for ch in value:
+        if escaped:
+            current.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            current.append(ch)
+            continue
+        if ch in {'"', "'"}:
+            if quote is None:
+                quote = ch
+            elif quote == ch:
+                quote = None
+            current.append(ch)
+            continue
+        if ch.isspace() and quote is None:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(ch)
+    if escaped:
+        current.append("\\")
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def path_matches(pattern: str, candidate: str, repo: Path) -> bool:

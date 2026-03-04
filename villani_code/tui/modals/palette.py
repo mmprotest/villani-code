@@ -21,6 +21,9 @@ class PaletteModal:
         self.container = Frame(HSplit([self.query_area, Window(height=10, content=self.results_control)]), title="Command Palette")
         self.refresh()
 
+    def focus_target(self):
+        return self.query_area
+
     def refresh(self) -> None:
         self.results = self.palette.search(self.query_area.text, limit=12)
         if self.selection >= len(self.results):

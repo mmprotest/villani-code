@@ -29,12 +29,18 @@ class TranscriptItem:
 
 
 class TranscriptView:
-    def __init__(self) -> None:
+    def __init__(self, verbose_tool_output: bool = False, tool_burst_limit: int = 5) -> None:
         self._items: list[TranscriptItem] = []
         self._next_id = count(1)
         self._folded: dict[int, bool] = {}
         self._tool_output_full: dict[str, str] = {}
         self._selected_foldable: int | None = None
+        self.verbose_tool_output = verbose_tool_output
+        self.tool_burst_limit = tool_burst_limit
+        self._pending_tool_calls: list[str] = []
+        self._collapsed_tool_count = 0
+        self._activity_line = ""
+        self._auto_scroll = True
         self.control = FormattedTextControl(self._get_text)
         self.window = Window(content=self.control, wrap_lines=True, always_hide_cursor=True, right_margins=[], scroll_offsets=None)
 
@@ -57,11 +63,38 @@ class TranscriptView:
             self._selected_foldable = item.id
 
     def append_tool_call(self, name: str, input_dict: dict[str, Any]) -> None:
-        self._items.append(TranscriptItem(next(self._next_id), "tool-call", f"{name} {input_dict}"))
+        text = f"{name} {input_dict}"
+        self._pending_tool_calls.append(text)
+        if self.verbose_tool_output or len(self._pending_tool_calls) <= self.tool_burst_limit:
+            self._items.append(TranscriptItem(next(self._next_id), "tool-call", text))
+        else:
+            self._collapsed_tool_count += 1
+        self.set_activity(name, "Running...")
 
     def append_tool_result(self, name: str, preview_text: str, full_text_id: str) -> None:
         self._tool_output_full[full_text_id] = preview_text if full_text_id not in self._tool_output_full else self._tool_output_full[full_text_id]
         self._items.append(TranscriptItem(next(self._next_id), "tool-result", f"{name}: {preview_text} [Expand:{full_text_id}]"))
+        self.set_activity(name, "Completed")
+
+    def set_activity(self, subject: str, status: str) -> None:
+        self._activity_line = f"{subject}: {status}"
+
+    def clear_activity(self) -> None:
+        self._activity_line = ""
+
+    def flush_tool_summary(self) -> None:
+        if self._collapsed_tool_count > 0 and not self.verbose_tool_output:
+            self._items.append(
+                TranscriptItem(next(self._next_id), "tool-summary", f"+{self._collapsed_tool_count} more tool uses (Ctrl+O to expand)")
+            )
+        self._collapsed_tool_count = 0
+        self._pending_tool_calls = []
+
+    def user_scrolled(self, at_bottom: bool) -> None:
+        self._auto_scroll = at_bottom
+
+    def should_auto_scroll(self) -> bool:
+        return self._auto_scroll
 
     def store_full_output(self, output_id: str, text: str) -> None:
         self._tool_output_full[output_id] = text
@@ -85,6 +118,8 @@ class TranscriptView:
                 "assistant-delta": "class:transcript.assistant",
                 "tool-call": "class:transcript.tool_call",
                 "tool-result": "class:transcript.tool_result",
+                "tool-summary": "class:transcript.tool_result",
+                "activity": "class:transcript.prefix",
             }.get(item.kind, "")
             rendered = item.text
             if item.kind in {"assistant", "assistant-delta"} and self._folded.get(item.id, False):
@@ -95,9 +130,15 @@ class TranscriptView:
                 "assistant-delta": "\nAssistant> ",
                 "tool-call": "\nTool call> ",
                 "tool-result": "\nTool result> ",
+                "tool-summary": "\nTools> ",
+                "activity": "\nStatus> ",
             }.get(item.kind, "\n")
             out.append(("class:transcript.prefix", prefix))
             out.append((style, rendered))
+            out.append(("", "\n"))
+        if self._activity_line:
+            out.append(("class:transcript.prefix", "\nStatus> "))
+            out.append(("class:transcript.assistant", self._activity_line))
             out.append(("", "\n"))
         return out
 
@@ -121,6 +162,7 @@ class TUIApp:
         help_modal: Any,
         settings_modal: Any,
         output_modal: Any,
+        approval_modal: Any | None,
         style: Any,
     ) -> None:
         self.state = state
@@ -129,12 +171,22 @@ class TUIApp:
         self.status_bar = status_bar
         self.right_panel = right_panel
         self.bottom_panel = bottom_panel
-        self.app = Application(layout=Layout(self._build_container(palette_modal, help_modal, settings_modal, output_modal)), key_bindings=key_bindings, full_screen=True, style=style)
+        self.app = Application(layout=Layout(self._build_container(palette_modal, help_modal, settings_modal, output_modal, approval_modal)), key_bindings=key_bindings, full_screen=True, style=style)
 
-    def _build_container(self, palette_modal: Any, help_modal: Any, settings_modal: Any, output_modal: Any):
+    def _build_container(self, palette_modal: Any, help_modal: Any, settings_modal: Any, output_modal: Any, approval_modal: Any | None):
+        @Condition
+        def use_right_panel() -> bool:
+            app = get_app()
+            width = app.output.get_size().columns if app else 120
+            return width >= 100
+
         @Condition
         def show_side_panels() -> bool:
-            return (self.state.show_tasks or self.state.show_diff) and not self.state.focus_mode
+            return (self.state.show_tasks or self.state.show_diff) and not self.state.focus_mode and use_right_panel()
+
+        @Condition
+        def show_bottom_panels() -> bool:
+            return (self.state.show_tasks or self.state.show_diff) and not self.state.focus_mode and not use_right_panel()
 
         @Condition
         def show_palette_modal() -> bool:
@@ -152,6 +204,10 @@ class TUIApp:
         def show_output_modal() -> bool:
             return self.state.active_modal == ActiveModal.OUTPUT
 
+        @Condition
+        def show_approval_modal() -> bool:
+            return self.state.active_modal == ActiveModal.APPROVAL
+
         transcript_frame = Frame(self.transcript.window, title="Transcript")
         body = VSplit(
             [
@@ -159,7 +215,7 @@ class TUIApp:
                 ConditionalContainer(self.right_panel, filter=show_side_panels),
             ]
         )
-        bottom_panels = ConditionalContainer(self.bottom_panel, filter=show_side_panels)
+        bottom_panels = ConditionalContainer(self.bottom_panel, filter=show_bottom_panels)
         content = HSplit(
             [
                 body,
@@ -174,6 +230,8 @@ class TUIApp:
             Float(content=ConditionalContainer(settings_modal, filter=show_settings_modal)),
             Float(content=ConditionalContainer(output_modal, filter=show_output_modal)),
         ]
+        if approval_modal is not None:
+            floats.append(Float(content=ConditionalContainer(approval_modal, filter=show_approval_modal)))
         return FloatContainer(content=content, floats=floats)
 
     async def run(self) -> None:

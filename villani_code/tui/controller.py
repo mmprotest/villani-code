@@ -100,4 +100,4 @@ class Controller:
         elif action.target == "settings":
             await self.handle_command("/settings")
         elif action.target == "save_checkpoint":
-            self.runner.checkpoints.create([], message_index=0)
+            self.runner.checkpoints.create([], message_index=len(self.messages or []))
