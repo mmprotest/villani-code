@@ -10,6 +10,7 @@ class ActiveModal(str, Enum):
     HELP = "help"
     SETTINGS = "settings"
     OUTPUT = "output"
+    APPROVAL = "approval"
 
 
 @dataclass(slots=True)

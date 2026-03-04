@@ -18,3 +18,13 @@ def test_permissions_precedence_deny_ask_allow(tmp_path: Path):
 def test_bash_operator_aware_matching():
     assert bash_matches("npm run test *", "npm run test unit")
     assert not bash_matches("npm run test *", "npm run test && rm -rf /")
+
+
+def test_bash_matches_never_throws_on_malformed_commands() -> None:
+    commands = [
+        'echo "hello',
+        r"ls -la /c/Users/Simon/OneDrive/Documents/Python\ Scripts/villani-code/",
+        "echo hi && cat file > out.txt",
+    ]
+    for command in commands:
+        assert isinstance(bash_matches("*", command), bool)

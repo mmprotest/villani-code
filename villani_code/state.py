@@ -97,6 +97,8 @@ class Runner:
                 payload["thinking"] = self.thinking
             payload = merge_extra_json(payload, self.extra_json)
             transcript["requests"].append(payload)
+            if self.stream_event_handler:
+                self.stream_event_handler({"type": "model_start", "model": self.model})
 
             raw = self.client.create_message(payload, stream=self.stream)
             if self.stream:
@@ -112,6 +114,14 @@ class Runner:
                 response = raw
 
             response["content"] = normalize_content_blocks(response.get("content"))
+            if self.stream_event_handler:
+                self.stream_event_handler(
+                    {
+                        "type": "model_stop",
+                        "usage": response.get("usage", {}),
+                        "stop_reason": response.get("stop_reason"),
+                    }
+                )
             transcript["responses"].append(response)
 
             assistant_message = {"role": "assistant", "content": response.get("content", [])}
@@ -143,6 +153,8 @@ class Runner:
                     elif self.plan_mode and tool_name in {"Write", "Patch"}:
                         result = {"content": "Plan mode: edit not executed", "is_error": False}
                     else:
+                        if self.tool_event_handler:
+                            self.tool_event_handler("tool_start", {"name": tool_name, "input": tool_input, "id": tool_use_id})
                         if tool_name in {"Write", "Patch"}:
                             file_path = Path(tool_input.get("file_path", ""))
                             self.checkpoints.create([file_path], message_index=len(messages))
@@ -151,6 +163,8 @@ class Runner:
 
                 transcript["tool_invocations"].append({"name": tool_name, "input": tool_input, "id": tool_use_id})
                 if self.tool_event_handler:
+                    preview = str(result.get("content", ""))[:240]
+                    self.tool_event_handler("tool_end", {"name": tool_name, "result": result, "id": tool_use_id, "is_error": bool(result.get("is_error")), "preview": preview})
                     self.tool_event_handler("tool_result", {"name": tool_name, "result": result, "id": tool_use_id})
                 transcript["tool_results"].append(result)
                 messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]}]})
