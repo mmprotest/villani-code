@@ -36,6 +36,9 @@ class Runner:
         auto_accept_edits: bool = False,
         plan_mode: bool = False,
         approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        stream_event_handler: Callable[[dict[str, Any]], None] | None = None,
+        tool_event_handler: Callable[[str, dict[str, Any]], None] | None = None,
+        interactive_mode: bool = False,
     ):
         self.client = client
         self.repo = repo
@@ -51,6 +54,9 @@ class Runner:
         self.auto_accept_edits = auto_accept_edits
         self.plan_mode = plan_mode
         self.approval_callback = approval_callback or (lambda _n, _i: True)
+        self.stream_event_handler = stream_event_handler
+        self.tool_event_handler = tool_event_handler
+        self.interactive_mode = interactive_mode
         self.console = Console()
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
@@ -98,6 +104,8 @@ class Runner:
                 for event in raw:
                     events.append(event)
                     self._render_stream_event(event)
+                    if self.stream_event_handler:
+                        self.stream_event_handler(event)
                 transcript["streamed_events_count"] += len(events)
                 response = assemble_anthropic_stream(events)
             else:
@@ -118,6 +126,8 @@ class Runner:
 
             for block in tool_uses:
                 tool_name = block.get("name", "")
+                if self.tool_event_handler:
+                    self.tool_event_handler("tool_use", block)
                 tool_input = block.get("input", {})
                 tool_use_id = str(block.get("id"))
 
@@ -140,6 +150,8 @@ class Runner:
                 self.hooks.run_event("PostToolUse", {"event": "PostToolUse", "tool": tool_name, "input": tool_input, "result": result})
 
                 transcript["tool_invocations"].append({"name": tool_name, "input": tool_input, "id": tool_use_id})
+                if self.tool_event_handler:
+                    self.tool_event_handler("tool_result", {"name": tool_name, "result": result, "id": tool_use_id})
                 transcript["tool_results"].append(result)
                 messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]}]})
 
@@ -153,7 +165,7 @@ class Runner:
         if event.get("type") != "content_block_delta":
             return
         delta = event.get("delta", {})
-        if delta.get("type") == "text_delta":
+        if delta.get("type") == "text_delta" and not self.interactive_mode:
             print(delta.get("text", ""), end="", flush=True)
         if self.verbose and delta.get("type") == "input_json_delta":
             self.console.print(f"[dim]tool delta: {delta.get('partial_json','')[:200]}[/dim]")
