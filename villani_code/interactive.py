@@ -90,14 +90,17 @@ class InteractiveShell:
 
         kb = build_keybindings(state, _schedule, _open_output, transcript.toggle_selected_fold)
 
-        async def _accept(buff) -> bool:
-            value = input_bar.textarea.text
-            input_bar.textarea.buffer.reset()
+        async def _handle_accept(value: str) -> None:
             if value.strip() == "/exit":
                 app.app.exit()
-                return False
+                return
             await controller.handle_input(value)
             app.invalidate()
+
+        def _accept(_buff) -> bool:
+            value = input_bar.textarea.text
+            input_bar.textarea.buffer.reset()
+            app.app.create_background_task(_handle_accept(value))
             return False
 
         input_bar.textarea.accept_handler = _accept
