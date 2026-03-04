@@ -15,6 +15,12 @@ Interactive mode:
 villani-code interactive --base-url http://localhost:8000 --model local-model
 ```
 
+Run with `--help` to view all available commands:
+
+```bash
+villani-code --help
+```
+
 ## Key features
 
 - Interactive REPL with slash commands, history, and `!` bash mode.
@@ -32,3 +38,20 @@ villani-code interactive --base-url http://localhost:8000 --model local-model
 The previous minimal runner only supported a basic loop with `Ls/Read/Grep/Bash/Write/Patch`. This version adds interactive workflows, permissions, checkpoints, hooks, extensibility, and more built-in tools while preserving compatibility with `/v1/messages` request/streaming semantics.
 
 See `docs/` for configuration details.
+
+## Development
+
+Set up a local development environment and run tests:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+pytest
+```
+
+Useful docs:
+
+- `docs/settings.md` for configuration.
+- `docs/permissions.md` for sandbox and approval behavior.
+- `docs/skills.md` for skill discovery and loading.
