@@ -90,7 +90,10 @@ class StatusController:
             self.current_phase = phase
             self.current_detail = detail
             self._spinning = False
-        self._render()
+        if phase:
+            self._render()
+        else:
+            self._clear_line()
 
     def suspend(self) -> None:
         with self._lock:
