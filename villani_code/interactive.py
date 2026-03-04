@@ -71,7 +71,8 @@ class InteractiveShell:
         self.token_events: deque[tuple[datetime, int]] = deque(maxlen=128)
         self.pending_action: CommandAction | None = None
         self._session_approval_allowlist: set[tuple[str, str]] = set()
-        self.status_controller = StatusController(fps=10.0, render_to_stdout=False)
+        self.status_controller = StatusController(fps=10.0, render_to_stdout=True)
+        self.runner.print_stream = False
         self.runner.approval_callback = self._approval_prompt
         self.runner.event_callback = self._on_runner_event
 
@@ -96,12 +97,12 @@ class InteractiveShell:
                 self._poll_settings()
                 self._execute_pending_action()
                 try:
-                    text = session.prompt()
+                    text = self._prompt_for_input(session)
                 except EOFError:
                     return
                 except KeyboardInterrupt:
                     self.console.print("[yellow]Cancelled[/yellow]")
-                    self.status_controller.update_phase("Idle")
+                    self.status_controller.suspend()
                     continue
                 if not text.strip():
                     continue
@@ -174,6 +175,10 @@ class InteractiveShell:
     def _bottom_toolbar(self) -> str:
         width = self.console.size.width
         return self.status_bar.format(width) + f" | {self.status_controller.status_line()}"
+
+    def _prompt_for_input(self, session: PromptSession) -> str:
+        self.status_controller.suspend()
+        return session.prompt()
 
     def _record_token_usage(self, tokens: int) -> None:
         now = datetime.now(timezone.utc)
@@ -486,6 +491,8 @@ class InteractiveShell:
             self.status_controller.push_action(f"{tool_name} finished ({outcome})")
             self.status_controller.start_waiting("Thinking")
             return
+        if etype == "stream_text":
+            return
         if etype == "command_policy":
             line = f"{event.get('outcome')} bash @ {event.get('cwd')}: {event.get('reason')}"
             self.task_manager.record_event("BashPolicy", line)
@@ -498,6 +505,10 @@ class InteractiveShell:
         if tool_name in {"Read", "Write", "Patch"} and payload.get("file_path"):
             prefix = "Editing" if tool_name in {"Write", "Patch"} else "Reading"
             return f"{prefix}: {payload.get('file_path')}"
+        if tool_name == "Patch":
+            patch_path = self._path_from_unified_diff(str(payload.get("unified_diff", "")))
+            if patch_path:
+                return f"Editing: {patch_path}"
         for key in ("file_path", "path", "target_file"):
             if payload.get(key):
                 return f"path: {payload.get(key)}"
@@ -507,7 +518,7 @@ class InteractiveShell:
             op = tool_name.replace("Git", "").lower() or "operation"
             return f"git {op} @ {self.repo}"
         if tool_name.lower() == "bash":
-            return self._summarize_command(str(payload.get("command", "")))
+            return self._summarize_bash_detail(payload)
         if payload.get("url"):
             return f"URL: {self._truncate_preview(str(payload.get('url')))}"
         for key in ("file", "target", "cwd"):
@@ -522,6 +533,31 @@ class InteractiveShell:
             chunks = cmd.split("cd ", 1)[1].split(" ", 1)
             return f"cmd: {summary} | path: {chunks[0]}"
         return f"cmd: {summary}"
+
+    def _summarize_bash_detail(self, payload: dict[str, Any]) -> str:
+        command = str(payload.get("command", "")).strip().replace("\n", " ")
+        summary = command[:80] + ("..." if len(command) > 80 else "")
+        cwd = payload.get("cwd")
+        if cwd:
+            return f"cmd: {summary} | cwd: {cwd}"
+        return f"cmd: {summary}"
+
+    def _path_from_unified_diff(self, unified_diff: str) -> str:
+        for line in unified_diff.splitlines():
+            if line.startswith("+++ "):
+                target = line[4:].strip().split("\t", 1)[0]
+                if target.startswith("b/"):
+                    target = target[2:]
+                if target != "/dev/null":
+                    return target
+        for line in unified_diff.splitlines():
+            if line.startswith("--- "):
+                source = line[4:].strip().split("\t", 1)[0]
+                if source.startswith("a/"):
+                    source = source[2:]
+                if source != "/dev/null":
+                    return source
+        return ""
 
     def _invalidate_toolbar_loop(self, session: PromptSession, stop_event: threading.Event) -> None:
         while not stop_event.is_set():

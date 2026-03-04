@@ -76,6 +76,36 @@ def test_loop_batches_multiple_tool_results_in_single_user_message(tmp_path: Pat
     assert [b["tool_use_id"] for b in user_messages[0]["content"]] == ["tool-1", "tool-2"]
 
 
+def test_runner_emits_tool_use_before_tool_execution(tmp_path: Path):
+    class ToolThenDoneClient:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "id": "1",
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "tool-1", "name": "Ls", "input": {"path": "."}}],
+                }
+            return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    events: list[dict] = []
+    runner = Runner(client=ToolThenDoneClient(), repo=tmp_path, model="m", stream=False, event_callback=events.append)
+
+    runner.run("list files")
+
+    assert [event["type"] for event in events if event["type"] in {"tool_use", "tool_started", "tool_result"}] == [
+        "tool_use",
+        "tool_started",
+        "tool_result",
+    ]
+    tool_use_event = next(event for event in events if event["type"] == "tool_use")
+    assert tool_use_event["name"] == "Ls"
+    assert tool_use_event["input"] == {"path": "."}
+
+
 class FakeClientEmptyThenDone:
     def __init__(self):
         self.calls = 0
