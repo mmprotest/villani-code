@@ -116,6 +116,7 @@ class Runner:
                 self._save_session_snapshot(messages)
                 return {"response": response, "messages": messages, "transcript_path": str(transcript_path), "transcript": transcript}
 
+            tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = block.get("input", {})
@@ -141,7 +142,9 @@ class Runner:
 
                 transcript["tool_invocations"].append({"name": tool_name, "input": tool_input, "id": tool_use_id})
                 transcript["tool_results"].append(result)
-                messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]}]})
+                tool_results.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]})
+
+            messages.append({"role": "user", "content": tool_results})
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         root = self.repo / ".villani_code" / "sessions"
