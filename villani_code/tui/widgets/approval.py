@@ -2,15 +2,25 @@ from __future__ import annotations
 
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Button, Static
 
 
 class ApprovalBar(Horizontal):
+    BINDINGS = [
+        Binding("left", "prev", show=False),
+        Binding("up", "prev", show=False),
+        Binding("right", "next", show=False),
+        Binding("down", "next", show=False),
+        Binding("tab", "next", show=False),
+        Binding("enter", "confirm", show=False),
+        Binding("escape", "deny", show=False),
+    ]
+
     def __init__(self) -> None:
         super().__init__(id="approval-bar")
-        self.display = False
         self.request_id: str | None = None
         self._choices = ["yes", "always", "no"]
         self._index = 0
@@ -21,12 +31,16 @@ class ApprovalBar(Horizontal):
         yield Button("Approve always", id="approve-always")
         yield Button("Deny", id="approve-no")
 
+    def on_mount(self) -> None:
+        self.display = False
+
     def show_request(self, prompt: str, request_id: str) -> None:
         self.request_id = request_id
         self.display = True
         self._index = 0
         self.query_one("#approval-prompt", Static).update(prompt)
         self._sync_highlight()
+        self.focus()
 
     def hide_request(self) -> None:
         self.request_id = None
@@ -38,6 +52,22 @@ class ApprovalBar(Horizontal):
     def move(self, delta: int) -> None:
         self._index = (self._index + delta) % len(self._choices)
         self._sync_highlight()
+
+    def action_prev(self) -> None:
+        if self.request_id is not None:
+            self.move(-1)
+
+    def action_next(self) -> None:
+        if self.request_id is not None:
+            self.move(1)
+
+    def action_confirm(self) -> None:
+        if self.request_id is not None:
+            self.post_message(self.ApprovalSelected(self.selected_choice()))
+
+    def action_deny(self) -> None:
+        if self.request_id is not None:
+            self.post_message(self.ApprovalSelected("no"))
 
     def _sync_highlight(self) -> None:
         mapping = {"yes": "#approve-yes", "always": "#approve-always", "no": "#approve-no"}

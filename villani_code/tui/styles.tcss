@@ -10,9 +10,26 @@
 }
 
 #approval-bar {
-  height: auto;
+  height: 3;
   padding: 0 1;
   background: $surface;
+  align: left middle;
+}
+
+#approval-prompt {
+  width: 1fr;
+  content-align: left middle;
+}
+
+#approval-bar Button {
+  width: auto;
+  margin-left: 1;
+}
+
+#approval-bar Button.-primary {
+  background: #1f6feb;
+  color: white;
+  text-style: bold;
 }
 
 #status {

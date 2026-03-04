@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 
 from villani_code.tui.controller import RunnerController
+from villani_code.tui.widgets.approval import ApprovalBar
 
 
 class DummyRunner:
@@ -32,3 +33,8 @@ def test_approval_bridge_blocks_worker_until_resolved(tmp_path: Path) -> None:
     t.join(timeout=1)
 
     assert result["approved"] is True
+
+
+def test_approval_bar_has_local_keybindings() -> None:
+    keys = {binding.key for binding in ApprovalBar.BINDINGS}
+    assert {"left", "right", "up", "down", "tab", "enter", "escape"}.issubset(keys)
