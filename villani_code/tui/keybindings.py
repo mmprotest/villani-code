@@ -46,11 +46,11 @@ def build_keybindings(state: UIState, call_async: Callable[[str], None], open_ou
     def _esc(_event):
         state.active_modal = ActiveModal.NONE
 
-    @kb.add("e")
+    @kb.add("c-e")
     def _expand(_event):
         open_output()
 
-    @kb.add("enter")
+    @kb.add("c-g")
     def _toggle_fold(_event):
         toggle_fold()
 

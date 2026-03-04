@@ -12,6 +12,8 @@ Ctrl+T task panel
 Ctrl+F focus mode
 Ctrl+O verbose output
 Ctrl+/ help
+Ctrl+E open full output
+Ctrl+G toggle code fold
 Esc close modal
 
 Commands
