@@ -71,6 +71,11 @@ class InteractiveShell:
         self.token_events: deque[tuple[datetime, int]] = deque(maxlen=128)
         self.pending_action: CommandAction | None = None
         self._session_approval_allowlist: set[tuple[str, str]] = set()
+        self._last_activity_line = ""
+        self._files_read_recent: list[str] = []
+        self._files_written_recent: list[str] = []
+        self._max_recent_files = 5
+        self._tool_calls: dict[str, tuple[str, dict[str, Any]]] = {}
         self.status_controller = StatusController(fps=10.0, render_to_stdout=True)
         self.runner.print_stream = False
         self.runner.approval_callback = self._approval_prompt
@@ -283,6 +288,54 @@ class InteractiveShell:
     def _truncate_preview(self, value: str, max_len: int = 120) -> str:
         return value if len(value) <= max_len else value[:max_len] + "..."
 
+    def _emit_activity(self, text: str) -> None:
+        if not text:
+            return
+        if text == self._last_activity_line:
+            return
+        self._last_activity_line = text
+        self.status_controller.print_persistent(text)
+        self.task_manager.record_event("Activity", text)
+
+    def _note_file_read(self, path: str) -> None:
+        if not path:
+            return
+        self._files_read_recent.append(path)
+        self._files_read_recent = self._files_read_recent[-self._max_recent_files :]
+        self._emit_activity(f"📖 Read: {path}")
+
+    def _note_file_written(self, path: str, kind: str = "Write") -> None:
+        if not path:
+            return
+        self._files_written_recent.append(path)
+        self._files_written_recent = self._files_written_recent[-self._max_recent_files :]
+        icon = "💾" if kind == "Write" else "🩹"
+        verb = "Wrote" if kind == "Write" else "Patched"
+        self._emit_activity(f"{icon} {verb}: {path}")
+
+    def _path_for_tool(self, tool_name: str, payload: dict[str, Any]) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("file_path"):
+            return str(payload.get("file_path"))
+        if tool_name == "Patch":
+            return self._path_from_unified_diff(str(payload.get("unified_diff", "")))
+        return ""
+
+    def _emit_tool_file_summary(self, tool_name: str) -> None:
+        if tool_name not in {"Read", "Write", "Patch"}:
+            return
+        reads = len(self._files_read_recent)
+        writes = len(self._files_written_recent)
+        if reads == 0 and writes == 0:
+            return
+        parts = [f"Files: read {reads}, wrote {writes}"]
+        if self._files_read_recent:
+            parts.append(f"last read: {', '.join(self._files_read_recent[-2:])}")
+        if self._files_written_recent:
+            parts.append(f"last wrote: {', '.join(self._files_written_recent[-2:])}")
+        self._emit_activity(" | ".join(parts))
+
     def _run_bash_line(self, command: str) -> None:
         self.task_manager.record_event("ToolStart", command)
         self.status_controller.start_waiting("Using tool: bash", self._summarize_command(command))
@@ -468,7 +521,8 @@ class InteractiveShell:
     def _on_runner_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if etype == "model_request_started":
-            self.status_controller.start_waiting("Thinking")
+            self._emit_activity("🤔 Thinking…")
+            self.status_controller.start_waiting("Thinking", "")
             return
         if etype == "first_text_delta":
             self.status_controller.stop_spinner("Responding: ")
@@ -476,20 +530,50 @@ class InteractiveShell:
         if etype == "tool_use":
             tool_name = str(event.get("name", ""))
             tool_input = event.get("input", {}) if isinstance(event.get("input"), dict) else {}
+            tool_use_id = str(event.get("tool_use_id", ""))
+            if tool_use_id:
+                self._tool_calls[tool_use_id] = (tool_name, tool_input)
             detail = self._detail_for_tool(tool_name, tool_input)
+            msg = f"▶ Using tool: {tool_name}" + (f" — {detail}" if detail else "")
+            self._emit_activity(msg)
+            path = self._path_for_tool(tool_name, tool_input)
+            if tool_name == "Read" and path:
+                self._note_file_read(path)
+            elif tool_name == "Write" and path:
+                self._emit_activity(f"✍️ Will write: {path}")
+            elif tool_name == "Patch" and path:
+                self._emit_activity(f"🩹 Will patch: {path}")
             self.status_controller.start_waiting(f"Using tool: {tool_name}", detail)
             self.status_controller.push_action(f"{tool_name}: {detail}" if detail else tool_name)
             return
         if etype == "approval_required":
             tool_name = str(event.get("name", ""))
-            detail = self._detail_for_tool(tool_name, event.get("input", {}))
-            self.status_controller.update_phase(f"Awaiting approval: {tool_name}", detail)
+            payload = event.get("input", {}) if isinstance(event.get("input"), dict) else {}
+            detail = self._detail_for_tool(tool_name, payload)
+            msg = f"⏸ Approval required: {tool_name}" + (f" — {detail}" if detail else "")
+            self._emit_activity(msg)
+            self.status_controller.update_phase(f"Approval required: {tool_name}", detail)
             return
         if etype == "tool_result":
+            tool_use_id = str(event.get("tool_use_id", ""))
             tool_name = str(event.get("name", ""))
+            tool_input: dict[str, Any] = {}
+            if tool_use_id and tool_use_id in self._tool_calls:
+                mapped_name, mapped_input = self._tool_calls.pop(tool_use_id)
+                if not tool_name:
+                    tool_name = mapped_name
+                tool_input = mapped_input
             outcome = "ok" if not event.get("is_error") else "error"
+            self._emit_activity(f"✓ Tool finished: {tool_name} ({outcome})")
+            if outcome == "ok":
+                path = self._path_for_tool(tool_name, tool_input)
+                if tool_name == "Write" and path:
+                    self._note_file_written(path, "Write")
+                elif tool_name == "Patch" and path:
+                    self._note_file_written(path, "Patch")
+                self._emit_tool_file_summary(tool_name)
             self.status_controller.push_action(f"{tool_name} finished ({outcome})")
-            self.status_controller.start_waiting("Thinking")
+            self.status_controller.stop_spinner("Waiting", "")
             return
         if etype == "stream_text":
             return
@@ -498,27 +582,39 @@ class InteractiveShell:
             self.task_manager.record_event("BashPolicy", line)
             return
         if etype == "edit_proposed":
+            proposal_id = str(event.get("proposal_id", ""))
+            summary = str(event.get("summary", ""))
+            self._emit_activity(f"✎ Edit proposed: {proposal_id} — {summary}")
             self.task_manager.record_event("EditProposed", f"{event.get('proposal_id')} {event.get('summary')}")
 
     def _detail_for_tool(self, tool_name: str, payload: dict[str, Any]) -> str:
         payload = self._redact_payload(payload)
-        if tool_name in {"Read", "Write", "Patch"} and payload.get("file_path"):
-            prefix = "Editing" if tool_name in {"Write", "Patch"} else "Reading"
-            return f"{prefix}: {payload.get('file_path')}"
+        if tool_name == "Read" and payload.get("file_path"):
+            return f"Reading: {payload.get('file_path')}"
+        if tool_name == "Write" and payload.get("file_path"):
+            return f"Writing: {payload.get('file_path')}"
+        if tool_name == "Patch" and payload.get("file_path"):
+            return f"Patching: {payload.get('file_path')}"
         if tool_name == "Patch":
             patch_path = self._path_from_unified_diff(str(payload.get("unified_diff", "")))
             if patch_path:
-                return f"Editing: {patch_path}"
+                return f"Patching: {patch_path}"
+        if tool_name in {"Grep", "Search"}:
+            pattern = payload.get("pattern") or payload.get("query") or payload.get("regex")
+            if pattern:
+                return f"Pattern: {self._truncate_preview(str(pattern), max_len=60)}"
+        if tool_name in {"Ls", "Glob"} and payload.get("path"):
+            return f"Path: {payload.get('path')}"
         for key in ("file_path", "path", "target_file"):
             if payload.get(key):
                 return f"path: {payload.get(key)}"
-        if tool_name in {"Grep", "Search", "Ls", "Glob"} and payload.get("path"):
-            return f"Path: {payload.get('path')}"
         if tool_name.startswith("Git"):
             op = tool_name.replace("Git", "").lower() or "operation"
             return f"git {op} @ {self.repo}"
         if tool_name.lower() == "bash":
             return self._summarize_bash_detail(payload)
+        if tool_name == "WebFetch" and payload.get("url"):
+            return f"URL: {self._truncate_preview(str(payload.get('url')))}"
         if payload.get("url"):
             return f"URL: {self._truncate_preview(str(payload.get('url')))}"
         for key in ("file", "target", "cwd"):

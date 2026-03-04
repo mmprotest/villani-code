@@ -191,6 +191,22 @@ class StatusController:
         sys.stdout.write("\r\033[2K")
         sys.stdout.flush()
 
+    def print_persistent(self, line: str) -> None:
+        """
+        Print a persistent line to stdout without breaking the spinner.
+        Clears the spinner line first, prints the line with newline, then re-renders spinner if active.
+        """
+        if not self._render_to_stdout:
+            return
+        clean = line.rstrip("\n")
+        self._clear_line()
+        sys.stdout.write(clean + "\n")
+        sys.stdout.flush()
+        with self._lock:
+            spinning = self._spinning
+        if spinning:
+            self._render()
+
     def status_line(self) -> str:
         with self._lock:
             detail = f" — {self.current_detail}" if self.current_detail else ""

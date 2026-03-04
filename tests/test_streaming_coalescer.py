@@ -36,3 +36,11 @@ def test_status_line_shows_spinner_frame_while_spinning():
         controller._frame_index = 0
     assert controller.status_line().startswith("[-] Working")
     controller.shutdown()
+
+
+def test_print_persistent_outputs_line(capsys):
+    controller = StatusController(render_to_stdout=True)
+    controller.print_persistent("hello persistent")
+    out = capsys.readouterr().out
+    controller.shutdown()
+    assert "hello persistent\n" in out
