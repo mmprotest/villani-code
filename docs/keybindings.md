@@ -1,24 +1,22 @@
 # Villani Code Keybindings
 
-## Primary
+## Global
+- `Ctrl+P`: Open command palette overlay.
+- `Ctrl+S`: Create checkpoint.
+- `Ctrl+D`: Toggle diff viewer panel.
+- `Ctrl+T`: Toggle task board panel.
+- `Ctrl+F`: Focus mode toggle.
+- `Ctrl+O`: Toggle verbose tool output.
+- `Ctrl+/`: Open shortcuts help overlay.
+- `Esc`: Close the active modal.
 
-- `Ctrl+P`: open command palette
-- `Ctrl+S`: quick save checkpoint
-- `Ctrl+D`: toggle diff panel
-- `Ctrl+F`: toggle focus mode
-- `Ctrl+/`: show shortcuts overlay
+## Transcript and tool output
+- `Enter`: Toggle fold for selected long code block.
+- `e`: Open full output overlay for selected tool result.
 
-## Existing compatibility
-
-- `Ctrl+O`: toggle verbose tool output
-- `Ctrl+T`: toggle task panel
-
-## ASCII mockup
-
-```text
-┌ Shortcuts ───────────────────────────┐
-│ Ctrl+P palette   Ctrl+D diff         │
-│ Ctrl+S save      Ctrl+F focus mode   │
-│ Ctrl+/ help      Ctrl+O verbose      │
-└──────────────────────────────────────┘
-```
+## Diff viewer panel
+- `Up` and `Down`: Move selected file.
+- `Enter`: Toggle folded hunk content.
+- `s`: Toggle side by side mode.
+- `Tab`: Switch pane focus.
+- `a`: Add annotation to selected hunk.

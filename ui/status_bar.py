@@ -39,6 +39,9 @@ class StatusBar:
             if hasattr(self.snapshot, key):
                 setattr(self.snapshot, key, value)
 
+    def format_fragments(self, width: int) -> list[tuple[str, str]]:
+        return [("class:bottom-toolbar", self.format(width))]
+
     def format(self, width: int) -> str:
         heartbeat = self.snapshot.last_heartbeat
         heart_age = "-"
