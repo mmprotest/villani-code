@@ -35,6 +35,61 @@ villani-code --help
 - Hooks for tool lifecycle events.
 - Local plugin install/list/remove.
 
+## Agent flow diagram
+
+```text
++-------------------+
+| User prompt/input |
++---------+---------+
+          |
+          v
++---------------------------+
+| Build run context         |
+| - system/developer rules  |
+| - repo + session state    |
++-------------+-------------+
+              |
+              v
++---------------------------+
+| Plan next action          |
+| (reasoning + constraints) |
++-------------+-------------+
+              |
+              v
++---------------------------+
+| Need a tool call?         |
++--------+------------------+
+         | yes                         no
+         v                             v
++---------------------------+   +----------------------+
+| Permission/safety check   |   | Draft direct answer  |
+| (deny/ask/allow policies) |   | from current context |
++-------------+-------------+   +----------+-----------+
+              |                            |
+              v                            |
++---------------------------+              |
+| Execute tool(s)           |              |
+| (read/edit/bash/mcp/etc.) |              |
++-------------+-------------+              |
+              |                            |
+              v                            |
++---------------------------+              |
+| Observe results           |<-------------+
+| Update memory/checkpoints |
++-------------+-------------+
+              |
+              v
++---------------------------+
+| Stop criteria met?        |
++--------+------------------+
+         | no                         yes
+         v                            v
+   (loop back to plan)      +----------------------+
+                             | Final response       |
+                             | + optional summaries |
+                             +----------------------+
+```
+
 ## Migration notes
 
 The previous minimal runner only supported a basic loop with `Ls/Read/Grep/Bash/Write/Patch`. This version adds interactive workflows, permissions, checkpoints, hooks, extensibility, and more built-in tools while preserving compatibility with `/v1/messages` request/streaming semantics.
