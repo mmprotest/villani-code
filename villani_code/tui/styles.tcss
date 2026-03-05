@@ -4,7 +4,7 @@
 
 #log {
   height: 1fr;
-  border: solid $primary;
+  border: solid #000000;
   scrollbar-size-vertical: 4;
   scrollbar-visibility: visible;
 }
@@ -26,8 +26,8 @@
 }
 
 #approval-options > ListItem.selected {
-  background: #1f6feb;
-  color: white;
+  background: #000000;
+  color: #1f6feb;
   text-style: bold;
 }
 
@@ -45,6 +45,7 @@
 
 #input-prompt {
   width: 20;
+  border: solid #000000;
 }
 
 #input {
