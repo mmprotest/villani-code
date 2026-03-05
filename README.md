@@ -1,37 +1,106 @@
 # Villani Code
 
-Villani Code is a production-oriented terminal agent runner that connects to a compatible `/v1/messages` backend and executes a secure tool loop with streaming output.
-
-## Quickstart
-
-```bash
-pip install -e .
-villani-code run "summarize this repo" --base-url http://localhost:8000 --model local-model
+```text
+__     ___ _ _             _    ____          _      
+\ \   / (_) | | __ _ _ __ (_)  / ___|___   __| | ___ 
+ \ \ / /| | | |/ _` | '_ \| | | |   / _ \ / _` |/ _ \
+  \ V / | | | | (_| | | | | | | |__| (_) | (_| |  __/
+   \_/  |_|_|_|\__,_|_| |_|_|  \____\___/ \__,_|\___|
 ```
 
-Interactive mode:
+Villani Code is a terminal coding agent. You point it at a repository, connect it to a compatible model API, and it plans + executes tool calls (read, search, edit, bash, git, etc.) to complete software tasks.
+
+## What it does
+
+- Runs an agent loop against your repo.
+- Streams model output in terminal or interactive TUI mode.
+- Uses tool calls for file operations, shell commands, and git actions.
+- Applies a permission/approval policy before sensitive actions.
+- Stores checkpoints/transcripts under `.villani_code/` for traceability.
+
+## Install
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+For development extras:
+
+```bash
+pip install -e .[dev]
+```
+
+## API compatibility
+
+Villani Code supports two provider styles:
+
+- `anthropic` (default): `POST {base_url}/v1/messages`
+- `openai`: `POST {base_url}/v1/chat/completions`
+
+Provider selection:
+
+```bash
+--provider anthropic|openai
+```
+
+API key lookup:
+
+- `--api-key` (explicit, optional)
+- if omitted and `--provider openai`: `OPENAI_API_KEY`
+- if omitted and `--provider anthropic`: `ANTHROPIC_API_KEY`
+
+## Core commands
+
+### 1) Default interactive mode (no subcommand)
+
+When you run `villani-code` with no subcommand, interactive mode starts.
+
+```bash
+villani-code --base-url http://localhost:8000 --model local-model
+```
+
+### 2) Explicit interactive mode
 
 ```bash
 villani-code interactive --base-url http://localhost:8000 --model local-model
 ```
 
-Run with `--help` to view all available commands:
+### 3) One-shot run mode
 
 ```bash
-villani-code --help
+villani-code run "summarize this repo" --base-url http://localhost:8000 --model local-model
 ```
 
-## Key features
+### Common options
 
-- **Textual-powered interactive TUI** with streamed assistant output, follow-tail controls, and inline approval prompts.
-- **Security-first permission engine** (`deny -> ask -> allow`) with Bash ASK-by-default and optional `BashSafe` auto-approval for safe read/build/test commands.
-- **Tooling breadth out of the box**: file tools (`Ls`, `Read`, `Write`, `Patch`, `Grep`, `Glob`, `Search`), shell execution (`Bash`), network fetch (`WebFetch`), and Git helpers (`GitStatus`, `GitDiff`, `GitLog`, `GitBranch`, `GitCheckout`, `GitCommit`).
-- **State durability** through checkpoints and rewind (`.villani_code/checkpoints/`), plus session and transcript persistence under `.villani_code/`.
-- **Extensibility primitives**: skills (`.villani/skills/**/SKILL.md`), subagents (`.villani/agents/*.{json,yaml}` + built-ins), lifecycle hooks, and local plugin install/list/remove.
-- **MCP integration** with layered config loading and CLI management (`villani-code mcp list|add|remove|reset-project-choices`).
-- **Planning and constrained-model support** via `--plan-mode` and `--small-model` for stronger guardrails in limited-context environments.
+- `--base-url` API server root URL
+- `--model` model name
+- `--repo` target repository path (default: `.`)
+- `--max-tokens` max output tokens per model call
+- `--small-model` enable constrained-model support mode
+- `--provider anthropic|openai`
+- `--api-key <token>`
 
-## Agent flow diagram
+## Typical workflow (end-to-end)
+
+```text
+1) Start Villani Code (interactive or run mode)
+2) Submit a task
+3) Agent builds context (system rules + repo state)
+4) Agent requests model output
+5) If tool calls are returned:
+   - run permission policy (deny/ask/allow)
+   - execute approved tools
+   - append tool results
+   - continue loop
+6) If no more tool calls:
+   - produce final response
+   - write transcript/checkpoint artifacts
+```
+
+## Agent loop diagram
 
 ```text
 +-------------------+
@@ -82,64 +151,33 @@ villani-code --help
          v                            v
    (loop back to plan)      +----------------------+
                              | Final response       |
-                             | + optional summaries |
+                             | + transcript outputs |
                              +----------------------+
 ```
 
-## Migration notes
+## Interactive mode notes
 
-The previous minimal runner only supported a basic loop with `Ls/Read/Grep/Bash/Write/Patch`. This version adds interactive workflows, permissions, checkpoints, hooks, extensibility, and more built-in tools while preserving compatibility with `/v1/messages` request/streaming semantics.
+- Inline approval prompts appear when policy requires confirmation.
+- Streaming output is shown live.
+- Scrolling/follow behavior is built into the TUI.
 
-See `docs/` for configuration details.
-
-## Small model mode
-
-Use `--small-model` to enable runner-side support for local/smaller models:
-
-- Persistent repository index at `.villani_code/index/index.json` with language/symbol/snippet metadata.
-- Retrieval briefing injected before each turn with top relevant files and reasons.
-- Deterministic repo map added to the system prompt.
-- Deterministic context compaction with a hard character budget.
-- Conservative edit safeguards (read-before-edit and patch-first behavior for large files).
-- Automatic post-edit verification (`git diff --stat`, `git diff`, and lightweight language checks).
-
-## CLI surface
+## Useful additional commands
 
 ```bash
-villani-code run "..." [runner options]
-villani-code interactive [runner options]
-villani-code mcp list|add|remove|reset-project-choices
-villani-code plugin install|list|remove
+villani-code mcp list
+villani-code mcp add <name> <type> <endpoint>
+villani-code mcp remove <name>
+villani-code mcp reset-project-choices
+
+villani-code plugin install <path>
+villani-code plugin list
+villani-code plugin remove <name>
 ```
 
-Example:
+## Help
 
 ```bash
-villani-code interactive --base-url http://localhost:8000 --model local-model --small-model
+villani-code --help
+villani-code run --help
+villani-code interactive --help
 ```
-
-Recommended for roughly 3B-14B local models where prompt budget and planning depth are limited. Tradeoff: stricter edits and compacted tool output can reduce flexibility but increases stability.
-
-
-## TUI key behavior
-
-- Approval prompts are inline: use `Up` / `Down` to move, `Enter` to confirm, and `Esc` to cancel.
-- Log scrolling supports wheel modifiers: normal wheel (medium), `Shift+wheel` (large), `Ctrl+wheel` (very large).
-- While streaming, status shows `FOLLOW` when auto-tail is active and `PAUSED` when you scroll away from the tail.
-
-## Development
-
-Set up a local development environment and run tests:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-pytest
-```
-
-Useful docs:
-
-- `docs/settings.md` for configuration.
-- `docs/permissions.md` for sandbox and approval behavior.
-- `docs/skills.md` for skill discovery and loading.
