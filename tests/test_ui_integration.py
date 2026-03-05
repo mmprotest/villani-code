@@ -57,3 +57,18 @@ def test_ai_stream_starts_on_fresh_line(tmp_path: Path) -> None:
             assert rendered.count("hello world") == 1
 
     asyncio.run(run())
+
+
+def test_space_key_inserts_space_in_input(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#input", Input)
+            input_widget.value = "hello"
+            input_widget.cursor_position = len(input_widget.value)
+            input_widget.focus()
+            await pilot.press("space")
+            await pilot.pause()
+            assert input_widget.value == "hello "
+
+    asyncio.run(run())
