@@ -23,17 +23,13 @@ villani-code --help
 
 ## Key features
 
-- Interactive REPL with slash commands, history, and `!` bash mode.
-- Animated bottom-toolbar status spinner in interactive mode, including current tool/detail context.
-- Permission engine (`deny -> ask -> allow`) with Bash ASK-by-default and optional `BashSafe` auto-approval for safe read/build/test commands.
-- First-class edit proposals with `/propose`, `/edits`, `/show <id>`, `/apply <id>`, `/reject <id>`.
-- Checkpoints and rewind stored under `.villani_code/checkpoints/`.
-- Sessions and transcript persistence under `.villani_code/`.
-- Skills from `.villani/skills/**/SKILL.md`.
-- Subagents from `.villani/agents/*.{json,yaml}` plus built-ins.
-- MCP config loading from project/user/local/managed scopes.
-- Hooks for tool lifecycle events.
-- Local plugin install/list/remove.
+- **Textual-powered interactive TUI** with streamed assistant output, follow-tail controls, and inline approval prompts.
+- **Security-first permission engine** (`deny -> ask -> allow`) with Bash ASK-by-default and optional `BashSafe` auto-approval for safe read/build/test commands.
+- **Tooling breadth out of the box**: file tools (`Ls`, `Read`, `Write`, `Patch`, `Grep`, `Glob`, `Search`), shell execution (`Bash`), network fetch (`WebFetch`), and Git helpers (`GitStatus`, `GitDiff`, `GitLog`, `GitBranch`, `GitCheckout`, `GitCommit`).
+- **State durability** through checkpoints and rewind (`.villani_code/checkpoints/`), plus session and transcript persistence under `.villani_code/`.
+- **Extensibility primitives**: skills (`.villani/skills/**/SKILL.md`), subagents (`.villani/agents/*.{json,yaml}` + built-ins), lifecycle hooks, and local plugin install/list/remove.
+- **MCP integration** with layered config loading and CLI management (`villani-code mcp list|add|remove|reset-project-choices`).
+- **Planning and constrained-model support** via `--plan-mode` and `--small-model` for stronger guardrails in limited-context environments.
 
 ## Agent flow diagram
 
@@ -106,6 +102,15 @@ Use `--small-model` to enable runner-side support for local/smaller models:
 - Deterministic context compaction with a hard character budget.
 - Conservative edit safeguards (read-before-edit and patch-first behavior for large files).
 - Automatic post-edit verification (`git diff --stat`, `git diff`, and lightweight language checks).
+
+## CLI surface
+
+```bash
+villani-code run "..." [runner options]
+villani-code interactive [runner options]
+villani-code mcp list|add|remove|reset-project-choices
+villani-code plugin install|list|remove
+```
 
 Example:
 
