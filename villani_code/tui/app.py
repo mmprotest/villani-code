@@ -140,6 +140,16 @@ class VillaniTUI(App[None]):
         input_widget.focus()
 
     def on_key(self, event: Key) -> None:
+        if event.key == "space":
+            focused = self.focused
+            if isinstance(focused, Input) and not focused.disabled:
+                cursor = focused.cursor_position
+                value = focused.value
+                focused.value = f"{value[:cursor]} {value[cursor:]}"
+                focused.cursor_position = cursor + 1
+                event.stop()
+                event.prevent_default()
+            return
         if event.key == "home":
             self.follow_tail = False
             self.query_one(VillaniLog).scroll_home(animate=False)
