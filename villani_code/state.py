@@ -8,7 +8,6 @@ from typing import Any, Callable
 
 from rich.console import Console
 
-from villani_code.anthropic_client import AnthropicClient
 from villani_code.checkpoints import CheckpointManager
 from villani_code.context_budget import ContextBudget
 from villani_code.edits import ProposalStore
@@ -18,6 +17,7 @@ from villani_code.live_display import apply_live_display_delta
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
 from villani_code.prompting import build_initial_messages, build_system_blocks
+from villani_code.llm_client import LLMClient
 from villani_code.repo_map import build_repo_map
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
@@ -30,7 +30,7 @@ from villani_code.utils import ensure_dir, is_effectively_empty_content, merge_e
 class Runner:
     def __init__(
         self,
-        client: AnthropicClient,
+        client: LLMClient,
         repo: Path,
         model: str,
         max_tokens: int = 4096,
