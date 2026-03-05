@@ -12,3 +12,7 @@ Permission modes:
 - Auto-accept edits
 - Plan mode
 - Dangerously skip permissions (CLI flag)
+
+- `villani_mode`: bool (default `false`). If true, default startup uses autonomous Villani mode unless overridden by CLI flags.
+
+CLI flags override settings, including `--villani-mode/--no-villani-mode`.

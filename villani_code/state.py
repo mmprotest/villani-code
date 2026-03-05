@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from rich.console import Console
 
+from villani_code.autonomous import VillaniModeConfig, VillaniModeController
 from villani_code.checkpoints import CheckpointManager
 from villani_code.context_budget import ContextBudget
 from villani_code.edits import ProposalStore
@@ -47,6 +48,8 @@ class Runner:
         approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
         small_model: bool = False,
+        villani_mode: bool = False,
+        villani_objective: str | None = None,
     ):
         self.client = client
         self.repo = repo
@@ -65,6 +68,9 @@ class Runner:
         self.approval_callback = approval_callback or (lambda _n, _i: True)
         self.event_callback = event_callback or (lambda _event: None)
         self.small_model = small_model
+        self.villani_mode = villani_mode
+        self.villani_objective = villani_objective
+        self.villani_config = VillaniModeConfig(enabled=villani_mode, steering_objective=villani_objective)
         self.console = Console()
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
@@ -94,9 +100,17 @@ class Runner:
         if self.small_model:
             self._init_small_model_support()
 
+
+    def run_villani_mode(self) -> dict[str, Any]:
+        controller = VillaniModeController(self, self.repo, steering_objective=self.villani_objective, event_callback=self.event_callback)
+        summary = controller.run()
+        text = VillaniModeController.format_summary(summary)
+        response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        return {"response": response, "summary": summary}
+
     def run(self, instruction: str, messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
-        system = build_system_blocks(self.repo, repo_map=self._repo_map if self.small_model else "")
+        system = build_system_blocks(self.repo, repo_map=self._repo_map if self.small_model else "", villani_mode=self.villani_mode)
         tools = tool_specs()
         transcript: dict[str, Any] = {"requests": [], "responses": [], "tool_invocations": [], "tool_results": [], "streamed_events_count": 0}
         self._save_session_snapshot(messages)
@@ -221,9 +235,12 @@ class Runner:
         if policy.decision == Decision.DENY:
             return {"content": "Denied by permission policy", "is_error": True}
         if policy.decision == Decision.ASK:
-            self.event_callback({"type": "approval_required", "name": tool_name, "input": tool_input})
-            if not self.approval_callback(tool_name, tool_input):
-                return {"content": "User denied tool execution", "is_error": True}
+            if self.villani_mode:
+                self.event_callback({"type": "approval_auto_resolved", "name": tool_name, "input": tool_input})
+            else:
+                self.event_callback({"type": "approval_required", "name": tool_name, "input": tool_input})
+                if not self.approval_callback(tool_name, tool_input):
+                    return {"content": "User denied tool execution", "is_error": True}
         elif self.plan_mode and tool_name in {"Write", "Patch"}:
             return {"content": "Plan mode: edit not executed", "is_error": False}
 

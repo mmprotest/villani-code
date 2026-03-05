@@ -45,7 +45,7 @@ class VillaniLog(Log):
 class VillaniTUI(App[None]):
     CSS_PATH = "styles.tcss"
 
-    def __init__(self, runner: Any, repo: Path) -> None:
+    def __init__(self, runner: Any, repo: Path, villani_mode: bool = False, villani_objective: str | None = None) -> None:
         super().__init__()
         self.runner = runner
         self.repo = repo
@@ -55,6 +55,8 @@ class VillaniTUI(App[None]):
         self._ai_started = False
         self._stream_buffer = ""
         self._stream_flush_timer: Timer | None = None
+        self.villani_mode = villani_mode
+        self.villani_objective = villani_objective
         self.controller = RunnerController(runner, self)
 
     def compose(self) -> ComposeResult:
@@ -71,9 +73,17 @@ class VillaniTUI(App[None]):
         for line in LAUNCH_BANNER.splitlines():
             log.write_line(line)
         log.write_line(f"Model: {getattr(self.runner, 'model', 'unknown')}")
-        log.write_line("Ready. Type /help for commands.")
+        if self.villani_mode:
+            objective = self.villani_objective or "inspect and improve this repository autonomously"
+            log.write_line(f"Villani mode active: {objective}")
+            self.query_one(StatusBarWidget).set_status("scanning repo")
+            input_widget = self.query_one(Input)
+            input_widget.disabled = True
+            self.controller.run_villani_mode()
+        else:
+            log.write_line("Ready. Type /help for commands.")
+            self.query_one(Input).focus()
         self.query_one(StatusBarWidget).set_follow_mode(self.follow_tail)
-        self.query_one(Input).focus()
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:

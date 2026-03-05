@@ -18,3 +18,14 @@
 🤖 Villani Code > Write tests for parser
 net:connected/0s | tok:12 (12/m) | tools:0:- | settings:Ctrl+P
 ```
+
+
+## Villani mode quick start
+
+Run autonomous mode (no initial prompt required):
+
+```bash
+villani-code villani-mode --base-url http://127.0.0.1:1234 --model my-model
+```
+
+Villani mode scans the repository, ranks tasks, executes edits, verifies results, and prints a final structured summary with verification status.

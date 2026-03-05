@@ -14,6 +14,7 @@ class UserSettings:
     verbose: bool = False
     auto_accept_edits: bool = False
     pin_user_theme: bool = False
+    villani_mode: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "UserSettings":
@@ -24,6 +25,7 @@ class UserSettings:
             verbose=bool(payload.get("verbose", False)),
             auto_accept_edits=bool(payload.get("auto_accept_edits", False)),
             pin_user_theme=bool(payload.get("pin_user_theme", False)),
+            villani_mode=bool(payload.get("villani_mode", False)),
         )
 
 

@@ -111,6 +111,33 @@ villani-code run "summarize this repo" --base-url http://localhost:8000 --model 
 
 One prompt in, one useful answer out, plus traces of theatrical panic.
 
+
+### 4) Villani mode (autonomous self-directed improvement)
+
+Villani mode is a first-class autonomous mode. It starts immediately without waiting for a user prompt, audits the repo, chooses high-value tasks, edits, verifies each task, iterates, and stops only when no clearly worthwhile verifiable work remains (or a real blocker is hit).
+
+```bash
+villani-code villani-mode --base-url http://localhost:8000 --model local-model
+```
+
+You can also enable it from interactive entrypoints:
+
+```bash
+villani-code interactive --villani-mode --base-url http://localhost:8000 --model local-model
+villani-code --villani-mode --base-url http://localhost:8000 --model local-model
+```
+
+Optional steering objective:
+
+```bash
+villani-code villani-mode "improve docs consistency" --base-url http://localhost:8000 --model local-model
+```
+
+Safety behavior in Villani mode:
+- normal repo-local write/patch/test commands auto-resolve approval prompts
+- hard destructive shell denylist remains active
+- denied commands are recorded as blockers unless you explicitly pass `--unsafe`
+
 ### Common options
 
 - `--base-url` API server root URL

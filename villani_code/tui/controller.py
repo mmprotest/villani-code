@@ -33,6 +33,22 @@ class RunnerController:
     def run_prompt(self, text: str) -> None:
         threading.Thread(target=self._run_prompt_worker, args=(text,), daemon=True).start()
 
+    def run_villani_mode(self) -> None:
+        threading.Thread(target=self._run_villani_mode_worker, daemon=True).start()
+
+
+    def _run_villani_mode_worker(self) -> None:
+        self.app.post_message(LogAppend("[villani-mode] Autonomous repo improvement started.", kind="meta"))
+        self.app.post_message(SpinnerState(True, None))
+        self.app.post_message(StatusUpdate("scanning repo"))
+        result = self.runner.run_villani_mode()
+        content = result.get("response", {}).get("content", [])
+        response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
+        if response_text:
+            self.app.post_message(LogAppend(response_text, kind="ai"))
+        self.app.post_message(SpinnerState(False, "villani mode done"))
+        self.app.post_message(StatusUpdate("summarizing"))
+
     def _run_prompt_worker(self, text: str) -> None:
         self.app.post_message(LogAppend(f"> {text}", kind="user"))
         self.app.post_message(SpinnerState(True, None))
@@ -114,6 +130,20 @@ class RunnerController:
         if etype in {"tool_finished", "tool_result"}:
             self.app.post_message(SpinnerState(False, None))
             self.app.post_message(StatusUpdate("Working"))
+            return
+        if etype == "autonomous_phase":
+            phase = str(event.get("phase", "working"))
+            self.app.post_message(StatusUpdate(phase))
+            task = str(event.get("task", "")).strip()
+            if task:
+                self.app.post_message(LogAppend(f"[villani-mode] {phase}: {task}", kind="meta"))
+            return
+        if etype == "autonomous_scan":
+            self.app.post_message(LogAppend(f"[villani-mode] scanned files={event.get('files_inspected', 0)}", kind="meta"))
+            return
+        if etype == "autonomous_candidates":
+            tasks = event.get("tasks", [])
+            self.app.post_message(LogAppend(f"[villani-mode] candidates: {', '.join(tasks)}", kind="meta"))
             return
         if etype == "stream_text":
             self._assistant_stream_saw_text = True

@@ -8,6 +8,7 @@ from typing import Literal, Optional
 import typer
 from rich.console import Console
 
+from ui.settings import SettingsManager
 from villani_code.anthropic_client import AnthropicClient
 from villani_code.interactive import InteractiveShell
 from villani_code.openai_client import OpenAIClient
@@ -22,7 +23,14 @@ app.add_typer(plugin_app, name="plugin")
 console = Console()
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: bool, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str]) -> Runner:
+def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
+    if cli_value is not None:
+        return cli_value
+    settings = SettingsManager(repo.resolve()).load()
+    return bool(getattr(settings, "villani_mode", False))
+
+
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: bool, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> Runner:
     if provider == "openai":
         resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
         client = OpenAIClient(base_url=base_url, api_key=resolved_api_key)
@@ -35,12 +43,12 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = json.loads(thinking)
         except json.JSONDecodeError:
             thinking_obj = thinking
-    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, small_model=small_model)
+    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective)
 
 
-def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str]) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False, small_model, provider, api_key)
-    InteractiveShell(runner, repo.resolve()).run()
+def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> None:
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False, small_model, provider, api_key, villani_mode=villani_mode, villani_objective=villani_objective)
+    InteractiveShell(runner, repo.resolve(), villani_mode=villani_mode, villani_objective=villani_objective).run()
 
 
 @app.callback(invoke_without_command=True)
@@ -53,11 +61,13 @@ def main(
     small_model: bool = typer.Option(False, "--small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
+    villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
 ) -> None:
     if ctx.invoked_subcommand is None:
         if not base_url or not model:
             raise typer.BadParameter("--base-url and --model are required when no subcommand is provided")
-        _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key)
+        resolved_villani = _resolve_villani_flag(repo, villani_mode)
+        _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani)
 
 
 @app.command()
@@ -96,8 +106,25 @@ def interactive(
     small_model: bool = typer.Option(False, "--small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
+    villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
+    objective: Optional[str] = typer.Argument(None),
 ):
-    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key)
+    resolved_villani = _resolve_villani_flag(repo, villani_mode)
+    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, villani_objective=objective)
+
+
+@app.command("villani-mode")
+def villani_mode_cmd(
+    objective: Optional[str] = typer.Argument(None, help="Optional steering objective"),
+    base_url: str = typer.Option(..., "--base-url"),
+    model: str = typer.Option(..., "--model"),
+    repo: Path = typer.Option(Path("."), "--repo"),
+    max_tokens: int = typer.Option(4096, "--max-tokens"),
+    small_model: bool = typer.Option(False, "--small-model"),
+    provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+) -> None:
+    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
 
 
 @mcp_app.command("list")

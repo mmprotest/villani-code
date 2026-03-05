@@ -42,3 +42,13 @@ def test_hot_reload_detection(tmp_path: Path) -> None:
     mgr.load()
     _write(path, {"theme": "high-contrast"})
     assert mgr.reload_if_changed() is not None
+
+
+def test_settings_support_villani_mode_flag(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    _write(home / ".villani" / "settings.json", {"villani_mode": True})
+    mgr = SettingsManager(repo, home=home)
+    settings = mgr.load()
+    assert settings.villani_mode is True
