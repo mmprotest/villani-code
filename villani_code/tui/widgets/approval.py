@@ -8,6 +8,7 @@ from textual.widgets import Label, ListItem, ListView, Static
 
 
 class ApprovalBar(Vertical):
+    can_focus = True
     BINDINGS = [
         Binding("up", "cursor_up", show=False),
         Binding("down", "cursor_down", show=False),
@@ -36,10 +37,6 @@ class ApprovalBar(Vertical):
         options.clear()
         for choice in choices:
             options.append(ListItem(Label(choice.capitalize())))
-        options.styles.height = len(choices)
-        options.styles.min_height = len(choices)
-        self.styles.height = 1 + len(choices)
-        self.styles.min_height = 1 + len(choices)
         options.index = 0
         self._sync_selected_style()
         options.focus()
@@ -49,7 +46,9 @@ class ApprovalBar(Vertical):
         self.display = False
 
     def _options(self) -> ListView:
-        return self.query_one("#approval-options", ListView)
+        options = self.query_one("#approval-options", ListView)
+        options.can_focus = True
+        return options
 
     def _sync_selected_style(self) -> None:
         options = self._options()

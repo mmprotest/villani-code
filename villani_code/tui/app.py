@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from textual.timer import Timer
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -17,19 +18,27 @@ from villani_code.tui.widgets.status import StatusBarWidget
 
 
 class VillaniLog(Log):
+    def _scroll_step(self, event: MouseScrollUp | MouseScrollDown) -> int:
+        base = 12
+        if getattr(event, "shift", False):
+            return base * 3
+        if getattr(event, "ctrl", False) or getattr(event, "control", False):
+            return base * 8
+        return base
+
     def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
         app = self.app
         if isinstance(app, VillaniTUI):
-            app.follow_tail = False
-        self.scroll_relative(y=-24)
+            app.set_follow_tail(False)
+        self.scroll_relative(y=-self._scroll_step(event))
         event.stop()
 
     def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
-        self.scroll_relative(y=24)
+        self.scroll_relative(y=self._scroll_step(event))
         if self.is_vertical_scroll_end:
             app = self.app
             if isinstance(app, VillaniTUI):
-                app.follow_tail = True
+                app.set_follow_tail(True)
         event.stop()
 
 
@@ -41,8 +50,11 @@ class VillaniTUI(App[None]):
         self.runner = runner
         self.repo = repo
         self.follow_tail = True
+        self.follow_paused = False
         self._ai_streaming = False
         self._ai_started = False
+        self._stream_buffer = ""
+        self._stream_flush_timer: Timer | None = None
         self.controller = RunnerController(runner, self)
 
     def compose(self) -> ComposeResult:
@@ -60,6 +72,7 @@ class VillaniTUI(App[None]):
             log.write_line(line)
         log.write_line(f"Model: {getattr(self.runner, 'model', 'unknown')}")
         log.write_line("Ready. Type /help for commands.")
+        self.query_one(StatusBarWidget).set_follow_mode(self.follow_tail)
         self.query_one(Input).focus()
 
     @on(Input.Submitted)
@@ -74,9 +87,32 @@ class VillaniTUI(App[None]):
         self.controller.run_prompt(text)
 
     def _end_ai_stream_if_open(self, log: VillaniLog) -> None:
+        self._flush_stream_buffer(log)
         if self._ai_streaming:
             log.write("\n", scroll_end=self.follow_tail)
             self._ai_streaming = False
+
+    def set_follow_tail(self, enabled: bool) -> None:
+        self.follow_tail = enabled
+        self.follow_paused = not enabled
+        self.query_one(StatusBarWidget).set_follow_mode(enabled)
+
+    def _schedule_stream_flush(self) -> None:
+        if self._stream_flush_timer is None:
+            self._stream_flush_timer = self.set_timer(0.04, self._flush_stream_timer)
+
+    def _flush_stream_timer(self) -> None:
+        self._stream_flush_timer = None
+        self._flush_stream_buffer(self.query_one(VillaniLog))
+
+    def _flush_stream_buffer(self, log: VillaniLog) -> None:
+        if not self._stream_buffer:
+            return
+        parts = self._stream_buffer.split("\n")
+        log.write(parts[0], scroll_end=self.follow_tail)
+        for line in parts[1:]:
+            log.write_line(line, scroll_end=self.follow_tail)
+        self._stream_buffer = ""
 
     def _start_ai_boundary(self, log: VillaniLog) -> None:
         if self._ai_started:
@@ -106,10 +142,9 @@ class VillaniTUI(App[None]):
             if not self._ai_streaming:
                 self._start_ai_boundary(log)
                 self._ai_streaming = True
-            parts = text.split("\n")
-            log.write(parts[0], scroll_end=self.follow_tail)
-            for line in parts[1:]:
-                log.write_line(line, scroll_end=self.follow_tail)
+                self.set_follow_tail(True)
+            self._stream_buffer += text
+            self._schedule_stream_flush()
             return
 
         self._end_ai_stream_if_open(log)
@@ -126,6 +161,7 @@ class VillaniTUI(App[None]):
         bar = self.query_one(ApprovalBar)
         self.query_one(Input).disabled = True
         bar.show_request(message.prompt, message.request_id, message.choices)
+        self.call_after_refresh(lambda: bar.query_one("#approval-options").focus())
 
     @on(ApprovalBar.ApprovalSelected)
     def on_approval_selected(self, event: ApprovalBar.ApprovalSelected) -> None:
@@ -140,6 +176,20 @@ class VillaniTUI(App[None]):
         input_widget.focus()
 
     def on_key(self, event: Key) -> None:
+        bar = self.query_one(ApprovalBar)
+        if bar.display and event.key in {"up", "down", "enter", "escape"}:
+            if event.key == "up":
+                bar.action_cursor_up()
+            elif event.key == "down":
+                bar.action_cursor_down()
+            elif event.key == "enter":
+                bar.action_confirm()
+            elif event.key == "escape":
+                bar.action_deny()
+            event.stop()
+            event.prevent_default()
+            return
+
         if event.key == "space":
             focused = self.focused
             if isinstance(focused, Input) and not focused.disabled:
@@ -151,15 +201,15 @@ class VillaniTUI(App[None]):
                 event.prevent_default()
             return
         if event.key == "home":
-            self.follow_tail = False
+            self.set_follow_tail(False)
             self.query_one(VillaniLog).scroll_home(animate=False)
         elif event.key == "pageup":
-            self.follow_tail = False
+            self.set_follow_tail(False)
             self.query_one(VillaniLog).scroll_page_up(animate=False)
         elif event.key == "pagedown":
             self.query_one(VillaniLog).scroll_page_down(animate=False)
             if self.query_one(VillaniLog).is_vertical_scroll_end:
-                self.follow_tail = True
+                self.set_follow_tail(True)
         elif event.key == "end":
-            self.follow_tail = True
+            self.set_follow_tail(True)
             self.query_one(VillaniLog).scroll_end(animate=False)

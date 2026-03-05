@@ -11,9 +11,13 @@ class StatusBarWidget(Horizontal):
     def compose(self) -> ComposeResult:
         yield SpinnerWidget()
         yield Static("Idle", id="status-text")
+        yield Static("FOLLOW", id="follow-mode")
 
     def set_status(self, text: str) -> None:
         self.query_one("#status-text", Static).update(text)
 
     def set_spinner(self, active: bool, label: str | None = None) -> None:
         self.query_one(SpinnerWidget).set_state(active, label)
+
+    def set_follow_mode(self, follow_tail: bool) -> None:
+        self.query_one("#follow-mode", Static).update("FOLLOW" if follow_tail else "PAUSED")

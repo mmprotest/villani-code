@@ -60,6 +60,13 @@ villani-code interactive --base-url http://localhost:8000 --model local-model --
 
 Recommended for roughly 3B-14B local models where prompt budget and planning depth are limited. Tradeoff: stricter edits and compacted tool output can reduce flexibility but increases stability.
 
+
+## TUI key behavior
+
+- Approval prompts are inline: use `Up` / `Down` to move, `Enter` to confirm, and `Esc` to cancel.
+- Log scrolling supports wheel modifiers: normal wheel (medium), `Shift+wheel` (large), `Ctrl+wheel` (very large).
+- While streaming, status shows `FOLLOW` when auto-tail is active and `PAUSED` when you scroll away from the tail.
+
 ## Development
 
 Set up a local development environment and run tests:

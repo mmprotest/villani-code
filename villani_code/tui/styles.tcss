@@ -5,7 +5,8 @@
 #log {
   height: 1fr;
   border: solid #000000;
-  scrollbar-size-vertical: 4;
+  overflow-y: auto;
+  scrollbar-size: 2 6;
   scrollbar-visibility: visible;
 }
 
@@ -25,9 +26,13 @@
   height: auto;
 }
 
+#approval-options > ListItem {
+  height: 1;
+}
+
 #approval-options > ListItem.selected {
-  background: #000000;
-  color: #1f6feb;
+  background: #1f6feb;
+  color: #ffffff;
   text-style: bold;
 }
 
@@ -54,4 +59,10 @@
 
 #spinner {
   width: 40;
+}
+
+#follow-mode {
+  width: 10;
+  content-align: right middle;
+  color: $text-muted;
 }
