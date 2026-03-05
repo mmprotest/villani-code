@@ -5,7 +5,7 @@ from pathlib import Path
 from villani_code.utils import now_local_date
 
 
-def build_system_blocks(repo: Path) -> list[dict[str, str]]:
+def build_system_blocks(repo: Path, repo_map: str = "") -> list[dict[str, str]]:
     text = (
         "You are an interactive Villani Code agent for software engineering tasks. "
         "Use tools conservatively, verify changes, and keep outputs concise."
@@ -14,6 +14,8 @@ def build_system_blocks(repo: Path) -> list[dict[str, str]]:
     blocks = [{"type": "text", "text": text}]
     if instructions:
         blocks.append({"type": "text", "text": f"<project-instructions>\n{instructions}\n</project-instructions>"})
+    if repo_map:
+        blocks.append({"type": "text", "text": f"<repo-map>\n{repo_map}\n</repo-map>"})
     return blocks
 
 

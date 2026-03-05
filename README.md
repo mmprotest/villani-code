@@ -41,6 +41,25 @@ The previous minimal runner only supported a basic loop with `Ls/Read/Grep/Bash/
 
 See `docs/` for configuration details.
 
+## Small model mode
+
+Use `--small-model` to enable runner-side support for local/smaller models:
+
+- Persistent repository index at `.villani_code/index/index.json` with language/symbol/snippet metadata.
+- Retrieval briefing injected before each turn with top relevant files and reasons.
+- Deterministic repo map added to the system prompt.
+- Deterministic context compaction with a hard character budget.
+- Conservative edit safeguards (read-before-edit and patch-first behavior for large files).
+- Automatic post-edit verification (`git diff --stat`, `git diff`, and lightweight language checks).
+
+Example:
+
+```bash
+villani-code interactive --base-url http://localhost:8000 --model local-model --small-model
+```
+
+Recommended for roughly 3B-14B local models where prompt budget and planning depth are limited. Tradeoff: stricter edits and compacted tool output can reduce flexibility but increases stability.
+
 ## Development
 
 Set up a local development environment and run tests:
