@@ -10,9 +10,14 @@ def mark_category_discovery(repo: Path, category_state: dict[str, str], is_test_
     files = [p.relative_to(repo).as_posix() for p in repo.rglob("*") if p.is_file()]
     if any(is_test_file(f) for f in files):
         category_state["tests"] = "discovered"
-    if any(f.endswith(".md") for f in files):
+    if any(f in {"README.md", "getting-started.md"} or f.startswith("docs/") for f in files):
         category_state["docs"] = "discovered"
-    if any(f.endswith("cli.py") for f in files) or (repo / "pyproject.toml").exists():
+    pyproject_has_scripts = False
+    pyproject = repo / "pyproject.toml"
+    if pyproject.exists():
+        text = pyproject.read_text(encoding="utf-8", errors="replace")
+        pyproject_has_scripts = any(token in text for token in ["[project.scripts]", "[tool.poetry.scripts]", "[project.entry-points"])
+    if any(f.endswith("cli.py") for f in files) or pyproject_has_scripts:
         category_state["entrypoints"] = "discovered"
     if any(f.endswith(".py") for f in files):
         category_state["imports"] = "discovered"

@@ -437,7 +437,7 @@ def test_takeover_stops_when_all_remaining_work_is_terminal(tmp_path: Path) -> N
 
 def test_global_takeover_budget_limits_iterations(tmp_path: Path) -> None:
     runner = SequencedRunner(tmp_path, [{"inspection_summary": "ok"}] * 12)
-    cfg = TakeoverConfig(max_waves=10, max_total_task_attempts=3)
+    cfg = TakeoverConfig(max_waves=10, max_total_task_attempts=3, stagnation_cycle_limit=0)
     controller = VillaniModeController(runner, tmp_path, takeover_config=cfg)
     controller.planner = SequencedPlanner(
         [[_op(f"Task {i}", TaskContract.INSPECTION.value)] for i in range(10)]

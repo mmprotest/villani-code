@@ -403,11 +403,11 @@ class Opportunity:
 @dataclass(slots=True)
 class TakeoverConfig:
     max_files_per_wave: int = 0
-    max_commands_per_wave: int = 0
-    max_waves: int = 0
-    max_total_task_attempts: int = 0
-    min_confidence: float = 0.55
-    stagnation_cycle_limit: int = 3
+    max_commands_per_wave: int = 2
+    max_waves: int = 3
+    max_total_task_attempts: int = 6
+    min_confidence: float = 0.60
+    stagnation_cycle_limit: int = 2
 
 
 @dataclass(slots=True)

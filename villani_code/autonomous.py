@@ -135,6 +135,15 @@ class VillaniModeController:
         self._stop_rationale: dict[str, str] = {}
         self._stale_task_keys: set[str] = set()
         self._critic_outcomes: list[str] = []
+        self._model_request_count: int = 0
+        self._planner_only_cycles: int = 0
+        self._last_model_request_count: int = 0
+        self._stop_decision_kind: str = ""
+        self._followup_skip_reasons: list[dict[str, str]] = []
+        self._lineage_terminal_fingerprint: dict[str, str] = {}
+        self._lineage_last_fingerprint: dict[str, str] = {}
+        self._lineage_last_intentional_changes: dict[str, tuple[str, ...]] = {}
+        self._wave_had_model_activity: bool = False
 
     def run(self) -> dict[str, Any]:
         self._preexisting_changes = set(self._git_changed_files())
@@ -152,15 +161,16 @@ class VillaniModeController:
 
         while True:
             wave += 1
+            self._wave_had_model_activity = False
             if self.takeover_config.max_waves > 0 and wave > self.takeover_config.max_waves:
                 if self._has_pending_actionable_work():
-                    return self._build_takeover_summary(state, "Villani mode budget exhausted.")
-                return self._build_takeover_summary(state, self._stop_reason_from_categories())
+                    return self._finalize_stop(state, "budget_exhausted", "Villani mode budget exhausted.")
+                return self._finalize_stop(state, "no_opportunities", self._stop_reason_from_categories())
             if (
                 self.takeover_config.max_total_task_attempts > 0
                 and self._attempt_counter >= self.takeover_config.max_total_task_attempts
             ):
-                return self._build_takeover_summary(state, "Villani mode budget exhausted.")
+                return self._finalize_stop(state, "budget_exhausted", "Villani mode budget exhausted.")
 
             state.repo_summary = self.planner.build_repo_summary()
             discovered = self.planner.discover_opportunities()
@@ -178,6 +188,18 @@ class VillaniModeController:
             )
 
             if not candidates:
+                self._planner_only_cycles += 1
+                self._emit(
+                    "villani_planner_churn",
+                    wave=wave,
+                    planner_only_cycles=self._planner_only_cycles,
+                    model_request_count=self._model_request_count,
+                    repo_delta=False,
+                )
+                if self._planner_only_cycles >= 2:
+                    reason = "Stopped: planner loop with no model activity."
+                    self._stop_rationale["planner_churn"] = reason
+                    return self._finalize_stop(state, "planner_churn", reason)
                 if self._enqueue_surface_followups_if_needed():
                     continue
                 if (
@@ -185,14 +207,16 @@ class VillaniModeController:
                     and not self._retryable_queue
                     and not self._followup_queue
                 ):
-                    return self._build_takeover_summary(
-                        state, "No opportunities discovered."
+                    if self._planner_only_cycles < 2:
+                        continue
+                    return self._finalize_stop(
+                        state, "no_opportunities", "No opportunities discovered."
                     )
                 if self._has_pending_actionable_work():
-                    return self._build_takeover_summary(
-                        state, "Retry budget exhausted for remaining work."
+                    return self._finalize_stop(
+                        state, "budget_exhausted", "Retry budget exhausted for remaining work."
                     )
-                return self._build_takeover_summary(state, self._stop_reason_from_categories())
+                return self._finalize_stop(state, "no_opportunities", self._stop_reason_from_categories())
 
             if self.takeover_config.max_commands_per_wave > 0:
                 selected = candidates[: self.takeover_config.max_commands_per_wave]
@@ -215,8 +239,8 @@ class VillaniModeController:
                     self.takeover_config.max_total_task_attempts > 0
                     and self._attempt_counter >= self.takeover_config.max_total_task_attempts
                 ):
-                    return self._build_takeover_summary(
-                        state, "Villani mode budget exhausted."
+                    return self._finalize_stop(
+                        state, "budget_exhausted", "Villani mode budget exhausted."
                     )
                 before_dirty = set(self._git_changed_files())
                 task_key = self._task_key_for_opportunity(op)
@@ -242,6 +266,7 @@ class VillaniModeController:
                 self._lineage_attempts[task_key] = attempts
                 self._attempt_counter += 1
                 self._execute_task(task)
+                self._lineage_last_fingerprint[task_key] = self._repo_fingerprint_for_task(task_key)
 
                 after_dirty = set(self._git_changed_files())
                 task.files_changed = sorted(after_dirty - before_dirty)
@@ -258,6 +283,7 @@ class VillaniModeController:
                         set(task.intentional_changes) | set(task.incidental_changes)
                     )
                 task.produced_effect = bool(task.intentional_changes)
+                self._lineage_last_intentional_changes[task_key] = tuple(sorted(task.intentional_changes))
                 wave_files.update(task.intentional_changes)
 
                 verification = self.verifier.verify(
@@ -324,11 +350,22 @@ class VillaniModeController:
             )
 
             current_changes = set(self._git_changed_files())
-            progress_made = (
-                current_changes != prior_changed_snapshot
-                or retired > 0
-                or bool(wave_files)
-            )
+            repo_delta = current_changes != prior_changed_snapshot or bool(wave_files)
+            model_activity = self._model_request_count > self._last_model_request_count
+            if model_activity:
+                self._planner_only_cycles = 0
+            else:
+                self._planner_only_cycles += 1
+                self._emit(
+                    "villani_planner_churn",
+                    wave=wave,
+                    planner_only_cycles=self._planner_only_cycles,
+                    model_request_count=self._model_request_count,
+                    repo_delta=repo_delta,
+                )
+            self._last_model_request_count = self._model_request_count
+
+            progress_made = repo_delta or retired > 0
             if progress_made:
                 stagnation_cycles = 0
             else:
@@ -341,12 +378,18 @@ class VillaniModeController:
                 )
             prior_changed_snapshot = current_changes
 
+            if self._planner_only_cycles >= 2 or (self._planner_only_cycles >= 2 and not repo_delta):
+                reason = "Stopped: planner loop with no model activity."
+                self._stop_rationale["planner_churn"] = reason
+                return self._finalize_stop(state, "planner_churn", reason)
+
             if (
                 self.takeover_config.stagnation_cycle_limit > 0
                 and stagnation_cycles >= self.takeover_config.stagnation_cycle_limit
             ):
-                return self._build_takeover_summary(
+                return self._finalize_stop(
                     state,
+                    "stagnation",
                     f"No meaningful progress after {stagnation_cycles} consecutive cycles.",
                 )
 
@@ -522,6 +565,27 @@ class VillaniModeController:
         return followups
 
     def _insert_followup(self, followup: Opportunity, source_task_id: str) -> None:
+        task_key = self._task_key_for_opportunity(followup)
+        current_fingerprint = self._repo_fingerprint_for_task(task_key)
+        skip_reason = ""
+        if self._followup_already_pending(followup.title):
+            skip_reason = "duplicate_pending_title"
+        elif self._is_task_satisfied(task_key):
+            skip_reason = "already_satisfied_for_fingerprint"
+        elif self._is_terminal_lineage(task_key) and self._lineage_terminal_fingerprint.get(task_key) == current_fingerprint:
+            skip_reason = "terminal_lineage_unchanged"
+
+        if skip_reason:
+            self._followup_skip_reasons.append({"title": followup.title, "reason": skip_reason})
+            self._emit("villani_followup_skipped", title=followup.title, reason=skip_reason)
+            return
+
+        self._emit(
+            "villani_followup_inserted",
+            title=followup.title,
+            category=followup.category,
+            source_task_id=source_task_id,
+        )
         self._followup_queue.append(followup)
         self._backlog_insertions.append(
             {
@@ -548,6 +612,7 @@ class VillaniModeController:
             for followup in self._deterministic_followups(task, op):
                 self._insert_followup(followup, task.task_id)
             self._lineage_status[task_key] = TaskLifecycle.PASSED.value
+            self._lineage_terminal_fingerprint[task_key] = self._repo_fingerprint_for_task(task_key)
             return TaskLifecycle.PASSED.value
 
         if task.status == TaskLifecycle.BLOCKED.value or any(
@@ -558,6 +623,7 @@ class VillaniModeController:
             self._lineage_blockers[task_key] = "; ".join(task.runner_failures[:2])
             for followup in self._generate_followups(task, op):
                 self._insert_followup(followup, task.task_id)
+            self._lineage_terminal_fingerprint[task_key] = self._repo_fingerprint_for_task(task_key)
             return TaskLifecycle.BLOCKED.value
 
         actionable = self._is_actionable_failure(task)
@@ -567,9 +633,13 @@ class VillaniModeController:
 
         if retries_used < retry_limit:
             if self._is_stale_repeat(task):
+                stale_marker = f"stale_repeat:{task_key}"
                 self._stale_task_keys.add(task_key)
-                self._critic_outcomes.append("stale_repetition")
+                self._critic_outcomes.append(stale_marker)
                 self._lineage_status[task_key] = TaskLifecycle.EXHAUSTED.value
+                self._lineage_terminal_fingerprint[task_key] = self._repo_fingerprint_for_task(task_key)
+                if task.task_contract in {TaskContract.VALIDATION.value, TaskContract.INSPECTION.value}:
+                    return TaskLifecycle.EXHAUSTED.value
                 return TaskLifecycle.EXHAUSTED.value
             self._lineage_retries[task_key] = retries_used + 1
             retry_confidence = max(op.confidence, 0.62)
@@ -590,6 +660,7 @@ class VillaniModeController:
             return TaskLifecycle.RETRYABLE.value
 
         self._lineage_status[task_key] = TaskLifecycle.EXHAUSTED.value
+        self._lineage_terminal_fingerprint[task_key] = self._repo_fingerprint_for_task(task_key)
         return TaskLifecycle.EXHAUSTED.value
 
     def _validate_recent_changes_followup(
@@ -642,6 +713,15 @@ class VillaniModeController:
                 f"(prefer {cmd}), capture the executed command output and exit code, and only then summarize result. "
                 "No network, no installs, and no broad recursive execution."
             )
+        self._emit(
+            "villani_model_request_started",
+            task_id=task.task_id,
+            title=task.title,
+            attempt=task.attempts,
+            task_contract=task.task_contract,
+        )
+        self._model_request_count += 1
+        self._wave_had_model_activity = True
         result = self.runner.run(objective, execution_budget=None)
         task.outcome = "\n".join(
             block.get("text", "")
@@ -653,6 +733,16 @@ class VillaniModeController:
         task.turns_used = int(execution.get("turns_used", 0))
         task.tool_calls_used = int(execution.get("tool_calls_used", 0))
         task.elapsed_seconds = float(execution.get("elapsed_seconds", 0.0))
+        self._emit(
+            "villani_model_request_finished",
+            task_id=task.task_id,
+            title=task.title,
+            attempt=task.attempts,
+            terminated_reason=task.terminated_reason,
+            turns_used=task.turns_used,
+            tool_calls_used=task.tool_calls_used,
+            elapsed_seconds=task.elapsed_seconds,
+        )
         task.files_changed = list(
             execution.get("all_changes", execution.get("files_changed", []))
         )
@@ -669,7 +759,7 @@ class VillaniModeController:
         if classify_shell_portability_failure(r.get("command", "") for r in task.verification_results):
             self._critic_outcomes.append("shell_portability_failure")
         task.produced_effect = bool(task.intentional_changes)
-        task.produced_validation = self._has_real_validation_artifact(task)
+        task.produced_validation = self._has_hard_validation_evidence(task)
         task.produced_inspection_conclusion = bool(task.inspection_summary)
         task.completed = task.terminated_reason == "completed"
         task.status = (
@@ -726,7 +816,7 @@ class VillaniModeController:
 
         if (
             task.task_contract == TaskContract.VALIDATION.value
-            and not self._has_real_validation_artifact(task)
+            and not self._has_hard_validation_evidence(task)
         ):
             return (
                 TaskLifecycle.FAILED.value,
@@ -799,6 +889,22 @@ class VillaniModeController:
         return autonomous_helpers.has_real_validation_artifact(task)
 
     @staticmethod
+    def _has_hard_validation_evidence(task: AutonomousTask) -> bool:
+        if VillaniModeController._has_real_validation_artifact(task):
+            return True
+        for result in task.verification_results:
+            if not isinstance(result, dict):
+                continue
+            command = str(result.get("command", "")).strip()
+            if command and int(result.get("exit", 1)) == 0:
+                return True
+        for artifact in task.validation_artifacts:
+            text = str(artifact).lower()
+            if "(exit=0)" in text and any(tok in text for tok in ["python", "pytest", "uv", "tox", "nox", "make", "poetry", "pip"]):
+                return True
+        return False
+
+    @staticmethod
     def _is_test_file(path: str) -> bool:
         norm = path.replace("\\", "/").lstrip("./")
         name = Path(norm).name
@@ -817,6 +923,19 @@ class VillaniModeController:
         from villani_code import autonomous_reporting
 
         return autonomous_reporting.extract_commands(result)
+
+    def _finalize_stop(
+        self, state: TakeoverState, decision_kind: str, done_reason: str
+    ) -> dict[str, Any]:
+        self._stop_decision_kind = decision_kind
+        self._emit(
+            "villani_stop_decision",
+            stop_decision_kind=decision_kind,
+            done_reason=done_reason,
+            model_request_count=self._model_request_count,
+            planner_only_cycles=self._planner_only_cycles,
+        )
+        return self._build_takeover_summary(state, done_reason)
 
     def _build_takeover_summary(
         self, state: TakeoverState, done_reason: str
@@ -839,6 +958,10 @@ class VillaniModeController:
                 "category_examination_state": self._category_state,
                 "stop_decision_rationale": self._stop_rationale,
                 "critic_outcomes": self._critic_outcomes,
+                "model_request_count": self._model_request_count,
+                "planner_only_cycles": self._planner_only_cycles,
+                "followup_skip_reasons": self._followup_skip_reasons,
+                "stop_decision_kind": self._stop_decision_kind,
             },
         )
 
@@ -897,34 +1020,90 @@ class VillaniModeController:
         return True
 
     def _is_stale_repeat(self, task: AutonomousTask) -> bool:
-        return task.attempts > 1 and not task.intentional_changes and not task.validation_artifacts
+        if task.attempts <= 1:
+            return False
+        prior_fingerprint = self._lineage_last_fingerprint.get(task.task_key)
+        current_fingerprint = self._repo_fingerprint_for_task(task.task_key)
+        same_fingerprint = prior_fingerprint == current_fingerprint
+        prior_changes = self._lineage_last_intentional_changes.get(task.task_key, tuple())
+        same_changes = tuple(sorted(task.intentional_changes)) == prior_changes
+        no_task_delta = not task.intentional_changes and not task.files_changed
+        no_model_wave_activity = not self._wave_had_model_activity
+        return all([
+            same_fingerprint,
+            same_changes,
+            no_task_delta,
+            no_model_wave_activity,
+            not task.validation_artifacts,
+        ])
 
     def _deterministic_followups(self, task: AutonomousTask, op: Opportunity) -> list[Opportunity]:
         followups: list[Opportunity] = []
-        if task.title == "Validate baseline importability" and task.status == TaskLifecycle.PASSED.value:
-            if self._category_state.get("tests") == "discovered":
-                followups.append(
-                    Opportunity(
-                        "Run baseline tests",
-                        "followup_tests",
-                        0.98,
-                        0.9,
-                        ["tests/"],
-                        "baseline import validation succeeded and tests are present",
-                        "small",
-                        "run baseline tests",
-                        TaskContract.VALIDATION.value,
-                    )
+        if task.title != "Validate baseline importability" or task.status != TaskLifecycle.PASSED.value:
+            return followups
+
+        if self._category_state.get("tests") == "discovered" and self._repo_has_test_files():
+            followups.append(
+                Opportunity(
+                    "Run baseline tests",
+                    "followup_tests",
+                    0.98,
+                    0.9,
+                    ["tests/"],
+                    "baseline import validation succeeded and tests are present",
+                    "small",
+                    "run baseline tests",
+                    TaskContract.VALIDATION.value,
                 )
-            if self._category_state.get("entrypoints") == "discovered":
-                followups.append(
-                    Opportunity("Validate CLI entrypoint", "followup_entrypoint", 0.94, 0.84, op.affected_files, "entrypoints discovered during exploration", "small", "validate CLI entrypoint", TaskContract.VALIDATION.value)
-                )
-            if self._category_state.get("docs") == "discovered":
-                followups.append(
-                    Opportunity("Validate documented commands/examples", "followup_docs", 0.93, 0.82, ["README.md"], "docs present and may include runnable examples", "small", "validate documented commands/examples", TaskContract.INSPECTION.value)
-                )
+            )
+
+        entrypoint_key = self._task_key_for_opportunity(
+            Opportunity("Validate CLI entrypoint", "followup_entrypoint", 0.94, 0.84, op.affected_files, "", "small", "validate CLI entrypoint", TaskContract.VALIDATION.value)
+        )
+        if (
+            self._repo_has_cli_entrypoint()
+            and self._category_state.get("entrypoints") == "discovered"
+            and not self._is_task_satisfied(entrypoint_key)
+            and not self._followup_already_pending("Validate CLI entrypoint")
+            and (not self._task_attempted_this_session(entrypoint_key) or self._lineage_last_fingerprint.get(entrypoint_key) != self._repo_fingerprint_for_task(entrypoint_key))
+        ):
+            followups.append(
+                Opportunity("Validate CLI entrypoint", "followup_entrypoint", 0.94, 0.84, op.affected_files, "entrypoints discovered during exploration", "small", "validate CLI entrypoint", TaskContract.VALIDATION.value)
+            )
+
+        if self._category_state.get("docs") == "discovered" and self._repo_has_docs_examples():
+            followups.append(
+                Opportunity("Validate documented commands/examples", "followup_docs", 0.93, 0.82, ["README.md"], "docs present and may include runnable examples", "small", "validate documented commands/examples", TaskContract.INSPECTION.value)
+            )
         return followups
+
+    def _repo_has_cli_entrypoint(self) -> bool:
+        pyproject = self.repo / "pyproject.toml"
+        if pyproject.exists():
+            text = pyproject.read_text(encoding="utf-8", errors="replace")
+            if "[project.scripts]" in text or "[tool.poetry.scripts]" in text or "[project.entry-points" in text:
+                return True
+        for candidate in ("villani_code/cli.py", "cli.py"):
+            if (self.repo / candidate).is_file():
+                return True
+        return False
+
+    def _repo_has_docs_examples(self) -> bool:
+        if (self.repo / "README.md").is_file() or (self.repo / "getting-started.md").is_file():
+            return True
+        return (self.repo / "docs").is_dir()
+
+    def _repo_has_test_files(self) -> bool:
+        tests = self.repo / "tests"
+        if not tests.is_dir():
+            return False
+        return any(self._is_test_file(p.relative_to(self.repo).as_posix()) for p in tests.rglob("*.py") if p.is_file())
+
+    def _followup_already_pending(self, title: str) -> bool:
+        return any(op.title == title for op in self._followup_queue)
+
+    def _task_attempted_this_session(self, task_key: str) -> bool:
+        return self._lineage_attempts.get(task_key, 0) > 0
 
     def _mark_category_discovery(self) -> None:
         from villani_code import autonomous_progress
@@ -945,8 +1124,18 @@ class VillaniModeController:
 
         inserted = False
         for followup in autonomous_progress.surface_followups(self._category_state):
+            if followup.title == "Run baseline tests" and not self._repo_has_test_files():
+                self._emit("villani_followup_skipped", title=followup.title, reason="no_test_files")
+                continue
+            if followup.title == "Validate documented commands/examples" and not self._repo_has_docs_examples():
+                self._emit("villani_followup_skipped", title=followup.title, reason="no_docs_examples")
+                continue
+            if followup.title == "Validate CLI entrypoint" and not self._repo_has_cli_entrypoint():
+                self._emit("villani_followup_skipped", title=followup.title, reason="no_cli_entrypoint")
+                continue
+            before = len(self._followup_queue)
             self._insert_followup(followup, "system")
-            inserted = True
+            inserted = inserted or len(self._followup_queue) > before
             if followup.title == "Run baseline tests":
                 self._log("[villani-mode] stop blocked: tests remain unexamined")
         return inserted
@@ -1073,4 +1262,24 @@ class VillaniModeController:
             lines.append(f"Incidental changes: {json.dumps(incidental)}")
         for step in summary.get("recommended_next_steps", []):
             lines.append(f"Next: {step}")
+
+        memory = summary.get("working_memory", {})
+        done_reason = str(summary.get("done_reason", "")).lower()
+        if "budget exhausted" in done_reason:
+            termination_kind = "budget exhausted"
+        elif "no meaningful progress" in done_reason:
+            termination_kind = "stagnation"
+        elif "planner loop with no model activity" in done_reason:
+            termination_kind = "planner loop with no model activity"
+        elif "no opportunities" in done_reason:
+            termination_kind = "no opportunities"
+        else:
+            termination_kind = memory.get("stop_decision_kind", "unknown")
+        lines.append("")
+        lines.append("## Villani control loop")
+        lines.append(f"- model_requests: {memory.get('model_request_count', 0)}")
+        lines.append(f"- backlog_insertions: {len(memory.get('backlog_insertions', []))}")
+        lines.append(f"- stop_reason: {summary.get('done_reason', '')}")
+        lines.append(f"- critic_outcomes: {json.dumps(memory.get('critic_outcomes', []))}")
+        lines.append(f"- termination_kind: {termination_kind}")
         return "\n".join(lines)

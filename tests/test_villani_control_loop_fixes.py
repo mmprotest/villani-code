@@ -158,7 +158,9 @@ def test_stop_reason_reports_category_exhaustion(tmp_path: Path) -> None:
 
 def test_critic_marks_stale_repetition() -> None:
     controller = VillaniModeController(SequencedRunner([]), Path("."))
-    task = type("T", (), {"attempts": 2, "intentional_changes": [], "validation_artifacts": []})()
+    task = type("T", (), {"attempts": 2, "intentional_changes": [], "validation_artifacts": [], "files_changed": [], "task_key": "k"})()
+    controller._lineage_last_fingerprint["k"] = controller._repo_fingerprint_for_task("k")
+    controller._lineage_last_intentional_changes["k"] = tuple()
     assert controller._is_stale_repeat(task) is True
 
 
@@ -191,3 +193,116 @@ def test_evidence_json_parsing_regression_still_works(tmp_path: Path) -> None:
         }
     )
     assert commands == [{"command": 'python -c "import villani_code"', "exit": 0}]
+
+
+def test_takeover_config_defaults_are_bounded() -> None:
+    cfg = TakeoverConfig()
+    assert cfg.max_commands_per_wave == 2
+    assert cfg.max_waves == 3
+    assert cfg.max_total_task_attempts == 6
+    assert cfg.min_confidence == 0.60
+    assert cfg.stagnation_cycle_limit == 2
+
+
+def test_planner_churn_stops_fast_with_explicit_reason(tmp_path: Path) -> None:
+    events: list[dict] = []
+    controller = VillaniModeController(SequencedRunner([{}]), tmp_path, event_callback=events.append, takeover_config=TakeoverConfig(max_waves=5))
+    controller.planner = Planner([[], [], []])
+    summary = controller.run()
+    assert summary["done_reason"] == "Stopped: planner loop with no model activity."
+    assert any(e.get("type") == "villani_planner_churn" for e in events)
+
+
+def test_insert_followup_deduplicates_cli_entrypoint(tmp_path: Path) -> None:
+    (tmp_path / "villani_code").mkdir()
+    (tmp_path / "villani_code" / "cli.py").write_text("", encoding="utf-8")
+    controller = VillaniModeController(SequencedRunner([]), tmp_path)
+    followup = _op("Validate CLI entrypoint", category="followup_entrypoint")
+    controller._insert_followup(followup, "s1")
+    controller._insert_followup(followup, "s1")
+    assert [o.title for o in controller._followup_queue].count("Validate CLI entrypoint") == 1
+
+
+def test_cli_followup_not_inserted_without_cli_signal(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# docs\n", encoding="utf-8")
+    controller = VillaniModeController(SequencedRunner([]), tmp_path)
+    controller._category_state["entrypoints"] = "discovered"
+    task = type("T", (), {"title": "Validate baseline importability", "status": "passed"})()
+    op = _op("Validate baseline importability")
+    titles = [f.title for f in controller._deterministic_followups(task, op)]
+    assert "Validate CLI entrypoint" not in titles
+
+
+def test_docs_followup_not_inserted_without_docs(tmp_path: Path) -> None:
+    controller = VillaniModeController(SequencedRunner([]), tmp_path)
+    controller._category_state["docs"] = "discovered"
+    task = type("T", (), {"title": "Validate baseline importability", "status": "passed"})()
+    op = _op("Validate baseline importability")
+    titles = [f.title for f in controller._deterministic_followups(task, op)]
+    assert "Validate documented commands/examples" not in titles
+
+
+def test_tests_followup_not_inserted_without_real_test_files(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "notes.txt").write_text("x", encoding="utf-8")
+    controller = VillaniModeController(SequencedRunner([]), tmp_path)
+    controller._category_state["tests"] = "discovered"
+    task = type("T", (), {"title": "Validate baseline importability", "status": "passed"})()
+    op = _op("Validate baseline importability")
+    titles = [f.title for f in controller._deterministic_followups(task, op)]
+    assert "Run baseline tests" not in titles
+
+
+def test_model_request_lifecycle_events_emitted(tmp_path: Path) -> None:
+    events: list[dict] = []
+    runner = SequencedRunner([{"validation_artifacts": ["python -c 'import villani_code' (exit=0)"]}])
+    controller = VillaniModeController(runner, tmp_path, event_callback=events.append)
+    task = type("T", (), {})()
+    # reuse real task type
+    from villani_code.autonomous import AutonomousTask
+    real_task = AutonomousTask("1", "Validate baseline importability", "r", 1.0, 1.0, [], task_contract=TaskContract.VALIDATION.value, attempts=1)
+    controller._execute_task(real_task)
+    types = [e.get("type") for e in events]
+    assert "villani_model_request_started" in types
+    assert "villani_model_request_finished" in types
+
+
+def test_stale_repeat_validation_does_not_generate_deterministic_followups(tmp_path: Path) -> None:
+    controller = VillaniModeController(SequencedRunner([]), tmp_path)
+    op = _op("Validate baseline importability", contract=TaskContract.VALIDATION.value)
+    from villani_code.autonomous import AutonomousTask
+    task = AutonomousTask("1", "Validate baseline importability", "r", 1.0, 1.0, [], task_contract=TaskContract.VALIDATION.value, task_key=controller._task_key_for_opportunity(op), attempts=2)
+    controller._lineage_last_fingerprint[task.task_key] = controller._repo_fingerprint_for_task(task.task_key)
+    controller._lineage_last_intentional_changes[task.task_key] = tuple()
+    task.status = "failed"
+    status = controller._update_lifecycle_after_attempt(task, op)
+    assert status == "exhausted"
+    assert controller._followup_queue == []
+
+
+def test_working_memory_contains_new_control_fields(tmp_path: Path) -> None:
+    controller = VillaniModeController(SequencedRunner([]), tmp_path, takeover_config=TakeoverConfig(max_waves=1, min_confidence=0.99))
+    controller.planner = Planner([[]])
+    summary = controller.run()
+    memory = summary["working_memory"]
+    assert "model_request_count" in memory
+    assert "planner_only_cycles" in memory
+    assert "followup_skip_reasons" in memory
+    assert "stop_decision_kind" in memory
+
+
+def test_summary_includes_control_loop_metrics() -> None:
+    text = VillaniModeController.format_summary({
+        "repo_summary": "x",
+        "tasks_attempted": [],
+        "done_reason": "Stopped: planner loop with no model activity.",
+        "blockers": [],
+        "preexisting_changes": [],
+        "files_changed": [],
+        "intentional_changes": [],
+        "recommended_next_steps": [],
+        "working_memory": {"model_request_count": 2, "backlog_insertions": [{"title": "x"}], "critic_outcomes": ["ok"], "stop_decision_kind": "planner_churn"},
+    })
+    assert "## Villani control loop" in text
+    assert "model_requests: 2" in text
+    assert "stop_reason:" in text
