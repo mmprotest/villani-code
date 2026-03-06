@@ -6,10 +6,12 @@ from textual.timer import Timer
 
 from textual import on
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.events import Key, MouseScrollDown, MouseScrollUp
 from textual.widgets import Input, Log, Static
 
+from villani_code.interrupts import InterruptController
 from villani_code.tui.assets import LAUNCH_BANNER
 from villani_code.tui.controller import RunnerController
 from villani_code.tui.messages import ApprovalRequest, LogAppend, SpinnerState, StatusUpdate
@@ -44,6 +46,7 @@ class VillaniLog(Log):
 
 class VillaniTUI(App[None]):
     CSS_PATH = "styles.tcss"
+    BINDINGS = [Binding("ctrl+c", "interrupt_or_quit", show=False, priority=True)]
 
     def __init__(self, runner: Any, repo: Path, villani_mode: bool = False, villani_objective: str | None = None) -> None:
         super().__init__()
@@ -55,7 +58,7 @@ class VillaniTUI(App[None]):
         self._ai_started = False
         self._stream_buffer = ""
         self._stream_flush_timer: Timer | None = None
-        self._suppress_next_enter = False
+        self._interrupts = InterruptController()
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
         self.controller = RunnerController(runner, self)
@@ -95,7 +98,15 @@ class VillaniTUI(App[None]):
         if text == "/exit":
             self.exit()
             return
+        self._interrupts.reset_interrupt_state()
         self.controller.run_prompt(text)
+
+    def action_interrupt_or_quit(self) -> None:
+        action = self._interrupts.register_interrupt()
+        if action == "exit":
+            self.exit()
+            return
+        self.post_message(StatusUpdate("Interrupted current session. Press Ctrl+C again to exit Villani Code."))
 
     def _end_ai_stream_if_open(self, log: VillaniLog) -> None:
         self._flush_stream_buffer(log)
@@ -181,19 +192,13 @@ class VillaniTUI(App[None]):
         if request_id is None:
             return
         self.controller.resolve_approval(request_id, event.choice)
+        self._interrupts.reset_interrupt_state()
         bar.hide_request()
         input_widget = self.query_one(Input)
         input_widget.disabled = False
         input_widget.focus()
-        self._suppress_next_enter = True
 
     def on_key(self, event: Key) -> None:
-        if event.key == "enter" and self._suppress_next_enter:
-            self._suppress_next_enter = False
-            event.stop()
-            event.prevent_default()
-            return
-
         bar = self.query_one(ApprovalBar)
         if bar.display:
             if event.key == "up":

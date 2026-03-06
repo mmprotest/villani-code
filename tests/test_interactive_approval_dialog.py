@@ -3,7 +3,7 @@ import threading
 import time
 from pathlib import Path
 
-from textual.widgets import Input, ListView
+from textual.widgets import Input, ListView, Static
 
 from villani_code.tui.app import VillaniTUI
 from villani_code.tui.controller import RunnerController
@@ -103,7 +103,6 @@ def test_approval_keys_are_contained_and_resolve_selection(tmp_path: Path) -> No
             assert bar.query_one("#approval-options", ListView).index == 1
 
             await pilot.press("enter")
-            await pilot.press("enter")
             await pilot.pause()
 
             assert app.controller.approvals == [("r1", "always")]
@@ -111,9 +110,61 @@ def test_approval_keys_are_contained_and_resolve_selection(tmp_path: Path) -> No
             assert input_widget.has_focus
             assert app.controller.prompts == []
 
+    asyncio.run(run())
+
+
+def test_one_enter_resolves_selected_approval_choice_immediately(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        app.controller = FakeController()
+        async with app.run_test() as pilot:
+            app.on_approval_request(ApprovalRequest("Allow?", ["yes", "always", "no"], "r-enter"))
+            await pilot.pause()
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.controller.approvals == [("r-enter", "yes")]
+            assert app.query_one(ApprovalBar).display is False
+
+    asyncio.run(run())
+
+
+def test_ctrl_c_twice_posts_status_then_exits(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert str(app.query_one("#status-text", Static).render()) == (
+                "Interrupted current session. Press Ctrl+C again to exit Villani Code."
+            )
+            assert app.is_running is True
+
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert app.is_running is False
+
+    asyncio.run(run())
+
+
+def test_enter_submits_normally_after_approval_resolution(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        app.controller = FakeController()
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#input", Input)
+            app.on_approval_request(ApprovalRequest("Allow?", ["yes", "always", "no"], "r-submit"))
+            await pilot.pause()
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.controller.approvals == [("r-submit", "yes")]
+
             input_widget.value = "submit-now"
             await pilot.press("enter")
             await pilot.pause()
+
             assert app.controller.prompts == ["submit-now"]
 
     asyncio.run(run())
