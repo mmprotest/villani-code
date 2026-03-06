@@ -343,8 +343,19 @@ class TakeoverState:
 
 
 class TakeoverPlanner:
-    def __init__(self, repo: Path):
+    _RANK_ORDER = {
+        "Bootstrap minimal tests": 0,
+        "Validate baseline importability": 1,
+        "Audit tracked runtime artifacts": 2,
+        "Triage TODO/FIXME cluster": 3,
+        "Audit missing usage docs": 4,
+        "Audit docs drift": 5,
+        "Inspect repo for highest-leverage small improvement": 6,
+    }
+
+    def __init__(self, repo: Path, *, enable_fallback: bool = True):
         self.repo = repo
+        self.enable_fallback = enable_fallback
 
     def _find_todo_fixme_matches(self) -> list[str]:
         rg_path = shutil.which("rg")
@@ -389,21 +400,54 @@ class TakeoverPlanner:
         py = sum(1 for p in files if p.suffix == ".py")
         tests = sum(1 for p in files if "tests" in p.parts)
         md = sum(1 for p in files if p.suffix == ".md")
-        return f"files={len(files)} py={py} tests={tests} docs={md}"
+        has_tests = self._has_meaningful_tests([p.relative_to(self.repo).as_posix() for p in files])
+        return f"files={len(files)} py={py} tests={tests} docs={md} has_tests={int(has_tests)}"
 
     def discover_opportunities(self) -> list[Opportunity]:
         ops: list[Opportunity] = []
-        if (self.repo / "tests").exists():
+        authoritative_files = self._authoritative_files()
+        python_files = self._python_source_files(authoritative_files)
+        has_tests = self._has_meaningful_tests(authoritative_files)
+        docs = self._discover_authoritative_docs()
+
+        if python_files and not has_tests:
             ops.append(
                 Opportunity(
-                    "Validate baseline tests",
-                    "broken_tests",
-                    0.92,
-                    0.86,
-                    ["tests/"],
-                    "tests directory present",
+                    "Bootstrap minimal tests",
+                    "testing",
+                    0.95,
+                    0.78,
+                    python_files[:3],
+                    "Python repo has source code but no tests directory or test files",
                     "small",
-                    "run pytest -q",
+                    "audit package layout and add a minimal baseline test scaffold",
+                )
+            )
+        if python_files:
+            ops.append(
+                Opportunity(
+                    "Validate baseline importability",
+                    "validation",
+                    0.9,
+                    0.72,
+                    python_files[:3],
+                    "Python repo detected; baseline validation is a reasonable first-pass autonomous task",
+                    "small",
+                    "inspect package entry points and validate importable baseline",
+                )
+            )
+        tracked_artifacts = self._tracked_runtime_artifacts()
+        if tracked_artifacts:
+            ops.append(
+                Opportunity(
+                    "Audit tracked runtime artifacts",
+                    "hygiene",
+                    0.84,
+                    0.74,
+                    tracked_artifacts[:5],
+                    "repository contains likely junk artifacts that may need cleanup",
+                    "small",
+                    "inspect tracked caches/checkpoints/editor artifacts and propose cleanup",
                 )
             )
         todo_matches = self._find_todo_fixme_matches()
@@ -420,7 +464,19 @@ class TakeoverPlanner:
                     "resolve highest-signal TODO",
                 )
             )
-        docs = self._discover_authoritative_docs()
+        if python_files and self._has_minimal_docs(docs):
+            ops.append(
+                Opportunity(
+                    "Audit missing usage docs",
+                    "docs",
+                    0.62,
+                    0.68,
+                    docs[:1],
+                    "code exists but documentation coverage appears sparse",
+                    "small",
+                    "inspect README and package layout for obvious docs coverage gaps",
+                )
+            )
         if docs and self._has_authoritative_docs_drift(docs):
             ops.append(
                 Opportunity(
@@ -434,10 +490,75 @@ class TakeoverPlanner:
                     "sync docs with current CLI",
                 )
             )
+        if not ops and self.enable_fallback:
+            ops.append(
+                Opportunity(
+                    "Inspect repo for highest-leverage small improvement",
+                    "fallback",
+                    0.5,
+                    0.55,
+                    [],
+                    "no stronger heuristic fired, but repo still deserves bounded inspection",
+                    "small",
+                    "read README, inspect key package/config files, and identify one safe bounded improvement",
+                )
+            )
         ops = [op for op in ops if self._is_authoritative_opportunity(op)]
-        return sorted(
-            ops, key=lambda o: (o.priority * 0.7 + o.confidence * 0.3), reverse=True
-        )
+        return sorted(ops, key=self._rank_key)
+
+    def _rank_key(self, op: Opportunity) -> tuple[int, float]:
+        rank = self._RANK_ORDER.get(op.title, 99)
+        score = op.priority * 0.7 + op.confidence * 0.3
+        return (rank, -score)
+
+    def _authoritative_files(self) -> list[str]:
+        files: list[str] = []
+        for path in self.repo.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.repo).as_posix()
+            if is_ignored_repo_path(rel):
+                continue
+            files.append(rel)
+        return sorted(files)
+
+    def _python_source_files(self, files: list[str]) -> list[str]:
+        return [
+            rel
+            for rel in files
+            if rel.endswith(".py") and not rel.startswith("tests/") and not Path(rel).name.startswith("test_")
+        ]
+
+    def _has_meaningful_tests(self, files: list[str]) -> bool:
+        if any(rel.startswith("tests/") for rel in files):
+            return True
+        for rel in files:
+            name = Path(rel).name
+            if name.startswith("test_") and name.endswith(".py"):
+                return True
+        return False
+
+    def _tracked_runtime_artifacts(self) -> list[str]:
+        try:
+            proc = subprocess.run(["git", "ls-files"], cwd=self.repo, capture_output=True, text=True)
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return []
+        if proc.returncode != 0:
+            return []
+        tracked: list[str] = []
+        for line in proc.stdout.splitlines():
+            rel = line.strip()
+            if not rel:
+                continue
+            cls = classify_repo_path(rel)
+            if cls in {"runtime_artifact", "editor_artifact"}:
+                tracked.append(rel)
+        return sorted(set(tracked))
+
+    def _has_minimal_docs(self, docs: list[str]) -> bool:
+        if not docs:
+            return True
+        return len(docs) == 1 and docs[0] in {"README.md", "README.rst"}
 
     def _discover_authoritative_docs(self) -> list[str]:
         docs: list[str] = []

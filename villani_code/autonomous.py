@@ -65,12 +65,17 @@ class VillaniModeController:
         self.planner = TakeoverPlanner(self.repo)
         self.verifier = VerificationEngine(self.repo, logger=self._log)
         self.failure_classifier = FailureClassifier()
+        self._preexisting_changes: set[str] = set()
 
     def run(self) -> dict[str, Any]:
+        self._preexisting_changes = set(self._git_changed_files())
         state = TakeoverState(repo_summary=self.planner.build_repo_summary())
         self._emit("takeover_dashboard", summary=state.repo_summary, wave=0, risk=state.current_risk_level)
         state.discovered_opportunities = self.planner.discover_opportunities()
         self._emit("takeover_ranked", count=len(state.discovered_opportunities), top=[o.title for o in state.discovered_opportunities[:5]])
+
+        if not state.discovered_opportunities:
+            return self._build_takeover_summary(state, "No opportunities discovered.")
 
         for wave in range(1, self.takeover_config.max_waves + 1):
             remaining = [o for o in state.discovered_opportunities if o.confidence >= self.takeover_config.min_confidence and o.title not in self._attempted_titles]
@@ -152,6 +157,15 @@ class VillaniModeController:
             "You are in repo takeover mode. Execute one bounded intervention and summarize exact edits and validation. "
             f"Intervention: {task.title}\nEvidence: {task.rationale}"
         )
+        if task.title == "Inspect repo for highest-leverage small improvement":
+            objective += (
+                "\nFollow this bounded inspection plan in order where files exist: "
+                "1) top-level README.md or README.rst, 2) pyproject.toml, "
+                "3) package root directory or src/ layout, 4) up to 3 representative Python source files, "
+                "5) existing test files if any. Then produce exactly one of: "
+                "small safe code improvement, small safe docs improvement, minimal test bootstrap, "
+                "or conclude no clear bounded improvement is justified."
+            )
         result = self.runner.run(objective, execution_budget=VILLANI_TASK_BUDGET)
         task.outcome = "\n".join(block.get("text", "") for block in result.get("response", {}).get("content", []) if block.get("type") == "text")
         execution = result.get("execution", {})
@@ -190,6 +204,11 @@ class VillaniModeController:
         return out
 
     def _build_takeover_summary(self, state: TakeoverState, done_reason: str) -> dict[str, Any]:
+        current_changes = set(self._git_changed_files())
+        preexisting = sorted(self._preexisting_changes)
+        new_changes = sorted(current_changes - self._preexisting_changes)
+        intentional_set = {p for t in self.attempted for p in t.intentional_changes}
+        incidental_set = {p for t in self.attempted for p in t.incidental_changes}
         return {
             "repo_summary": state.repo_summary,
             "tasks_attempted": [
@@ -210,9 +229,10 @@ class VillaniModeController:
                 }
                 for t in self.attempted
             ],
-            "files_changed": self._git_changed_files(),
-            "intentional_changes": sorted({p for t in self.attempted for p in t.intentional_changes}),
-            "incidental_changes": sorted({p for t in self.attempted for p in t.incidental_changes}),
+            "files_changed": new_changes,
+            "preexisting_changes": preexisting,
+            "intentional_changes": sorted(intentional_set & set(new_changes)),
+            "incidental_changes": sorted(incidental_set & set(new_changes)),
             "blockers": [t.title for t in self.attempted if t.status == "blocked"],
             "done_reason": done_reason,
             "completed_waves": state.completed_waves,
@@ -304,6 +324,7 @@ class VillaniModeController:
             lines.append(f"wave {wave.get('wave')}: retired={wave.get('retired')} confidence={wave.get('confidence')} files={len(wave.get('files_touched', []))}")
         lines.append(f"Done reason: {summary.get('done_reason', '')}")
         lines.append(f"Blockers: {json.dumps(summary.get('blockers', []))}")
+        lines.append(f"Preexisting changes: {json.dumps(summary.get('preexisting_changes', []))}")
         lines.append(f"Files changed: {json.dumps(summary.get('files_changed', []))}")
         lines.append(f"Intentional changes: {json.dumps(summary.get('intentional_changes', []))}")
         incidental = summary.get('incidental_changes', [])
