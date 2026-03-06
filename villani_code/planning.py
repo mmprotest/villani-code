@@ -39,12 +39,13 @@ class EstimatedScope(str, Enum):
 
 
 class ChangeImpact(str, Enum):
-    SOURCE_ONLY = "source_only"
     TESTS_ONLY = "tests_only"
+    SOURCE_ONLY = "source_only"
     SOURCE_AND_TESTS = "source_and_tests"
-    CONFIG_OR_MANIFEST = "config_or_manifest"
-    MULTI_PACKAGE = "multi_package"
-    CROSS_CUTTING = "cross_cutting"
+    CONFIG_ONLY = "config_only"
+    DEPENDENCY_SURFACE = "dependency_surface"
+    PACKAGE_WIDE_BEHAVIOR = "package_wide_behavior"
+    REPO_WIDE_BEHAVIOR = "repo_wide_behavior"
 
 
 @dataclass(slots=True)
@@ -185,17 +186,19 @@ def _scope(targets: list[str], actions: set[ActionClass], repo_shape: str) -> Es
 def _infer_change_impact(actions: set[ActionClass], targets: list[CandidateTarget], repo_map: dict[str, Any]) -> ChangeImpact:
     types = {t.target_type for t in targets}
     source_roots = set(repo_map.get("source_roots", []))
-    if ActionClass.DEPENDENCY_CHANGE in actions or "manifest" in types or "config" in types:
-        return ChangeImpact.CONFIG_OR_MANIFEST
+    if ActionClass.DEPENDENCY_CHANGE in actions or "lockfile" in types:
+        return ChangeImpact.DEPENDENCY_SURFACE
+    if "manifest" in types or "config" in types:
+        return ChangeImpact.CONFIG_ONLY
     if "test" in types and "source" not in types:
         return ChangeImpact.TESTS_ONLY
     if "source" in types and "test" in types:
         return ChangeImpact.SOURCE_AND_TESTS
     roots_touched = {t.target.split("/")[0] for t in targets if "/" in t.target}
     if len(roots_touched & source_roots) > 1:
-        return ChangeImpact.MULTI_PACKAGE
+        return ChangeImpact.PACKAGE_WIDE_BEHAVIOR
     if ActionClass.REFACTOR_BROAD in actions or ActionClass.MIGRATION in actions:
-        return ChangeImpact.CROSS_CUTTING
+        return ChangeImpact.REPO_WIDE_BEHAVIOR
     return ChangeImpact.SOURCE_ONLY
 
 
@@ -223,7 +226,8 @@ def analyze_instruction(instruction: str, repo_map: dict[str, Any] | None, valid
     for path in manifests:
         name = Path(path).name.lower()
         if name in text or name.split(".")[0] in tokens:
-            add_candidate(path, "manifest", f"instruction mentions {name}")
+            target_type = "lockfile" if name in {"poetry.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"} else "manifest"
+            add_candidate(path, target_type, f"instruction mentions {name}")
     for path in configs:
         name = Path(path).name.lower()
         if name in text:
@@ -238,6 +242,19 @@ def analyze_instruction(instruction: str, repo_map: dict[str, Any] | None, valid
     for root in docs_roots:
         if "docs" in tokens or "readme" in tokens:
             add_candidate(root, "docs", f"docs signal mapped to {root}")
+
+    searchable_paths = [
+        *[_normalize(v) for v in repo_map.get("package_roots", [])],
+        *[_normalize(v) for v in repo_map.get("likely_entrypoints", [])],
+        *source_roots,
+        *test_roots,
+    ]
+    for path in sorted(set(searchable_paths)):
+        name = Path(path).name.lower()
+        stem = Path(path).stem.lower()
+        if name in tokens or stem in tokens:
+            target_type = "source" if path in source_roots else "test" if path in test_roots else "module"
+            add_candidate(path, target_type, f"token-to-path grounding: {name}")
 
     if not candidates:
         for path in (source_roots + test_roots + manifests + configs)[:8]:
@@ -296,7 +313,7 @@ def classify_plan_risk(instruction: str, analysis: PlanAnalysis) -> PlanRiskLeve
         return PlanRiskLevel.HIGH
     if analysis.estimated_scope in {EstimatedScope.REPO_WIDE, EstimatedScope.PACKAGE_WIDE}:
         return PlanRiskLevel.HIGH
-    if analysis.change_impact in {ChangeImpact.CONFIG_OR_MANIFEST, ChangeImpact.MULTI_PACKAGE, ChangeImpact.CROSS_CUTTING}:
+    if analysis.change_impact in {ChangeImpact.CONFIG_ONLY, ChangeImpact.DEPENDENCY_SURFACE, ChangeImpact.PACKAGE_WIDE_BEHAVIOR, ChangeImpact.REPO_WIDE_BEHAVIOR}:
         return PlanRiskLevel.HIGH
     if analysis.estimated_scope in {EstimatedScope.NARROW_MULTI_FILE, EstimatedScope.BROAD_MULTI_FILE}:
         return PlanRiskLevel.MEDIUM

@@ -187,9 +187,7 @@ Lazy init is also enabled: if `.villani/` is missing when a task starts, Villani
 - On validation failure, Villani runs a dedicated bounded repair executor (default: 2 attempts) and reports unresolved failures with compact summaries.
 
 Useful options:
-- `--plan-mode/--no-plan-mode`
-- `--plan-policy off|auto|strict` (controls approval strictness)
-- `--skip-plan` (expert override)
+- `--plan-mode off|auto|strict`
 - `--max-repair-attempts N`
 
 ### Common options

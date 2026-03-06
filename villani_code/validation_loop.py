@@ -171,8 +171,10 @@ def _step_order(step: ValidationStep) -> tuple[int, int, str]:
 
 def _impact_from_inputs(scope: ValidationScope, change_impact: str | None, action_classes: list[str] | None) -> ChangeImpact:
     actions = set(action_classes or [])
-    if scope.manifests_changed or scope.config_changed or ActionClass.DEPENDENCY_CHANGE.value in actions:
-        return ChangeImpact.CONFIG_OR_MANIFEST
+    if scope.dependency_changed or ActionClass.DEPENDENCY_CHANGE.value in actions:
+        return ChangeImpact.DEPENDENCY_SURFACE
+    if scope.manifests_changed or scope.config_changed or ActionClass.CONFIG_EDIT.value in actions:
+        return ChangeImpact.CONFIG_ONLY
     if change_impact:
         try:
             return ChangeImpact(change_impact)
@@ -213,7 +215,7 @@ def plan_validation(config: ValidationConfig, changed_files: list[str], repo_map
                 include(step, "Docs-only changes: skip code-heavy checks.")
         return ValidationPlan(scope, selected, reasons, targets, ValidationEscalationPolicy(False, False, "docs_only"))
 
-    force_broad = impact in {ChangeImpact.CONFIG_OR_MANIFEST, ChangeImpact.CROSS_CUTTING, ChangeImpact.MULTI_PACKAGE} or scope.dependency_changed
+    force_broad = impact in {ChangeImpact.CONFIG_ONLY, ChangeImpact.DEPENDENCY_SURFACE, ChangeImpact.PACKAGE_WIDE_BEHAVIOR, ChangeImpact.REPO_WIDE_BEHAVIOR} or scope.dependency_changed
 
     for step in enabled:
         if step.kind in {"format", "lint"}:
