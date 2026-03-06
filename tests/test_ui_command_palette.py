@@ -1,4 +1,4 @@
-from ui.command_palette import CommandPalette, fuzzy_score
+from villani_code.tui.components.command_palette import CommandPalette, fuzzy_score
 
 
 def test_fuzzy_score_prefers_substring_match() -> None:

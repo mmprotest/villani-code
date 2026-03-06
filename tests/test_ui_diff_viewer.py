@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ui.diff_viewer import DiffViewer
+from villani_code.tui.components.diff_viewer import DiffViewer
 
 
 def test_diff_parse_and_fold() -> None:

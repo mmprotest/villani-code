@@ -1,9 +1,19 @@
-"""Villani Code terminal UI components."""
+"""Compatibility wrappers for legacy top-level UI imports.
 
-from .command_palette import CommandAction, CommandPalette
-from .settings import SettingsManager, UserSettings
-from .status_bar import StatusBar, StatusSnapshot
-from .task_board import TaskEvent, TaskManager, TaskStatus
+Canonical implementations live in ``villani_code.tui.components``.
+"""
+
+from villani_code.tui.components import (
+    CommandAction,
+    CommandPalette,
+    SettingsManager,
+    StatusBar,
+    StatusSnapshot,
+    TaskEvent,
+    TaskManager,
+    TaskStatus,
+    UserSettings,
+)
 
 __all__ = [
     "CommandAction",

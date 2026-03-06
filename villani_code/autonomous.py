@@ -361,71 +361,42 @@ class VillaniModeController:
     def _build_wave_candidates(
         self, discovered: list[Opportunity]
     ) -> list[Opportunity]:
-        combined = (
-            list(discovered) + list(self._retryable_queue) + list(self._followup_queue)
-        )
+        from villani_code import autonomous_helpers
+
+        candidates = autonomous_helpers.build_wave_candidates(self, discovered)
         self._retryable_queue = []
         self._followup_queue = []
-
-        dedup: dict[str, Opportunity] = {}
-        for op in combined:
-            key = self._task_key_for_opportunity(op)
-            if self._is_terminal_lineage(key):
-                continue
-            if op.confidence < self.takeover_config.min_confidence:
-                continue
-            existing = dedup.get(key)
-            if existing is None or self._effective_priority(
-                op
-            ) > self._effective_priority(existing):
-                dedup[key] = op
-        ranked = sorted(dedup.values(), key=self._effective_priority, reverse=True)
-        return ranked
+        return candidates
 
     def _effective_priority(self, op: Opportunity) -> float:
-        score = op.priority * 0.7 + op.confidence * 0.3
-        if op.category == "followup_validation":
-            score += 0.3
-        elif op.category.startswith("followup_"):
-            score += 0.2
-        return score
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.effective_priority(op)
 
     def _task_key_for_opportunity(self, op: Opportunity) -> str:
-        title = op.title.lower()
-        aliases = {
-            "re-run baseline importability validation": "validate baseline importability",
-            "complete minimal test bootstrap": "bootstrap minimal tests",
-            "validate recent autonomous changes": "validate recent autonomous changes",
-        }
-        normalized = aliases.get(title, title)
-        return normalized.replace(" ", "-")
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.task_key_for_opportunity(op)
 
     def _parent_task_key(self, op: Opportunity) -> str:
-        if op.category.startswith("followup_"):
-            return self._task_key_for_opportunity(op)
-        return ""
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.parent_task_key(op)
 
     def _retry_limit_for_contract(self, contract: str) -> int:
-        if contract == TaskContract.VALIDATION.value:
-            return 2
-        return 1
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.retry_limit_for_contract(contract)
 
     def _is_terminal_lineage(self, task_key: str) -> bool:
-        return self._lineage_status.get(task_key) in {
-            TaskLifecycle.PASSED.value,
-            TaskLifecycle.BLOCKED.value,
-            TaskLifecycle.EXHAUSTED.value,
-        }
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.is_terminal_lineage(self, task_key)
 
     def _is_actionable_failure(self, task: AutonomousTask) -> bool:
-        return any(
-            [
-                bool(task.intentional_changes),
-                bool(task.validation_artifacts),
-                bool(task.runner_failures),
-                bool(task.produced_inspection_conclusion),
-            ]
-        )
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.is_actionable_failure(task)
 
     def _generate_followups(
         self, task: AutonomousTask, op: Opportunity
@@ -556,10 +527,9 @@ class VillaniModeController:
         )
 
     def _has_pending_actionable_work(self) -> bool:
-        return any(
-            status == TaskLifecycle.RETRYABLE.value
-            for status in self._lineage_status.values()
-        )
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.has_pending_actionable_work(self)
 
     def _execute_task(self, task: AutonomousTask) -> None:
         task.status = TaskLifecycle.RUNNING.value
@@ -712,40 +682,30 @@ class VillaniModeController:
 
     @staticmethod
     def _has_any_evidence(task: AutonomousTask) -> bool:
-        return (
-            task.produced_effect
-            or task.produced_validation
-            or task.produced_inspection_conclusion
-        )
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.has_any_evidence(task)
 
     def _meets_contract(self, task: AutonomousTask) -> bool:
-        if task.task_contract == TaskContract.EFFECTFUL.value:
-            return task.produced_effect and self._meets_effectful_minimum(task)
-        if task.task_contract == TaskContract.VALIDATION.value:
-            return task.produced_validation and self._meets_validation_minimum(task)
-        return self._has_any_evidence(task)
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.meets_contract(task)
 
     def _meets_effectful_minimum(self, task: AutonomousTask) -> bool:
-        if task.title == "Bootstrap minimal tests":
-            return any(self._is_test_file(path) for path in task.intentional_changes)
-        if task.title == "Audit missing usage docs":
-            return any(
-                is_authoritative_doc_path(path) for path in task.intentional_changes
-            )
-        return True
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.meets_effectful_minimum(task)
 
     def _meets_validation_minimum(self, task: AutonomousTask) -> bool:
-        if task.title == "Validate baseline importability":
-            return self._has_real_validation_artifact(task)
-        return task.produced_validation and self._has_real_validation_artifact(task)
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.meets_validation_minimum(task)
 
     @staticmethod
     def _has_real_validation_artifact(task: AutonomousTask) -> bool:
-        for artifact in task.validation_artifacts:
-            text = str(artifact).lower()
-            if "python -c" in text or "python <<" in text or "exit=0" in text or "exit 0" in text:
-                return True
-        return False
+        from villani_code import autonomous_helpers
+
+        return autonomous_helpers.has_real_validation_artifact(task)
 
     @staticmethod
     def _is_test_file(path: str) -> bool:

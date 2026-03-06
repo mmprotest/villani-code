@@ -57,15 +57,16 @@ Install with a totally unreasonable amount of Villani:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 Freshly Villani and medically inadvisable.
 
-For development extras:
+Development install (includes test tools and TUI dependencies):
 
 ```bash
-pip install -e .[dev]
+pip install -e ".[dev]"
+pytest -q
 ```
 
 Applied artisanal evil by hand.

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from ui.settings import SettingsManager
+from villani_code.tui.components.settings import SettingsManager
 
 
 def _write(path: Path, payload: dict) -> None:

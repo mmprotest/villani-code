@@ -8,7 +8,7 @@ from typing import Literal, Optional
 import typer
 from rich.console import Console
 
-from ui.settings import SettingsManager
+from villani_code.tui.components.settings import SettingsManager
 from villani_code.anthropic_client import AnthropicClient
 from villani_code.interactive import InteractiveShell
 from villani_code.openai_client import OpenAIClient
