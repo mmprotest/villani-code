@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import sys
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,6 +22,11 @@ from villani_code.autonomy import (
 )
 from villani_code.evidence import parse_command_evidence
 from villani_code.execution import VILLANI_TASK_BUDGET
+from villani_code.shells import (
+    baseline_import_validation_command,
+    classify_shell_portability_failure,
+    shell_family_for_platform,
+)
 from villani_code.repo_rules import (
     classify_repo_path,
     is_authoritative_doc_path,
@@ -117,6 +124,19 @@ class VillaniModeController:
         self.verifier = VerificationEngine(self.repo, logger=self._log)
         self.failure_classifier = FailureClassifier()
         self._preexisting_changes: set[str] = set()
+        self._satisfied_task_keys: dict[str, str] = {}
+        self._invalidated_task_keys: set[str] = set()
+        self._backlog_insertions: list[dict[str, Any]] = []
+        self._filtered_reasons_by_category: dict[str, str] = {}
+        self._category_state: dict[str, str] = {
+            "tests": "unknown",
+            "docs": "unknown",
+            "entrypoints": "unknown",
+            "imports": "unknown",
+        }
+        self._stop_rationale: dict[str, str] = {}
+        self._stale_task_keys: set[str] = set()
+        self._critic_outcomes: list[str] = []
 
     def run(self) -> dict[str, Any]:
         self._preexisting_changes = set(self._git_changed_files())
@@ -135,6 +155,10 @@ class VillaniModeController:
             state.repo_summary = self.planner.build_repo_summary()
             discovered = self.planner.discover_opportunities()
             state.discovered_opportunities = discovered
+            self._mark_category_discovery()
+            self._log(
+                f"[villani-mode] explorer found tests/docs/entrypoints; backlog now has {len(discovered)} candidates"
+            )
 
             candidates = self._build_wave_candidates(discovered)
             self._emit(
@@ -144,6 +168,8 @@ class VillaniModeController:
             )
 
             if not candidates:
+                if self._enqueue_surface_followups_if_needed():
+                    continue
                 if (
                     not discovered
                     and not self._retryable_queue
@@ -156,9 +182,7 @@ class VillaniModeController:
                     return self._build_takeover_summary(
                         state, "Retry budget exhausted for remaining work."
                     )
-                return self._build_takeover_summary(
-                    state, "No remaining opportunities above confidence threshold."
-                )
+                return self._build_takeover_summary(state, self._stop_reason_from_categories())
 
             selected = candidates[: self.takeover_config.max_commands_per_wave]
             self._emit("autonomous_phase", phase=f"Villani mode wave {wave}")
@@ -244,6 +268,7 @@ class VillaniModeController:
                 )
                 task.status, task.outcome = self._adjudicate_task(task, verification)
                 task.status = self._update_lifecycle_after_attempt(task, op)
+                self._update_category_attempt_state(task)
                 if task.status == TaskLifecycle.PASSED.value:
                     retired += 1
                 elif task.status == TaskLifecycle.RETRYABLE.value:
@@ -288,7 +313,9 @@ class VillaniModeController:
                 risk=state.current_risk_level,
             )
 
-        return self._build_takeover_summary(state, "Villani mode budget exhausted.")
+        if self._has_pending_actionable_work():
+            return self._build_takeover_summary(state, "Villani mode budget exhausted.")
+        return self._build_takeover_summary(state, self._stop_reason_from_categories())
 
     def inspect_repo(self) -> RepoSnapshot:
         files = sorted(
@@ -460,6 +487,21 @@ class VillaniModeController:
 
         return followups
 
+    def _insert_followup(self, followup: Opportunity, source_task_id: str) -> None:
+        self._followup_queue.append(followup)
+        self._backlog_insertions.append(
+            {
+                "title": followup.title,
+                "category": followup.category,
+                "rationale": followup.evidence,
+                "evidence": followup.evidence,
+                "confidence": followup.confidence,
+                "estimated_risk": followup.blast_radius,
+                "source_task_id": source_task_id,
+            }
+        )
+        self._log(f"[villani-mode] planner inserted follow-up: {followup.title}")
+
     def _update_lifecycle_after_attempt(
         self, task: AutonomousTask, op: Opportunity
     ) -> str:
@@ -468,6 +510,9 @@ class VillaniModeController:
         retry_limit = self._retry_limit_for_contract(task.task_contract)
 
         if task.status == TaskLifecycle.PASSED.value:
+            self._mark_task_satisfied(task)
+            for followup in self._deterministic_followups(task, op):
+                self._insert_followup(followup, task.task_id)
             self._lineage_status[task_key] = TaskLifecycle.PASSED.value
             return TaskLifecycle.PASSED.value
 
@@ -477,14 +522,21 @@ class VillaniModeController:
         ):
             self._lineage_status[task_key] = TaskLifecycle.BLOCKED.value
             self._lineage_blockers[task_key] = "; ".join(task.runner_failures[:2])
-            self._followup_queue.extend(self._generate_followups(task, op))
+            for followup in self._generate_followups(task, op):
+                self._insert_followup(followup, task.task_id)
             return TaskLifecycle.BLOCKED.value
 
         actionable = self._is_actionable_failure(task)
         if actionable:
-            self._followup_queue.extend(self._generate_followups(task, op))
+            for followup in self._generate_followups(task, op):
+                self._insert_followup(followup, task.task_id)
 
         if retries_used < retry_limit:
+            if self._is_stale_repeat(task):
+                self._stale_task_keys.add(task_key)
+                self._critic_outcomes.append("stale_repetition")
+                self._lineage_status[task_key] = TaskLifecycle.EXHAUSTED.value
+                return TaskLifecycle.EXHAUSTED.value
             self._lineage_retries[task_key] = retries_used + 1
             retry_confidence = max(op.confidence, 0.62)
             self._retryable_queue.append(
@@ -549,9 +601,11 @@ class VillaniModeController:
                 "or conclude no clear bounded improvement is justified."
             )
         if task.title == "Validate baseline importability":
+            family = shell_family_for_platform(sys.platform)
+            cmd = baseline_import_validation_command(family)
             objective += (
                 "\nValidation contract (mandatory): inspect relevant package layout first, then run one bounded import validation command "
-                "(prefer python -c or short heredoc), capture the executed command output and exit code, and only then summarize result. "
+                f"(prefer {cmd}), capture the executed command output and exit code, and only then summarize result. "
                 "No network, no installs, and no broad recursive execution."
             )
         result = self.runner.run(objective, execution_budget=VILLANI_TASK_BUDGET)
@@ -578,6 +632,8 @@ class VillaniModeController:
         task.runner_failures = list(
             execution.get("runner_failures", [])
         ) or self._extract_runner_failures(result)
+        if classify_shell_portability_failure(r.get("command", "") for r in task.verification_results):
+            self._critic_outcomes.append("shell_portability_failure")
         task.produced_effect = bool(task.intentional_changes)
         task.produced_validation = self._has_real_validation_artifact(task)
         task.produced_inspection_conclusion = bool(task.inspection_summary)
@@ -792,6 +848,15 @@ class VillaniModeController:
             "done_reason": done_reason,
             "completed_waves": state.completed_waves,
             "recommended_next_steps": self._recommended_next_steps(),
+            "working_memory": {
+                "satisfied_task_keys": self._satisfied_task_keys,
+                "invalidated_task_keys": sorted(self._invalidated_task_keys),
+                "backlog_insertions": self._backlog_insertions,
+                "filtered_opportunity_reasons": self._filtered_reasons_by_category,
+                "category_examination_state": self._category_state,
+                "stop_decision_rationale": self._stop_rationale,
+                "critic_outcomes": self._critic_outcomes,
+            },
         }
 
     def _detect_tooling_commands(self, files: list[str]) -> list[str]:
@@ -838,6 +903,128 @@ class VillaniModeController:
                 "Inspect verification findings, then rerun Villani mode with tighter wave limits."
             ]
         return ["Run full CI before merging autonomous changes."]
+
+    def _repo_fingerprint_for_task(self, task_key: str) -> str:
+        relevant: list[str] = []
+        if "importability" in task_key or "import" in task_key:
+            for p in self.repo.rglob("*.py"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(self.repo).as_posix()
+                if rel.startswith("tests/"):
+                    continue
+                digest = hashlib.sha1(p.read_bytes()).hexdigest()
+                relevant.append(f"{rel}:{digest}")
+        else:
+            relevant = [f"dirty:{f}" for f in self._git_changed_files()]
+        return "|".join(sorted(relevant)[:200])
+
+    def _mark_task_satisfied(self, task: AutonomousTask) -> None:
+        key = task.task_key
+        self._satisfied_task_keys[key] = self._repo_fingerprint_for_task(key)
+        self._log(f"[villani-mode] critic marked {task.title.lower()} as session-satisfied")
+
+    def _is_task_satisfied(self, task_key: str) -> bool:
+        fingerprint = self._satisfied_task_keys.get(task_key)
+        if not fingerprint:
+            return False
+        current = self._repo_fingerprint_for_task(task_key)
+        if current != fingerprint:
+            self._invalidated_task_keys.add(task_key)
+            return False
+        return True
+
+    def _is_stale_repeat(self, task: AutonomousTask) -> bool:
+        return task.attempts > 1 and not task.intentional_changes and not task.validation_artifacts
+
+    def _deterministic_followups(self, task: AutonomousTask, op: Opportunity) -> list[Opportunity]:
+        followups: list[Opportunity] = []
+        if task.title == "Validate baseline importability" and task.status == TaskLifecycle.PASSED.value:
+            if self._category_state.get("tests") == "discovered":
+                followups.append(
+                    Opportunity(
+                        "Run baseline tests",
+                        "followup_tests",
+                        0.98,
+                        0.9,
+                        ["tests/"],
+                        "baseline import validation succeeded and tests are present",
+                        "small",
+                        "run baseline tests",
+                        TaskContract.VALIDATION.value,
+                    )
+                )
+            if self._category_state.get("entrypoints") == "discovered":
+                followups.append(
+                    Opportunity("Validate CLI entrypoint", "followup_entrypoint", 0.94, 0.84, op.affected_files, "entrypoints discovered during exploration", "small", "validate CLI entrypoint", TaskContract.VALIDATION.value)
+                )
+            if self._category_state.get("docs") == "discovered":
+                followups.append(
+                    Opportunity("Validate documented commands/examples", "followup_docs", 0.93, 0.82, ["README.md"], "docs present and may include runnable examples", "small", "validate documented commands/examples", TaskContract.INSPECTION.value)
+                )
+        return followups
+
+    def _mark_category_discovery(self) -> None:
+        files = [p.relative_to(self.repo).as_posix() for p in self.repo.rglob("*") if p.is_file()]
+        if any(self._is_test_file(f) for f in files):
+            self._category_state["tests"] = "discovered"
+        if any(f.endswith(".md") for f in files):
+            self._category_state["docs"] = "discovered"
+        if any(f.endswith("cli.py") for f in files) or (self.repo / "pyproject.toml").exists():
+            self._category_state["entrypoints"] = "discovered"
+        if any(f.endswith(".py") for f in files):
+            self._category_state["imports"] = "discovered"
+
+    def _update_category_attempt_state(self, task: AutonomousTask) -> None:
+        title = task.title.lower()
+        if "test" in title:
+            self._category_state["tests"] = "attempted"
+        if "doc" in title:
+            self._category_state["docs"] = "attempted"
+        if "entrypoint" in title or "cli" in title:
+            self._category_state["entrypoints"] = "attempted"
+        if "import" in title:
+            self._category_state["imports"] = "attempted"
+
+    def _enqueue_surface_followups_if_needed(self) -> bool:
+        inserted = False
+        if self._category_state.get("tests") == "discovered":
+            self._insert_followup(
+                Opportunity("Run baseline tests", "followup_tests", 0.99, 0.9, ["tests/"], "tests remain unexamined", "small", "run baseline tests", TaskContract.VALIDATION.value),
+                "system",
+            )
+            self._category_state["tests"] = "attempted"
+            inserted = True
+            self._log("[villani-mode] stop blocked: tests remain unexamined")
+        if self._category_state.get("docs") == "discovered":
+            self._insert_followup(
+                Opportunity("Validate documented commands/examples", "followup_docs", 0.92, 0.78, ["README.md"], "docs remain unexamined", "small", "validate documented commands/examples", TaskContract.INSPECTION.value),
+                "system",
+            )
+            self._category_state["docs"] = "attempted"
+            inserted = True
+        if self._category_state.get("entrypoints") == "discovered":
+            self._insert_followup(
+                Opportunity("Validate CLI entrypoint", "followup_entrypoint", 0.9, 0.76, [], "entrypoints remain unexamined", "small", "validate CLI entrypoint", TaskContract.VALIDATION.value),
+                "system",
+            )
+            self._category_state["entrypoints"] = "attempted"
+            inserted = True
+        return inserted
+
+    def _stop_reason_from_categories(self) -> str:
+        self._stop_rationale = {
+            "tests": self._category_state.get("tests", "unknown"),
+            "docs": self._category_state.get("docs", "unknown"),
+            "entrypoints": self._category_state.get("entrypoints", "unknown"),
+            "improvements": "exhausted",
+        }
+        return (
+            "No remaining opportunities above confidence threshold; "
+            f"tests examined: {self._stop_rationale['tests']}; "
+            f"docs examined: {self._stop_rationale['docs']}; "
+            f"entrypoints examined: {self._stop_rationale['entrypoints']}."
+        )
 
     def _git_changed_files(self) -> list[str]:
         proc = subprocess.run(

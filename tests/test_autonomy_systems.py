@@ -156,9 +156,8 @@ def test_done_reason_below_threshold_is_distinct(tmp_path: Path) -> None:
 
     summary = controller.run()
 
-    assert (
-        summary["done_reason"]
-        == "No remaining opportunities above confidence threshold."
+    assert summary["done_reason"].startswith(
+        "No remaining opportunities above confidence threshold"
     )
 
 

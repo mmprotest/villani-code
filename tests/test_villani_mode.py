@@ -430,9 +430,8 @@ def test_takeover_stops_when_all_remaining_work_is_terminal(tmp_path: Path) -> N
     )
     controller.planner = SequencedPlanner([[_op("Task A", confidence=0.6)]])
     summary = controller.run()
-    assert (
-        summary["done_reason"]
-        == "No remaining opportunities above confidence threshold."
+    assert summary["done_reason"].startswith(
+        "No remaining opportunities above confidence threshold"
     )
 
 

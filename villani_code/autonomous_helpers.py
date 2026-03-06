@@ -11,6 +11,11 @@ def build_wave_candidates(controller: Any, discovered: list[Opportunity]) -> lis
     dedup: dict[str, Opportunity] = {}
     for op in combined:
         key = controller._task_key_for_opportunity(op)
+        if controller._is_task_satisfied(key):
+            controller._log(f"[villani-mode] selector skipped satisfied task: {op.title}")
+            continue
+        if key in controller._stale_task_keys:
+            continue
         if controller._is_terminal_lineage(key):
             continue
         if op.confidence < controller.takeover_config.min_confidence:
@@ -23,6 +28,12 @@ def build_wave_candidates(controller: Any, discovered: list[Opportunity]) -> lis
 
 def effective_priority(op: Opportunity) -> float:
     score = op.priority * 0.7 + op.confidence * 0.3
+    if op.title == "Run baseline tests":
+        score += 0.45
+    if op.title == "Validate CLI entrypoint":
+        score += 0.35
+    if op.title == "Validate documented commands/examples":
+        score += 0.3
     if op.category == "followup_validation":
         score += 0.3
     elif op.category.startswith("followup_"):
