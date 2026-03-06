@@ -55,6 +55,8 @@ def inject_retrieval_briefing(runner: Any, messages: list[dict[str, Any]]) -> No
     content = last.get("content", [])
     if not isinstance(content, list):
         return
+    if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+        return
     user_text = "\n".join(
         str(b.get("text", "")) for b in content if isinstance(b, dict) and b.get("type") == "text"
     )
