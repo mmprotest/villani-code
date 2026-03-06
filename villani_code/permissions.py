@@ -180,10 +180,13 @@ def classify_bash_command(command: str) -> BashClassification:
 
 def bash_matches(pattern: str, command: str) -> bool:
     # operator-aware token matching to avoid prefix exploits like `&& rm -rf /`.
-    c_tokens = shlex.split(command)
+    try:
+        c_tokens = shlex.split(command)
+        p_tokens = shlex.split(pattern)
+    except ValueError:
+        return False
     if any(t in {"&&", "||", ";", "|"} for t in c_tokens):
         return False
-    p_tokens = shlex.split(pattern)
     if p_tokens == ["*"]:
         return True
     if p_tokens and p_tokens[-1] == "*":

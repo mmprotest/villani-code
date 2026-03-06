@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from villani_code.patch_apply import PatchApplyError, apply_unified_diff
 
@@ -17,7 +17,7 @@ from villani_code.patch_apply import PatchApplyError, apply_unified_diff
 class LsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str = "."
-    ignore: list[str] = [".git", ".venv", "__pycache__"]
+    ignore: list[str] = Field(default_factory=lambda: [".git", ".venv", "__pycache__"])
 
 
 class ReadInput(BaseModel):
@@ -74,7 +74,7 @@ class WebFetchInput(BaseModel):
 
 class GitSimpleInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    args: list[str] = []
+    args: list[str] = Field(default_factory=list)
 
 
 TOOL_MODELS: dict[str, type[BaseModel]] = {
@@ -157,7 +157,9 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
 def _safe_path(repo: Path, raw: str) -> Path:
     path = (repo / raw).resolve()
     repo_resolved = repo.resolve()
-    if not str(path).startswith(str(repo_resolved)):
+    try:
+        path.relative_to(repo_resolved)
+    except ValueError:
         raise ValueError("Path escapes repository")
     return path
 

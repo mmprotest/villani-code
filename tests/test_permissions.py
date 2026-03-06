@@ -41,3 +41,7 @@ def test_public_target_for_exposes_normalized_target(tmp_path: Path):
     cfg = PermissionConfig.from_strings(deny=[], ask=[], allow=[])
     engine = PermissionEngine(cfg, tmp_path)
     assert engine.target_for("Write", {"file_path": "a.txt"}) == "a.txt"
+
+
+def test_bash_matches_malformed_input_fails_closed():
+    assert bash_matches("*", "echo \"unterminated") is False
