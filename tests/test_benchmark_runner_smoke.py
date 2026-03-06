@@ -1,7 +1,6 @@
-from dataclasses import replace
 from pathlib import Path
 
-from villani_code.benchmark.adapters.base import AgentAdapterConfig, AgentRunResult, ValidationResult
+from villani_code.benchmark.adapters.base import AgentAdapterConfig, AgentRunResult
 from villani_code.benchmark.runner import BenchmarkRunner
 
 
@@ -54,3 +53,7 @@ def test_runner_smoke_with_fake_adapter(monkeypatch, tmp_path: Path) -> None:
     )
     assert result["results"]
     assert result["results"][0]["scorecard"]["task_success"] is True
+    output_dir = Path(result["output_dir"])
+    assert (output_dir / "benchmark_results.json").exists()
+    assert (output_dir / "benchmark_results.md").exists()
+    assert (output_dir / "benchmark_results.csv").exists()

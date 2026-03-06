@@ -292,8 +292,18 @@ def benchmark_cmd(
     unsafe: bool = typer.Option(False, "--unsafe"),
     thinking: Optional[str] = typer.Option(None, "--thinking"),
     max_tokens: Optional[int] = typer.Option(None, "--max-tokens"),
+    verbose: bool = typer.Option(True, "--verbose/--no-verbose"),
+    stream_agent_output: bool = typer.Option(True, "--stream-agent-output/--no-stream-agent-output"),
+    quiet: bool = typer.Option(False, "--quiet"),
 ) -> None:
-    runner = BenchmarkRunner(output_dir=output_dir.resolve())
+    if quiet:
+        verbose = False
+        stream_agent_output = False
+    runner = BenchmarkRunner(
+        output_dir=output_dir.resolve(),
+        verbose=verbose,
+        stream_agent_output=stream_agent_output,
+    )
     result = runner.run(
         tasks_dir=tasks_dir.resolve(),
         task_id=task,

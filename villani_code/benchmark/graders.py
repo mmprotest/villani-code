@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 from villani_code.benchmark.adapters.base import ValidationResult
 from villani_code.benchmark.models import BenchmarkTask, ValidationCheckType
 
 
-def execute_validation_checks(task: BenchmarkTask, repo_root: Path) -> list[ValidationResult]:
+def execute_validation_checks(
+    task: BenchmarkTask,
+    repo_root: Path,
+    on_check_start: Callable[[int, object], None] | None = None,
+    on_check_end: Callable[[int, object, ValidationResult], None] | None = None,
+) -> list[ValidationResult]:
     results: list[ValidationResult] = []
     for index, check in enumerate(task.validation_checks):
+        if on_check_start:
+            on_check_start(index, check)
         if check.type == ValidationCheckType.COMMAND:
             cwd = repo_root if check.cwd is None else (repo_root / check.cwd)
             proc = subprocess.run(
@@ -21,27 +29,29 @@ def execute_validation_checks(task: BenchmarkTask, repo_root: Path) -> list[Vali
             )
             success = proc.returncode == check.expect_exit_code
             details = f"expected={check.expect_exit_code} actual={proc.returncode}\n{proc.stdout}\n{proc.stderr}"
-            results.append(
-                ValidationResult(
-                    check_type=check.type.value,
-                    success=success,
-                    details=details,
-                    exit_code=proc.returncode,
-                    check_index=index,
-                )
+            result = ValidationResult(
+                check_type=check.type.value,
+                success=success,
+                details=details,
+                exit_code=proc.returncode,
+                check_index=index,
             )
+            results.append(result)
+            if on_check_end:
+                on_check_end(index, check, result)
             continue
 
         file_path = repo_root / (check.path or "")
         if not file_path.exists():
-            results.append(
-                ValidationResult(
-                    check_type=check.type.value,
-                    success=False,
-                    details=f"File not found: {file_path}",
-                    check_index=index,
-                )
+            result = ValidationResult(
+                check_type=check.type.value,
+                success=False,
+                details=f"File not found: {file_path}",
+                check_index=index,
             )
+            results.append(result)
+            if on_check_end:
+                on_check_end(index, check, result)
             continue
 
         content = file_path.read_text(encoding="utf-8")
@@ -52,14 +62,15 @@ def execute_validation_checks(task: BenchmarkTask, repo_root: Path) -> list[Vali
         else:
             success = substring not in content
             details = f"substring absent={success}"
-        results.append(
-            ValidationResult(
-                check_type=check.type.value,
-                success=success,
-                details=details,
-                check_index=index,
-            )
+        result = ValidationResult(
+            check_type=check.type.value,
+            success=success,
+            details=details,
+            check_index=index,
         )
+        results.append(result)
+        if on_check_end:
+            on_check_end(index, check, result)
     return results
 
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import subprocess
-import time
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AgentAdapter, AgentRunResult
@@ -36,52 +34,26 @@ class OpenCodeAdapter(AgentAdapter):
         if self.config.model:
             command.extend(["--model", self.config.model])
         command.extend(self.config.extra_args)
-        started = time.monotonic()
-        try:
-            proc = subprocess.run(
-                command,
-                cwd=workspace_repo,
-                capture_output=True,
-                text=True,
-                timeout=task.timeout_seconds,
-                check=False,
-            )
-            return AgentRunResult(
-                agent_name=self.name,
-                task_id=task.id,
-                success=proc.returncode == 0,
-                exit_reason=f"exit:{proc.returncode}",
-                elapsed_seconds=time.monotonic() - started,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                changed_files=[],
-                git_diff="",
-                validation_results=[],
-                catastrophic_failure=proc.returncode != 0,
-                tokens_input=None,
-                tokens_output=None,
-                cost_usd=None,
-                raw_artifact_dir=str(artifact_dir),
-                skipped=False,
-                skip_reason=None,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return AgentRunResult(
-                agent_name=self.name,
-                task_id=task.id,
-                success=False,
-                exit_reason="timeout",
-                elapsed_seconds=time.monotonic() - started,
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
-                changed_files=[],
-                git_diff="",
-                validation_results=[],
-                catastrophic_failure=True,
-                tokens_input=None,
-                tokens_output=None,
-                cost_usd=None,
-                raw_artifact_dir=str(artifact_dir),
-                skipped=False,
-                skip_reason=None,
-            )
+
+        proc_result = self.run_command(command, workspace_repo, task.timeout_seconds)
+        return AgentRunResult(
+            agent_name=self.name,
+            task_id=task.id,
+            success=proc_result.exit_code == 0,
+            exit_reason=proc_result.exit_reason,
+            elapsed_seconds=proc_result.elapsed_seconds,
+            stdout=proc_result.stdout,
+            stderr=proc_result.stderr,
+            changed_files=[],
+            git_diff="",
+            validation_results=[],
+            catastrophic_failure=proc_result.catastrophic_failure,
+            tokens_input=None,
+            tokens_output=None,
+            cost_usd=None,
+            raw_artifact_dir=str(artifact_dir),
+            skipped=False,
+            skip_reason=None,
+            exit_code=proc_result.exit_code,
+            command=command,
+        )

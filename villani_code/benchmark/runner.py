@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -20,16 +19,27 @@ from villani_code.benchmark.graders import (
     compute_unnecessary_files_touched,
     execute_validation_checks,
 )
+from villani_code.benchmark.logging import BenchmarkLogger, render_command
 from villani_code.benchmark.models import BenchmarkTask
-from villani_code.benchmark.reporting import persist_reports
+from villani_code.benchmark.reporting import aggregate_by_agent, persist_reports
 from villani_code.benchmark.task_loader import load_benchmark_tasks
 from villani_code.benchmark.utils import utc_timestamp_slug, write_json
 
 
 class BenchmarkRunner:
-    def __init__(self, output_dir: Path, environment: BenchmarkEnvironment | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        environment: BenchmarkEnvironment | None = None,
+        logger: BenchmarkLogger | None = None,
+        verbose: bool = True,
+        stream_agent_output: bool = True,
+    ) -> None:
         self.output_dir = output_dir
         self.environment = environment or BenchmarkEnvironment()
+        self.logger = logger or BenchmarkLogger(enabled=verbose)
+        self.verbose = verbose
+        self.stream_agent_output = stream_agent_output
 
     def run(
         self,
@@ -46,12 +56,19 @@ class BenchmarkRunner:
         max_tokens: int | None = None,
         seed: int | None = None,
     ) -> dict[str, Any]:
+        self.logger.info(f"Benchmark started for repo: {repo_path}")
         tasks = load_benchmark_tasks(tasks_dir, task_id=task_id)
+        self.logger.info(f"Loaded {len(tasks)} tasks and {len(agents)} agents")
         run_root = self.output_dir / utc_timestamp_slug()
         run_root.mkdir(parents=True, exist_ok=True)
         result_rows: list[dict[str, Any]] = []
 
-        for agent_name in agents:
+        total_tasks = len(tasks)
+        total_agents = len(agents)
+        total_runs = total_tasks * total_agents
+
+        for agent_index, agent_name in enumerate(agents, start=1):
+            self.logger.info(f"{self.logger.agent_label(agent_index, total_agents, agent_name)}")
             adapter = self._build_adapter(
                 agent_name,
                 AgentAdapterConfig(
@@ -63,23 +80,56 @@ class BenchmarkRunner:
                     unsafe=unsafe,
                     thinking=thinking,
                     max_tokens=max_tokens,
+                    stream_agent_output=self.stream_agent_output,
+                    on_output_line=self.logger.agent_output,
+                    on_command_start=lambda run_agent, cmd: self.logger.info(f"Running command ({run_agent}): {render_command(cmd)}"),
                 ),
             )
-            for task in tasks:
+            agent_rows: list[dict[str, Any]] = []
+            for task_index, task in enumerate(tasks, start=1):
+                self.logger.info(f"Starting {self.logger.task_label(task_index, total_tasks, task.id)}")
                 task_timeout = timeout_seconds or task.timeout_seconds
                 task = task.model_copy(update={"timeout_seconds": task_timeout})
+                self.logger.info(
+                    f"Creating workspace for agent={agent_name}, task={task.id} ({task_index}/{total_tasks}, {agent_index}/{total_agents})"
+                )
                 workspace = self.environment.create_workspace(repo_path, task.repo_git_ref)
+                self.logger.info(f"Workspace ready: {workspace.work_repo}")
                 artifact_dir = run_root / agent_name / task.id
                 artifact_dir.mkdir(parents=True, exist_ok=True)
 
+                self.logger.info(f"Agent run start: agent={agent_name} task={task.id}")
                 run_result = adapter.run_task(task, workspace.work_repo, artifact_dir)
+                if run_result.skipped:
+                    self.logger.warn(
+                        f"Skipping agent '{agent_name}' for task '{task.id}': {run_result.skip_reason or run_result.exit_reason}"
+                    )
+                self.logger.info(
+                    f"Agent finished: {run_result.exit_reason} in {run_result.elapsed_seconds:.1f}s"
+                )
+
+                self.logger.info("Collecting changed files")
                 run_result.changed_files = self.environment.collect_changed_files(workspace.work_repo)
                 run_result.git_diff = self.environment.collect_git_diff(workspace.work_repo)
-                validation_results = execute_validation_checks(task, workspace.work_repo)
+                self.logger.info(f"Changed files collected: {len(run_result.changed_files)}")
+
+                self.logger.info("Validation start")
+                total_checks = len(task.validation_checks)
+                validation_results = execute_validation_checks(
+                    task,
+                    workspace.work_repo,
+                    on_check_start=lambda idx, check: self.logger.info(
+                        f"Validation {idx + 1}/{total_checks} start: type={check.type.value}"
+                    ),
+                    on_check_end=lambda idx, _check, result: self.logger.info(
+                        f"Validation {idx + 1}/{total_checks} {'passed' if result.success else 'failed'}: exit={result.exit_code}"
+                    ),
+                )
                 run_result.validation_results = validation_results
                 validation_success = all(item.success for item in validation_results)
                 task_success = validation_success and not run_result.skipped
 
+                self.logger.info("Scoring start")
                 unnecessary = compute_unnecessary_files_touched(run_result.changed_files, task.expected_touched_paths)
                 forbidden = compute_forbidden_files_touched(run_result.changed_files, task.forbidden_touched_paths)
                 catastrophic = run_result.catastrophic_failure or run_result.exit_reason == "timeout"
@@ -89,6 +139,9 @@ class BenchmarkRunner:
                     unnecessary_files_touched_count=len(unnecessary),
                     catastrophic_failure=catastrophic,
                     elapsed_seconds=run_result.elapsed_seconds,
+                )
+                self.logger.info(
+                    f"Scoring done: {composite:.1f} | changed={len(run_result.changed_files)} unnecessary={len(unnecessary)} forbidden={len(forbidden)}"
                 )
 
                 scorecard = {
@@ -107,17 +160,27 @@ class BenchmarkRunner:
                     "composite_score": composite,
                 }
 
+                self.logger.info("Artifact persistence start")
                 self._persist_artifacts(artifact_dir, run_result, scorecard)
-                result_rows.append(
-                    {
-                        "agent_name": run_result.agent_name,
-                        "task_id": run_result.task_id,
-                        "exit_reason": run_result.exit_reason,
-                        "skip_reason": run_result.skip_reason,
-                        "changed_files": run_result.changed_files,
-                        "scorecard": scorecard,
-                    }
+                self.logger.info(f"Wrote artifacts: {artifact_dir}")
+                row = {
+                    "agent_name": run_result.agent_name,
+                    "task_id": run_result.task_id,
+                    "exit_reason": run_result.exit_reason,
+                    "skip_reason": run_result.skip_reason,
+                    "changed_files": run_result.changed_files,
+                    "scorecard": scorecard,
+                }
+                result_rows.append(row)
+                agent_rows.append(row)
+                self.logger.info(
+                    "Task summary: "
+                    f"agent={run_result.agent_name} task={run_result.task_id} exit={run_result.exit_reason} "
+                    f"validation={'pass' if validation_success else 'fail'} success={task_success} "
+                    f"elapsed={run_result.elapsed_seconds:.1f}s score={composite:.1f} changed={len(run_result.changed_files)}"
                 )
+
+            self._log_agent_summary(agent_name, agent_rows)
 
         metadata = {
             "model": model,
@@ -128,8 +191,30 @@ class BenchmarkRunner:
             "repo_path": str(repo_path),
         }
         persist_reports(run_root, metadata, result_rows)
+        agg = aggregate_by_agent(result_rows)
+        best_agent = None
+        if agg:
+            best_agent = max(agg.items(), key=lambda item: item[1].get("avg_composite_score", 0.0))[0]
+        self.logger.info(
+            f"Final summary: output={run_root} tasks={total_tasks} agents={total_agents} runs={total_runs}"
+            + (f" best_agent={best_agent}" if best_agent else "")
+        )
         self.environment.cleanup()
         return {"output_dir": str(run_root), "metadata": metadata, "results": result_rows}
+
+    def _log_agent_summary(self, agent_name: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            self.logger.info(f"Agent summary: {agent_name} total_tasks=0 success=0 skipped=0 avg_score=0.0 avg_elapsed=0.0s")
+            return
+        total_tasks = len(rows)
+        success_count = sum(1 for row in rows if row["scorecard"]["task_success"])
+        skip_count = sum(1 for row in rows if row["scorecard"].get("skipped"))
+        avg_score = sum(float(row["scorecard"].get("composite_score", 0.0)) for row in rows) / total_tasks
+        avg_elapsed = sum(float(row["scorecard"].get("elapsed_seconds", 0.0)) for row in rows) / total_tasks
+        self.logger.info(
+            f"Agent summary: {agent_name} total_tasks={total_tasks} success={success_count} "
+            f"skipped={skip_count} avg_score={avg_score:.1f} avg_elapsed={avg_elapsed:.1f}s"
+        )
 
     def _persist_artifacts(self, artifact_dir: Path, run_result: Any, scorecard: dict[str, Any]) -> None:
         (artifact_dir / "stdout.txt").write_text(run_result.stdout, encoding="utf-8")
