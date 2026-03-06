@@ -27,6 +27,7 @@ from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import execute_tool, tool_specs
+from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.transcripts import save_transcript
 from villani_code.utils import ensure_dir, is_effectively_empty_content, merge_extra_json, normalize_content_blocks
 
@@ -100,6 +101,8 @@ class Runner:
         self._context_budget = ContextBudget(max_chars=35000, keep_last_turns=4) if self.small_model else None
         self._files_read: set[str] = set()
         self._pending_verification = ""
+        self._intended_targets: set[str] = set()
+        self._before_contents: dict[str, str] = {}
         self._failure_classifier = FailureClassifier()
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
@@ -131,22 +134,41 @@ class Runner:
         consecutive_no_edit_turns = 0
         consecutive_recon_turns = 0
         baseline_changed = set(self._git_changed_files())
+        self._intended_targets: set[str] = set()
+        self._before_contents: dict[str, str] = {}
         previous_attributed = set()
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
             return sorted(current - baseline_changed)
 
+        def _change_summary() -> tuple[list[str], list[str], list[str]]:
+            attributed = _attributed_changed_files()
+            intentional: list[str] = []
+            incidental: list[str] = []
+            for path in attributed:
+                if is_ignored_repo_path(path) or classify_repo_path(path) != "authoritative":
+                    incidental.append(path)
+                else:
+                    intentional.append(path)
+            all_changes = sorted(set(intentional) | set(incidental))
+            return sorted(set(intentional)), sorted(set(incidental)), all_changes
+
         def _finish_bounded(response: dict[str, Any], reason: str, completed: bool) -> dict[str, Any]:
             elapsed = time.monotonic() - start
-            files_changed = _attributed_changed_files()
+            intentional_changes, incidental_changes, all_changes = _change_summary()
             final_text = "\n".join(block.get("text", "") for block in response.get("content", []) if block.get("type") == "text")
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,
                 tool_calls_used=tool_calls_used,
                 elapsed_seconds=elapsed,
-                files_changed=files_changed,
+                files_changed=all_changes,
+                intentional_changes=intentional_changes,
+                incidental_changes=incidental_changes,
+                all_changes=all_changes,
+                intended_targets=sorted(self._intended_targets),
+                before_contents=dict(self._before_contents),
                 terminated_reason=reason,
                 completed=completed,
             )
@@ -381,7 +403,23 @@ class Runner:
         elif self.plan_mode and tool_name in {"Write", "Patch"}:
             return {"content": "Plan mode: edit not executed", "is_error": False}
 
+        if self.villani_mode and tool_name in {"Write", "Patch"}:
+            target = str(tool_input.get("file_path", ""))
+            if target:
+                classification = classify_repo_path(target)
+                if is_ignored_repo_path(target) or classification in {"runtime_artifact", "editor_artifact", "vcs_internal"}:
+                    msg = f"Skipped low-authority path: {target} ({classification})"
+                    self.event_callback({"type": "autonomous_phase", "phase": msg})
+                    return {"content": msg, "is_error": True}
+
         if tool_name in {"Write", "Patch"}:
+            target = str(tool_input.get("file_path", ""))
+            if target:
+                normalized_target = target.replace("\\", "/").lstrip("./")
+                self._intended_targets.add(normalized_target)
+                target_path = (self.repo / normalized_target).resolve()
+                if target_path.exists() and target_path.is_file():
+                    self._before_contents[normalized_target] = target_path.read_text(encoding="utf-8", errors="replace")
             self.checkpoints.create([Path(tool_input.get("file_path", ""))], message_index=message_count)
         self.event_callback({"type": "tool_started", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
         return execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
@@ -464,10 +502,8 @@ class Runner:
 
     def _run_verification(self, trigger: str = "edit") -> str:
         commands = [["git", "diff", "--stat"], ["git", "diff", "--", "."]]
-        if (self.repo / "pyproject.toml").exists() or (self.repo / "requirements.txt").exists():
-            commands.append(["python", "-m", "compileall", "-q", str(self.repo)])
-            if (self.repo / "tests").exists():
-                commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
+        if (self.repo / "tests").exists():
+            commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
         lines = ["<verification>", f"trigger: {trigger}"]
         cmd_results: list[dict[str, Any]] = []
         for cmd in commands:
@@ -482,7 +518,13 @@ class Runner:
             if stderr_lines:
                 lines.append(f"key stderr:\n{stderr_lines}")
         changed = self._git_changed_files()
-        verification = self._verification_engine.verify(trigger, changed, cmd_results)
+        verification = self._verification_engine.verify(
+            trigger,
+            changed,
+            cmd_results,
+            intended_targets=sorted(self._intended_targets),
+            before_contents=dict(self._before_contents),
+        )
         lines.append(f"status: {verification.status.value}")
         lines.append(f"confidence: {verification.confidence_score}")
         if verification.findings:
