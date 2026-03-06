@@ -6,7 +6,9 @@
   height: 1fr;
   border: solid #000000;
   overflow-y: auto;
-  scrollbar-size: 2 2;
+  overflow-x: hidden;
+  text-wrap: wrap;
+  scrollbar-size: 0 2;
 }
 
 #approval-bar {
