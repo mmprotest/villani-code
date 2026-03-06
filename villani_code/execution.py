@@ -19,6 +19,11 @@ class ExecutionResult:
     tool_calls_used: int
     elapsed_seconds: float
     files_changed: list[str]
+    intentional_changes: list[str]
+    incidental_changes: list[str]
+    all_changes: list[str]
+    intended_targets: list[str]
+    before_contents: dict[str, str]
     terminated_reason: str
     completed: bool
 
@@ -33,4 +38,3 @@ VILLANI_TASK_BUDGET = ExecutionBudget(
     max_no_edit_turns=8,
     max_reconsecutive_recon_turns=6,
 )
-

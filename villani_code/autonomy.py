@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from villani_code.repo_rules import classify_repo_path, is_authoritative_doc_path, is_ignored_repo_path
+
 
 class FindingCategory(str, Enum):
     REGRESSION = "regression"
@@ -49,14 +51,18 @@ class VerificationResult:
 class VerificationEngine:
     """Compact adversarial verifier for changed files and command outcomes."""
 
-    def __init__(self, repo: Path):
+    def __init__(self, repo: Path, logger: Any | None = None):
         self.repo = repo
+        self._logger = logger or (lambda _msg: None)
 
     def verify(
         self,
         goal: str,
         changed_files: list[str],
         command_results: list[dict[str, Any]] | None = None,
+        intended_targets: list[str] | None = None,
+        target_existence_expectation: dict[str, bool] | None = None,
+        before_contents: dict[str, str] | None = None,
     ) -> VerificationResult:
         findings: list[VerificationFinding] = []
         command_results = command_results or []
@@ -64,10 +70,17 @@ class VerificationEngine:
             str(c.get("command", "")) for c in command_results if c.get("command")
         ]
         examined: list[str] = []
+        intended_targets = [self._normalize_repo_path(p) for p in (intended_targets or changed_files)]
+        target_existence_expectation = {self._normalize_repo_path(k): v for k, v in (target_existence_expectation or {}).items()}
+        before_contents = {self._normalize_repo_path(k): v for k, v in (before_contents or {}).items()}
+        git_diff_targets = set(self._git_diff_name_only())
 
-        for rel in changed_files[:12]:
+        for rel in intended_targets[:12]:
+            if is_ignored_repo_path(rel):
+                continue
+            expected_to_exist = target_existence_expectation.get(rel, True)
             path = self.repo / rel
-            if not path.exists() or not path.is_file():
+            if expected_to_exist and (not path.exists() or not path.is_file()):
                 findings.append(
                     VerificationFinding(
                         FindingCategory.INCOMPLETE_EDIT,
@@ -78,6 +91,25 @@ class VerificationEngine:
                 )
                 continue
             examined.append(rel)
+            if expected_to_exist and rel in before_contents:
+                current = path.read_text(encoding="utf-8", errors="replace")
+                if current == before_contents[rel] and rel not in git_diff_targets:
+                    findings.append(
+                        VerificationFinding(
+                            FindingCategory.FAILED_ASSUMPTION,
+                            "No effective change detected for intended target",
+                            rel,
+                            "medium",
+                        )
+                    )
+                continue
+
+        for rel in changed_files[:12]:
+            if is_ignored_repo_path(rel):
+                continue
+            path = self.repo / rel
+            if not path.exists() or not path.is_file():
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
             if "TODO" in text or "FIXME" in text:
                 findings.append(
@@ -145,6 +177,17 @@ class VerificationEngine:
             status = VerificationStatus.UNCERTAIN
             summary = "Adversarial review found non-blocking risks."
 
+        findings = self._reconcile_findings(findings, intended_targets, before_contents, git_diff_targets)
+        if not findings:
+            status = VerificationStatus.PASS
+            summary = f"Adversarial review passed for {len(examined)} file(s)."
+        elif any(f.severity == "high" for f in findings):
+            status = VerificationStatus.FAIL
+            summary = "Adversarial review found high-risk issues."
+        else:
+            status = VerificationStatus.UNCERTAIN
+            summary = "Adversarial review found non-blocking risks."
+
         return VerificationResult(
             status=status,
             confidence_score=round(confidence, 2),
@@ -154,6 +197,43 @@ class VerificationEngine:
             repair_attempted=False,
             summary=summary,
         )
+
+    def _git_diff_name_only(self) -> list[str]:
+        proc = subprocess.run(["git", "diff", "--name-only"], cwd=self.repo, capture_output=True, text=True)
+        return [self._normalize_repo_path(line.strip()) for line in proc.stdout.splitlines() if line.strip()]
+
+    def _reconcile_findings(
+        self,
+        findings: list[VerificationFinding],
+        intended_targets: list[str],
+        before_contents: dict[str, str],
+        git_diff_targets: set[str],
+    ) -> list[VerificationFinding]:
+        reconciled: list[VerificationFinding] = []
+        intended_set = set(intended_targets)
+        for finding in findings:
+            rel = self._normalize_repo_path(finding.file_path) if finding.file_path else None
+            if finding.category == FindingCategory.INCOMPLETE_EDIT and rel and rel in intended_set:
+                path = self.repo / rel
+                if path.exists():
+                    self._logger(f"Verification finding removed due to direct evidence: {finding.category.value}: {finding.message}")
+                    continue
+            if finding.category == FindingCategory.FAILED_ASSUMPTION and rel and rel in intended_set:
+                path = self.repo / rel
+                before = before_contents.get(rel)
+                if path.exists() and before is not None:
+                    current = path.read_text(encoding="utf-8", errors="replace")
+                    if current != before or rel in git_diff_targets:
+                        self._logger(f"Verification finding removed due to direct evidence: {finding.category.value}: {finding.message}")
+                        continue
+            reconciled.append(finding)
+        return reconciled
+
+    @staticmethod
+    def _normalize_repo_path(path: str | None) -> str:
+        if not path:
+            return ""
+        return path.replace("\\", "/").lstrip("./")
 
 
 class FailureCategory(str, Enum):
@@ -271,7 +351,7 @@ class TakeoverPlanner:
         if rg_path:
             try:
                 result = subprocess.run(
-                    ["rg", "-n", "TODO|FIXME", "."],
+                    ["rg", "-n", "TODO|FIXME", ".", "--glob", "!.git/**", "--glob", "!.venv/**", "--glob", "!venv/**", "--glob", "!**/__pycache__/**", "--glob", "!**/.pytest_cache/**", "--glob", "!**/.mypy_cache/**", "--glob", "!**/.ruff_cache/**", "--glob", "!**/.ipynb_checkpoints/**", "--glob", "!**/.vscode/**", "--glob", "!**/.idea/**", "--glob", "!**/.villani_code/**", "--glob", "!build/**", "--glob", "!dist/**", "--glob", "!node_modules/**"],
                     cwd=self.repo,
                     capture_output=True,
                     text=True,
@@ -285,7 +365,10 @@ class TakeoverPlanner:
         for path in self.repo.rglob("*"):
             if len(matches) >= 50:
                 break
-            if ".git" in path.parts or not path.is_file():
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.repo).as_posix()
+            if is_ignored_repo_path(rel):
                 continue
             try:
                 if path.stat().st_size > 1_000_000:
@@ -293,7 +376,6 @@ class TakeoverPlanner:
                 with path.open("r", encoding="utf-8", errors="ignore") as f:
                     for line_no, line in enumerate(f, start=1):
                         if "TODO" in line or "FIXME" in line:
-                            rel = path.relative_to(self.repo).as_posix()
                             matches.append(f"{rel}:{line_no}: {line.strip()}")
                             if len(matches) >= 50:
                                 break
@@ -303,11 +385,7 @@ class TakeoverPlanner:
         return matches
 
     def build_repo_summary(self) -> str:
-        files = [
-            p
-            for p in self.repo.rglob("*")
-            if p.is_file() and ".git" not in p.as_posix()
-        ]
+        files = [p for p in self.repo.rglob("*") if p.is_file() and not is_ignored_repo_path(p.relative_to(self.repo).as_posix())]
         py = sum(1 for p in files if p.suffix == ".py")
         tests = sum(1 for p in files if "tests" in p.parts)
         md = sum(1 for p in files if p.suffix == ".md")
@@ -342,19 +420,46 @@ class TakeoverPlanner:
                     "resolve highest-signal TODO",
                 )
             )
-        if (self.repo / "README.md").exists():
+        docs = self._discover_authoritative_docs()
+        if docs and self._has_authoritative_docs_drift(docs):
             ops.append(
                 Opportunity(
                     "Audit docs drift",
                     "stale_docs",
                     0.55,
                     0.64,
-                    ["README.md"],
-                    "README present",
+                    docs,
+                    "Authoritative docs may not match current module layout",
                     "small",
                     "sync docs with current CLI",
                 )
             )
+        ops = [op for op in ops if self._is_authoritative_opportunity(op)]
         return sorted(
             ops, key=lambda o: (o.priority * 0.7 + o.confidence * 0.3), reverse=True
         )
+
+    def _discover_authoritative_docs(self) -> list[str]:
+        docs: list[str] = []
+        for path in self.repo.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.repo).as_posix()
+            if is_authoritative_doc_path(rel):
+                docs.append(rel)
+        return sorted(docs)
+
+    def _has_authoritative_docs_drift(self, docs: list[str]) -> bool:
+        if not docs:
+            return False
+        readme = self.repo / "README.md"
+        src = self.repo / "villani_code"
+        if readme.exists() and src.exists() and any(p.name == "__init__.py" for p in src.rglob("__init__.py")):
+            text = readme.read_text(encoding="utf-8", errors="replace").lower()
+            return "villani" not in text
+        return False
+
+    def _is_authoritative_opportunity(self, op: Opportunity) -> bool:
+        if op.category == "stale_docs":
+            return all(is_authoritative_doc_path(p) for p in op.affected_files)
+        return not any(is_ignored_repo_path(p) or classify_repo_path(p) != "authoritative" for p in op.affected_files)

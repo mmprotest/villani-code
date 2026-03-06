@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from villani_code.autonomy import FailureClassifier, Opportunity, TakeoverConfig, TakeoverPlanner, TakeoverState, VerificationEngine, VerificationStatus
 from villani_code.execution import VILLANI_TASK_BUDGET
+from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 
 
 @dataclass(slots=True)
@@ -38,6 +39,10 @@ class AutonomousTask:
     status: str = "pending"
     outcome: str = ""
     files_changed: list[str] = field(default_factory=list)
+    intentional_changes: list[str] = field(default_factory=list)
+    incidental_changes: list[str] = field(default_factory=list)
+    intended_targets: list[str] = field(default_factory=list)
+    before_contents: dict[str, str] = field(default_factory=dict)
     verification_results: list[dict[str, Any]] = field(default_factory=list)
     terminated_reason: str = ""
     turns_used: int = 0
@@ -58,7 +63,7 @@ class VillaniModeController:
         self.attempted: list[AutonomousTask] = []
         self._attempted_titles: set[str] = set()
         self.planner = TakeoverPlanner(self.repo)
-        self.verifier = VerificationEngine(self.repo)
+        self.verifier = VerificationEngine(self.repo, logger=self._log)
         self.failure_classifier = FailureClassifier()
 
     def run(self) -> dict[str, Any]:
@@ -84,14 +89,18 @@ class VillaniModeController:
                     rationale=op.evidence,
                     priority=op.priority,
                     confidence=op.confidence,
-                    verification_plan=["python -m compileall -q ."] if (self.repo / "pyproject.toml").exists() else [],
+                    verification_plan=["pytest -q tests/test_runner_defaults.py"] if (self.repo / "tests").exists() else [],
                 )
                 self._attempted_titles.add(task.title)
                 self._execute_task(task)
                 task.files_changed = self._git_changed_files()
-                wave_files.update(task.files_changed)
+                task.intentional_changes, task.incidental_changes, _ = self._split_changes(task.files_changed)
+                wave_files.update(task.intentional_changes)
+                self._emit("autonomous_phase", phase=f"Intentional changes: {', '.join(task.intentional_changes) if task.intentional_changes else "[]"}")
+                if task.incidental_changes:
+                    self._emit("autonomous_phase", phase=f"Incidental changes: {', '.join(task.incidental_changes)}")
 
-                verification = self.verifier.verify(op.proposed_next_action, task.files_changed, task.verification_results)
+                verification = self.verifier.verify(op.proposed_next_action, task.intentional_changes, task.verification_results, intended_targets=task.intended_targets, before_contents=task.before_contents)
                 task.verification_results.append({"summary": verification.summary, "status": verification.status.value, "confidence": verification.confidence_score, "findings": [f"{f.category.value}: {f.message}" for f in verification.findings]})
                 if verification.status in {VerificationStatus.PASS, VerificationStatus.UNCERTAIN}:
                     task.status = "passed" if verification.status == VerificationStatus.PASS else "uncertain"
@@ -113,7 +122,7 @@ class VillaniModeController:
         return self._build_takeover_summary(state, "Reached maximum configured takeover waves.")
 
     def inspect_repo(self) -> RepoSnapshot:
-        files = sorted(p.relative_to(self.repo).as_posix() for p in self.repo.rglob("*") if p.is_file() and ".git/" not in p.as_posix())
+        files = sorted(p.relative_to(self.repo).as_posix() for p in self.repo.rglob("*") if p.is_file() and not is_ignored_repo_path(p.relative_to(self.repo).as_posix()))
         key = [f for f in files if f in {"README.md", "pyproject.toml", "getting-started.md"} or f.startswith("villani_code/")][:40]
         docs = [f for f in files if f.startswith("docs/") or f.endswith(".md")][:40]
         tests = [f for f in files if f.startswith("tests/")][:80]
@@ -150,7 +159,11 @@ class VillaniModeController:
         task.turns_used = int(execution.get("turns_used", 0))
         task.tool_calls_used = int(execution.get("tool_calls_used", 0))
         task.elapsed_seconds = float(execution.get("elapsed_seconds", 0.0))
-        task.files_changed = list(execution.get("files_changed", []))
+        task.files_changed = list(execution.get("all_changes", execution.get("files_changed", [])))
+        task.intentional_changes = list(execution.get("intentional_changes", []))
+        task.incidental_changes = list(execution.get("incidental_changes", []))
+        task.intended_targets = list(execution.get("intended_targets", []))
+        task.before_contents = dict(execution.get("before_contents", {}))
         task.verification_results = self._extract_commands(result)
         task.completed = task.terminated_reason == "completed"
         task.status = "completed" if task.completed else "stopped"
@@ -186,6 +199,8 @@ class VillaniModeController:
                     "status": t.status,
                     "verification": t.verification_results,
                     "files_changed": t.files_changed,
+                    "intentional_changes": t.intentional_changes,
+                    "incidental_changes": t.incidental_changes,
                     "outcome": t.outcome[:1200],
                     "terminated_reason": t.terminated_reason,
                     "turns_used": t.turns_used,
@@ -196,6 +211,8 @@ class VillaniModeController:
                 for t in self.attempted
             ],
             "files_changed": self._git_changed_files(),
+            "intentional_changes": sorted({p for t in self.attempted for p in t.intentional_changes}),
+            "incidental_changes": sorted({p for t in self.attempted for p in t.incidental_changes}),
             "blockers": [t.title for t in self.attempted if t.status == "blocked"],
             "done_reason": done_reason,
             "completed_waves": state.completed_waves,
@@ -204,17 +221,17 @@ class VillaniModeController:
 
     def _detect_tooling_commands(self, files: list[str]) -> list[str]:
         commands: list[str] = []
-        if "pyproject.toml" in files:
-            commands.append("python -m compileall -q .")
         if any(f.startswith("tests/") for f in files):
             commands.append("pytest -q")
-        return commands or ["python -m compileall -q ."]
+        return commands or ["git diff --stat"]
 
     def _todo_hits(self, files: list[str]) -> list[str]:
         hits: list[str] = []
         for rel in files:
             if len(hits) >= 20:
                 break
+            if is_ignored_repo_path(rel):
+                continue
             if not rel.endswith((".py", ".md", ".txt")):
                 continue
             path = self.repo / rel
@@ -244,6 +261,18 @@ class VillaniModeController:
             changed.append(line[3:].strip())
         return changed
 
+
+    def _split_changes(self, files: list[str]) -> tuple[list[str], list[str], list[str]]:
+        intentional: list[str] = []
+        incidental: list[str] = []
+        for path in files:
+            if is_ignored_repo_path(path) or classify_repo_path(path) != "authoritative":
+                incidental.append(path)
+            else:
+                intentional.append(path)
+        all_changes = sorted(set(intentional) | set(incidental))
+        return sorted(set(intentional)), sorted(set(incidental)), all_changes
+
     def _transcript_contains_denied(self, result: dict[str, Any]) -> bool:
         transcript = result.get("transcript", {})
         for tool_result in transcript.get("tool_results", []):
@@ -251,6 +280,9 @@ class VillaniModeController:
             if "Denied by permission policy" in content or "Refusing command" in content:
                 return True
         return False
+
+    def _log(self, message: str) -> None:
+        self._emit("autonomous_phase", phase=message)
 
     def _emit(self, event_type: str, **payload: Any) -> None:
         event = {"type": event_type}
@@ -273,6 +305,10 @@ class VillaniModeController:
         lines.append(f"Done reason: {summary.get('done_reason', '')}")
         lines.append(f"Blockers: {json.dumps(summary.get('blockers', []))}")
         lines.append(f"Files changed: {json.dumps(summary.get('files_changed', []))}")
+        lines.append(f"Intentional changes: {json.dumps(summary.get('intentional_changes', []))}")
+        incidental = summary.get('incidental_changes', [])
+        if incidental:
+            lines.append(f"Incidental changes: {json.dumps(incidental)}")
         for step in summary.get("recommended_next_steps", []):
             lines.append(f"Next: {step}")
         return "\n".join(lines)
