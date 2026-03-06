@@ -131,6 +131,13 @@ class Runner:
         self._pending_verification = ""
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
+        self._current_verification_targets: set[str] = set()
+        self._current_verification_before_contents: dict[str, str] = {}
+        self._verification_baseline_changed: set[str] = set()
+        self._last_verification_fingerprint = ""
+        self._repeated_stale_verification_count = 0
+        self._last_verification_intentional: set[str] = set()
+        self._last_verification_artifact_count = 0
         self._failure_classifier = FailureClassifier()
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
@@ -176,8 +183,15 @@ class Runner:
         consecutive_no_edit_turns = 0
         consecutive_recon_turns = 0
         baseline_changed = set(self._git_changed_files())
+        self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
+        self._current_verification_targets: set[str] = set()
+        self._current_verification_before_contents: dict[str, str] = {}
+        self._last_verification_fingerprint = ""
+        self._repeated_stale_verification_count = 0
+        self._last_verification_intentional = set()
+        self._last_verification_artifact_count = 0
         previous_attributed = set()
 
         def _attributed_changed_files() -> list[str]:
@@ -677,11 +691,13 @@ class Runner:
             if target:
                 normalized_target = target.replace("\\", "/").lstrip("./")
                 self._intended_targets.add(normalized_target)
+                self._current_verification_targets = {normalized_target}
+                self._current_verification_before_contents = {}
                 target_path = (self.repo / normalized_target).resolve()
                 if target_path.exists() and target_path.is_file():
-                    self._before_contents[normalized_target] = target_path.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
+                    before_text = target_path.read_text(encoding="utf-8", errors="replace")
+                    self._before_contents[normalized_target] = before_text
+                    self._current_verification_before_contents[normalized_target] = before_text
             self.checkpoints.create(
                 [Path(tool_input.get("file_path", ""))], message_index=message_count
             )
@@ -754,19 +770,27 @@ class Runner:
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> str | None:
         if tool_name in {"Write", "Patch"}:
-            fp = str(tool_input.get("file_path", ""))
-            if fp and fp not in self._files_read:
-                read_result = execute_tool(
-                    "Read",
-                    {"file_path": fp, "max_bytes": 8000},
-                    self.repo,
-                    unsafe=self.unsafe,
-                )
-                if read_result.get("is_error"):
-                    return f"Read-before-edit policy: failed to auto-read {fp}. Read it explicitly before editing."
-                self._files_read.add(fp)
+            fp = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+            if fp:
+                path = (self.repo / fp).resolve()
+                if is_ignored_repo_path(fp) or classify_repo_path(fp) != "authoritative":
+                    return f"Small-model mode policy: target path is not authoritative: {fp}."
+                if tool_name == "Patch" and not path.exists():
+                    return f"Read-before-edit policy: cannot patch missing file {fp}. Use Write to create it first."
+                if tool_name == "Write" and not path.exists():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                if path.exists() and fp not in self._files_read:
+                    read_result = execute_tool(
+                        "Read",
+                        {"file_path": fp, "max_bytes": 8000},
+                        self.repo,
+                        unsafe=self.unsafe,
+                    )
+                    if read_result.get("is_error"):
+                        return f"Read-before-edit policy: failed to auto-read {fp}. Read it explicitly before editing."
+                    self._files_read.add(fp)
         if tool_name == "Write":
-            file_path = str(tool_input.get("file_path", ""))
+            file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
             path = (self.repo / file_path).resolve()
             if path.exists() and path.is_file():
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -795,9 +819,23 @@ class Runner:
         return result
 
     def _run_verification(self, trigger: str = "edit") -> str:
-        commands = [["git", "diff", "--stat"], ["git", "diff", "--", "."]]
-        if (self.repo / "tests").exists():
+        current_changed = set(self._git_changed_files())
+        attributed_changed = sorted(current_changed - self._verification_baseline_changed)
+        attributed_intentional: list[str] = []
+        attributed_incidental: list[str] = []
+        for path in attributed_changed:
+            if is_ignored_repo_path(path) or classify_repo_path(path) != "authoritative":
+                attributed_incidental.append(path)
+            else:
+                attributed_intentional.append(path)
+
+        commands: list[list[str]] = []
+        if attributed_intentional:
+            commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
+            commands.append(["git", "diff", "--", *attributed_intentional])
+        if (self.repo / "tests").exists() and attributed_intentional:
             commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
+
         lines = ["<verification>", f"trigger: {trigger}"]
         cmd_results: list[dict[str, Any]] = []
         for cmd in commands:
@@ -818,14 +856,59 @@ class Runner:
                 lines.append(f"stdout:\n{stdout}")
             if stderr_lines:
                 lines.append(f"key stderr:\n{stderr_lines}")
-        changed = self._git_changed_files()
+
+        verification_artifacts = [
+            r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
+        ]
         verification = self._verification_engine.verify(
             trigger,
-            changed,
+            attributed_intentional,
             cmd_results,
-            intended_targets=sorted(self._intended_targets),
-            before_contents=dict(self._before_contents),
+            validation_artifacts=verification_artifacts,
+            intended_targets=sorted(self._current_verification_targets),
+            before_contents=dict(self._current_verification_before_contents),
         )
+        finding_fingerprints = sorted(
+            f"{f.category.value}|{(f.file_path or '').replace('\\', '/').lstrip('./')}|{f.message.strip().lower()}"
+            for f in verification.findings
+        )
+        fingerprint = json.dumps(
+            {
+                "status": verification.status.value,
+                "findings": finding_fingerprints,
+                "intentional": sorted(attributed_intentional),
+                "validation_artifact_count": len(verification_artifacts),
+            },
+            sort_keys=True,
+        )
+        repeated_stale = (
+            self._last_verification_fingerprint == fingerprint
+            and set(attributed_intentional) == self._last_verification_intentional
+            and len(verification_artifacts) == self._last_verification_artifact_count
+        )
+        if repeated_stale:
+            self._repeated_stale_verification_count += 1
+        else:
+            self._repeated_stale_verification_count = 0
+            self._last_verification_fingerprint = fingerprint
+            self._last_verification_intentional = set(attributed_intentional)
+            self._last_verification_artifact_count = len(verification_artifacts)
+
+        if repeated_stale and self._repeated_stale_verification_count >= 2:
+            self.event_callback(
+                {
+                    "type": "failure_classified",
+                    "category": "repeated_no_progress",
+                    "summary": "repeated identical verification state with no new evidence",
+                    "next_strategy": "Change strategy or stop this task in budgeted mode.",
+                    "occurrence": self._repeated_stale_verification_count,
+                }
+            )
+            return ""
+
+        lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")
+        if attributed_incidental:
+            lines.append(f"incidental_changed: {json.dumps(sorted(attributed_incidental))}")
         lines.append(f"status: {verification.status.value}")
         lines.append(f"confidence: {verification.confidence_score}")
         if verification.findings:
@@ -838,6 +921,7 @@ class Runner:
                 "type": "verification_ran",
                 "status": verification.status.value,
                 "confidence": verification.confidence_score,
+                "repeated_stale_state": repeated_stale,
             }
         )
         if verification.status in {

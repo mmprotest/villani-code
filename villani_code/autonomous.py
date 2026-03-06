@@ -577,6 +577,12 @@ class VillaniModeController:
                 "small safe code improvement, small safe docs improvement, minimal test bootstrap, "
                 "or conclude no clear bounded improvement is justified."
             )
+        if task.title == "Validate baseline importability":
+            objective += (
+                "\nValidation contract (mandatory): inspect relevant package layout first, then run one bounded import validation command "
+                "(prefer python -c or short heredoc), capture the executed command output and exit code, and only then summarize result. "
+                "No network, no installs, and no broad recursive execution."
+            )
         result = self.runner.run(objective, execution_budget=VILLANI_TASK_BUDGET)
         task.outcome = "\n".join(
             block.get("text", "")
@@ -597,18 +603,12 @@ class VillaniModeController:
         task.before_contents = dict(execution.get("before_contents", {}))
         task.verification_results = self._extract_commands(result)
         task.validation_artifacts = list(execution.get("validation_artifacts", []))
-        if not task.validation_artifacts:
-            task.validation_artifacts = [
-                f"{cmd.get('command', '')} (exit={cmd.get('exit', 1)})"
-                for cmd in task.verification_results
-                if cmd.get("command")
-            ]
         task.inspection_summary = str(execution.get("inspection_summary", "")).strip()
         task.runner_failures = list(
             execution.get("runner_failures", [])
         ) or self._extract_runner_failures(result)
         task.produced_effect = bool(task.intentional_changes)
-        task.produced_validation = bool(task.validation_artifacts)
+        task.produced_validation = self._has_real_validation_artifact(task)
         task.produced_inspection_conclusion = bool(task.inspection_summary)
         task.completed = task.terminated_reason == "completed"
         task.status = (
@@ -627,10 +627,15 @@ class VillaniModeController:
                 f"elapsed: {task.elapsed_seconds:.2f}s, files changed: {len(task.files_changed)}"
             ),
         )
-        if task.files_changed:
+        if task.intentional_changes:
             self._emit(
                 "autonomous_phase",
-                phase=f"Files changed: {', '.join(task.files_changed)}",
+                phase=f"Intentional files changed: {', '.join(task.intentional_changes)}",
+            )
+        elif task.incidental_changes:
+            self._emit(
+                "autonomous_phase",
+                phase=f"Incidental files changed: {', '.join(task.incidental_changes)}",
             )
         if self._transcript_contains_denied(result):
             task.status = TaskLifecycle.BLOCKED.value
@@ -656,6 +661,15 @@ class VillaniModeController:
             return (
                 TaskLifecycle.FAILED.value,
                 "no_effect: No intervention or validation evidence produced.",
+            )
+
+        if (
+            task.task_contract == TaskContract.VALIDATION.value
+            and not self._has_real_validation_artifact(task)
+        ):
+            return (
+                TaskLifecycle.FAILED.value,
+                "validation_not_executed: no concrete validation command artifact was produced.",
             )
 
         if verification.status == VerificationStatus.UNCERTAIN:
@@ -722,8 +736,16 @@ class VillaniModeController:
 
     def _meets_validation_minimum(self, task: AutonomousTask) -> bool:
         if task.title == "Validate baseline importability":
-            return bool(task.validation_artifacts)
-        return task.produced_validation
+            return self._has_real_validation_artifact(task)
+        return task.produced_validation and self._has_real_validation_artifact(task)
+
+    @staticmethod
+    def _has_real_validation_artifact(task: AutonomousTask) -> bool:
+        for artifact in task.validation_artifacts:
+            text = str(artifact).lower()
+            if "python -c" in text or "python <<" in text or "exit=0" in text or "exit 0" in text:
+                return True
+        return False
 
     @staticmethod
     def _is_test_file(path: str) -> bool:
@@ -921,9 +943,14 @@ class VillaniModeController:
                 lines.append(
                     f"  - attempts: {task.get('attempts')} retries: {task.get('retries', 0)}"
                 )
-            if task.get("files_changed"):
+            if task.get("intentional_changes"):
                 lines.append(
-                    f"  - changed: {json.dumps(task.get('files_changed', []))}"
+                    f"  - intentional_changed: {json.dumps(task.get('intentional_changes', []))}"
+                )
+            elif task.get("incidental_changes"):
+                lines.append("  - changed: []")
+                lines.append(
+                    f"  - incidental_changed: {json.dumps(task.get('incidental_changes', []))}"
                 )
             if task.get("validation_artifacts"):
                 lines.append(
@@ -939,6 +966,13 @@ class VillaniModeController:
                 )
             if task.get("reason") and task.get("status") != "passed":
                 lines.append(f"  - reason: {task.get('reason')[:180]}")
+            if (
+                task.get("task_contract") == TaskContract.VALIDATION.value
+                and not task.get("validation_artifacts")
+            ):
+                lines.append(
+                    "  - validation_not_executed: no concrete validation command artifact was produced."
+                )
             for vr in task.get("verification", []):
                 lines.append(f"  - verification: {json.dumps(vr)}")
         lines.append("")
