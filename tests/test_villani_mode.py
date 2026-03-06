@@ -9,6 +9,7 @@ from villani_code import cli
 from villani_code.autonomous import AutonomousTask, RepoSnapshot, VillaniModeController
 from villani_code.permissions import Decision
 from villani_code.state import Runner
+from villani_code.execution import ExecutionBudget
 
 
 class DummyClient:
@@ -21,11 +22,21 @@ class StubRunner:
         self.repo = repo
         self.calls: list[str] = []
 
-    def run(self, prompt: str):
+    def run(self, prompt: str, execution_budget: ExecutionBudget | None = None):
         self.calls.append(prompt)
+        self.last_budget = execution_budget
         return {
             "response": {"content": [{"type": "text", "text": "done"}]},
             "transcript": {"tool_results": []},
+            "execution": {
+                "final_text": "done",
+                "turns_used": 1,
+                "tool_calls_used": 0,
+                "elapsed_seconds": 0.01,
+                "files_changed": [],
+                "terminated_reason": "completed",
+                "completed": True,
+            },
         }
 
 
@@ -110,6 +121,16 @@ def test_summary_generation_includes_verification(tmp_path: Path) -> None:
     task.verification_results = [{"command": "echo ok", "exit": 0}]
     summary_text = VillaniModeController.format_summary({"tasks_attempted": [{"title": task.title, "status": task.status, "verification": task.verification_results}], "done_reason": "done", "blockers": [], "files_changed": [], "recommended_next_steps": []})
     assert "verification" in summary_text
+
+
+def test_villani_mode_uses_bounded_runner(tmp_path: Path) -> None:
+    runner = StubRunner(tmp_path)
+    controller = VillaniModeController(runner, tmp_path)
+
+    task = AutonomousTask("1", "task", "because", priority=1.0, confidence=1.0, verification_plan=[])
+    controller._execute_task(task)
+
+    assert runner.last_budget is not None
 
 
 def test_villani_mode_startup_without_prompt(tmp_path: Path) -> None:

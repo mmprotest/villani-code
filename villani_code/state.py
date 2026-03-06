@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +14,7 @@ from villani_code.autonomy import FailureClassifier, VerificationEngine, Verific
 from villani_code.checkpoints import CheckpointManager
 from villani_code.context_budget import ContextBudget
 from villani_code.edits import ProposalStore
+from villani_code.execution import ExecutionBudget, ExecutionResult
 from villani_code.hooks import HookRunner
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
@@ -111,13 +113,74 @@ class Runner:
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
         return {"response": response, "summary": summary}
 
-    def run(self, instruction: str, messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        instruction: str,
+        messages: list[dict[str, Any]] | None = None,
+        execution_budget: ExecutionBudget | None = None,
+    ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
         system = build_system_blocks(self.repo, repo_map=self._repo_map if self.small_model else "", villani_mode=self.villani_mode)
         tools = tool_specs()
         transcript: dict[str, Any] = {"requests": [], "responses": [], "tool_invocations": [], "tool_results": [], "streamed_events_count": 0}
         self._save_session_snapshot(messages)
         empty_turn_retries = 0
+        start = time.monotonic()
+        turns_used = 0
+        tool_calls_used = 0
+        consecutive_no_edit_turns = 0
+        consecutive_recon_turns = 0
+        baseline_changed = set(self._git_changed_files())
+        previous_attributed = set()
+
+        def _attributed_changed_files() -> list[str]:
+            current = set(self._git_changed_files())
+            return sorted(current - baseline_changed)
+
+        def _finish_bounded(response: dict[str, Any], reason: str, completed: bool) -> dict[str, Any]:
+            elapsed = time.monotonic() - start
+            files_changed = _attributed_changed_files()
+            final_text = "\n".join(block.get("text", "") for block in response.get("content", []) if block.get("type") == "text")
+            execution = ExecutionResult(
+                final_text=final_text,
+                turns_used=turns_used,
+                tool_calls_used=tool_calls_used,
+                elapsed_seconds=elapsed,
+                files_changed=files_changed,
+                terminated_reason=reason,
+                completed=completed,
+            )
+            transcript["execution"] = execution.to_dict()
+            transcript["final_assistant_content"] = response.get("content", [])
+            transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+            self._save_session_snapshot(messages)
+            return {
+                "response": response,
+                "messages": messages,
+                "transcript_path": str(transcript_path),
+                "transcript": transcript,
+                "execution": execution.to_dict(),
+            }
+
+        def _budget_reason(completed: bool = False, model_idle: bool = False) -> str | None:
+            if execution_budget is None:
+                return None
+            elapsed = time.monotonic() - start
+            if elapsed > execution_budget.max_seconds:
+                return "max_seconds"
+            if tool_calls_used >= execution_budget.max_tool_calls:
+                return "max_tool_calls"
+            if turns_used >= execution_budget.max_turns:
+                return "max_turns"
+            if consecutive_recon_turns >= execution_budget.max_reconsecutive_recon_turns:
+                return "recon_loop"
+            if consecutive_no_edit_turns >= execution_budget.max_no_edit_turns:
+                return "no_edits"
+            if model_idle:
+                return "model_idle"
+            if completed:
+                return "completed"
+            return None
 
         while True:
             self._live_stream_buffer = ""
@@ -145,17 +208,24 @@ class Runner:
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
             messages.append({"role": "assistant", "content": response.get("content", [])})
+            turns_used += 1
 
             tool_uses = [b for b in response.get("content", []) if b.get("type") == "tool_use"]
             empty = is_effectively_empty_content(response.get("content", []))
             if not tool_uses and empty and empty_turn_retries < 2:
                 empty_turn_retries += 1
                 messages.append({"role": "user", "content": [{"type": "text", "text": "Continue. You ended your previous turn with no output. Resume the task from where you left off and either call the next tool or provide the next part of the answer."}]})
+                reason = _budget_reason()
+                if reason:
+                    return _finish_bounded(response, reason, reason == "completed")
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
             if not tool_uses:
                 if empty:
+                    reason = _budget_reason(completed=True)
+                    if reason:
+                        return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
                     self._save_session_snapshot(messages)
@@ -165,8 +235,15 @@ class Runner:
                     self.event_callback({"type": "edit_proposed", "proposal_id": proposal.id, "summary": proposal.summary, "files": proposal.files_touched})
                 if self._is_no_progress_response(response):
                     self._no_progress_cycles += 1
+                    if execution_budget is not None:
+                        reason = _budget_reason(model_idle=True)
+                        if reason:
+                            return _finish_bounded(response, reason, reason == "completed")
                     if self._no_progress_cycles < 3:
                         messages.append({"role": "user", "content": [{"type": "text", "text": "No progress detected. Continue with one concrete next step."}]})
+                        reason = _budget_reason()
+                        if reason:
+                            return _finish_bounded(response, reason, reason == "completed")
                         continue
                 else:
                     self._no_progress_cycles = 0
@@ -180,6 +257,9 @@ class Runner:
                         self._no_progress_cycles = 0
                         messages.append({"role": "user", "content": [{"type": "text", "text": "RECOVERY MODE: In <=6 lines recap current state, then list next 3 concrete actions, then choose exactly 1 tool call to run next with arguments."}]})
                         continue
+                reason = _budget_reason(completed=True)
+                if reason:
+                    return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
                 self._save_session_snapshot(messages)
@@ -193,6 +273,7 @@ class Runner:
                 self.event_callback({"type": "tool_use", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
 
                 result = self._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
+                tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
@@ -214,6 +295,10 @@ class Runner:
                 self.event_callback({"type": "tool_result", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id, "is_error": result["is_error"]})
                 tool_results.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]})
 
+                reason = _budget_reason()
+                if reason:
+                    return _finish_bounded(response, reason, reason == "completed")
+
             if self._pending_verification:
                 tool_results.append({"type": "text", "text": self._pending_verification})
                 self._pending_verification = ""
@@ -227,7 +312,49 @@ class Runner:
                 if sig and sig == self._last_failed_tool_sig:
                     self._no_progress_cycles += 1
                 self._last_failed_tool_sig = sig
+
+            attributed = set(_attributed_changed_files())
+            edited_this_turn = attributed != previous_attributed
+            previous_attributed = attributed
+            if edited_this_turn:
+                consecutive_no_edit_turns = 0
+            else:
+                consecutive_no_edit_turns += 1
+
+            mutating_tools = any(self._is_mutating_tool_call(b.get("name", ""), dict(b.get("input", {}))) for b in tool_uses)
+            recon_turn = bool(tool_uses) and not mutating_tools and not edited_this_turn
+            if recon_turn:
+                consecutive_recon_turns += 1
+            else:
+                consecutive_recon_turns = 0
+
+            reason = _budget_reason()
+            if reason:
+                return _finish_bounded(response, reason, reason == "completed")
             messages.append({"role": "user", "content": tool_results})
+
+            reason = _budget_reason()
+            if reason:
+                return _finish_bounded(response, reason, reason == "completed")
+
+    def _is_mutating_tool_call(self, tool_name: str, tool_input: dict[str, Any]) -> bool:
+        if tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}:
+            return True
+        if tool_name == "Bash":
+            command = str(tool_input.get("command", "")).strip().lower()
+            readonly_prefixes = (
+                "git status",
+                "git diff",
+                "git log",
+                "ls",
+                "cat",
+                "rg ",
+                "grep ",
+                "find ",
+                "pwd",
+            )
+            return not command.startswith(readonly_prefixes)
+        return False
 
     def _execute_tool_with_policy(self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str, message_count: int) -> dict[str, Any]:
         hook_pre = self.hooks.run_event("PreToolUse", {"event": "PreToolUse", "tool": tool_name, "input": tool_input})

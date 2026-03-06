@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from villani_code.autonomy import FailureClassifier, Opportunity, TakeoverConfig, TakeoverPlanner, TakeoverState, VerificationEngine, VerificationStatus
+from villani_code.execution import VILLANI_TASK_BUDGET
 
 
 @dataclass(slots=True)
@@ -38,6 +39,11 @@ class AutonomousTask:
     outcome: str = ""
     files_changed: list[str] = field(default_factory=list)
     verification_results: list[dict[str, Any]] = field(default_factory=list)
+    terminated_reason: str = ""
+    turns_used: int = 0
+    tool_calls_used: int = 0
+    elapsed_seconds: float = 0.0
+    completed: bool = False
 
 
 class VillaniModeController:
@@ -132,14 +138,32 @@ class VillaniModeController:
 
     def _execute_task(self, task: AutonomousTask) -> None:
         task.status = "running"
+        self._emit("autonomous_phase", phase=f"Villani mode task started: {task.title}")
         objective = (
             "You are in repo takeover mode. Execute one bounded intervention and summarize exact edits and validation. "
             f"Intervention: {task.title}\nEvidence: {task.rationale}"
         )
-        result = self.runner.run(objective)
+        result = self.runner.run(objective, execution_budget=VILLANI_TASK_BUDGET)
         task.outcome = "\n".join(block.get("text", "") for block in result.get("response", {}).get("content", []) if block.get("type") == "text")
-        task.files_changed = self._git_changed_files()
+        execution = result.get("execution", {})
+        task.terminated_reason = str(execution.get("terminated_reason", "error"))
+        task.turns_used = int(execution.get("turns_used", 0))
+        task.tool_calls_used = int(execution.get("tool_calls_used", 0))
+        task.elapsed_seconds = float(execution.get("elapsed_seconds", 0.0))
+        task.files_changed = list(execution.get("files_changed", []))
         task.verification_results = self._extract_commands(result)
+        task.completed = task.terminated_reason == "completed"
+        task.status = "completed" if task.completed else "stopped"
+        self._emit("autonomous_phase", phase=f"Villani mode task stopped: {task.terminated_reason}")
+        self._emit(
+            "autonomous_phase",
+            phase=(
+                f"Turns: {task.turns_used}, tool calls: {task.tool_calls_used}, "
+                f"elapsed: {task.elapsed_seconds:.2f}s, files changed: {len(task.files_changed)}"
+            ),
+        )
+        if task.files_changed:
+            self._emit("autonomous_phase", phase=f"Files changed: {', '.join(task.files_changed)}")
         if self._transcript_contains_denied(result):
             task.status = "blocked"
             task.outcome += "\nBlocked by hard safety policy."
@@ -163,6 +187,11 @@ class VillaniModeController:
                     "verification": t.verification_results,
                     "files_changed": t.files_changed,
                     "outcome": t.outcome[:1200],
+                    "terminated_reason": t.terminated_reason,
+                    "turns_used": t.turns_used,
+                    "tool_calls_used": t.tool_calls_used,
+                    "elapsed_seconds": t.elapsed_seconds,
+                    "completed": t.completed,
                 }
                 for t in self.attempted
             ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import traceback
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -41,13 +42,20 @@ class RunnerController:
         self.app.post_message(LogAppend("[villani-mode] Autonomous repo improvement started.", kind="meta"))
         self.app.post_message(SpinnerState(True, None))
         self.app.post_message(StatusUpdate("scanning repo"))
-        result = self.runner.run_villani_mode()
-        content = result.get("response", {}).get("content", [])
-        response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
-        if response_text:
-            self.app.post_message(LogAppend(response_text, kind="ai"))
-        self.app.post_message(SpinnerState(False, "villani mode done"))
-        self.app.post_message(StatusUpdate("summarizing"))
+        try:
+            result = self.runner.run_villani_mode()
+            content = result.get("response", {}).get("content", [])
+            response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
+            if response_text:
+                self.app.post_message(LogAppend(response_text, kind="ai"))
+            self.app.post_message(SpinnerState(False, "villani mode done"))
+            self.app.post_message(StatusUpdate("summarizing"))
+        except Exception as exc:  # noqa: BLE001
+            tb = traceback.format_exc()
+            self.app.post_message(LogAppend(f"[villani-mode] ERROR {type(exc).__name__}: {exc}", kind="meta"))
+            self.app.post_message(LogAppend(tb, kind="meta"))
+            self.app.post_message(SpinnerState(False, "villani mode failed"))
+            self.app.post_message(StatusUpdate("Idle"))
 
     def _run_prompt_worker(self, text: str) -> None:
         self.app.post_message(LogAppend(f"> {text}", kind="user"))
