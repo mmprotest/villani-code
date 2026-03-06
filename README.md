@@ -66,3 +66,46 @@ villani-code run "fix failing test in tests/test_parser.py" --base-url http://lo
 villani-code context --json
 villani-code eval --suite tests/fixtures/eval/suite.json --json
 ```
+
+## Benchmark mode (agent-layer benchmark)
+
+`villani-code benchmark` compares coding **agents** (not model families) under a controlled setup: same repo snapshot, same task prompt, same execution budget, and objective validation checks.
+
+It is designed to answer: *which agent performs better on real repo tasks when the backend model is held constant?*
+
+### Run Villani-only benchmark
+
+```bash
+villani-code benchmark \
+  --tasks-dir benchmark_tasks/villani_code \
+  --agent villani \
+  --repo . \
+  --base-url http://localhost:8000 \
+  --model your-model
+```
+
+### Compare multiple agents
+
+```bash
+villani-code benchmark \
+  --tasks-dir benchmark_tasks/villani_code \
+  --agent villani \
+  --agent claude-code \
+  --agent opencode \
+  --agent copilot-cli \
+  --repo . \
+  --base-url http://localhost:8000 \
+  --model your-model
+```
+
+### Outputs
+
+Each benchmark run writes:
+- `benchmark_results.json`
+- `benchmark_results.md`
+- `benchmark_results.csv`
+- per-run artifacts (`stdout.txt`, `stderr.txt`, `git_diff.patch`, `changed_files.json`, `validation_results.json`, `metadata.json`)
+
+### Current external-adapter limitations
+
+External adapters are CLI-driven and intentionally conservative. If an executable is missing, auth is not configured, or unattended mode is not supported on that machine/version, the run is reported as **skipped** (not as success, and distinct from failures).

@@ -17,6 +17,7 @@ from villani_code.plugins import PluginManager
 from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.eval_harness import render_human_summary, result_to_json, run_eval_suite
+from villani_code.benchmark.runner import BenchmarkRunner
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -267,6 +268,42 @@ def eval_cmd(
         console.print_json(json.dumps(payload))
         return
     console.print(render_human_summary(result))
+
+
+@app.command("benchmark")
+def benchmark_cmd(
+    tasks_dir: Path = typer.Option(Path("benchmark_tasks/villani_code"), "--tasks-dir"),
+    task: Optional[str] = typer.Option(None, "--task"),
+    agent: list[str] = typer.Option(["villani"], "--agent"),
+    repo: Path = typer.Option(Path("."), "--repo"),
+    base_url: Optional[str] = typer.Option(None, "--base-url"),
+    model: Optional[str] = typer.Option(None, "--model"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+    timeout_seconds: Optional[int] = typer.Option(None, "--timeout-seconds"),
+    output_dir: Path = typer.Option(Path("artifacts/benchmark"), "--output-dir"),
+    seed: Optional[int] = typer.Option(None, "--seed"),
+    unsafe: bool = typer.Option(False, "--unsafe"),
+    thinking: Optional[str] = typer.Option(None, "--thinking"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens"),
+) -> None:
+    runner = BenchmarkRunner(output_dir=output_dir.resolve())
+    result = runner.run(
+        tasks_dir=tasks_dir.resolve(),
+        task_id=task,
+        agents=agent,
+        repo_path=repo.resolve(),
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+        seed=seed,
+        unsafe=unsafe,
+        thinking=thinking,
+        max_tokens=max_tokens,
+    )
+    console.print_json(json.dumps(result))
+
+
 @mcp_app.command("list")
 def mcp_list(repo: Path = typer.Option(Path("."), "--repo")):
     from villani_code.mcp import load_mcp_config

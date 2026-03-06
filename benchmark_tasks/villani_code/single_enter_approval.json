@@ -1,0 +1,24 @@
+{
+  "id": "single_enter_approval",
+  "name": "Single Enter approves once",
+  "repo_path": ".",
+  "instruction": "Fix the interactive approval input handling so pressing Enter once confirms approval once, and update/add targeted tests.",
+  "category": "ui-bugfix",
+  "tags": ["approval", "keyboard", "ui"],
+  "timeout_seconds": 300,
+  "expected_touched_paths": [
+    "villani_code/tui/widgets/approval.py",
+    "tests/test_interactive_approval_dialog.py"
+  ],
+  "forbidden_touched_paths": [
+    "pyproject.toml"
+  ],
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "pytest tests/test_interactive_approval_dialog.py -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "notes": "Uses existing approval dialog tests for objective verification."
+}

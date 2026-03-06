@@ -1,0 +1,24 @@
+{
+  "id": "ctrl_c_exit",
+  "name": "Ctrl+C exits cleanly",
+  "repo_path": ".",
+  "instruction": "Fix Ctrl+C handling so repeated interrupts exit cleanly with the expected behavior, and keep tests passing.",
+  "category": "runtime-stability",
+  "tags": ["interrupt", "cli", "stability"],
+  "timeout_seconds": 300,
+  "expected_touched_paths": [
+    "villani_code/interrupts.py",
+    "tests/test_interrupts.py"
+  ],
+  "forbidden_touched_paths": [
+    "README.md"
+  ],
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "pytest tests/test_interrupts.py -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "notes": "Targets known interrupt behavior regressions."
+}
