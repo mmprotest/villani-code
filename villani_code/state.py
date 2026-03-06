@@ -560,18 +560,13 @@ class Runner:
             reason = _budget_reason()
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
-            messages.append({"role": "user", "content": tool_results})
-
+            next_user_content = list(tool_results)
             if self._pending_verification:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": self._pending_verification}
-                        ],
-                    }
+                next_user_content.append(
+                    {"type": "text", "text": self._pending_verification}
                 )
                 self._pending_verification = ""
+            messages.append({"role": "user", "content": next_user_content})
 
             reason = _budget_reason()
             if reason:
