@@ -375,7 +375,8 @@ class Opportunity:
 class TakeoverConfig:
     max_files_per_wave: int = 4
     max_commands_per_wave: int = 3
-    max_waves: int = 3
+    max_waves: int = 4
+    max_total_task_attempts: int = 8
     min_confidence: float = 0.55
 
 

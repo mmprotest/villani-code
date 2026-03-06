@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,6 +43,16 @@ class RepoSnapshot:
     todo_hits: list[str]
 
 
+class TaskLifecycle(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    RETRYABLE = "retryable"
+    EXHAUSTED = "exhausted"
+
+
 @dataclass(slots=True)
 class AutonomousTask:
     task_id: str
@@ -51,7 +62,12 @@ class AutonomousTask:
     confidence: float
     verification_plan: list[str]
     task_contract: str = TaskContract.INSPECTION.value
-    status: str = "pending"
+    task_key: str = ""
+    parent_task_key: str = ""
+    origin_kind: str = "discovery"
+    attempts: int = 0
+    retries: int = 0
+    status: str = TaskLifecycle.PENDING.value
     outcome: str = ""
     files_changed: list[str] = field(default_factory=list)
     intentional_changes: list[str] = field(default_factory=list)
@@ -89,7 +105,13 @@ class VillaniModeController:
         self.event_callback = event_callback or (lambda _event: None)
         self.takeover_config = takeover_config or TakeoverConfig()
         self.attempted: list[AutonomousTask] = []
-        self._attempted_titles: set[str] = set()
+        self._lineage_attempts: dict[str, int] = {}
+        self._lineage_retries: dict[str, int] = {}
+        self._lineage_status: dict[str, str] = {}
+        self._lineage_blockers: dict[str, str] = {}
+        self._retryable_queue: list[Opportunity] = []
+        self._followup_queue: list[Opportunity] = []
+        self._attempt_counter: int = 0
         self.planner = TakeoverPlanner(self.repo)
         self.verifier = VerificationEngine(self.repo, logger=self._log)
         self.failure_classifier = FailureClassifier()
@@ -104,28 +126,40 @@ class VillaniModeController:
             wave=0,
             risk=state.current_risk_level,
         )
-        state.discovered_opportunities = self.planner.discover_opportunities()
-        self._emit(
-            "takeover_ranked",
-            count=len(state.discovered_opportunities),
-            top=[o.title for o in state.discovered_opportunities[:5]],
-        )
-
-        if not state.discovered_opportunities:
-            return self._build_takeover_summary(state, "No opportunities discovered.")
 
         for wave in range(1, self.takeover_config.max_waves + 1):
-            remaining = [
-                o
-                for o in state.discovered_opportunities
-                if o.confidence >= self.takeover_config.min_confidence
-                and o.title not in self._attempted_titles
-            ]
-            if not remaining:
+            if self._attempt_counter >= self.takeover_config.max_total_task_attempts:
+                return self._build_takeover_summary(state, "Takeover budget exhausted.")
+
+            state.repo_summary = self.planner.build_repo_summary()
+            discovered = self.planner.discover_opportunities()
+            state.discovered_opportunities = discovered
+
+            candidates = self._build_wave_candidates(discovered)
+            self._emit(
+                "takeover_ranked",
+                count=len(candidates),
+                top=[o.title for o in candidates[:5]],
+            )
+
+            if not candidates:
+                if (
+                    not discovered
+                    and not self._retryable_queue
+                    and not self._followup_queue
+                ):
+                    return self._build_takeover_summary(
+                        state, "No opportunities discovered."
+                    )
+                if self._has_pending_actionable_work():
+                    return self._build_takeover_summary(
+                        state, "Retry budget exhausted for remaining work."
+                    )
                 return self._build_takeover_summary(
                     state, "No remaining opportunities above confidence threshold."
                 )
-            selected = remaining[: self.takeover_config.max_commands_per_wave]
+
+            selected = candidates[: self.takeover_config.max_commands_per_wave]
             self._emit("autonomous_phase", phase=f"takeover wave {wave}")
             self._emit(
                 "takeover_wave",
@@ -136,35 +170,57 @@ class VillaniModeController:
 
             wave_files: set[str] = set()
             retired = 0
-            for op in selected:
+            retryable = 0
+            blocked = 0
+            for index, op in enumerate(selected, start=1):
+                if (
+                    self._attempt_counter
+                    >= self.takeover_config.max_total_task_attempts
+                ):
+                    return self._build_takeover_summary(
+                        state, "Takeover budget exhausted."
+                    )
+                before_dirty = set(self._git_changed_files())
+                task_key = self._task_key_for_opportunity(op)
+                attempts = self._lineage_attempts.get(task_key, 0) + 1
                 task = AutonomousTask(
-                    task_id=f"wave-{wave}-{retired + 1}",
+                    task_id=f"wave-{wave}-{index}",
                     title=op.title,
                     rationale=op.evidence,
                     priority=op.priority,
                     confidence=op.confidence,
-                    verification_plan=["pytest -q tests/test_runner_defaults.py"]
-                    if (self.repo / "tests").exists()
-                    else [],
+                    verification_plan=(
+                        ["pytest -q tests/test_runner_defaults.py"]
+                        if (self.repo / "tests").exists()
+                        else []
+                    ),
                     task_contract=op.task_contract,
+                    task_key=task_key,
+                    parent_task_key=self._parent_task_key(op),
+                    origin_kind=op.category,
+                    attempts=attempts,
+                    retries=max(0, attempts - 1),
                 )
-                self._attempted_titles.add(task.title)
+                self._lineage_attempts[task_key] = attempts
+                self._attempt_counter += 1
                 self._execute_task(task)
-                task.files_changed = self._git_changed_files()
-                task.intentional_changes, task.incidental_changes, _ = (
-                    self._split_changes(task.files_changed)
+
+                after_dirty = set(self._git_changed_files())
+                task.files_changed = sorted(after_dirty - before_dirty)
+                delta_basis = (
+                    task.files_changed
+                    or task.intentional_changes
+                    or task.incidental_changes
                 )
+                task.intentional_changes, task.incidental_changes, _ = (
+                    self._split_changes(delta_basis)
+                )
+                if not task.files_changed:
+                    task.files_changed = sorted(
+                        set(task.intentional_changes) | set(task.incidental_changes)
+                    )
                 task.produced_effect = bool(task.intentional_changes)
                 wave_files.update(task.intentional_changes)
-                self._emit(
-                    "autonomous_phase",
-                    phase=f"Intentional changes: {', '.join(task.intentional_changes) if task.intentional_changes else '[]'}",
-                )
-                if task.incidental_changes:
-                    self._emit(
-                        "autonomous_phase",
-                        phase=f"Incidental changes: {', '.join(task.incidental_changes)}",
-                    )
 
                 verification = self.verifier.verify(
                     op.proposed_next_action,
@@ -186,14 +242,26 @@ class VillaniModeController:
                     }
                 )
                 task.status, task.outcome = self._adjudicate_task(task, verification)
-                if task.status == "passed":
+                task.status = self._update_lifecycle_after_attempt(task, op)
+                if task.status == TaskLifecycle.PASSED.value:
                     retired += 1
+                elif task.status == TaskLifecycle.RETRYABLE.value:
+                    retryable += 1
+                elif task.status == TaskLifecycle.BLOCKED.value:
+                    blocked += 1
                 self.attempted.append(task)
 
             if len(wave_files) > self.takeover_config.max_files_per_wave:
                 state.current_risk_level = "high"
                 return self._build_takeover_summary(
                     state, "Blast radius exceeded configured max files per wave."
+                )
+
+            if wave_files and not self._wave_has_validation_artifact(
+                self.attempted[-len(selected) :]
+            ):
+                self._followup_queue.append(
+                    self._validate_recent_changes_followup(sorted(wave_files))
                 )
 
             avg_conf = round(
@@ -205,6 +273,8 @@ class VillaniModeController:
                 {
                     "wave": wave,
                     "retired": retired,
+                    "retryable": retryable,
+                    "blocked": blocked,
                     "confidence": avg_conf,
                     "files_touched": sorted(wave_files),
                 }
@@ -217,9 +287,7 @@ class VillaniModeController:
                 risk=state.current_risk_level,
             )
 
-        return self._build_takeover_summary(
-            state, "Reached maximum configured takeover waves."
-        )
+        return self._build_takeover_summary(state, "Takeover budget exhausted.")
 
     def inspect_repo(self) -> RepoSnapshot:
         files = sorted(
@@ -290,8 +358,211 @@ class VillaniModeController:
         )
         return ranked
 
+    def _build_wave_candidates(
+        self, discovered: list[Opportunity]
+    ) -> list[Opportunity]:
+        combined = (
+            list(discovered) + list(self._retryable_queue) + list(self._followup_queue)
+        )
+        self._retryable_queue = []
+        self._followup_queue = []
+
+        dedup: dict[str, Opportunity] = {}
+        for op in combined:
+            key = self._task_key_for_opportunity(op)
+            if self._is_terminal_lineage(key):
+                continue
+            if op.confidence < self.takeover_config.min_confidence:
+                continue
+            existing = dedup.get(key)
+            if existing is None or self._effective_priority(
+                op
+            ) > self._effective_priority(existing):
+                dedup[key] = op
+        ranked = sorted(dedup.values(), key=self._effective_priority, reverse=True)
+        return ranked
+
+    def _effective_priority(self, op: Opportunity) -> float:
+        score = op.priority * 0.7 + op.confidence * 0.3
+        if op.category == "followup_validation":
+            score += 0.3
+        elif op.category.startswith("followup_"):
+            score += 0.2
+        return score
+
+    def _task_key_for_opportunity(self, op: Opportunity) -> str:
+        title = op.title.lower()
+        aliases = {
+            "re-run baseline importability validation": "validate baseline importability",
+            "complete minimal test bootstrap": "bootstrap minimal tests",
+            "validate recent autonomous changes": "validate recent autonomous changes",
+        }
+        normalized = aliases.get(title, title)
+        return normalized.replace(" ", "-")
+
+    def _parent_task_key(self, op: Opportunity) -> str:
+        if op.category.startswith("followup_"):
+            return self._task_key_for_opportunity(op)
+        return ""
+
+    def _retry_limit_for_contract(self, contract: str) -> int:
+        if contract == TaskContract.VALIDATION.value:
+            return 2
+        return 1
+
+    def _is_terminal_lineage(self, task_key: str) -> bool:
+        return self._lineage_status.get(task_key) in {
+            TaskLifecycle.PASSED.value,
+            TaskLifecycle.BLOCKED.value,
+            TaskLifecycle.EXHAUSTED.value,
+        }
+
+    def _is_actionable_failure(self, task: AutonomousTask) -> bool:
+        return any(
+            [
+                bool(task.intentional_changes),
+                bool(task.validation_artifacts),
+                bool(task.runner_failures),
+                bool(task.produced_inspection_conclusion),
+            ]
+        )
+
+    def _generate_followups(
+        self, task: AutonomousTask, op: Opportunity
+    ) -> list[Opportunity]:
+        followups: list[Opportunity] = []
+        if task.status == TaskLifecycle.BLOCKED.value:
+            if task.runner_failures:
+                followups.append(
+                    Opportunity(
+                        title=f"Unblock {op.title}",
+                        category="followup_repair",
+                        priority=0.88,
+                        confidence=0.68,
+                        affected_files=task.intentional_changes or op.affected_files,
+                        evidence="Concrete blocker found; attempt narrow unblock.",
+                        blast_radius="small",
+                        proposed_next_action="apply the smallest unblock needed for the prior task",
+                        task_contract=TaskContract.EFFECTFUL.value,
+                    )
+                )
+            return followups
+
+        if (
+            task.task_contract == TaskContract.EFFECTFUL.value
+            and task.produced_effect
+            and task.status != TaskLifecycle.PASSED.value
+        ):
+            followups.append(
+                Opportunity(
+                    title=f"Complete {op.title.lower()}",
+                    category="followup_repair",
+                    priority=0.9,
+                    confidence=0.76,
+                    affected_files=task.intentional_changes or op.affected_files,
+                    evidence="Partial edits were made without full contract completion.",
+                    blast_radius="small",
+                    proposed_next_action="finish the narrow missing repair and verify changed files",
+                    task_contract=TaskContract.EFFECTFUL.value,
+                )
+            )
+
+        if (
+            task.task_contract == TaskContract.VALIDATION.value
+            and task.produced_effect
+            and not task.produced_validation
+        ):
+            followups.append(
+                Opportunity(
+                    title=f"Re-run {op.title.lower()} validation",
+                    category="followup_validation",
+                    priority=0.94,
+                    confidence=0.82,
+                    affected_files=task.intentional_changes or op.affected_files,
+                    evidence="Validation task edited files but produced no validation evidence.",
+                    blast_radius="small",
+                    proposed_next_action="run bounded validation only on recently changed files",
+                    task_contract=TaskContract.VALIDATION.value,
+                )
+            )
+
+        return followups
+
+    def _update_lifecycle_after_attempt(
+        self, task: AutonomousTask, op: Opportunity
+    ) -> str:
+        task_key = task.task_key
+        retries_used = self._lineage_retries.get(task_key, 0)
+        retry_limit = self._retry_limit_for_contract(task.task_contract)
+
+        if task.status == TaskLifecycle.PASSED.value:
+            self._lineage_status[task_key] = TaskLifecycle.PASSED.value
+            return TaskLifecycle.PASSED.value
+
+        if task.status == TaskLifecycle.BLOCKED.value or any(
+            "permission" in f.lower() or "denied" in f.lower()
+            for f in task.runner_failures
+        ):
+            self._lineage_status[task_key] = TaskLifecycle.BLOCKED.value
+            self._lineage_blockers[task_key] = "; ".join(task.runner_failures[:2])
+            self._followup_queue.extend(self._generate_followups(task, op))
+            return TaskLifecycle.BLOCKED.value
+
+        actionable = self._is_actionable_failure(task)
+        if actionable:
+            self._followup_queue.extend(self._generate_followups(task, op))
+
+        if retries_used < retry_limit:
+            self._lineage_retries[task_key] = retries_used + 1
+            retry_confidence = max(op.confidence, 0.62)
+            self._retryable_queue.append(
+                Opportunity(
+                    title=op.title,
+                    category="retryable",
+                    priority=min(0.95, op.priority + 0.03),
+                    confidence=retry_confidence,
+                    affected_files=op.affected_files,
+                    evidence=f"retry attempt {retries_used + 1} for lineage {task_key}",
+                    blast_radius=op.blast_radius,
+                    proposed_next_action=op.proposed_next_action,
+                    task_contract=op.task_contract,
+                )
+            )
+            self._lineage_status[task_key] = TaskLifecycle.RETRYABLE.value
+            return TaskLifecycle.RETRYABLE.value
+
+        self._lineage_status[task_key] = TaskLifecycle.EXHAUSTED.value
+        return TaskLifecycle.EXHAUSTED.value
+
+    def _validate_recent_changes_followup(
+        self, changed_files: list[str]
+    ) -> Opportunity:
+        return Opportunity(
+            title="Validate recent autonomous changes",
+            category="followup_validation",
+            priority=0.96,
+            confidence=0.82,
+            affected_files=changed_files[:5],
+            evidence="Authoritative files changed without successful validation artifact.",
+            blast_radius="small",
+            proposed_next_action="run bounded validation path for recently changed files",
+            task_contract=TaskContract.VALIDATION.value,
+        )
+
+    def _wave_has_validation_artifact(self, tasks: list[AutonomousTask]) -> bool:
+        return any(
+            t.task_contract == TaskContract.VALIDATION.value and t.produced_validation
+            for t in tasks
+        )
+
+    def _has_pending_actionable_work(self) -> bool:
+        return any(
+            status == TaskLifecycle.RETRYABLE.value
+            for status in self._lineage_status.values()
+        )
+
     def _execute_task(self, task: AutonomousTask) -> None:
-        task.status = "running"
+        task.status = TaskLifecycle.RUNNING.value
         self._emit("autonomous_phase", phase=f"Villani mode task started: {task.title}")
         objective = (
             "You are in repo takeover mode. Execute one bounded intervention and summarize exact edits and validation. "
@@ -340,7 +611,11 @@ class VillaniModeController:
         task.produced_validation = bool(task.validation_artifacts)
         task.produced_inspection_conclusion = bool(task.inspection_summary)
         task.completed = task.terminated_reason == "completed"
-        task.status = "completed" if task.completed else "stopped"
+        task.status = (
+            TaskLifecycle.RUNNING.value
+            if task.completed
+            else TaskLifecycle.FAILED.value
+        )
         self._emit(
             "autonomous_phase",
             phase=f"Villani mode task stopped: {task.terminated_reason}",
@@ -358,37 +633,40 @@ class VillaniModeController:
                 phase=f"Files changed: {', '.join(task.files_changed)}",
             )
         if self._transcript_contains_denied(result):
-            task.status = "blocked"
+            task.status = TaskLifecycle.BLOCKED.value
             task.outcome += "\nBlocked by hard safety policy."
         if not self._has_any_evidence(task):
             task.outcome = (
                 task.outcome + "\n" if task.outcome else ""
             ) + "No intervention or validation evidence produced."
-            if task.status in {"completed", "stopped"}:
-                task.status = "failed"
+            if task.status in {TaskLifecycle.RUNNING.value, TaskLifecycle.FAILED.value}:
+                task.status = TaskLifecycle.FAILED.value
 
     def _adjudicate_task(
         self, task: AutonomousTask, verification: Any
     ) -> tuple[str, str]:
+        if task.status == TaskLifecycle.BLOCKED.value:
+            return TaskLifecycle.BLOCKED.value, "blocked_by_policy_or_environment"
+
         if task.terminated_reason in {
             "no_edits",
             "recon_loop",
             "model_idle",
         } and not self._has_any_evidence(task):
             return (
-                "failed",
+                TaskLifecycle.FAILED.value,
                 "no_effect: No intervention or validation evidence produced.",
             )
 
         if verification.status == VerificationStatus.UNCERTAIN:
             return (
-                "failed",
+                TaskLifecycle.FAILED.value,
                 "verification_uncertain: task requires concrete evidence before pass.",
             )
 
         if not self._meets_contract(task):
             return (
-                "failed",
+                TaskLifecycle.FAILED.value,
                 "contract_unsatisfied: no evidence produced for task contract.",
             )
 
@@ -396,7 +674,7 @@ class VillaniModeController:
             task.produced_effect or task.produced_validation
         ):
             return (
-                "failed",
+                TaskLifecycle.FAILED.value,
                 "runner_failures_unresolved: No intervention or validation evidence produced.",
             )
 
@@ -409,14 +687,14 @@ class VillaniModeController:
             task.produced_effect or task.produced_validation
         ):
             return (
-                "failed",
+                TaskLifecycle.FAILED.value,
                 "runner_failure_blocked_pass: No intervention or validation evidence produced.",
             )
 
         if verification.status == VerificationStatus.PASS:
-            return "passed", "passed"
+            return TaskLifecycle.PASSED.value, "passed"
 
-        return "failed", "verification_failed"
+        return TaskLifecycle.FAILED.value, "verification_failed"
 
     @staticmethod
     def _has_any_evidence(task: AutonomousTask) -> bool:
@@ -501,6 +779,9 @@ class VillaniModeController:
                     "title": t.title,
                     "status": t.status,
                     "task_contract": t.task_contract,
+                    "attempts": t.attempts,
+                    "retries": t.retries,
+                    "reason": t.outcome[:1200],
                     "verification": t.verification_results,
                     "validation_artifacts": t.validation_artifacts,
                     "inspection_summary": t.inspection_summary,
@@ -511,7 +792,6 @@ class VillaniModeController:
                     "files_changed": t.files_changed,
                     "intentional_changes": t.intentional_changes,
                     "incidental_changes": t.incidental_changes,
-                    "outcome": t.outcome[:1200],
                     "terminated_reason": t.terminated_reason,
                     "turns_used": t.turns_used,
                     "tool_calls_used": t.tool_calls_used,
@@ -524,7 +804,11 @@ class VillaniModeController:
             "preexisting_changes": preexisting,
             "intentional_changes": sorted(intentional_set & set(new_changes)),
             "incidental_changes": sorted(incidental_set & set(new_changes)),
-            "blockers": [t.title for t in self.attempted if t.status == "blocked"],
+            "blockers": [
+                t.title
+                for t in self.attempted
+                if t.status == TaskLifecycle.BLOCKED.value
+            ],
             "done_reason": done_reason,
             "completed_waves": state.completed_waves,
             "recommended_next_steps": self._recommended_next_steps(),
@@ -557,11 +841,19 @@ class VillaniModeController:
         return hits
 
     def _recommended_next_steps(self) -> list[str]:
-        if any(t.status == "blocked" for t in self.attempted):
+        if any(t.status == TaskLifecycle.BLOCKED.value for t in self.attempted):
             return [
                 "Review blocked tasks and rerun with --unsafe only if trusted and necessary."
             ]
-        if any(t.status == "failed" for t in self.attempted):
+        if any(
+            t.status
+            in {
+                TaskLifecycle.FAILED.value,
+                TaskLifecycle.RETRYABLE.value,
+                TaskLifecycle.EXHAUSTED.value,
+            }
+            for t in self.attempted
+        ):
             return [
                 "Inspect verification findings, then rerun takeover with tighter wave limits."
             ]
@@ -569,7 +861,10 @@ class VillaniModeController:
 
     def _git_changed_files(self) -> list[str]:
         proc = subprocess.run(
-            ["git", "status", "--short"], cwd=self.repo, capture_output=True, text=True
+            ["git", "status", "--short", "--untracked-files=all"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
         )
         changed: list[str] = []
         for line in proc.stdout.splitlines():
@@ -622,6 +917,10 @@ class VillaniModeController:
             lines.append(
                 f"- {task['title']} :: {task['status']} ({task.get('task_contract', 'inspection')})"
             )
+            if task.get("attempts", 0) > 0:
+                lines.append(
+                    f"  - attempts: {task.get('attempts')} retries: {task.get('retries', 0)}"
+                )
             if task.get("files_changed"):
                 lines.append(
                     f"  - changed: {json.dumps(task.get('files_changed', []))}"
@@ -638,15 +937,15 @@ class VillaniModeController:
                 lines.append(
                     f"  - runner_failures: {json.dumps(task.get('runner_failures', []))}"
                 )
-            if task.get("outcome") and task.get("status") != "passed":
-                lines.append(f"  - reason: {task.get('outcome')[:180]}")
+            if task.get("reason") and task.get("status") != "passed":
+                lines.append(f"  - reason: {task.get('reason')[:180]}")
             for vr in task.get("verification", []):
                 lines.append(f"  - verification: {json.dumps(vr)}")
         lines.append("")
         waves = summary.get("completed_waves", [])
         for wave in waves:
             lines.append(
-                f"wave {wave.get('wave')}: retired={wave.get('retired')} confidence={wave.get('confidence')} files={len(wave.get('files_touched', []))}"
+                f"wave {wave.get('wave')}: retired={wave.get('retired')} retryable={wave.get('retryable', 0)} blocked={wave.get('blocked', 0)} files={len(wave.get('files_touched', []))}"
             )
         lines.append(f"Done reason: {summary.get('done_reason', '')}")
         lines.append(f"Blockers: {json.dumps(summary.get('blockers', []))}")
