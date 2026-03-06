@@ -7,6 +7,7 @@ from textual.widgets import Input, ListView
 
 from villani_code.tui.app import VillaniTUI
 from villani_code.tui.controller import RunnerController
+from villani_code.tui.messages import ApprovalRequest
 from villani_code.tui.widgets.approval import ApprovalBar
 
 
@@ -74,6 +75,16 @@ def test_approval_shows_all_three_options(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+
+
+def test_stylesheet_loads_and_app_mounts(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.query_one("#log") is not None
+
+    asyncio.run(run())
 def test_approval_keys_are_contained_and_resolve_selection(tmp_path: Path) -> None:
     async def run() -> None:
         app = VillaniTUI(DummyRunner(), tmp_path)
@@ -83,15 +94,15 @@ def test_approval_keys_are_contained_and_resolve_selection(tmp_path: Path) -> No
             input_widget.value = "should-not-submit"
             input_widget.focus()
 
+            app.on_approval_request(ApprovalRequest("Allow?", ["yes", "always", "no"], "r1"))
             bar = app.query_one(ApprovalBar)
-            bar.show_request("Allow?", "r1", ["yes", "always", "no"])
-            app.call_after_refresh(lambda: bar.query_one("#approval-options", ListView).focus())
             await pilot.pause()
 
             await pilot.press("down")
             await pilot.pause()
             assert bar.query_one("#approval-options", ListView).index == 1
 
+            await pilot.press("enter")
             await pilot.press("enter")
             await pilot.pause()
 
@@ -104,5 +115,24 @@ def test_approval_keys_are_contained_and_resolve_selection(tmp_path: Path) -> No
             await pilot.press("enter")
             await pilot.pause()
             assert app.controller.prompts == ["submit-now"]
+
+    asyncio.run(run())
+
+
+def test_escape_denies_and_restores_focus(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        app.controller = FakeController()
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#input", Input)
+            app.on_approval_request(ApprovalRequest("Allow?", ["yes", "always", "no"], "r2"))
+            await pilot.pause()
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert app.controller.approvals == [("r2", "no")]
+            assert input_widget.disabled is False
+            assert input_widget.has_focus
 
     asyncio.run(run())
