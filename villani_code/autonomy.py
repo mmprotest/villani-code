@@ -56,6 +56,7 @@ class VerificationResult:
     files_examined: list[str]
     repair_attempted: bool
     summary: str
+    repeated_verification_state: bool = False
 
 
 class VerificationEngine:
@@ -64,6 +65,7 @@ class VerificationEngine:
     def __init__(self, repo: Path, logger: Any | None = None):
         self.repo = repo
         self._logger = logger or (lambda _msg: None)
+        self._last_finding_fingerprints: tuple[str, ...] = ()
 
     def verify(
         self,
@@ -198,7 +200,30 @@ class VerificationEngine:
         findings = self._reconcile_findings(
             findings, intended_targets, before_contents, git_diff_targets
         )
-        confidence = max(0.05, 0.95 - (0.12 * len(findings)))
+        finding_fingerprints = tuple(
+            sorted(
+                f"{f.category.value}|{self._normalize_repo_path(f.file_path)}|{f.message.strip().lower()}"
+                for f in findings
+            )
+        )
+        repeated_verification_state = finding_fingerprints == self._last_finding_fingerprints
+        self._last_finding_fingerprints = finding_fingerprints
+
+        severity_penalty = {"high": 0.18, "medium": 0.1, "low": 0.05}
+        confidence = 0.9
+        for finding in findings:
+            confidence -= severity_penalty.get(finding.severity, 0.1)
+        command_failures = sum(1 for cmd in command_results if int(cmd.get("exit", 0)) != 0)
+        if command_failures:
+            confidence -= 0.12 * command_failures
+        if any(f.category == FindingCategory.SUSPICIOUS_BREADTH for f in findings):
+            confidence -= 0.06
+        if not intended_targets and not changed_files and not validation_artifacts:
+            confidence -= 0.08
+        if repeated_verification_state:
+            confidence -= 0.03
+        confidence = max(0.05, min(0.95, confidence))
+
         if not findings:
             status = VerificationStatus.PASS
             summary = f"Adversarial review passed for {len(examined)} file(s)."
@@ -217,6 +242,7 @@ class VerificationEngine:
             files_examined=examined,
             repair_attempted=False,
             summary=summary,
+            repeated_verification_state=repeated_verification_state,
         )
 
     def _git_diff_name_only(self) -> list[str]:
@@ -318,7 +344,10 @@ class FailureClassifier:
         retryable = True
         strategy = "Retry once with narrower scope and explicit command output capture."
 
-        if "denied" in text or "permission" in text or "sandbox" in text:
+        if "read-before-edit policy" in text:
+            category = FailureCategory.TOOL_FAILURE
+            strategy = "Use Write to create missing files and read existing files before editing."
+        elif "denied" in text or "permission" in text or "sandbox" in text:
             category = FailureCategory.PERMISSION_OR_SANDBOX_ISSUE
             retryable = False
             strategy = "Avoid blocked operations and choose repo-local alternatives."
