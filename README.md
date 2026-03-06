@@ -170,20 +170,21 @@ villani-code init --repo .
 ```
 
 This creates deterministic compact state under `.villani/`:
-- `project_rules.md`
-- `validation.json`
-- `repo_map.json`
-- `session_state.json`
+- `project_rules.md` (derived from detected tools/layout, not generic templates)
+- `validation.json` (typed validation steps with cost, scope, and targeting strategy metadata)
+- `repo_map.json` (languages, roots, manifests/configs, entrypoints, repo shape, module relationships)
+- `session_state.json` (compact checkpoint fields for task, plan risk/scope, validation/repair outcomes)
 
 Lazy init is also enabled: if `.villani/` is missing when a task starts, Villani initializes it before planning.
 
 ## Plan Mode and validation loop defaults
 
 - Plan Mode is on by default for non-trivial tasks.
+- Planning is grounded in repository evidence (repo map, manifests/configs, inferred targets, action classes, and scope) instead of pure keyword heuristics.
 - Interactive mode shows the full execution plan inline and requires approval before execution.
 - Autonomous Villani mode auto-approves low/medium risk plans and safely aborts high-risk plans without a confirmation path.
-- After edits, validation runs automatically using `.villani/validation.json` in cost-aware order.
-- On validation failure, Villani attempts bounded self-repair (default: 2 attempts), then stops with a clear unresolved summary.
+- After edits, validation builds a scoped plan first (docs-only short-circuit, targeted test inference, config/manifest escalation), then executes in relevance/cost order.
+- On validation failure, Villani runs a dedicated bounded repair executor (default: 2 attempts) and reports unresolved failures with compact summaries.
 
 Useful options:
 - `--plan-mode/--no-plan-mode`

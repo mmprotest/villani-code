@@ -11,12 +11,12 @@ from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import PlanRiskLevel, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
-from villani_code.validation_loop import RepairAttemptSummary, run_validation
+from villani_code.prompting import build_initial_messages, build_system_blocks
+from villani_code.tools import execute_tool, tool_specs
+from villani_code.validation_loop import run_validation
 from villani_code.repo_map import build_repo_map
-from villani_code.prompting import build_initial_messages
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
-from villani_code.tools import execute_tool
 from villani_code.utils import ensure_dir
 
 
@@ -313,11 +313,30 @@ def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
             runner.event_callback({"type": "stream_text", "text": partial})
 
 
+
+
+def _build_session_state_from_plan(instruction: str, plan: Any) -> SessionState:
+    return SessionState(
+        task_summary=instruction[:220],
+        plan_summary=plan.task_goal[:180],
+        plan_risk=plan.risk_level.value,
+        action_classes=list(plan.action_classes),
+        estimated_scope=plan.estimated_scope,
+        outcome_status="planned",
+        checkpoint_note=f"risk={plan.risk_level.value}; scope={plan.estimated_scope}",
+        current_task_summary=instruction[:220],
+        last_approved_plan_summary=f"{plan.risk_level.value}:{plan.task_goal[:140]}",
+    )
+
+
 def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
-    files = ensure_project_memory(runner.repo)
+    ensure_project_memory(runner.repo)
+    runner.event_callback({"type": "init_started"})
+    runner.event_callback({"type": "init_completed", "path": str(runner.repo / ".villani")})
     runner.event_callback({"type": "planning_started"})
+
     repo_map = load_repo_map(runner.repo)
-    validation_steps = []
+    validation_steps: list[str] = []
     val_file = runner.repo / ".villani" / "validation.json"
     if val_file.exists():
         try:
@@ -325,20 +344,15 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
             validation_steps = [str(s.get("name", "")) for s in payload.get("steps", []) if isinstance(s, dict)]
         except json.JSONDecodeError:
             validation_steps = []
+
     plan = generate_execution_plan(instruction, runner.repo, repo_map, validation_steps)
     runner._execution_plan = plan
     runner.event_callback({"type": "plan_generated", "plan": plan.to_dict(), "human": plan.to_human_text()})
 
-    session = SessionState(
-        current_task_summary=instruction[:220],
-        last_approved_plan_summary=f"{plan.risk_level.value}:{plan.task_goal[:140]}",
-    )
+    session = _build_session_state_from_plan(instruction, plan)
 
-    if runner.skip_plan or runner.plan_policy == "off":
-        update_session_state(runner.repo, session)
-        return
-
-    if not plan.non_trivial:
+    if runner.skip_plan or runner.plan_policy == "off" or not plan.non_trivial:
+        runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
         update_session_state(runner.repo, session)
         return
 
@@ -348,15 +362,47 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
             update_session_state(runner.repo, session)
             return
         runner.event_callback({"type": "plan_aborted", "reason": "high risk in autonomous mode"})
+        session.outcome_status = "aborted"
+        update_session_state(runner.repo, session)
         raise RuntimeError("High-risk plan in autonomous mode requires explicit confirmation; aborting safely.")
 
     runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
     approved = runner.approval_callback("ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value})
     if not approved:
         runner.event_callback({"type": "plan_rejected"})
+        session.outcome_status = "rejected"
+        update_session_state(runner.repo, session)
         raise RuntimeError("Execution plan rejected by user.")
     runner.event_callback({"type": "plan_approved", "risk": plan.risk_level.value})
     update_session_state(runner.repo, session)
+
+
+def _run_repair_attempt(runner: Any, prompt: str) -> dict[str, Any]:
+    messages = build_initial_messages(runner.repo, prompt)
+    system = build_system_blocks(runner.repo)
+    tools = tool_specs()
+    payload = {
+        "model": runner.model,
+        "messages": messages,
+        "system": system,
+        "tools": tools,
+        "max_tokens": runner.max_tokens,
+        "stream": False,
+    }
+    raw = runner.client.create_message(payload, stream=False)
+    response = raw if isinstance(raw, dict) else {"content": []}
+    tool_uses = [b for b in response.get("content", []) if b.get("type") == "tool_use"]
+    for block in tool_uses:
+        runner._execute_tool_with_policy(
+            str(block.get("name", "")),
+            dict(block.get("input", {})),
+            str(block.get("id", "repair-tool")),
+            len(messages),
+        )
+    text = "\n".join(
+        b.get("text", "") for b in response.get("content", []) if isinstance(b, dict) and b.get("type") == "text"
+    )
+    return {"summary": text[:400] or "repair attempt executed"}
 
 
 def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
@@ -364,14 +410,26 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         return ""
     runner.event_callback({"type": "validation_started", "changed_files": changed_files})
     result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback)
+    runner.event_callback(
+        {
+            "type": "validation_plan_selected",
+            "steps": [s.step.name for s in result.plan.selected_steps],
+            "scope": {
+                "docs_only": result.plan.scope.docs_only,
+                "config_changed": result.plan.scope.config_changed,
+                "manifests_changed": result.plan.scope.manifests_changed,
+            },
+        }
+    )
+
     if result.passed:
         update_session_state(
             runner.repo,
             SessionState(
-                current_task_summary="",
-                last_approved_plan_summary=getattr(getattr(runner, "_execution_plan", None), "task_goal", "")[:140],
                 affected_files=changed_files,
                 validation_summary="passed",
+                outcome_status="success",
+                checkpoint_note="validation_passed",
             ),
         )
         return "Validation: passed."
@@ -379,28 +437,65 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     attempts: list[dict[str, Any]] = []
     failing_step = result.steps[-1].step.name if result.steps else "unknown"
     failure_summary = result.failure_summary
-    for attempt in range(1, int(getattr(runner, "max_repair_attempts", 2)) + 1):
+    max_attempts = int(getattr(runner, "max_repair_attempts", 2))
+
+    for attempt in range(1, max_attempts + 1):
         runner.event_callback({"type": "repair_attempt_started", "attempt": attempt, "failing_step": failing_step})
         prompt = (
             "Repair validation failure only.\n"
-            f"Plan: {getattr(getattr(runner, '_execution_plan', None), 'task_goal', '')}\n"
+            f"Task: {getattr(getattr(runner, '_execution_plan', None), 'task_goal', '')}\n"
             f"Changed files: {', '.join(changed_files[:8])}\n"
             f"Failing step: {failing_step}\n"
-            f"Failure summary:\n{failure_summary[:1200]}"
+            f"Failure summary:\n{failure_summary[:1200]}\n"
+            f"Prior attempts: {json.dumps(attempts)[:500]}"
         )
-        runner._in_repair_cycle = True
-        try:
-            sub = runner.run(prompt, messages=build_initial_messages(runner.repo, prompt))
-            _ = sub
-        finally:
-            runner._in_repair_cycle = False
-        result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback)
-        attempts.append({"attempt": attempt, "failing_step": failing_step, "failure_summary": failure_summary[:300], "repair_summary": "attempted targeted repair"})
-        if result.passed:
-            update_session_state(runner.repo, SessionState(affected_files=changed_files, validation_summary="passed after repair", repair_attempts=attempts))
-            return f"Validation recovered after repair attempt {attempt}."
-        failing_step = result.steps[-1].step.name if result.steps else failing_step
-        failure_summary = result.failure_summary
+        repair = _run_repair_attempt(runner, prompt)
 
-    update_session_state(runner.repo, SessionState(affected_files=changed_files, validation_summary="failed", repair_attempts=attempts))
+        recheck = run_validation(
+            runner.repo,
+            changed_files,
+            event_callback=runner.event_callback,
+            steps_override=[failing_step],
+        )
+        attempts.append(
+            {
+                "attempt": attempt,
+                "failing_step": failing_step,
+                "failure_summary": failure_summary[:300],
+                "repair_summary": repair.get("summary", "attempted targeted repair")[:260],
+            }
+        )
+        if recheck.passed:
+            full = run_validation(runner.repo, changed_files, event_callback=runner.event_callback)
+            if full.passed:
+                runner.event_callback({"type": "repair_attempt_result", "attempt": attempt, "status": "recovered"})
+                update_session_state(
+                    runner.repo,
+                    SessionState(
+                        affected_files=changed_files,
+                        validation_summary="passed after repair",
+                        repair_attempt_summaries=attempts,
+                        repair_attempts=attempts,
+                        outcome_status="recovered",
+                        checkpoint_note="repair_recovered",
+                    ),
+                )
+                return f"Validation recovered after repair attempt {attempt}."
+
+        runner.event_callback({"type": "repair_attempt_result", "attempt": attempt, "status": "failed"})
+        failing_step = recheck.steps[-1].step.name if recheck.steps else failing_step
+        failure_summary = recheck.failure_summary or failure_summary
+
+    update_session_state(
+        runner.repo,
+        SessionState(
+            affected_files=changed_files,
+            validation_summary="failed",
+            last_failed_step=failing_step,
+            repair_attempt_summaries=attempts,
+            repair_attempts=attempts,
+            outcome_status="failed",
+            checkpoint_note="repair_exhausted",
+        ),
+    )
     return "Validation failed after bounded repair attempts. Remaining failure: " + failure_summary[:400]
