@@ -55,6 +55,7 @@ class VillaniTUI(App[None]):
         self._ai_started = False
         self._stream_buffer = ""
         self._stream_flush_timer: Timer | None = None
+        self._suppress_next_enter = False
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
         self.controller = RunnerController(runner, self)
@@ -184,10 +185,17 @@ class VillaniTUI(App[None]):
         input_widget = self.query_one(Input)
         input_widget.disabled = False
         input_widget.focus()
+        self._suppress_next_enter = True
 
     def on_key(self, event: Key) -> None:
+        if event.key == "enter" and self._suppress_next_enter:
+            self._suppress_next_enter = False
+            event.stop()
+            event.prevent_default()
+            return
+
         bar = self.query_one(ApprovalBar)
-        if bar.display and event.key in {"up", "down", "enter", "escape"}:
+        if bar.display:
             if event.key == "up":
                 bar.action_cursor_up()
             elif event.key == "down":

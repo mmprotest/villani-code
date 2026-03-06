@@ -20,6 +20,7 @@ class ApprovalBar(Vertical):
         super().__init__(id="approval-bar")
         self.request_id: str | None = None
         self._choices: list[str] = []
+        self._resolved = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="approval-prompt")
@@ -31,6 +32,7 @@ class ApprovalBar(Vertical):
     def show_request(self, prompt: str, request_id: str, choices: list[str]) -> None:
         self.request_id = request_id
         self._choices = choices
+        self._resolved = False
         self.display = True
         self.query_one("#approval-prompt", Static).update(prompt)
         options = self._options()
@@ -67,26 +69,23 @@ class ApprovalBar(Vertical):
             self._sync_selected_style()
 
     def action_confirm(self) -> None:
-        if self.request_id is None:
+        if self.request_id is None or self._resolved:
             return
         index = self._options().index
         if index is None or index < 0 or index >= len(self._choices):
             return
+        self._resolved = True
         self.post_message(self.ApprovalSelected(self._choices[index]))
 
     def action_deny(self) -> None:
-        if self.request_id is not None:
-            self.post_message(self.ApprovalSelected("no"))
+        if self.request_id is None or self._resolved:
+            return
+        self._resolved = True
+        self.post_message(self.ApprovalSelected("no"))
 
     def on_list_view_highlighted(self, _event: ListView.Highlighted) -> None:
         if self.request_id is not None:
             self._sync_selected_style()
-
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        if self.request_id is None:
-            return
-        if 0 <= event.list_view.index < len(self._choices):
-            self.post_message(self.ApprovalSelected(self._choices[event.list_view.index]))
 
     class ApprovalSelected(Message):
         def __init__(self, choice: str) -> None:

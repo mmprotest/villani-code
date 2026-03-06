@@ -116,38 +116,15 @@ class RunnerController:
     def on_runner_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if etype == "planning_started":
-            self.app.post_message(LogAppend("[plan] generating execution plan", kind="meta"))
             self.app.post_message(StatusUpdate("Planning"))
             return
-        if etype == "plan_generated":
-            self.app.post_message(LogAppend(str(event.get("human", "")), kind="meta"))
-            return
-        if etype == "plan_approval_required":
-            self.app.post_message(LogAppend(f"[plan] approval required (risk={event.get('risk')})", kind="meta"))
-            return
         if etype == "plan_approved":
-            self.app.post_message(LogAppend(f"[plan] approved (risk={event.get('risk')})", kind="meta"))
             self.app.post_message(StatusUpdate("Executing"))
             return
-        if etype == "plan_auto_approved":
-            self.app.post_message(LogAppend(f"[plan] auto-approved (risk={event.get('risk')})", kind="meta"))
-            return
-        if etype == "plan_aborted":
-            self.app.post_message(LogAppend(f"[plan] aborted: {event.get('reason')}", kind="meta"))
-            return
         if etype == "validation_started":
-            self.app.post_message(LogAppend("[validation] started", kind="meta"))
             self.app.post_message(StatusUpdate("Validation"))
             return
-        if etype == "validation_step_started":
-            self.app.post_message(LogAppend(f"[validation] running {event.get('name')}: {event.get('command')}", kind="meta"))
-            return
-        if etype == "validation_step_finished":
-            code = int(event.get('exit_code', 1))
-            self.app.post_message(LogAppend(f"[validation] {event.get('name')} => {'pass' if code == 0 else 'fail'}", kind="meta"))
-            return
         if etype == "repair_attempt_started":
-            self.app.post_message(LogAppend(f"[repair] attempt {event.get('attempt')} for {event.get('failing_step')}", kind="meta"))
             self.app.post_message(StatusUpdate("Repairing"))
             return
         if etype == "model_request_started":
@@ -165,10 +142,9 @@ class RunnerController:
             if activity:
                 self.app.post_message(LogAppend(activity, kind="meta"))
                 self.app.post_message(StatusUpdate(activity))
-                self.app.post_message(SpinnerState(True, None))
             else:
                 self.app.post_message(StatusUpdate("Working"))
-                self.app.post_message(SpinnerState(True, None))
+            self.app.post_message(SpinnerState(True, None))
             return
         if etype in {"tool_finished", "tool_result"}:
             self.app.post_message(SpinnerState(False, None))
@@ -177,38 +153,6 @@ class RunnerController:
         if etype == "autonomous_phase":
             phase = str(event.get("phase", "working"))
             self.app.post_message(StatusUpdate(phase))
-            task = str(event.get("task", "")).strip()
-            if task:
-                self.app.post_message(LogAppend(f"[villani-mode] {phase}: {task}", kind="meta"))
-            return
-        if etype == "autonomous_scan":
-            self.app.post_message(LogAppend(f"[villani-mode] scanned files={event.get('files_inspected', 0)}", kind="meta"))
-            return
-        if etype == "autonomous_candidates":
-            tasks = event.get("tasks", [])
-            self.app.post_message(LogAppend(f"[villani-mode] candidates: {', '.join(tasks)}", kind="meta"))
-            return
-        if etype == "takeover_dashboard":
-            self.app.post_message(LogAppend(f"[villani-mode] repo assessment: {event.get('summary', '')}", kind="meta"))
-            return
-        if etype == "takeover_ranked":
-            top = event.get("top", [])
-            self.app.post_message(LogAppend(f"[villani-mode] ranked {event.get('count', 0)} opportunities; top: {', '.join(top)}", kind="meta"))
-            return
-        if etype == "takeover_wave":
-            self.app.post_message(LogAppend(f"[villani-mode] executing wave {event.get('wave')}: {', '.join(event.get('selected', []))}", kind="meta"))
-            return
-        if etype == "takeover_wave_complete":
-            self.app.post_message(LogAppend(f"[villani-mode] wave {event.get('wave')} complete, confidence {event.get('confidence')}, risk {event.get('risk')}, retired {event.get('retired')}", kind="meta"))
-            return
-        if etype == "failure_classified":
-            self.app.post_message(LogAppend(f"[failure] classified as {event.get('category')}: {event.get('next_strategy')}", kind="meta"))
-            return
-        if etype == "verification_ran":
-            self.app.post_message(LogAppend(f"[verification] status={event.get('status', 'unknown')} confidence={event.get('confidence', 'n/a')}", kind="meta"))
-            return
-        if etype == "confidence_risk":
-            self.app.post_message(LogAppend(f"[risk] confidence {event.get('confidence')} risk {event.get('risk')} :: {event.get('summary')}", kind="meta"))
             return
         if etype == "stream_text":
             self._assistant_stream_saw_text = True
