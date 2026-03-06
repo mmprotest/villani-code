@@ -24,6 +24,9 @@ class ExecutionResult:
     all_changes: list[str]
     intended_targets: list[str]
     before_contents: dict[str, str]
+    validation_artifacts: list[str]
+    inspection_summary: str
+    runner_failures: list[str]
     terminated_reason: str
     completed: bool
 

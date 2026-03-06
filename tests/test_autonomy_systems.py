@@ -90,7 +90,9 @@ def test_python_repo_without_tests_creates_bootstrap_tests_opportunity(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "core.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "core.py").write_text(
+        "def f():\n    return 1\n", encoding="utf-8"
+    )
 
     planner = TakeoverPlanner(tmp_path)
     ops = planner.discover_opportunities()
@@ -119,13 +121,17 @@ def test_sparse_docs_repo_gets_docs_coverage_gap_opportunity(tmp_path: Path) -> 
     assert any(op.title == "Audit missing usage docs" for op in ops)
 
 
-def test_fallback_opportunity_created_when_no_other_heuristics_fire(tmp_path: Path) -> None:
+def test_fallback_opportunity_created_when_no_other_heuristics_fire(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "README.md").write_text("# docs\n", encoding="utf-8")
 
     planner = TakeoverPlanner(tmp_path)
     ops = planner.discover_opportunities()
 
-    assert [op.title for op in ops] == ["Inspect repo for highest-leverage small improvement"]
+    assert [op.title for op in ops] == [
+        "Inspect repo for highest-leverage small improvement"
+    ]
 
 
 def test_done_reason_no_opportunities_discovered(tmp_path: Path) -> None:
@@ -139,7 +145,9 @@ def test_done_reason_no_opportunities_discovered(tmp_path: Path) -> None:
 
 def test_done_reason_below_threshold_is_distinct(tmp_path: Path) -> None:
     (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "core.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "core.py").write_text(
+        "def f():\n    return 1\n", encoding="utf-8"
+    )
     controller = VillaniModeController(
         StubRunner(tmp_path),
         tmp_path,
@@ -148,16 +156,33 @@ def test_done_reason_below_threshold_is_distinct(tmp_path: Path) -> None:
 
     summary = controller.run()
 
-    assert summary["done_reason"] == "No remaining opportunities above confidence threshold."
+    assert (
+        summary["done_reason"]
+        == "No remaining opportunities above confidence threshold."
+    )
 
 
-def test_takeover_summary_separates_preexisting_changes_from_new_changes(tmp_path: Path) -> None:
+def test_takeover_summary_separates_preexisting_changes_from_new_changes(
+    tmp_path: Path,
+) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
     (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "README.md").write_text("dirty\n", encoding="utf-8")
 
     controller = VillaniModeController(
@@ -171,7 +196,9 @@ def test_takeover_summary_separates_preexisting_changes_from_new_changes(tmp_pat
     assert summary["files_changed"] == []
 
 
-def test_no_tasks_run_means_no_intentional_or_incidental_changes(tmp_path: Path) -> None:
+def test_no_tasks_run_means_no_intentional_or_incidental_changes(
+    tmp_path: Path,
+) -> None:
     controller = VillaniModeController(
         StubRunner(tmp_path),
         tmp_path,
@@ -183,7 +210,9 @@ def test_no_tasks_run_means_no_intentional_or_incidental_changes(tmp_path: Path)
     assert summary["incidental_changes"] == []
 
 
-def test_rank_order_prefers_real_python_repo_work_over_docs_drift(tmp_path: Path) -> None:
+def test_rank_order_prefers_real_python_repo_work_over_docs_drift(
+    tmp_path: Path,
+) -> None:
     planner = TakeoverPlanner(tmp_path)
     ops = [
         Opportunity(
@@ -195,6 +224,7 @@ def test_rank_order_prefers_real_python_repo_work_over_docs_drift(tmp_path: Path
             evidence="x",
             blast_radius="small",
             proposed_next_action="x",
+            task_contract="effectful",
         ),
         Opportunity(
             title="Bootstrap minimal tests",
@@ -205,6 +235,7 @@ def test_rank_order_prefers_real_python_repo_work_over_docs_drift(tmp_path: Path
             evidence="x",
             blast_radius="small",
             proposed_next_action="x",
+            task_contract="effectful",
         ),
     ]
 

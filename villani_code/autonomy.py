@@ -7,7 +7,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from villani_code.repo_rules import classify_repo_path, is_authoritative_doc_path, is_ignored_repo_path
+from villani_code.repo_rules import (
+    classify_repo_path,
+    is_authoritative_doc_path,
+    is_ignored_repo_path,
+)
 
 
 class FindingCategory(str, Enum):
@@ -27,6 +31,12 @@ class VerificationStatus(str, Enum):
     REPAIRED = "repaired"
     FAIL = "fail"
     UNCERTAIN = "uncertain"
+
+
+class TaskContract(str, Enum):
+    EFFECTFUL = "effectful"
+    VALIDATION = "validation"
+    INSPECTION = "inspection"
 
 
 @dataclass(slots=True)
@@ -60,19 +70,28 @@ class VerificationEngine:
         goal: str,
         changed_files: list[str],
         command_results: list[dict[str, Any]] | None = None,
+        validation_artifacts: list[str] | None = None,
         intended_targets: list[str] | None = None,
         target_existence_expectation: dict[str, bool] | None = None,
         before_contents: dict[str, str] | None = None,
     ) -> VerificationResult:
         findings: list[VerificationFinding] = []
         command_results = command_results or []
+        validation_artifacts = validation_artifacts or []
         commands_run = [
             str(c.get("command", "")) for c in command_results if c.get("command")
         ]
         examined: list[str] = []
-        intended_targets = [self._normalize_repo_path(p) for p in (intended_targets or changed_files)]
-        target_existence_expectation = {self._normalize_repo_path(k): v for k, v in (target_existence_expectation or {}).items()}
-        before_contents = {self._normalize_repo_path(k): v for k, v in (before_contents or {}).items()}
+        intended_targets = [
+            self._normalize_repo_path(p) for p in (intended_targets or changed_files)
+        ]
+        target_existence_expectation = {
+            self._normalize_repo_path(k): v
+            for k, v in (target_existence_expectation or {}).items()
+        }
+        before_contents = {
+            self._normalize_repo_path(k): v for k, v in (before_contents or {}).items()
+        }
         git_diff_targets = set(self._git_diff_name_only())
 
         for rel in intended_targets[:12]:
@@ -166,18 +185,20 @@ class VerificationEngine:
                 except (ValueError, IndexError):
                     pass
 
-        confidence = max(0.05, 0.95 - (0.12 * len(findings)))
-        if not findings:
-            status = VerificationStatus.PASS
-            summary = f"Adversarial review passed for {len(examined)} file(s)."
-        elif any(f.severity == "high" for f in findings):
-            status = VerificationStatus.FAIL
-            summary = "Adversarial review found high-risk issues."
-        else:
-            status = VerificationStatus.UNCERTAIN
-            summary = "Adversarial review found non-blocking risks."
+        if not intended_targets and not changed_files and not validation_artifacts:
+            findings.append(
+                VerificationFinding(
+                    FindingCategory.FAILED_ASSUMPTION,
+                    "No intervention or validation evidence produced.",
+                    None,
+                    "medium",
+                )
+            )
 
-        findings = self._reconcile_findings(findings, intended_targets, before_contents, git_diff_targets)
+        findings = self._reconcile_findings(
+            findings, intended_targets, before_contents, git_diff_targets
+        )
+        confidence = max(0.05, 0.95 - (0.12 * len(findings)))
         if not findings:
             status = VerificationStatus.PASS
             summary = f"Adversarial review passed for {len(examined)} file(s)."
@@ -199,8 +220,17 @@ class VerificationEngine:
         )
 
     def _git_diff_name_only(self) -> list[str]:
-        proc = subprocess.run(["git", "diff", "--name-only"], cwd=self.repo, capture_output=True, text=True)
-        return [self._normalize_repo_path(line.strip()) for line in proc.stdout.splitlines() if line.strip()]
+        proc = subprocess.run(
+            ["git", "diff", "--name-only"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+        )
+        return [
+            self._normalize_repo_path(line.strip())
+            for line in proc.stdout.splitlines()
+            if line.strip()
+        ]
 
     def _reconcile_findings(
         self,
@@ -212,19 +242,35 @@ class VerificationEngine:
         reconciled: list[VerificationFinding] = []
         intended_set = set(intended_targets)
         for finding in findings:
-            rel = self._normalize_repo_path(finding.file_path) if finding.file_path else None
-            if finding.category == FindingCategory.INCOMPLETE_EDIT and rel and rel in intended_set:
+            rel = (
+                self._normalize_repo_path(finding.file_path)
+                if finding.file_path
+                else None
+            )
+            if (
+                finding.category == FindingCategory.INCOMPLETE_EDIT
+                and rel
+                and rel in intended_set
+            ):
                 path = self.repo / rel
                 if path.exists():
-                    self._logger(f"Verification finding removed due to direct evidence: {finding.category.value}: {finding.message}")
+                    self._logger(
+                        f"Verification finding removed due to direct evidence: {finding.category.value}: {finding.message}"
+                    )
                     continue
-            if finding.category == FindingCategory.FAILED_ASSUMPTION and rel and rel in intended_set:
+            if (
+                finding.category == FindingCategory.FAILED_ASSUMPTION
+                and rel
+                and rel in intended_set
+            ):
                 path = self.repo / rel
                 before = before_contents.get(rel)
                 if path.exists() and before is not None:
                     current = path.read_text(encoding="utf-8", errors="replace")
                     if current != before or rel in git_diff_targets:
-                        self._logger(f"Verification finding removed due to direct evidence: {finding.category.value}: {finding.message}")
+                        self._logger(
+                            f"Verification finding removed due to direct evidence: {finding.category.value}: {finding.message}"
+                        )
                         continue
             reconciled.append(finding)
         return reconciled
@@ -322,6 +368,7 @@ class Opportunity:
     evidence: str
     blast_radius: str
     proposed_next_action: str
+    task_contract: str
 
 
 @dataclass(slots=True)
@@ -362,7 +409,40 @@ class TakeoverPlanner:
         if rg_path:
             try:
                 result = subprocess.run(
-                    ["rg", "-n", "TODO|FIXME", ".", "--glob", "!.git/**", "--glob", "!.venv/**", "--glob", "!venv/**", "--glob", "!**/__pycache__/**", "--glob", "!**/.pytest_cache/**", "--glob", "!**/.mypy_cache/**", "--glob", "!**/.ruff_cache/**", "--glob", "!**/.ipynb_checkpoints/**", "--glob", "!**/.vscode/**", "--glob", "!**/.idea/**", "--glob", "!**/.villani_code/**", "--glob", "!build/**", "--glob", "!dist/**", "--glob", "!node_modules/**"],
+                    [
+                        "rg",
+                        "-n",
+                        "TODO|FIXME",
+                        ".",
+                        "--glob",
+                        "!.git/**",
+                        "--glob",
+                        "!.venv/**",
+                        "--glob",
+                        "!venv/**",
+                        "--glob",
+                        "!**/__pycache__/**",
+                        "--glob",
+                        "!**/.pytest_cache/**",
+                        "--glob",
+                        "!**/.mypy_cache/**",
+                        "--glob",
+                        "!**/.ruff_cache/**",
+                        "--glob",
+                        "!**/.ipynb_checkpoints/**",
+                        "--glob",
+                        "!**/.vscode/**",
+                        "--glob",
+                        "!**/.idea/**",
+                        "--glob",
+                        "!**/.villani_code/**",
+                        "--glob",
+                        "!build/**",
+                        "--glob",
+                        "!dist/**",
+                        "--glob",
+                        "!node_modules/**",
+                    ],
                     cwd=self.repo,
                     capture_output=True,
                     text=True,
@@ -396,11 +476,18 @@ class TakeoverPlanner:
         return matches
 
     def build_repo_summary(self) -> str:
-        files = [p for p in self.repo.rglob("*") if p.is_file() and not is_ignored_repo_path(p.relative_to(self.repo).as_posix())]
+        files = [
+            p
+            for p in self.repo.rglob("*")
+            if p.is_file()
+            and not is_ignored_repo_path(p.relative_to(self.repo).as_posix())
+        ]
         py = sum(1 for p in files if p.suffix == ".py")
         tests = sum(1 for p in files if "tests" in p.parts)
         md = sum(1 for p in files if p.suffix == ".md")
-        has_tests = self._has_meaningful_tests([p.relative_to(self.repo).as_posix() for p in files])
+        has_tests = self._has_meaningful_tests(
+            [p.relative_to(self.repo).as_posix() for p in files]
+        )
         return f"files={len(files)} py={py} tests={tests} docs={md} has_tests={int(has_tests)}"
 
     def discover_opportunities(self) -> list[Opportunity]:
@@ -421,6 +508,7 @@ class TakeoverPlanner:
                     "Python repo has source code but no tests directory or test files",
                     "small",
                     "audit package layout and add a minimal baseline test scaffold",
+                    TaskContract.EFFECTFUL.value,
                 )
             )
         if python_files:
@@ -434,6 +522,7 @@ class TakeoverPlanner:
                     "Python repo detected; baseline validation is a reasonable first-pass autonomous task",
                     "small",
                     "inspect package entry points and validate importable baseline",
+                    TaskContract.VALIDATION.value,
                 )
             )
         tracked_artifacts = self._tracked_runtime_artifacts()
@@ -448,6 +537,7 @@ class TakeoverPlanner:
                     "repository contains likely junk artifacts that may need cleanup",
                     "small",
                     "inspect tracked caches/checkpoints/editor artifacts and propose cleanup",
+                    TaskContract.INSPECTION.value,
                 )
             )
         todo_matches = self._find_todo_fixme_matches()
@@ -462,6 +552,7 @@ class TakeoverPlanner:
                     todo_matches[0],
                     "medium",
                     "resolve highest-signal TODO",
+                    TaskContract.EFFECTFUL.value,
                 )
             )
         if python_files and self._has_minimal_docs(docs):
@@ -475,6 +566,7 @@ class TakeoverPlanner:
                     "code exists but documentation coverage appears sparse",
                     "small",
                     "inspect README and package layout for obvious docs coverage gaps",
+                    TaskContract.EFFECTFUL.value,
                 )
             )
         if docs and self._has_authoritative_docs_drift(docs):
@@ -488,6 +580,7 @@ class TakeoverPlanner:
                     "Authoritative docs may not match current module layout",
                     "small",
                     "sync docs with current CLI",
+                    TaskContract.EFFECTFUL.value,
                 )
             )
         if not ops and self.enable_fallback:
@@ -501,6 +594,7 @@ class TakeoverPlanner:
                     "no stronger heuristic fired, but repo still deserves bounded inspection",
                     "small",
                     "read README, inspect key package/config files, and identify one safe bounded improvement",
+                    TaskContract.INSPECTION.value,
                 )
             )
         ops = [op for op in ops if self._is_authoritative_opportunity(op)]
@@ -526,7 +620,9 @@ class TakeoverPlanner:
         return [
             rel
             for rel in files
-            if rel.endswith(".py") and not rel.startswith("tests/") and not Path(rel).name.startswith("test_")
+            if rel.endswith(".py")
+            and not rel.startswith("tests/")
+            and not Path(rel).name.startswith("test_")
         ]
 
     def _has_meaningful_tests(self, files: list[str]) -> bool:
@@ -540,7 +636,9 @@ class TakeoverPlanner:
 
     def _tracked_runtime_artifacts(self) -> list[str]:
         try:
-            proc = subprocess.run(["git", "ls-files"], cwd=self.repo, capture_output=True, text=True)
+            proc = subprocess.run(
+                ["git", "ls-files"], cwd=self.repo, capture_output=True, text=True
+            )
         except (FileNotFoundError, OSError, subprocess.SubprocessError):
             return []
         if proc.returncode != 0:
@@ -575,7 +673,11 @@ class TakeoverPlanner:
             return False
         readme = self.repo / "README.md"
         src = self.repo / "villani_code"
-        if readme.exists() and src.exists() and any(p.name == "__init__.py" for p in src.rglob("__init__.py")):
+        if (
+            readme.exists()
+            and src.exists()
+            and any(p.name == "__init__.py" for p in src.rglob("__init__.py"))
+        ):
             text = readme.read_text(encoding="utf-8", errors="replace").lower()
             return "villani" not in text
         return False
@@ -583,4 +685,7 @@ class TakeoverPlanner:
     def _is_authoritative_opportunity(self, op: Opportunity) -> bool:
         if op.category == "stale_docs":
             return all(is_authoritative_doc_path(p) for p in op.affected_files)
-        return not any(is_ignored_repo_path(p) or classify_repo_path(p) != "authoritative" for p in op.affected_files)
+        return not any(
+            is_ignored_repo_path(p) or classify_repo_path(p) != "authoritative"
+            for p in op.affected_files
+        )

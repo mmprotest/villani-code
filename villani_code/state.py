@@ -10,7 +10,11 @@ from typing import Any, Callable
 from rich.console import Console
 
 from villani_code.autonomous import VillaniModeConfig, VillaniModeController
-from villani_code.autonomy import FailureClassifier, VerificationEngine, VerificationStatus
+from villani_code.autonomy import (
+    FailureClassifier,
+    VerificationEngine,
+    VerificationStatus,
+)
 from villani_code.checkpoints import CheckpointManager
 from villani_code.context_budget import ContextBudget
 from villani_code.edits import ProposalStore
@@ -29,7 +33,12 @@ from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import execute_tool, tool_specs
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.transcripts import save_transcript
-from villani_code.utils import ensure_dir, is_effectively_empty_content, merge_extra_json, normalize_content_blocks
+from villani_code.utils import (
+    ensure_dir,
+    is_effectively_empty_content,
+    merge_extra_json,
+    normalize_content_blocks,
+)
 
 
 class Runner:
@@ -74,13 +83,28 @@ class Runner:
         self.small_model = small_model
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
-        self.villani_config = VillaniModeConfig(enabled=villani_mode, steering_objective=villani_objective)
+        self.villani_config = VillaniModeConfig(
+            enabled=villani_mode, steering_objective=villani_objective
+        )
         self.console = Console()
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
                 deny=["Read(.env)", "Read(secrets/**)", "Bash(curl *)", "Bash(wget *)"],
                 ask=["Write(*)", "Patch(*)"],
-                allow=["Read(*)", "Ls(*)", "Grep(*)", "Search(*)", "Glob(*)", "BashSafe(*)", "GitStatus(*)", "GitDiff(*)", "GitLog(*)", "GitBranch(*)", "GitCheckout(*)", "GitCommit(*)"],
+                allow=[
+                    "Read(*)",
+                    "Ls(*)",
+                    "Grep(*)",
+                    "Search(*)",
+                    "Glob(*)",
+                    "BashSafe(*)",
+                    "GitStatus(*)",
+                    "GitDiff(*)",
+                    "GitLog(*)",
+                    "GitBranch(*)",
+                    "GitCheckout(*)",
+                    "GitCommit(*)",
+                ],
             ),
             repo=self.repo,
         )
@@ -98,7 +122,11 @@ class Runner:
         self._last_failed_tool_sig = ""
         self._repo_map = ""
         self._retriever: Retriever | None = None
-        self._context_budget = ContextBudget(max_chars=35000, keep_last_turns=4) if self.small_model else None
+        self._context_budget = (
+            ContextBudget(max_chars=35000, keep_last_turns=4)
+            if self.small_model
+            else None
+        )
         self._files_read: set[str] = set()
         self._pending_verification = ""
         self._intended_targets: set[str] = set()
@@ -108,9 +136,13 @@ class Runner:
         if self.small_model:
             self._init_small_model_support()
 
-
     def run_villani_mode(self) -> dict[str, Any]:
-        controller = VillaniModeController(self, self.repo, steering_objective=self.villani_objective, event_callback=self.event_callback)
+        controller = VillaniModeController(
+            self,
+            self.repo,
+            steering_objective=self.villani_objective,
+            event_callback=self.event_callback,
+        )
         summary = controller.run()
         text = VillaniModeController.format_summary(summary)
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
@@ -123,9 +155,19 @@ class Runner:
         execution_budget: ExecutionBudget | None = None,
     ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
-        system = build_system_blocks(self.repo, repo_map=self._repo_map if self.small_model else "", villani_mode=self.villani_mode)
+        system = build_system_blocks(
+            self.repo,
+            repo_map=self._repo_map if self.small_model else "",
+            villani_mode=self.villani_mode,
+        )
         tools = tool_specs()
-        transcript: dict[str, Any] = {"requests": [], "responses": [], "tool_invocations": [], "tool_results": [], "streamed_events_count": 0}
+        transcript: dict[str, Any] = {
+            "requests": [],
+            "responses": [],
+            "tool_invocations": [],
+            "tool_results": [],
+            "streamed_events_count": 0,
+        }
         self._save_session_snapshot(messages)
         empty_turn_retries = 0
         start = time.monotonic()
@@ -147,17 +189,54 @@ class Runner:
             intentional: list[str] = []
             incidental: list[str] = []
             for path in attributed:
-                if is_ignored_repo_path(path) or classify_repo_path(path) != "authoritative":
+                if (
+                    is_ignored_repo_path(path)
+                    or classify_repo_path(path) != "authoritative"
+                ):
                     incidental.append(path)
                 else:
                     intentional.append(path)
             all_changes = sorted(set(intentional) | set(incidental))
             return sorted(set(intentional)), sorted(set(incidental)), all_changes
 
-        def _finish_bounded(response: dict[str, Any], reason: str, completed: bool) -> dict[str, Any]:
+        def _validation_artifacts() -> list[str]:
+            artifacts: list[str] = []
+            for tool_result in transcript.get("tool_results", []):
+                content = str(tool_result.get("content", ""))
+                if "command:" in content and "exit:" in content:
+                    cmd = content.splitlines()[0].replace("command:", "").strip()
+                    exit_line = next(
+                        (
+                            line
+                            for line in content.splitlines()
+                            if line.startswith("exit:")
+                        ),
+                        "exit: ?",
+                    )
+                    artifacts.append(
+                        f"{cmd} ({exit_line.replace('exit:', 'exit').strip()})"
+                    )
+            return artifacts
+
+        def _runner_failures() -> list[str]:
+            failures: list[str] = []
+            for tool_result in transcript.get("tool_results", []):
+                if tool_result.get("is_error"):
+                    failures.append(
+                        f"tool_failure: {str(tool_result.get('content', ''))[:220]}"
+                    )
+            return failures
+
+        def _finish_bounded(
+            response: dict[str, Any], reason: str, completed: bool
+        ) -> dict[str, Any]:
             elapsed = time.monotonic() - start
             intentional_changes, incidental_changes, all_changes = _change_summary()
-            final_text = "\n".join(block.get("text", "") for block in response.get("content", []) if block.get("type") == "text")
+            final_text = "\n".join(
+                block.get("text", "")
+                for block in response.get("content", [])
+                if block.get("type") == "text"
+            )
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,
@@ -169,6 +248,9 @@ class Runner:
                 all_changes=all_changes,
                 intended_targets=sorted(self._intended_targets),
                 before_contents=dict(self._before_contents),
+                validation_artifacts=_validation_artifacts(),
+                inspection_summary="",
+                runner_failures=_runner_failures(),
                 terminated_reason=reason,
                 completed=completed,
             )
@@ -184,7 +266,9 @@ class Runner:
                 "execution": execution.to_dict(),
             }
 
-        def _budget_reason(completed: bool = False, model_idle: bool = False) -> str | None:
+        def _budget_reason(
+            completed: bool = False, model_idle: bool = False
+        ) -> str | None:
             if execution_budget is None:
                 return None
             elapsed = time.monotonic() - start
@@ -194,7 +278,10 @@ class Runner:
                 return "max_tool_calls"
             if turns_used >= execution_budget.max_turns:
                 return "max_turns"
-            if consecutive_recon_turns >= execution_budget.max_reconsecutive_recon_turns:
+            if (
+                consecutive_recon_turns
+                >= execution_budget.max_reconsecutive_recon_turns
+            ):
                 return "recon_loop"
             if consecutive_no_edit_turns >= execution_budget.max_no_edit_turns:
                 return "no_edits"
@@ -209,7 +296,14 @@ class Runner:
             self._live_stream_started = False
             self._coalescer = StreamCoalescer()
             turn_messages = self._prepare_messages_for_model(messages)
-            payload = {"model": self.model, "messages": turn_messages, "system": system, "tools": tools, "max_tokens": self.max_tokens, "stream": self.stream}
+            payload = {
+                "model": self.model,
+                "messages": turn_messages,
+                "system": system,
+                "tools": tools,
+                "max_tokens": self.max_tokens,
+                "stream": self.stream,
+            }
             if self.thinking is not None:
                 payload["thinking"] = self.thinking
             payload = merge_extra_json(payload, self.extra_json)
@@ -229,14 +323,28 @@ class Runner:
 
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
-            messages.append({"role": "assistant", "content": response.get("content", [])})
+            messages.append(
+                {"role": "assistant", "content": response.get("content", [])}
+            )
             turns_used += 1
 
-            tool_uses = [b for b in response.get("content", []) if b.get("type") == "tool_use"]
+            tool_uses = [
+                b for b in response.get("content", []) if b.get("type") == "tool_use"
+            ]
             empty = is_effectively_empty_content(response.get("content", []))
             if not tool_uses and empty and empty_turn_retries < 2:
                 empty_turn_retries += 1
-                messages.append({"role": "user", "content": [{"type": "text", "text": "Continue. You ended your previous turn with no output. Resume the task from where you left off and either call the next tool or provide the next part of the answer."}]})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Continue. You ended your previous turn with no output. Resume the task from where you left off and either call the next tool or provide the next part of the answer.",
+                            }
+                        ],
+                    }
+                )
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -249,52 +357,114 @@ class Runner:
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
-                    transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+                    transcript_path = save_transcript(
+                        self.repo, transcript, redact=self.redact
+                    )
                     self._save_session_snapshot(messages)
-                    return {"response": response, "messages": messages, "transcript_path": str(transcript_path), "transcript": transcript}
+                    return {
+                        "response": response,
+                        "messages": messages,
+                        "transcript_path": str(transcript_path),
+                        "transcript": transcript,
+                    }
                 proposal = self._capture_edit_proposal(response)
                 if proposal:
-                    self.event_callback({"type": "edit_proposed", "proposal_id": proposal.id, "summary": proposal.summary, "files": proposal.files_touched})
+                    self.event_callback(
+                        {
+                            "type": "edit_proposed",
+                            "proposal_id": proposal.id,
+                            "summary": proposal.summary,
+                            "files": proposal.files_touched,
+                        }
+                    )
                 if self._is_no_progress_response(response):
                     self._no_progress_cycles += 1
                     if execution_budget is not None:
                         reason = _budget_reason(model_idle=True)
                         if reason:
-                            return _finish_bounded(response, reason, reason == "completed")
+                            return _finish_bounded(
+                                response, reason, reason == "completed"
+                            )
                     if self._no_progress_cycles < 3:
-                        messages.append({"role": "user", "content": [{"type": "text", "text": "No progress detected. Continue with one concrete next step."}]})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "No progress detected. Continue with one concrete next step.",
+                                    }
+                                ],
+                            }
+                        )
                         reason = _budget_reason()
                         if reason:
-                            return _finish_bounded(response, reason, reason == "completed")
+                            return _finish_bounded(
+                                response, reason, reason == "completed"
+                            )
                         continue
                 else:
                     self._no_progress_cycles = 0
                     self._recovery_count = 0
                 if self._no_progress_cycles >= 3:
                     if self._recovery_count >= 2:
-                        response = {"role": "assistant", "content": [{"type": "text", "text": "I’m still blocked after two recovery attempts. Which one constraint should I relax first: permissions, test scope, or patch strategy?"}]}
+                        response = {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "I’m still blocked after two recovery attempts. Which one constraint should I relax first: permissions, test scope, or patch strategy?",
+                                }
+                            ],
+                        }
                         transcript["responses"].append(response)
                     else:
                         self._recovery_count += 1
                         self._no_progress_cycles = 0
-                        messages.append({"role": "user", "content": [{"type": "text", "text": "RECOVERY MODE: In <=6 lines recap current state, then list next 3 concrete actions, then choose exactly 1 tool call to run next with arguments."}]})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "RECOVERY MODE: In <=6 lines recap current state, then list next 3 concrete actions, then choose exactly 1 tool call to run next with arguments.",
+                                    }
+                                ],
+                            }
+                        )
                         continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
-                transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+                transcript_path = save_transcript(
+                    self.repo, transcript, redact=self.redact
+                )
                 self._save_session_snapshot(messages)
-                return {"response": response, "messages": messages, "transcript_path": str(transcript_path), "transcript": transcript}
+                return {
+                    "response": response,
+                    "messages": messages,
+                    "transcript_path": str(transcript_path),
+                    "transcript": transcript,
+                }
 
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
                 tool_use_id = str(block.get("id"))
-                self.event_callback({"type": "tool_use", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
+                self.event_callback(
+                    {
+                        "type": "tool_use",
+                        "name": tool_name,
+                        "input": tool_input,
+                        "tool_use_id": tool_use_id,
+                    }
+                )
 
-                result = self._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
+                result = self._execute_tool_with_policy(
+                    tool_name, tool_input, tool_use_id, len(messages)
+                )
                 tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
@@ -304,24 +474,72 @@ class Runner:
                         self._pending_verification = self._run_verification()
 
                 if tool_name in {"Write", "Patch", "Bash"}:
-                    self._pending_verification = self._run_verification(trigger=f"{tool_name} execution")
+                    self._pending_verification = self._run_verification(
+                        trigger=f"{tool_name} execution"
+                    )
 
                 if result.get("is_error"):
-                    failure = self._failure_classifier.classify(f"{tool_name} failed", str(result.get("content", "")))
-                    self.event_callback({"type": "failure_classified", "category": failure.category.value, "summary": failure.cause_summary, "next_strategy": failure.suggested_strategy, "occurrence": failure.occurrence_count})
+                    failure = self._failure_classifier.classify(
+                        f"{tool_name} failed", str(result.get("content", ""))
+                    )
+                    self.event_callback(
+                        {
+                            "type": "failure_classified",
+                            "category": failure.category.value,
+                            "summary": failure.cause_summary,
+                            "next_strategy": failure.suggested_strategy,
+                            "occurrence": failure.occurrence_count,
+                        }
+                    )
 
-                self.hooks.run_event("PostToolUse", {"event": "PostToolUse", "tool": tool_name, "input": tool_input, "result": result})
-                self.event_callback({"type": "tool_finished", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id, "is_error": result["is_error"]})
-                transcript["tool_invocations"].append({"name": tool_name, "input": tool_input, "id": tool_use_id})
+                self.hooks.run_event(
+                    "PostToolUse",
+                    {
+                        "event": "PostToolUse",
+                        "tool": tool_name,
+                        "input": tool_input,
+                        "result": result,
+                    },
+                )
+                self.event_callback(
+                    {
+                        "type": "tool_finished",
+                        "name": tool_name,
+                        "input": tool_input,
+                        "tool_use_id": tool_use_id,
+                        "is_error": result["is_error"],
+                    }
+                )
+                transcript["tool_invocations"].append(
+                    {"name": tool_name, "input": tool_input, "id": tool_use_id}
+                )
                 transcript["tool_results"].append(result)
-                self.event_callback({"type": "tool_result", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id, "is_error": result["is_error"]})
-                tool_results.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": result["content"], "is_error": result["is_error"]})
+                self.event_callback(
+                    {
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "input": tool_input,
+                        "tool_use_id": tool_use_id,
+                        "is_error": result["is_error"],
+                    }
+                )
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result["content"],
+                        "is_error": result["is_error"],
+                    }
+                )
 
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
 
-            if tool_results and any(not r.get("is_error") for r in transcript["tool_results"][-len(tool_uses) :]):
+            if tool_results and any(
+                not r.get("is_error")
+                for r in transcript["tool_results"][-len(tool_uses) :]
+            ):
                 self._no_progress_cycles = 0
                 self._recovery_count = 0
                 self._last_failed_tool_sig = ""
@@ -339,7 +557,10 @@ class Runner:
             else:
                 consecutive_no_edit_turns += 1
 
-            mutating_tools = any(self._is_mutating_tool_call(b.get("name", ""), dict(b.get("input", {}))) for b in tool_uses)
+            mutating_tools = any(
+                self._is_mutating_tool_call(b.get("name", ""), dict(b.get("input", {})))
+                for b in tool_uses
+            )
             recon_turn = bool(tool_uses) and not mutating_tools and not edited_this_turn
             if recon_turn:
                 consecutive_recon_turns += 1
@@ -352,14 +573,23 @@ class Runner:
             messages.append({"role": "user", "content": tool_results})
 
             if self._pending_verification:
-                messages.append({"role": "user", "content": [{"type": "text", "text": self._pending_verification}]})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self._pending_verification}
+                        ],
+                    }
+                )
                 self._pending_verification = ""
 
             reason = _budget_reason()
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
 
-    def _is_mutating_tool_call(self, tool_name: str, tool_input: dict[str, Any]) -> bool:
+    def _is_mutating_tool_call(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> bool:
         if tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}:
             return True
         if tool_name == "Bash":
@@ -378,8 +608,17 @@ class Runner:
             return not command.startswith(readonly_prefixes)
         return False
 
-    def _execute_tool_with_policy(self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str, message_count: int) -> dict[str, Any]:
-        hook_pre = self.hooks.run_event("PreToolUse", {"event": "PreToolUse", "tool": tool_name, "input": tool_input})
+    def _execute_tool_with_policy(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        message_count: int,
+    ) -> dict[str, Any]:
+        hook_pre = self.hooks.run_event(
+            "PreToolUse",
+            {"event": "PreToolUse", "tool": tool_name, "input": tool_input},
+        )
         if not hook_pre.allow:
             return {"content": f"Blocked by hook: {hook_pre.reason}", "is_error": True}
 
@@ -389,15 +628,32 @@ class Runner:
                 return {"content": policy_error, "is_error": True}
             self._tighten_tool_input(tool_name, tool_input)
 
-        policy = self.permissions.evaluate_with_reason(tool_name, tool_input, bypass=self.bypass_permissions, auto_accept_edits=self.auto_accept_edits)
+        policy = self.permissions.evaluate_with_reason(
+            tool_name,
+            tool_input,
+            bypass=self.bypass_permissions,
+            auto_accept_edits=self.auto_accept_edits,
+        )
         self._emit_policy_event(tool_name, tool_input, policy.decision, policy.reason)
         if policy.decision == Decision.DENY:
             return {"content": "Denied by permission policy", "is_error": True}
         if policy.decision == Decision.ASK:
             if self.villani_mode:
-                self.event_callback({"type": "approval_auto_resolved", "name": tool_name, "input": tool_input})
+                self.event_callback(
+                    {
+                        "type": "approval_auto_resolved",
+                        "name": tool_name,
+                        "input": tool_input,
+                    }
+                )
             else:
-                self.event_callback({"type": "approval_required", "name": tool_name, "input": tool_input})
+                self.event_callback(
+                    {
+                        "type": "approval_required",
+                        "name": tool_name,
+                        "input": tool_input,
+                    }
+                )
                 if not self.approval_callback(tool_name, tool_input):
                     return {"content": "User denied tool execution", "is_error": True}
         elif self.plan_mode and tool_name in {"Write", "Patch"}:
@@ -407,7 +663,11 @@ class Runner:
             target = str(tool_input.get("file_path", ""))
             if target:
                 classification = classify_repo_path(target)
-                if is_ignored_repo_path(target) or classification in {"runtime_artifact", "editor_artifact", "vcs_internal"}:
+                if is_ignored_repo_path(target) or classification in {
+                    "runtime_artifact",
+                    "editor_artifact",
+                    "vcs_internal",
+                }:
                     msg = f"Skipped low-authority path: {target} ({classification})"
                     self.event_callback({"type": "autonomous_phase", "phase": msg})
                     return {"content": msg, "is_error": True}
@@ -419,12 +679,25 @@ class Runner:
                 self._intended_targets.add(normalized_target)
                 target_path = (self.repo / normalized_target).resolve()
                 if target_path.exists() and target_path.is_file():
-                    self._before_contents[normalized_target] = target_path.read_text(encoding="utf-8", errors="replace")
-            self.checkpoints.create([Path(tool_input.get("file_path", ""))], message_index=message_count)
-        self.event_callback({"type": "tool_started", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
+                    self._before_contents[normalized_target] = target_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+            self.checkpoints.create(
+                [Path(tool_input.get("file_path", ""))], message_index=message_count
+            )
+        self.event_callback(
+            {
+                "type": "tool_started",
+                "name": tool_name,
+                "input": tool_input,
+                "tool_use_id": tool_use_id,
+            }
+        )
         return execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
 
-    def _prepare_messages_for_model(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _prepare_messages_for_model(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         prepared = [dict(m) for m in messages]
         if self.small_model:
             self._inject_retrieval_briefing(prepared)
@@ -441,14 +714,24 @@ class Runner:
         content = last.get("content", [])
         if not isinstance(content, list):
             return
-        user_text = "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict) and b.get("type") == "text")
+        user_text = "\n".join(
+            str(b.get("text", ""))
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
         if not user_text or "<retrieval-briefing>" in user_text:
             return
         hits = self._retriever.query(user_text, k=8)
         if not hits:
             return
         briefing = "\n".join(f"- {h.path}: {h.reason}" for h in hits)
-        content.insert(0, {"type": "text", "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>"})
+        content.insert(
+            0,
+            {
+                "type": "text",
+                "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>",
+            },
+        )
 
     def _init_small_model_support(self) -> None:
         index_path = self.repo / ".villani_code" / "index" / "index.json"
@@ -467,11 +750,18 @@ class Runner:
         self._retriever = Retriever(idx)
         self._repo_map = build_repo_map(idx)
 
-    def _small_model_tool_guard(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    def _small_model_tool_guard(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> str | None:
         if tool_name in {"Write", "Patch"}:
             fp = str(tool_input.get("file_path", ""))
             if fp and fp not in self._files_read:
-                read_result = execute_tool("Read", {"file_path": fp, "max_bytes": 8000}, self.repo, unsafe=self.unsafe)
+                read_result = execute_tool(
+                    "Read",
+                    {"file_path": fp, "max_bytes": 8000},
+                    self.repo,
+                    unsafe=self.unsafe,
+                )
                 if read_result.get("is_error"):
                     return f"Read-before-edit policy: failed to auto-read {fp}. Read it explicitly before editing."
                 self._files_read.add(fp)
@@ -486,11 +776,15 @@ class Runner:
 
     def _tighten_tool_input(self, tool_name: str, tool_input: dict[str, Any]) -> None:
         if tool_name == "Read":
-            tool_input["max_bytes"] = min(int(tool_input.get("max_bytes", 200000)), 50_000)
+            tool_input["max_bytes"] = min(
+                int(tool_input.get("max_bytes", 200000)), 50_000
+            )
         if tool_name == "Grep":
             tool_input["max_results"] = min(int(tool_input.get("max_results", 200)), 60)
 
-    def _truncate_tool_result(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    def _truncate_tool_result(
+        self, tool_name: str, result: dict[str, Any]
+    ) -> dict[str, Any]:
         if result.get("is_error"):
             return result
         content = str(result.get("content", ""))
@@ -510,7 +804,14 @@ class Runner:
             proc = subprocess.run(cmd, cwd=self.repo, capture_output=True, text=True)
             stderr_lines = "\n".join([ln for ln in proc.stderr.splitlines() if ln][:5])
             stdout = proc.stdout[:1500]
-            cmd_results.append({"command": " ".join(cmd), "exit": proc.returncode, "stdout": stdout, "stderr": stderr_lines})
+            cmd_results.append(
+                {
+                    "command": " ".join(cmd),
+                    "exit": proc.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr_lines,
+                }
+            )
             lines.append(f"command: {' '.join(cmd)}")
             lines.append(f"exit: {proc.returncode}")
             if stdout:
@@ -532,31 +833,81 @@ class Runner:
             for finding in verification.findings[:6]:
                 lines.append(f"- {finding.category.value}: {finding.message}")
         lines.append("</verification>")
-        self.event_callback({"type": "verification_ran", "status": verification.status.value, "confidence": verification.confidence_score})
-        if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
-            self.event_callback({"type": "confidence_risk", "confidence": verification.confidence_score, "risk": "medium" if verification.status == VerificationStatus.UNCERTAIN else "high", "summary": verification.summary})
+        self.event_callback(
+            {
+                "type": "verification_ran",
+                "status": verification.status.value,
+                "confidence": verification.confidence_score,
+            }
+        )
+        if verification.status in {
+            VerificationStatus.FAIL,
+            VerificationStatus.UNCERTAIN,
+        }:
+            self.event_callback(
+                {
+                    "type": "confidence_risk",
+                    "confidence": verification.confidence_score,
+                    "risk": "medium"
+                    if verification.status == VerificationStatus.UNCERTAIN
+                    else "high",
+                    "summary": verification.summary,
+                }
+            )
         return "\n".join(lines)
 
     def _git_changed_files(self) -> list[str]:
-        proc = subprocess.run(["git", "status", "--short"], cwd=self.repo, capture_output=True, text=True)
+        proc = subprocess.run(
+            ["git", "status", "--short"], cwd=self.repo, capture_output=True, text=True
+        )
         return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
 
-    def _emit_policy_event(self, tool_name: str, tool_input: dict[str, Any], decision: Decision, reason: str) -> None:
+    def _emit_policy_event(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        decision: Decision,
+        reason: str,
+    ) -> None:
         if tool_name != "Bash":
             return
         command = str(tool_input.get("command", ""))
         cwd = str((self.repo / str(tool_input.get("cwd", "."))).resolve())
-        outcome = {Decision.ALLOW: "AUTO_APPROVE", Decision.ASK: "ASK", Decision.DENY: "DENY"}[decision]
+        outcome = {
+            Decision.ALLOW: "AUTO_APPROVE",
+            Decision.ASK: "ASK",
+            Decision.DENY: "DENY",
+        }[decision]
         ts = datetime.now(timezone.utc).isoformat()
-        line = json.dumps({"timestamp": ts, "cwd": cwd, "command": command, "outcome": outcome, "reason": reason})
+        line = json.dumps(
+            {
+                "timestamp": ts,
+                "cwd": cwd,
+                "command": command,
+                "outcome": outcome,
+                "reason": reason,
+            }
+        )
         log_dir = self.repo / ".villani_code" / "logs"
         ensure_dir(log_dir)
         with (log_dir / "commands.log").open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
-        self.event_callback({"type": "command_policy", "command": command, "cwd": cwd, "outcome": outcome, "reason": reason})
+        self.event_callback(
+            {
+                "type": "command_policy",
+                "command": command,
+                "cwd": cwd,
+                "outcome": outcome,
+                "reason": reason,
+            }
+        )
 
     def _capture_edit_proposal(self, response: dict[str, Any]):
-        text_blocks = [b.get("text", "") for b in response.get("content", []) if b.get("type") == "text"]
+        text_blocks = [
+            b.get("text", "")
+            for b in response.get("content", [])
+            if b.get("type") == "text"
+        ]
         if not text_blocks:
             return None
         merged = "\n".join(text_blocks)
@@ -570,13 +921,19 @@ class Runner:
                 if p.startswith("b/"):
                     p = p[2:]
                 files.append(p)
-        proposal = self.proposals.create(diff_text=merged, files_touched=files, summary=f"Proposed edit touching {len(files)} file(s)")
+        proposal = self.proposals.create(
+            diff_text=merged,
+            files_touched=files,
+            summary=f"Proposed edit touching {len(files)} file(s)",
+        )
         self.capture_next_diff_proposal = False
         return proposal
 
     def _is_no_progress_response(self, response: dict[str, Any]) -> bool:
         blocks = response.get("content", [])
-        text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+        text = " ".join(
+            b.get("text", "") for b in blocks if b.get("type") == "text"
+        ).strip()
         if not text:
             return True
         return len(text) <= 2
@@ -584,7 +941,18 @@ class Runner:
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         root = self.repo / ".villani_code" / "sessions"
         ensure_dir(root)
-        (root / "last.json").write_text(json.dumps({"id": "last", "messages": messages, "cwd": str(self.repo), "settings": {"model": self.model}}, indent=2), encoding="utf-8")
+        (root / "last.json").write_text(
+            json.dumps(
+                {
+                    "id": "last",
+                    "messages": messages,
+                    "cwd": str(self.repo),
+                    "settings": {"model": self.model},
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     def _render_stream_event(self, event: dict[str, Any]) -> None:
         if event.get("type") == "message_stop":
@@ -601,7 +969,9 @@ class Runner:
         if delta.get("type") == "text_delta":
             raw_text = delta.get("text", "")
             before = self._live_stream_buffer
-            self._live_stream_buffer, updated_started = apply_live_display_delta(before, raw_text, self._live_stream_started)
+            self._live_stream_buffer, updated_started = apply_live_display_delta(
+                before, raw_text, self._live_stream_started
+            )
             if updated_started and not self._live_stream_started:
                 self.event_callback({"type": "first_text_delta"})
             self._live_stream_started = updated_started
@@ -614,7 +984,7 @@ class Runner:
                     else:
                         self.event_callback({"type": "stream_text", "text": emit})
         if self.verbose and delta.get("type") == "input_json_delta":
-            partial = f"[dim]tool delta: {delta.get('partial_json','')[:200]}[/dim]"
+            partial = f"[dim]tool delta: {delta.get('partial_json', '')[:200]}[/dim]"
             if self.print_stream:
                 self.console.print(partial)
             else:
