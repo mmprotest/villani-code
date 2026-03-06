@@ -4,7 +4,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from ui.settings import SettingsManager
+from villani_code.tui.components.settings import SettingsManager
 from villani_code import cli
 from villani_code.autonomous import AutonomousTask, RepoSnapshot, VillaniModeController
 from villani_code.permissions import Decision

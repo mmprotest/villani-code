@@ -711,240 +711,52 @@ class Runner:
         )
         return execute_tool(tool_name, tool_input, self.repo, unsafe=self.unsafe)
 
+
     def _prepare_messages_for_model(
         self, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        prepared = [dict(m) for m in messages]
-        if self.small_model:
-            self._inject_retrieval_briefing(prepared)
-            if self._context_budget:
-                prepared = self._context_budget.compact(prepared)
-        return prepared
+        from villani_code import state_runtime
+
+        return state_runtime.prepare_messages_for_model(self, messages)
 
     def _inject_retrieval_briefing(self, messages: list[dict[str, Any]]) -> None:
-        if not self._retriever or not messages:
-            return
-        last = messages[-1]
-        if last.get("role") != "user":
-            return
-        content = last.get("content", [])
-        if not isinstance(content, list):
-            return
-        user_text = "\n".join(
-            str(b.get("text", ""))
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        )
-        if not user_text or "<retrieval-briefing>" in user_text:
-            return
-        hits = self._retriever.query(user_text, k=8)
-        if not hits:
-            return
-        briefing = "\n".join(f"- {h.path}: {h.reason}" for h in hits)
-        content.insert(
-            0,
-            {
-                "type": "text",
-                "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>",
-            },
-        )
+        from villani_code import state_runtime
+
+        state_runtime.inject_retrieval_briefing(self, messages)
 
     def _init_small_model_support(self) -> None:
-        index_path = self.repo / ".villani_code" / "index" / "index.json"
-        if index_path.exists():
-            idx = RepoIndex.load(index_path)
-            if idx.needs_rebuild(self.repo):
-                idx = RepoIndex.build(self.repo, DEFAULT_IGNORE)
-                idx.save(index_path)
-                self.event_callback({"type": "index_built", "path": str(index_path)})
-            else:
-                self.event_callback({"type": "index_loaded", "path": str(index_path)})
-        else:
-            idx = RepoIndex.build(self.repo, DEFAULT_IGNORE)
-            idx.save(index_path)
-            self.event_callback({"type": "index_built", "path": str(index_path)})
-        self._retriever = Retriever(idx)
-        self._repo_map = build_repo_map(idx)
+        from villani_code import state_runtime
+
+        state_runtime.init_small_model_support(self)
 
     def _small_model_tool_guard(
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> str | None:
-        if tool_name in {"Write", "Patch"}:
-            fp = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
-            if fp:
-                path = (self.repo / fp).resolve()
-                if is_ignored_repo_path(fp) or classify_repo_path(fp) != "authoritative":
-                    return f"Small-model mode policy: target path is not authoritative: {fp}."
-                if tool_name == "Patch" and not path.exists():
-                    return f"Read-before-edit policy: cannot patch missing file {fp}. Use Write to create it first."
-                if tool_name == "Write" and not path.exists():
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                if path.exists() and fp not in self._files_read:
-                    read_result = execute_tool(
-                        "Read",
-                        {"file_path": fp, "max_bytes": 8000},
-                        self.repo,
-                        unsafe=self.unsafe,
-                    )
-                    if read_result.get("is_error"):
-                        return f"Read-before-edit policy: failed to auto-read {fp}. Read it explicitly before editing."
-                    self._files_read.add(fp)
-        if tool_name == "Write":
-            file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
-            path = (self.repo / file_path).resolve()
-            if path.exists() and path.is_file():
-                text = path.read_text(encoding="utf-8", errors="replace")
-                if len(text) > 10_000 or len(text.splitlines()) > 200:
-                    return "Small-model mode policy: avoid whole-file writes for large files; use Patch instead."
-        return None
+        from villani_code import state_runtime
+
+        return state_runtime.small_model_tool_guard(self, tool_name, tool_input)
 
     def _tighten_tool_input(self, tool_name: str, tool_input: dict[str, Any]) -> None:
-        if tool_name == "Read":
-            tool_input["max_bytes"] = min(
-                int(tool_input.get("max_bytes", 200000)), 50_000
-            )
-        if tool_name == "Grep":
-            tool_input["max_results"] = min(int(tool_input.get("max_results", 200)), 60)
+        from villani_code import state_runtime
+
+        state_runtime.tighten_tool_input(tool_name, tool_input)
 
     def _truncate_tool_result(
         self, tool_name: str, result: dict[str, Any]
     ) -> dict[str, Any]:
-        if result.get("is_error"):
-            return result
-        content = str(result.get("content", ""))
-        if tool_name == "Bash" and len(content) > 6000:
-            result["content"] = content[:2000] + "\n...\n" + content[-3000:]
-        elif len(content) > 50000:
-            result["content"] = content[:50000]
-        return result
+        from villani_code import state_runtime
+
+        return state_runtime.truncate_tool_result(tool_name, result)
 
     def _run_verification(self, trigger: str = "edit") -> str:
-        current_changed = set(self._git_changed_files())
-        attributed_changed = sorted(current_changed - self._verification_baseline_changed)
-        attributed_intentional: list[str] = []
-        attributed_incidental: list[str] = []
-        for path in attributed_changed:
-            if is_ignored_repo_path(path) or classify_repo_path(path) != "authoritative":
-                attributed_incidental.append(path)
-            else:
-                attributed_intentional.append(path)
+        from villani_code import state_runtime
 
-        commands: list[list[str]] = []
-        if attributed_intentional:
-            commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
-            commands.append(["git", "diff", "--", *attributed_intentional])
-        if (self.repo / "tests").exists() and attributed_intentional:
-            commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
-
-        lines = ["<verification>", f"trigger: {trigger}"]
-        cmd_results: list[dict[str, Any]] = []
-        for cmd in commands:
-            proc = subprocess.run(cmd, cwd=self.repo, capture_output=True, text=True)
-            stderr_lines = "\n".join([ln for ln in proc.stderr.splitlines() if ln][:5])
-            stdout = proc.stdout[:1500]
-            cmd_results.append(
-                {
-                    "command": " ".join(cmd),
-                    "exit": proc.returncode,
-                    "stdout": stdout,
-                    "stderr": stderr_lines,
-                }
-            )
-            lines.append(f"command: {' '.join(cmd)}")
-            lines.append(f"exit: {proc.returncode}")
-            if stdout:
-                lines.append(f"stdout:\n{stdout}")
-            if stderr_lines:
-                lines.append(f"key stderr:\n{stderr_lines}")
-
-        verification_artifacts = [
-            r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
-        ]
-        verification = self._verification_engine.verify(
-            trigger,
-            attributed_intentional,
-            cmd_results,
-            validation_artifacts=verification_artifacts,
-            intended_targets=sorted(self._current_verification_targets),
-            before_contents=dict(self._current_verification_before_contents),
-        )
-        finding_fingerprints = sorted(
-            f"{f.category.value}|{(f.file_path or '').replace('\\', '/').lstrip('./')}|{f.message.strip().lower()}"
-            for f in verification.findings
-        )
-        fingerprint = json.dumps(
-            {
-                "status": verification.status.value,
-                "findings": finding_fingerprints,
-                "intentional": sorted(attributed_intentional),
-                "validation_artifact_count": len(verification_artifacts),
-            },
-            sort_keys=True,
-        )
-        repeated_stale = (
-            self._last_verification_fingerprint == fingerprint
-            and set(attributed_intentional) == self._last_verification_intentional
-            and len(verification_artifacts) == self._last_verification_artifact_count
-        )
-        if repeated_stale:
-            self._repeated_stale_verification_count += 1
-        else:
-            self._repeated_stale_verification_count = 0
-            self._last_verification_fingerprint = fingerprint
-            self._last_verification_intentional = set(attributed_intentional)
-            self._last_verification_artifact_count = len(verification_artifacts)
-
-        if repeated_stale and self._repeated_stale_verification_count >= 2:
-            self.event_callback(
-                {
-                    "type": "failure_classified",
-                    "category": "repeated_no_progress",
-                    "summary": "repeated identical verification state with no new evidence",
-                    "next_strategy": "Change strategy or stop this task in budgeted mode.",
-                    "occurrence": self._repeated_stale_verification_count,
-                }
-            )
-            return ""
-
-        lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")
-        if attributed_incidental:
-            lines.append(f"incidental_changed: {json.dumps(sorted(attributed_incidental))}")
-        lines.append(f"status: {verification.status.value}")
-        lines.append(f"confidence: {verification.confidence_score}")
-        if verification.findings:
-            lines.append("findings:")
-            for finding in verification.findings[:6]:
-                lines.append(f"- {finding.category.value}: {finding.message}")
-        lines.append("</verification>")
-        self.event_callback(
-            {
-                "type": "verification_ran",
-                "status": verification.status.value,
-                "confidence": verification.confidence_score,
-                "repeated_stale_state": repeated_stale,
-            }
-        )
-        if verification.status in {
-            VerificationStatus.FAIL,
-            VerificationStatus.UNCERTAIN,
-        }:
-            self.event_callback(
-                {
-                    "type": "confidence_risk",
-                    "confidence": verification.confidence_score,
-                    "risk": "medium"
-                    if verification.status == VerificationStatus.UNCERTAIN
-                    else "high",
-                    "summary": verification.summary,
-                }
-            )
-        return "\n".join(lines)
+        return state_runtime.run_verification(self, trigger)
 
     def _git_changed_files(self) -> list[str]:
-        proc = subprocess.run(
-            ["git", "status", "--short"], cwd=self.repo, capture_output=True, text=True
-        )
-        return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
+        from villani_code import state_runtime
+
+        return state_runtime.git_changed_files(self.repo)
 
     def _emit_policy_event(
         self,
@@ -953,123 +765,27 @@ class Runner:
         decision: Decision,
         reason: str,
     ) -> None:
-        if tool_name != "Bash":
-            return
-        command = str(tool_input.get("command", ""))
-        cwd = str((self.repo / str(tool_input.get("cwd", "."))).resolve())
-        outcome = {
-            Decision.ALLOW: "AUTO_APPROVE",
-            Decision.ASK: "ASK",
-            Decision.DENY: "DENY",
-        }[decision]
-        ts = datetime.now(timezone.utc).isoformat()
-        line = json.dumps(
-            {
-                "timestamp": ts,
-                "cwd": cwd,
-                "command": command,
-                "outcome": outcome,
-                "reason": reason,
-            }
-        )
-        log_dir = self.repo / ".villani_code" / "logs"
-        ensure_dir(log_dir)
-        with (log_dir / "commands.log").open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-        self.event_callback(
-            {
-                "type": "command_policy",
-                "command": command,
-                "cwd": cwd,
-                "outcome": outcome,
-                "reason": reason,
-            }
-        )
+        from villani_code import state_runtime
+
+        state_runtime.emit_policy_event(self, tool_name, tool_input, decision, reason)
 
     def _capture_edit_proposal(self, response: dict[str, Any]):
-        text_blocks = [
-            b.get("text", "")
-            for b in response.get("content", [])
-            if b.get("type") == "text"
-        ]
-        if not text_blocks:
-            return None
-        merged = "\n".join(text_blocks)
-        has_diff = "--- " in merged and "+++ " in merged and "@@" in merged
-        if not (self.capture_next_diff_proposal or has_diff):
-            return None
-        files: list[str] = []
-        for ln in merged.splitlines():
-            if ln.startswith("+++ "):
-                p = ln[4:].strip().split("\t")[0]
-                if p.startswith("b/"):
-                    p = p[2:]
-                files.append(p)
-        proposal = self.proposals.create(
-            diff_text=merged,
-            files_touched=files,
-            summary=f"Proposed edit touching {len(files)} file(s)",
-        )
-        self.capture_next_diff_proposal = False
-        return proposal
+        from villani_code import state_runtime
+
+        return state_runtime.capture_edit_proposal(self, response)
 
     def _is_no_progress_response(self, response: dict[str, Any]) -> bool:
-        blocks = response.get("content", [])
-        text = " ".join(
-            b.get("text", "") for b in blocks if b.get("type") == "text"
-        ).strip()
-        if not text:
-            return True
-        return len(text) <= 2
+        from villani_code import state_runtime
+
+        return state_runtime.is_no_progress_response(response)
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
-        root = self.repo / ".villani_code" / "sessions"
-        ensure_dir(root)
-        (root / "last.json").write_text(
-            json.dumps(
-                {
-                    "id": "last",
-                    "messages": messages,
-                    "cwd": str(self.repo),
-                    "settings": {"model": self.model},
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        from villani_code import state_runtime
+
+        state_runtime.save_session_snapshot(self, messages)
 
     def _render_stream_event(self, event: dict[str, Any]) -> None:
-        if event.get("type") == "message_stop":
-            tail = self._coalescer.flush()
-            if tail:
-                if self.print_stream:
-                    print(tail, end="", flush=True)
-                else:
-                    self.event_callback({"type": "stream_text", "text": tail})
-            return
-        if event.get("type") != "content_block_delta":
-            return
-        delta = event.get("delta", {})
-        if delta.get("type") == "text_delta":
-            raw_text = delta.get("text", "")
-            before = self._live_stream_buffer
-            self._live_stream_buffer, updated_started = apply_live_display_delta(
-                before, raw_text, self._live_stream_started
-            )
-            if updated_started and not self._live_stream_started:
-                self.event_callback({"type": "first_text_delta"})
-            self._live_stream_started = updated_started
-            appended = self._live_stream_buffer[len(before) :]
-            if appended:
-                emit = self._coalescer.consume(appended)
-                if emit:
-                    if self.print_stream:
-                        print(emit, end="", flush=True)
-                    else:
-                        self.event_callback({"type": "stream_text", "text": emit})
-        if self.verbose and delta.get("type") == "input_json_delta":
-            partial = f"[dim]tool delta: {delta.get('partial_json', '')[:200]}[/dim]"
-            if self.print_stream:
-                self.console.print(partial)
-            else:
-                self.event_callback({"type": "stream_text", "text": partial})
+        from villani_code import state_runtime
+
+        state_runtime.render_stream_event(self, event)
+

@@ -1,4 +1,4 @@
-from ui.task_board import TaskManager, TaskStatus
+from villani_code.tui.components.task_board import TaskManager, TaskStatus
 
 
 def test_task_transitions_and_timeline() -> None:

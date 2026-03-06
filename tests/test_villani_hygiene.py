@@ -117,8 +117,8 @@ def test_verifier_promotes_success_when_failures_are_contradicted(tmp_path: Path
 
 def test_planner_discards_junk_opportunities_before_ranking(tmp_path: Path) -> None:
     planner = TakeoverPlanner(tmp_path)
-    junk = Opportunity("junk", "stale_docs", 0.99, 0.99, [".ipynb_checkpoints/readme-checkpoint.md"], "x", "small", "x")
-    real = Opportunity("real", "broken_tests", 0.8, 0.8, ["tests/"], "x", "small", "x")
+    junk = Opportunity("junk", "stale_docs", 0.99, 0.99, [".ipynb_checkpoints/readme-checkpoint.md"], "x", "small", "x", "inspection")
+    real = Opportunity("real", "broken_tests", 0.8, 0.8, ["tests/"], "x", "small", "x", "effectful")
     ranked = [o for o in [junk, real] if planner._is_authoritative_opportunity(o)]
     assert ranked == [real]
 

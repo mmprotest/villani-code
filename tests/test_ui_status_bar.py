@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from ui.status_bar import DebouncedRefresher, StatusBar, StatusSnapshot
+from villani_code.tui.components.status_bar import DebouncedRefresher, StatusBar, StatusSnapshot
 
 
 def test_status_bar_compacts_for_small_width() -> None:
