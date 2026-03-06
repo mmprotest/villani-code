@@ -72,3 +72,69 @@ def test_space_key_inserts_space_in_input(tmp_path: Path) -> None:
             assert input_widget.value == "hello "
 
     asyncio.run(run())
+
+
+def test_copy_console_binding_copies_current_console_text(tmp_path: Path, monkeypatch) -> None:
+    async def run() -> None:
+        copied: dict[str, str] = {}
+        app = VillaniTUI(DummyRunner(), tmp_path)
+
+        def fake_copy(text: str) -> None:
+            copied["text"] = text
+
+        monkeypatch.setattr(app, "_copy_to_clipboard", fake_copy)
+        async with app.run_test() as pilot:
+            app.post_message(LogAppend("alpha", kind="meta"))
+            app.post_message(LogAppend("beta", kind="meta"))
+            await pilot.pause()
+            await pilot.press("ctrl+shift+c")
+            await pilot.pause()
+
+            assert copied["text"] == app._log_plain_text.rstrip("\n")
+            assert copied["text"].endswith("alpha\nbeta")
+
+    asyncio.run(run())
+
+
+def test_copy_console_preserves_multiline_content(tmp_path: Path, monkeypatch) -> None:
+    async def run() -> None:
+        copied: dict[str, str] = {}
+        app = VillaniTUI(DummyRunner(), tmp_path)
+
+        def fake_copy(text: str) -> None:
+            copied["text"] = text
+
+        monkeypatch.setattr(app, "_copy_to_clipboard", fake_copy)
+        async with app.run_test() as pilot:
+            app._log_plain_text = "line 1\nline 2\nline 3\n"
+            app.action_copy_console()
+            await pilot.pause()
+            assert copied["text"] == "line 1\nline 2\nline 3"
+
+    asyncio.run(run())
+
+
+def test_copy_console_success_posts_status_update(tmp_path: Path, monkeypatch) -> None:
+    app = VillaniTUI(DummyRunner(), tmp_path)
+    messages = []
+    monkeypatch.setattr(app, "_copy_to_clipboard", lambda _text: None)
+    monkeypatch.setattr(app, "post_message", lambda message: messages.append(message))
+
+    app.action_copy_console()
+
+    assert messages[-1].text == "Copied console text to clipboard."
+
+
+def test_copy_console_failure_is_handled_without_crash(tmp_path: Path, monkeypatch) -> None:
+    app = VillaniTUI(DummyRunner(), tmp_path)
+    messages = []
+
+    def fail_copy(_text: str) -> None:
+        raise RuntimeError("no clipboard")
+
+    monkeypatch.setattr(app, "_copy_to_clipboard", fail_copy)
+    monkeypatch.setattr(app, "post_message", lambda message: messages.append(message))
+
+    app.action_copy_console()
+
+    assert messages[-1].text == "Failed to copy console text."

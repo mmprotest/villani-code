@@ -46,7 +46,10 @@ class VillaniLog(Log):
 
 class VillaniTUI(App[None]):
     CSS_PATH = "styles.tcss"
-    BINDINGS = [Binding("ctrl+c", "interrupt_or_quit", show=False, priority=True)]
+    BINDINGS = [
+        Binding("ctrl+c", "interrupt_or_quit", show=False, priority=True),
+        Binding("ctrl+shift+c", "copy_console", show=False, priority=True),
+    ]
 
     def __init__(self, runner: Any, repo: Path, villani_mode: bool = False, villani_objective: str | None = None) -> None:
         super().__init__()
@@ -57,6 +60,7 @@ class VillaniTUI(App[None]):
         self._ai_streaming = False
         self._ai_started = False
         self._stream_buffer = ""
+        self._log_plain_text = ""
         self._stream_flush_timer: Timer | None = None
         self._interrupts = InterruptController()
         self.villani_mode = villani_mode
@@ -75,19 +79,48 @@ class VillaniTUI(App[None]):
     def on_mount(self) -> None:
         log = self.query_one(VillaniLog)
         for line in LAUNCH_BANNER.splitlines():
-            log.write_line(line)
-        log.write_line(f"Model: {getattr(self.runner, 'model', 'unknown')}")
+            self._append_log_line(log, line)
+        self._append_log_line(log, f"Model: {getattr(self.runner, 'model', 'unknown')}")
         if self.villani_mode:
             objective = self.villani_objective or "inspect and improve this repository autonomously"
-            log.write_line(f"Villani mode active: {objective}")
+            self._append_log_line(log, f"Villani mode active: {objective}")
             self.query_one(StatusBarWidget).set_status("scanning repo")
             input_widget = self.query_one(Input)
             input_widget.disabled = True
             self.controller.run_villani_mode()
         else:
-            log.write_line("Ready. Type /help for commands.")
+            self._append_log_line(log, "Ready. Type /help for commands.")
             self.query_one(Input).focus()
         self.query_one(StatusBarWidget).set_follow_mode(self.follow_tail)
+
+    def _append_log(self, log: VillaniLog, text: str) -> None:
+        log.write(text, scroll_end=self.follow_tail)
+        self._log_plain_text += text
+
+    def _append_log_line(self, log: VillaniLog, text: str) -> None:
+        log.write_line(text, scroll_end=self.follow_tail)
+        self._log_plain_text += f"{text}\n"
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        try:
+            self.copy_to_clipboard(text)
+            return
+        except Exception:
+            pass
+        try:
+            import pyperclip
+
+            pyperclip.copy(text)
+            return
+        except Exception as exc:  # pragma: no cover - exact backend failure is platform-dependent
+            raise RuntimeError("Clipboard copy failed") from exc
+
+    def action_copy_console(self) -> None:
+        try:
+            self._copy_to_clipboard(self._log_plain_text.rstrip("\n"))
+            self.post_message(StatusUpdate("Copied console text to clipboard."))
+        except Exception:
+            self.post_message(StatusUpdate("Failed to copy console text."))
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -111,7 +144,7 @@ class VillaniTUI(App[None]):
     def _end_ai_stream_if_open(self, log: VillaniLog) -> None:
         self._flush_stream_buffer(log)
         if self._ai_streaming:
-            log.write("\n", scroll_end=self.follow_tail)
+            self._append_log(log, "\n")
             self._ai_streaming = False
 
     def set_follow_tail(self, enabled: bool) -> None:
@@ -131,9 +164,9 @@ class VillaniTUI(App[None]):
         if not self._stream_buffer:
             return
         parts = self._stream_buffer.split("\n")
-        log.write(parts[0], scroll_end=self.follow_tail)
+        self._append_log(log, parts[0])
         for line in parts[1:]:
-            log.write_line(line, scroll_end=self.follow_tail)
+            self._append_log_line(log, line)
         self._stream_buffer = ""
 
     def _start_ai_boundary(self, log: VillaniLog) -> None:
@@ -149,14 +182,14 @@ class VillaniTUI(App[None]):
         if kind in {"user", "meta"}:
             self._end_ai_stream_if_open(log)
             self._ai_started = False
-            log.write(f"{text}\n", scroll_end=self.follow_tail)
+            self._append_log(log, f"{text}\n")
             return
 
         if kind == "ai":
             self._end_ai_stream_if_open(log)
             self._start_ai_boundary(log)
             for line in text.rstrip("\n").split("\n"):
-                log.write_line(line, scroll_end=self.follow_tail)
+                self._append_log_line(log, line)
             self._ai_streaming = False
             return
 
@@ -171,7 +204,7 @@ class VillaniTUI(App[None]):
 
         self._end_ai_stream_if_open(log)
         self._ai_started = False
-        log.write(f"{text}\n", scroll_end=self.follow_tail)
+        self._append_log(log, f"{text}\n")
 
     def on_status_update(self, message: StatusUpdate) -> None:
         self.query_one(StatusBarWidget).set_status(message.text)
