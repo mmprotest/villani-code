@@ -25,6 +25,7 @@ from villani_code.shells import (
     classify_shell_portability_failure,
     shell_family_for_platform,
 )
+from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.repo_rules import (
     classify_repo_path,
     is_authoritative_doc_path,
@@ -107,6 +108,7 @@ class VillaniModeController:
     ) -> None:
         self.runner = runner
         self.repo = repo.resolve()
+        ensure_runtime_dependencies_not_shadowed(self.repo)
         self.steering_objective = steering_objective
         self.event_callback = event_callback or (lambda _event: None)
         self.takeover_config = takeover_config or TakeoverConfig()

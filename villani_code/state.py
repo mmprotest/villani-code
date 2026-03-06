@@ -29,6 +29,7 @@ from villani_code.permissions import Decision, PermissionConfig, PermissionEngin
 from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.llm_client import LLMClient
 from villani_code.repo_map import build_repo_map
+from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
@@ -73,6 +74,7 @@ class Runner:
     ):
         self.client = client
         self.repo = repo
+        ensure_runtime_dependencies_not_shadowed(self.repo)
         self.model = model
         self.max_tokens = max_tokens
         self.stream = stream
@@ -153,6 +155,7 @@ class Runner:
             self._init_small_model_support()
 
     def run_villani_mode(self) -> dict[str, Any]:
+        ensure_runtime_dependencies_not_shadowed(self.repo)
         controller = VillaniModeController(
             self,
             self.repo,

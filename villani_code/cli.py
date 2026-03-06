@@ -14,6 +14,7 @@ from villani_code.optional_tui import OptionalTUIDependencyError, TUI_INSTALL_HI
 from villani_code.anthropic_client import AnthropicClient
 from villani_code.openai_client import OpenAIClient
 from villani_code.plugins import PluginManager
+from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.eval_harness import render_human_summary, result_to_json, run_eval_suite
@@ -53,6 +54,12 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
 
 
 def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> Runner:
+    resolved_repo = repo.resolve()
+    try:
+        ensure_runtime_dependencies_not_shadowed(resolved_repo)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     client: Any
     if provider == "openai":
         resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -66,7 +73,7 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = json.loads(thinking)
         except json.JSONDecodeError:
             thinking_obj = thinking
-    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective)
+    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective)
 
 
 def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> None:
