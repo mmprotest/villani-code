@@ -12,6 +12,8 @@ from villani_code.repo_rules import (
     is_authoritative_doc_path,
     is_ignored_repo_path,
 )
+from villani_code.repo_map import build_structured_repo_map
+from villani_code.opportunities import OpportunityEngine
 
 
 class FindingCategory(str, Enum):
@@ -398,6 +400,13 @@ class Opportunity:
     blast_radius: str
     proposed_next_action: str
     task_contract: str
+    id: str = ""
+    rationale: str = ""
+    evidence_items: list[str] = field(default_factory=list)
+    estimated_risk: float = 0.2
+    estimated_value: float = 0.5
+    validation_strategy: list[str] = field(default_factory=list)
+    followup_candidates: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -520,110 +529,48 @@ class TakeoverPlanner:
         return f"files={len(files)} py={py} tests={tests} docs={md} has_tests={int(has_tests)}"
 
     def discover_opportunities(self) -> list[Opportunity]:
+        repo_map = build_structured_repo_map(self.repo)
+        candidates = OpportunityEngine(repo_map).generate()
         ops: list[Opportunity] = []
-        authoritative_files = self._authoritative_files()
-        python_files = self._python_source_files(authoritative_files)
-        has_tests = self._has_meaningful_tests(authoritative_files)
-        docs = self._discover_authoritative_docs()
-
-        if python_files and not has_tests:
+        for candidate in candidates:
             ops.append(
                 Opportunity(
-                    "Bootstrap minimal tests",
-                    "testing",
-                    0.95,
-                    0.78,
-                    python_files[:3],
-                    "Python repo has source code but no tests directory or test files",
-                    "small",
-                    "audit package layout and add a minimal baseline test scaffold",
-                    TaskContract.EFFECTFUL.value,
-                )
-            )
-        if python_files:
-            ops.append(
-                Opportunity(
-                    "Validate baseline importability",
-                    "validation",
-                    0.9,
-                    0.72,
-                    python_files[:3],
-                    "Python repo detected; baseline validation is a reasonable first-pass autonomous task",
-                    "small",
-                    "inspect package entry points and validate importable baseline",
-                    TaskContract.VALIDATION.value,
-                )
-            )
-        tracked_artifacts = self._tracked_runtime_artifacts()
-        if tracked_artifacts:
-            ops.append(
-                Opportunity(
-                    "Audit tracked runtime artifacts",
-                    "hygiene",
-                    0.84,
-                    0.74,
-                    tracked_artifacts[:5],
-                    "repository contains likely junk artifacts that may need cleanup",
-                    "small",
-                    "inspect tracked caches/checkpoints/editor artifacts and propose cleanup",
-                    TaskContract.INSPECTION.value,
-                )
-            )
-        todo_matches = self._find_todo_fixme_matches()
-        if todo_matches:
-            ops.append(
-                Opportunity(
-                    "Triage TODO/FIXME cluster",
-                    "todo_fixme_cluster",
-                    0.68,
-                    0.72,
-                    [],
-                    todo_matches[0],
-                    "medium",
-                    "resolve highest-signal TODO",
-                    TaskContract.EFFECTFUL.value,
-                )
-            )
-        if python_files and self._has_minimal_docs(docs):
-            ops.append(
-                Opportunity(
-                    "Audit missing usage docs",
-                    "docs",
-                    0.62,
-                    0.68,
-                    docs[:1],
-                    "code exists but documentation coverage appears sparse",
-                    "small",
-                    "inspect README and package layout for obvious docs coverage gaps",
-                    TaskContract.EFFECTFUL.value,
-                )
-            )
-        if docs and self._has_authoritative_docs_drift(docs):
-            ops.append(
-                Opportunity(
-                    "Audit docs drift",
-                    "stale_docs",
-                    0.55,
-                    0.64,
-                    docs,
-                    "Authoritative docs may not match current module layout",
-                    "small",
-                    "sync docs with current CLI",
-                    TaskContract.EFFECTFUL.value,
+                    id=candidate.id,
+                    title=candidate.title,
+                    category=candidate.category,
+                    rationale=candidate.rationale,
+                    priority=round(candidate.estimated_value, 2),
+                    confidence=candidate.confidence,
+                    evidence_items=candidate.evidence,
+                    estimated_risk=candidate.estimated_risk,
+                    estimated_value=candidate.estimated_value,
+                    validation_strategy=candidate.validation_strategy,
+                    followup_candidates=candidate.followup_candidates,
+                    affected_files=candidate.affected_files,
+                    evidence="; ".join(candidate.evidence)[:240] or candidate.rationale,
+                    blast_radius="small" if candidate.estimated_risk <= 0.3 else "medium",
+                    proposed_next_action=candidate.proposed_next_action,
+                    task_contract=candidate.task_contract,
                 )
             )
         if not ops and self.enable_fallback:
             ops.append(
                 Opportunity(
-                    "Inspect repo for highest-leverage small improvement",
-                    "fallback",
-                    0.5,
-                    0.55,
-                    [],
-                    "no stronger heuristic fired, but repo still deserves bounded inspection",
-                    "small",
-                    "read README, inspect key package/config files, and identify one safe bounded improvement",
-                    TaskContract.INSPECTION.value,
+                    title="Inspect repo for highest-leverage small improvement",
+                    category="investigation",
+                    rationale="No deterministic signals fired strongly enough for effectful work.",
+                    priority=0.52,
+                    confidence=0.58,
+                    evidence_items=["fallback investigation"],
+                    estimated_risk=0.1,
+                    estimated_value=0.5,
+                    validation_strategy=["inspect README and top-level modules"],
+                    followup_candidates=["Validate baseline importability"],
+                    affected_files=[],
+                    evidence="no stronger heuristic fired, but repo still deserves bounded inspection",
+                    blast_radius="small",
+                    proposed_next_action="read README, inspect key package/config files, and identify one safe bounded improvement",
+                    task_contract=TaskContract.INSPECTION.value,
                 )
             )
         ops = [op for op in ops if self._is_authoritative_opportunity(op)]

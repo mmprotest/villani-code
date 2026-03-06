@@ -13,7 +13,12 @@ def build_wave_candidates(controller: Any, discovered: list[Opportunity]) -> lis
         key = controller._task_key_for_opportunity(op)
         if controller._is_terminal_lineage(key):
             continue
-        if op.confidence < controller.takeover_config.min_confidence:
+        min_conf = controller.takeover_config.min_confidence
+        if op.category == "investigation":
+            min_conf = max(0.35, min_conf - 0.2)
+        elif op.category == "improvement":
+            min_conf = max(0.5, min_conf - 0.05)
+        if op.confidence < min_conf:
             continue
         existing = dedup.get(key)
         if existing is None or effective_priority(op) > effective_priority(existing):

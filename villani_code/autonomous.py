@@ -20,11 +20,13 @@ from villani_code.autonomy import (
 )
 from villani_code.evidence import parse_command_evidence
 from villani_code.execution import VILLANI_TASK_BUDGET
+from villani_code.repo_map import build_structured_repo_map
 from villani_code.repo_rules import (
     classify_repo_path,
     is_authoritative_doc_path,
     is_ignored_repo_path,
 )
+from villani_code.working_memory import WorkingMemorySnapshot, WorkingMemoryStore
 
 
 @dataclass(slots=True)
@@ -87,6 +89,9 @@ class AutonomousTask:
     tool_calls_used: int = 0
     elapsed_seconds: float = 0.0
     completed: bool = False
+    critic_verdict: str = ""
+    validation_confidence: float = 0.0
+    execution_confidence: float = 0.0
 
 
 class VillaniModeController:
@@ -117,10 +122,15 @@ class VillaniModeController:
         self.verifier = VerificationEngine(self.repo, logger=self._log)
         self.failure_classifier = FailureClassifier()
         self._preexisting_changes: set[str] = set()
+        self._no_progress_waves: int = 0
+        self.memory_store = WorkingMemoryStore(self.repo)
+        self._last_stop_detail: str = ""
 
     def run(self) -> dict[str, Any]:
         self._preexisting_changes = set(self._git_changed_files())
         state = TakeoverState(repo_summary=self.planner.build_repo_summary())
+        repo_map = build_structured_repo_map(self.repo)
+        self._emit("autonomous_phase", phase="explorer: repo assessment")
         self._emit(
             "takeover_dashboard",
             summary=state.repo_summary,
@@ -128,148 +138,79 @@ class VillaniModeController:
             risk=state.current_risk_level,
         )
 
+        discovered = self.planner.discover_opportunities()
+        state.discovered_opportunities = discovered
+        category_counts = self._category_counts(discovered)
+        self._emit(
+            "autonomous_phase",
+            phase=(
+                "[villani-mode] explorer found "
+                f"{len(discovered)} candidates across "
+                f"{', '.join(f'{k}={v}' for k, v in sorted(category_counts.items())) or 'none'}"
+            ),
+        )
+
+        if self._repo_is_nontrivial(repo_map) and len(discovered) < 3:
+            discovered.extend(self._planner_backfill_minimum(repo_map, discovered))
+
+        stop_reason = "Villani mode budget exhausted."
         for wave in range(1, self.takeover_config.max_waves + 1):
             if self._attempt_counter >= self.takeover_config.max_total_task_attempts:
-                return self._build_takeover_summary(state, "Villani mode budget exhausted.")
+                stop_reason = "Villani mode budget exhausted."
+                break
 
-            state.repo_summary = self.planner.build_repo_summary()
-            discovered = self.planner.discover_opportunities()
-            state.discovered_opportunities = discovered
-
+            self._emit("autonomous_phase", phase="planner: rank backlog")
             candidates = self._build_wave_candidates(discovered)
             self._emit(
                 "takeover_ranked",
                 count=len(candidates),
                 top=[o.title for o in candidates[:5]],
             )
-
             if not candidates:
-                if (
-                    not discovered
-                    and not self._retryable_queue
-                    and not self._followup_queue
-                ):
-                    return self._build_takeover_summary(
-                        state, "No opportunities discovered."
-                    )
-                if self._has_pending_actionable_work():
-                    return self._build_takeover_summary(
-                        state, "Retry budget exhausted for remaining work."
-                    )
-                return self._build_takeover_summary(
-                    state, "No remaining opportunities above confidence threshold."
-                )
+                stop_reason = self._build_stop_reason(repo_map, discovered)
+                break
 
             selected = candidates[: self.takeover_config.max_commands_per_wave]
-            self._emit("autonomous_phase", phase=f"Villani mode wave {wave}")
+            self._emit(
+                "autonomous_phase",
+                phase=f"[villani-mode] planner selected: {selected[0].title}",
+            )
             self._emit(
                 "takeover_wave",
                 wave=wave,
                 selected=[o.title for o in selected],
-                why="ranked by priority and confidence",
+                why="ranked by priority/confidence/risk",
             )
 
             wave_files: set[str] = set()
-            retired = 0
-            retryable = 0
-            blocked = 0
+            retired = retryable = blocked = 0
+            progressed = False
             for index, op in enumerate(selected, start=1):
-                if (
-                    self._attempt_counter
-                    >= self.takeover_config.max_total_task_attempts
-                ):
-                    return self._build_takeover_summary(
-                        state, "Villani mode budget exhausted."
-                    )
-                before_dirty = set(self._git_changed_files())
-                task_key = self._task_key_for_opportunity(op)
-                attempts = self._lineage_attempts.get(task_key, 0) + 1
-                task = AutonomousTask(
-                    task_id=f"wave-{wave}-{index}",
-                    title=op.title,
-                    rationale=op.evidence,
-                    priority=op.priority,
-                    confidence=op.confidence,
-                    verification_plan=(
-                        ["pytest -q tests/test_runner_defaults.py"]
-                        if (self.repo / "tests").exists()
-                        else []
-                    ),
-                    task_contract=op.task_contract,
-                    task_key=task_key,
-                    parent_task_key=self._parent_task_key(op),
-                    origin_kind=op.category,
-                    attempts=attempts,
-                    retries=max(0, attempts - 1),
-                )
-                self._lineage_attempts[task_key] = attempts
-                self._attempt_counter += 1
-                self._execute_task(task)
-
-                after_dirty = set(self._git_changed_files())
-                task.files_changed = sorted(after_dirty - before_dirty)
-                delta_basis = (
-                    task.files_changed
-                    or task.intentional_changes
-                    or task.incidental_changes
-                )
-                task.intentional_changes, task.incidental_changes, _ = (
-                    self._split_changes(delta_basis)
-                )
-                if not task.files_changed:
-                    task.files_changed = sorted(
-                        set(task.intentional_changes) | set(task.incidental_changes)
-                    )
-                task.produced_effect = bool(task.intentional_changes)
-                wave_files.update(task.intentional_changes)
-
-                verification = self.verifier.verify(
-                    op.proposed_next_action,
-                    task.intentional_changes,
-                    task.verification_results,
-                    validation_artifacts=task.validation_artifacts,
-                    intended_targets=task.intended_targets,
-                    before_contents=task.before_contents,
-                )
-                task.verification_results.append(
-                    {
-                        "summary": verification.summary,
-                        "status": verification.status.value,
-                        "confidence": verification.confidence_score,
-                        "findings": [
-                            f"{f.category.value}: {f.message}"
-                            for f in verification.findings
-                        ],
-                    }
-                )
-                task.status, task.outcome = self._adjudicate_task(task, verification)
-                task.status = self._update_lifecycle_after_attempt(task, op)
+                if self._attempt_counter >= self.takeover_config.max_total_task_attempts:
+                    stop_reason = "Villani mode budget exhausted."
+                    break
+                task = self._run_single_task(wave, index, op)
+                self.attempted.append(task)
                 if task.status == TaskLifecycle.PASSED.value:
                     retired += 1
                 elif task.status == TaskLifecycle.RETRYABLE.value:
                     retryable += 1
                 elif task.status == TaskLifecycle.BLOCKED.value:
                     blocked += 1
-                self.attempted.append(task)
+                if task.intentional_changes or task.validation_artifacts or task.produced_inspection_conclusion:
+                    progressed = True
+                wave_files.update(task.intentional_changes)
 
-            if len(wave_files) > self.takeover_config.max_files_per_wave:
-                state.current_risk_level = "high"
-                return self._build_takeover_summary(
-                    state, "Blast radius exceeded configured max files per wave."
-                )
+            if wave_files and not self._wave_has_validation_artifact(self.attempted[-len(selected) :]):
+                self._followup_queue.append(self._validate_recent_changes_followup(sorted(wave_files)))
 
-            if wave_files and not self._wave_has_validation_artifact(
-                self.attempted[-len(selected) :]
-            ):
-                self._followup_queue.append(
-                    self._validate_recent_changes_followup(sorted(wave_files))
-                )
+            if not progressed:
+                self._no_progress_waves += 1
+                self._emit("autonomous_phase", phase="critic: no-op wave detected; biasing toward investigation")
+            else:
+                self._no_progress_waves = 0
 
-            avg_conf = round(
-                sum(t.confidence for t in self.attempted[-len(selected) :])
-                / max(1, len(selected)),
-                2,
-            )
+            avg_conf = round(sum(t.confidence for t in self.attempted[-len(selected):]) / max(1, len(selected)), 2)
             state.completed_waves.append(
                 {
                     "wave": wave,
@@ -280,15 +221,285 @@ class VillaniModeController:
                     "files_touched": sorted(wave_files),
                 }
             )
-            self._emit(
-                "takeover_wave_complete",
-                wave=wave,
-                retired=retired,
-                confidence=avg_conf,
-                risk=state.current_risk_level,
-            )
+            self._emit("takeover_wave_complete", wave=wave, retired=retired, confidence=avg_conf, risk=state.current_risk_level)
 
-        return self._build_takeover_summary(state, "Villani mode budget exhausted.")
+            discovered = self.planner.discover_opportunities()
+            discovered.extend(self._followup_policy(repo_map, self.attempted[-len(selected):]))
+            if self._repo_is_nontrivial(repo_map) and len(discovered) < 3:
+                discovered.extend(self._planner_backfill_minimum(repo_map, discovered))
+
+            if self._no_progress_waves >= 2:
+                self._last_stop_detail = "Repeated no-progress waves; critic flagged fake autonomy patterns."
+                stop_reason = "No remaining opportunities above confidence threshold."
+                break
+
+        summary = self._build_takeover_summary(state, stop_reason)
+        self._write_working_memory(summary, discovered)
+        self._emit("autonomous_phase", phase=f"[villani-mode] stop: {summary.get('done_reason', stop_reason)}")
+        return summary
+
+    def _run_single_task(self, wave: int, index: int, op: Opportunity) -> AutonomousTask:
+        before_dirty = set(self._git_changed_files())
+        task_key = self._task_key_for_opportunity(op)
+        attempts = self._lineage_attempts.get(task_key, 0) + 1
+        task = AutonomousTask(
+            task_id=f"wave-{wave}-{index}",
+            title=op.title,
+            rationale=op.evidence,
+            priority=op.priority,
+            confidence=op.confidence,
+            verification_plan=op.validation_strategy or (["pytest -q"] if (self.repo / "tests").exists() else []),
+            task_contract=op.task_contract,
+            task_key=task_key,
+            parent_task_key=self._parent_task_key(op),
+            origin_kind=op.category,
+            attempts=attempts,
+            retries=max(0, attempts - 1),
+        )
+        self._lineage_attempts[task_key] = attempts
+        self._attempt_counter += 1
+
+        self._emit("autonomous_phase", phase="builder: executing bounded task")
+        self._execute_task(task)
+
+        after_dirty = set(self._git_changed_files())
+        task.files_changed = sorted(after_dirty - before_dirty)
+        delta_basis = task.files_changed or task.intentional_changes or task.incidental_changes
+        task.intentional_changes, task.incidental_changes, _ = self._split_changes(delta_basis)
+        if not task.files_changed:
+            task.files_changed = sorted(set(task.intentional_changes) | set(task.incidental_changes))
+        task.produced_effect = bool(task.intentional_changes)
+
+        verification = self.verifier.verify(
+            op.proposed_next_action,
+            task.intentional_changes,
+            task.verification_results,
+            validation_artifacts=task.validation_artifacts,
+            intended_targets=task.intended_targets,
+            before_contents=task.before_contents,
+        )
+        task.validation_confidence = verification.confidence_score
+        task.execution_confidence = round((task.confidence + verification.confidence_score) / 2, 2)
+        task.verification_results.append(
+            {
+                "summary": verification.summary,
+                "status": verification.status.value,
+                "confidence": verification.confidence_score,
+                "findings": [f"{f.category.value}: {f.message}" for f in verification.findings],
+            }
+        )
+        task.status, task.outcome = self._adjudicate_task(task, verification)
+        task.status = self._update_lifecycle_after_attempt(task, op)
+        task.critic_verdict = self._critic_verdict(task, verification)
+        self._emit("autonomous_phase", phase=f"critic: {task.critic_verdict}")
+        return task
+
+    def _category_counts(self, opportunities: list[Opportunity]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for op in opportunities:
+            counts[op.category] = counts.get(op.category, 0) + 1
+        return counts
+
+    def _repo_is_nontrivial(self, repo_map: Any) -> bool:
+        return bool(repo_map.key_modules or repo_map.tests or len(repo_map.docs) > 1)
+
+    def _planner_backfill_minimum(self, repo_map: Any, discovered: list[Opportunity]) -> list[Opportunity]:
+        titles = {op.title for op in discovered}
+        out: list[Opportunity] = []
+        if "Validate baseline importability" not in titles and repo_map.key_modules:
+            out.append(
+                Opportunity(
+                    title="Validate baseline importability",
+                    category="validation",
+                    rationale="backfill minimum backlog for nontrivial repo",
+                    priority=0.72,
+                    confidence=0.75,
+                    evidence_items=repo_map.key_modules[:2],
+                    estimated_risk=0.2,
+                    estimated_value=0.8,
+                    validation_strategy=["python -c 'import villani_code'"],
+                    followup_candidates=["Run baseline tests"],
+                    affected_files=repo_map.key_modules[:2],
+                    evidence="backfill validation candidate",
+                    blast_radius="small",
+                    proposed_next_action="run bounded import validation",
+                    task_contract=TaskContract.VALIDATION.value,
+                )
+            )
+        if "Run baseline tests" not in titles and repo_map.tests:
+            out.append(
+                Opportunity(
+                    title="Run baseline tests",
+                    category="validation",
+                    rationale="tests detected; baseline should run early",
+                    priority=0.8,
+                    confidence=0.8,
+                    evidence_items=repo_map.tests[:2],
+                    estimated_risk=0.25,
+                    estimated_value=0.85,
+                    validation_strategy=["pytest -q"],
+                    followup_candidates=["Validate CLI entrypoints"],
+                    affected_files=repo_map.tests[:2],
+                    evidence="tests detected",
+                    blast_radius="small",
+                    proposed_next_action="run pytest -q",
+                    task_contract=TaskContract.VALIDATION.value,
+                )
+            )
+        if "Investigate docs/code mismatch" not in titles and repo_map.docs:
+            out.append(
+                Opportunity(
+                    title="Investigate docs/code mismatch",
+                    category="investigation",
+                    rationale="docs exist; at least one docs/code check should be considered",
+                    priority=0.62,
+                    confidence=0.56,
+                    evidence_items=repo_map.docs[:2],
+                    estimated_risk=0.1,
+                    estimated_value=0.62,
+                    validation_strategy=["inspect docs command against code"],
+                    followup_candidates=["Validate documented commands"],
+                    affected_files=repo_map.docs[:2],
+                    evidence="docs exist",
+                    blast_radius="small",
+                    proposed_next_action="inspect docs and command references",
+                    task_contract=TaskContract.INSPECTION.value,
+                )
+            )
+        return out[: max(0, 3 - len(discovered))]
+
+    def _build_stop_reason(self, repo_map: Any, discovered: list[Opportunity]) -> str:
+        reasons: list[str] = []
+        if not repo_map.tests:
+            reasons.append("no tests were found")
+        if not repo_map.entrypoints:
+            reasons.append("no entrypoints were found")
+        if not repo_map.docs:
+            reasons.append("no actionable docs were found")
+        if not repo_map.todo_hits and not repo_map.import_hotspots:
+            reasons.append("no suspicious hotspots were found")
+        if discovered and not self._build_wave_candidates(discovered):
+            reasons.append("safe candidates were filtered by confidence/risk thresholds")
+        if not reasons:
+            reasons.append("backlog exhausted after replanning")
+        self._last_stop_detail = "; ".join(reasons)
+        return "No remaining opportunities above confidence threshold."
+
+    def _followup_policy(self, repo_map: Any, recent_tasks: list[AutonomousTask]) -> list[Opportunity]:
+        followups: list[Opportunity] = []
+        for task in recent_tasks:
+            if task.title == "Validate baseline importability" and task.status == TaskLifecycle.PASSED.value:
+                if repo_map.tests:
+                    followups.append(
+                        Opportunity(
+                            title="Run baseline tests",
+                            category="validation",
+                            priority=0.86,
+                            confidence=0.83,
+                            affected_files=repo_map.tests[:2],
+                            evidence="follow-up tests",
+                            blast_radius="small",
+                            proposed_next_action="run pytest -q",
+                            task_contract=TaskContract.VALIDATION.value,
+                            rationale="follow-up policy after import success",
+                            evidence_items=repo_map.tests[:2],
+                            estimated_risk=0.2,
+                            estimated_value=0.9,
+                            validation_strategy=["pytest -q"],
+                        )
+                    )
+                if repo_map.entrypoints:
+                    followups.append(
+                        Opportunity(
+                            title="Validate CLI entrypoints",
+                            category="validation",
+                            priority=0.72,
+                            confidence=0.72,
+                            affected_files=repo_map.entrypoints[:2],
+                            evidence="cli surfaces detected",
+                            blast_radius="small",
+                            proposed_next_action="execute entrypoint --help",
+                            task_contract=TaskContract.VALIDATION.value,
+                            rationale="follow-up policy after import success",
+                            evidence_items=repo_map.entrypoints[:2],
+                            estimated_risk=0.2,
+                            estimated_value=0.72,
+                            validation_strategy=["python -m <entrypoint> --help"],
+                        )
+                    )
+                if repo_map.doc_commands:
+                    followups.append(
+                        Opportunity(
+                            title="Validate documented commands",
+                            category="validation",
+                            priority=0.7,
+                            confidence=0.68,
+                            affected_files=[],
+                            evidence="docs command examples detected",
+                            blast_radius="small",
+                            proposed_next_action="execute one docs command",
+                            task_contract=TaskContract.VALIDATION.value,
+                            rationale="follow-up policy after import success",
+                            evidence_items=repo_map.doc_commands[:2],
+                            estimated_risk=0.2,
+                            estimated_value=0.74,
+                            validation_strategy=[repo_map.doc_commands[0]],
+                        )
+                    )
+
+            if task.status == TaskLifecycle.FAILED.value and not task.validation_artifacts:
+                followups.append(
+                    Opportunity(
+                        title=f"Investigate failure scope: {task.title}",
+                        category="investigation",
+                        priority=0.66,
+                        confidence=0.58,
+                        affected_files=task.files_changed[:2],
+                        evidence="ambiguous failure",
+                        blast_radius="small",
+                        proposed_next_action="gather targeted evidence only",
+                        task_contract=TaskContract.INSPECTION.value,
+                        rationale="failed validation needs narrower investigation before retry",
+                        evidence_items=[task.outcome[:120]],
+                        estimated_risk=0.1,
+                        estimated_value=0.63,
+                        validation_strategy=["inspect failure logs and narrow scope"],
+                        followup_candidates=[f"Retry {task.title} with narrowed command"],
+                    )
+                )
+        return followups
+
+    def _critic_verdict(self, task: AutonomousTask, verification: Any) -> str:
+        if not (task.intentional_changes or task.validation_artifacts or task.produced_inspection_conclusion):
+            return "no-progress wave: task looked complete but produced no meaningful execution evidence"
+        if verification.repeated_verification_state:
+            return "retryable: repeated validation state detected, strategy change required"
+        if task.status == TaskLifecycle.PASSED.value:
+            if task.produced_validation:
+                return "retired: task validated with concrete receipts"
+            return "retired: task intentionally exhausted with inspection conclusion"
+        if task.status == TaskLifecycle.BLOCKED.value:
+            return "blocked: external or repository blocker prevented progress"
+        if task.status == TaskLifecycle.RETRYABLE.value:
+            return "retryable: follow-up strategy available"
+        if task.status == TaskLifecycle.EXHAUSTED.value:
+            return "superseded/exhausted: retries spent without sufficient evidence"
+        return "needs follow-up: weak evidence or unresolved verification"
+
+    def _write_working_memory(self, summary: dict[str, Any], discovered: list[Opportunity]) -> None:
+        snapshot = WorkingMemorySnapshot(
+            repo_assessment={"summary": summary.get("repo_summary", "")},
+            backlog=[{"title": op.title, "category": op.category, "confidence": op.confidence} for op in discovered[:12]],
+            completed_tasks=[t for t in summary.get("tasks_attempted", []) if t.get("status") == TaskLifecycle.PASSED.value],
+            failed_tasks=[t for t in summary.get("tasks_attempted", []) if t.get("status") != TaskLifecycle.PASSED.value],
+            validation_receipts=[a for t in summary.get("tasks_attempted", []) for a in t.get("validation_artifacts", [])][:30],
+            changed_files=summary.get("files_changed", []),
+            blockers=summary.get("blockers", []),
+            rejected_hypotheses=[t.get("title", "") for t in summary.get("tasks_attempted", []) if t.get("status") in {TaskLifecycle.EXHAUSTED.value, TaskLifecycle.BLOCKED.value}],
+            next_recommended_actions=summary.get("recommended_next_steps", []),
+            stop_reason=summary.get("done_reason", ""),
+        )
+        self.memory_store.write(snapshot)
 
     def inspect_repo(self) -> RepoSnapshot:
         files = sorted(
@@ -777,6 +988,7 @@ class VillaniModeController:
                     "tool_calls_used": t.tool_calls_used,
                     "elapsed_seconds": t.elapsed_seconds,
                     "completed": t.completed,
+                    "critic_verdict": t.critic_verdict,
                 }
                 for t in self.attempted
             ],
@@ -792,6 +1004,9 @@ class VillaniModeController:
             "done_reason": done_reason,
             "completed_waves": state.completed_waves,
             "recommended_next_steps": self._recommended_next_steps(),
+            "stop_detail": self._last_stop_detail,
+            "backlog_count": len(state.discovered_opportunities),
+            "selected_tasks": [t.title for t in self.attempted],
         }
 
     def _detect_tooling_commands(self, files: list[str]) -> list[str]:
@@ -892,6 +1107,9 @@ class VillaniModeController:
     def format_summary(summary: dict[str, Any]) -> str:
         lines = ["# Villani mode summary", ""]
         lines.append(f"Repo assessment: {summary.get('repo_summary', '')}")
+        lines.append("## Backlog")
+        lines.append(f"- backlog_count: {summary.get('backlog_count', 0)}")
+        lines.append(f"- selected_tasks: {json.dumps(summary.get('selected_tasks', []))}")
         lines.append("## Tasks")
         for task in summary.get("tasks_attempted", []):
             lines.append(
@@ -940,6 +1158,8 @@ class VillaniModeController:
                 f"wave {wave.get('wave')}: retired={wave.get('retired')} retryable={wave.get('retryable', 0)} blocked={wave.get('blocked', 0)} files={len(wave.get('files_touched', []))}"
             )
         lines.append(f"Done reason: {summary.get('done_reason', '')}")
+        if summary.get("stop_detail"):
+            lines.append(f"Stop detail: {summary.get('stop_detail')}")
         lines.append(f"Blockers: {json.dumps(summary.get('blockers', []))}")
         lines.append(
             f"Preexisting changes: {json.dumps(summary.get('preexisting_changes', []))}"
