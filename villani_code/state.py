@@ -299,10 +299,6 @@ class Runner:
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
 
-            if self._pending_verification:
-                tool_results.append({"type": "text", "text": self._pending_verification})
-                self._pending_verification = ""
-
             if tool_results and any(not r.get("is_error") for r in transcript["tool_results"][-len(tool_uses) :]):
                 self._no_progress_cycles = 0
                 self._recovery_count = 0
@@ -332,6 +328,10 @@ class Runner:
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
             messages.append({"role": "user", "content": tool_results})
+
+            if self._pending_verification:
+                messages.append({"role": "user", "content": [{"type": "text", "text": self._pending_verification}]})
+                self._pending_verification = ""
 
             reason = _budget_reason()
             if reason:

@@ -129,6 +129,27 @@ class FakeClientEmptyThenDone:
         }
 
 
+class FakeClientToolUseThenDone:
+    def __init__(self):
+        self.calls = 0
+        self.second_payload = None
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "id": "1",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool-1", "name": "Ls", "input": {"path": "."}}],
+            }
+        self.second_payload = payload
+        return {
+            "id": "2",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+        }
+
+
 class FakeClientTwoEmptyThenDone:
     def __init__(self):
         self.calls = 0
@@ -181,6 +202,82 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
         and "Continue. You ended your previous turn with no output." in m["content"][0].get("text", "")
     ]
     assert continuation_messages
+
+
+def test_tool_result_message_contains_only_tool_results(tmp_path: Path):
+    client = FakeClientToolUseThenDone()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    original_execute = runner._execute_tool_with_policy
+
+    def _execute_and_set_pending(tool_name, tool_input, tool_use_id, message_count):
+        result = original_execute(tool_name, tool_input, tool_use_id, message_count)
+        runner._pending_verification = "<verification>ok</verification>"
+        return result
+
+    runner._execute_tool_with_policy = _execute_and_set_pending
+    runner.run("list files")
+
+    assert client.second_payload is not None
+    first_tool_result_msg = next(
+        m
+        for m in client.second_payload["messages"]
+        if m["role"] == "user" and m["content"] and m["content"][0].get("type") == "tool_result"
+    )
+    assert all(block.get("type") == "tool_result" for block in first_tool_result_msg["content"])
+    assert not any(block.get("type") == "text" for block in first_tool_result_msg["content"])
+
+
+def test_pending_verification_is_emitted_as_separate_user_message(tmp_path: Path):
+    client = FakeClientToolUseThenDone()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    original_execute = runner._execute_tool_with_policy
+
+    def _execute_and_set_pending(tool_name, tool_input, tool_use_id, message_count):
+        result = original_execute(tool_name, tool_input, tool_use_id, message_count)
+        runner._pending_verification = "<verification>separate-message</verification>"
+        return result
+
+    runner._execute_tool_with_policy = _execute_and_set_pending
+    runner.run("list files")
+
+    assert client.second_payload is not None
+    verification_messages = [
+        m
+        for m in client.second_payload["messages"]
+        if m["role"] == "user"
+        and m["content"]
+        and len(m["content"]) == 1
+        and m["content"][0].get("type") == "text"
+        and m["content"][0].get("text") == "<verification>separate-message</verification>"
+    ]
+    assert verification_messages
+
+
+def test_anthropic_message_order_after_tool_use(tmp_path: Path):
+    client = FakeClientToolUseThenDone()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    original_execute = runner._execute_tool_with_policy
+
+    def _execute_and_set_pending(tool_name, tool_input, tool_use_id, message_count):
+        result = original_execute(tool_name, tool_input, tool_use_id, message_count)
+        runner._pending_verification = "<verification>order-check</verification>"
+        return result
+
+    runner._execute_tool_with_policy = _execute_and_set_pending
+    runner.run("list files")
+
+    assert client.second_payload is not None
+    msgs = client.second_payload["messages"]
+    assistant_idx = next(i for i, m in enumerate(msgs) if m["role"] == "assistant" and m["content"] and m["content"][0].get("type") == "tool_use")
+    assert msgs[assistant_idx + 1]["role"] == "user"
+    assert all(block.get("type") == "tool_result" for block in msgs[assistant_idx + 1]["content"])
+    assert msgs[assistant_idx + 2] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "<verification>order-check</verification>"}],
+    }
 
 
 def test_loop_retries_twice_then_succeeds(tmp_path: Path):
