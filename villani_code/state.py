@@ -5,7 +5,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -58,7 +58,10 @@ class Runner:
         redact: bool = False,
         bypass_permissions: bool = False,
         auto_accept_edits: bool = False,
-        plan_mode: bool = False,
+        plan_mode: bool = True,
+        plan_policy: Literal["off", "auto", "strict"] = "auto",
+        skip_plan: bool = False,
+        max_repair_attempts: int = 2,
         approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
         small_model: bool = False,
@@ -79,6 +82,9 @@ class Runner:
         self.bypass_permissions = bypass_permissions
         self.auto_accept_edits = auto_accept_edits
         self.plan_mode = plan_mode
+        self.plan_policy = plan_policy
+        self.skip_plan = skip_plan
+        self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)
         self.event_callback = event_callback or (lambda _event: None)
         self.small_model = small_model
@@ -143,6 +149,7 @@ class Runner:
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
+        self._in_repair_cycle = False
 
     def run_villani_mode(self) -> dict[str, Any]:
         controller = VillaniModeController(
@@ -163,6 +170,8 @@ class Runner:
         execution_budget: ExecutionBudget | None = None,
     ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
+        if not self._in_repair_cycle:
+            self._ensure_project_memory_and_plan(instruction)
         system = build_system_blocks(
             self.repo,
             repo_map=self._repo_map if self.small_model else "",
@@ -262,6 +271,10 @@ class Runner:
             transcript["execution"] = execution.to_dict()
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+            if not self._in_repair_cycle:
+                post = self._run_post_execution_validation(_change_summary()[2])
+                if post:
+                    response.setdefault("content", []).append({"type": "text", "text": post})
             self._save_session_snapshot(messages)
             return {
                 "response": response,
@@ -365,6 +378,10 @@ class Runner:
                     transcript_path = save_transcript(
                         self.repo, transcript, redact=self.redact
                     )
+                    if not self._in_repair_cycle:
+                        post = self._run_post_execution_validation(_change_summary()[2])
+                        if post:
+                            response.setdefault("content", []).append({"type": "text", "text": post})
                     self._save_session_snapshot(messages)
                     return {
                         "response": response,
@@ -780,3 +797,12 @@ class Runner:
 
         state_runtime.render_stream_event(self, event)
 
+    def _ensure_project_memory_and_plan(self, instruction: str) -> None:
+        from villani_code import state_runtime
+
+        state_runtime.ensure_project_memory_and_plan(self, instruction)
+
+    def _run_post_execution_validation(self, changed_files: list[str]) -> str:
+        from villani_code import state_runtime
+
+        return state_runtime.run_post_execution_validation(self, changed_files)

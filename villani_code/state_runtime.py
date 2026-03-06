@@ -9,7 +9,11 @@ from villani_code.autonomy import VerificationStatus
 from villani_code.edits import ProposalStore
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
+from villani_code.planning import PlanRiskLevel, generate_execution_plan
+from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
+from villani_code.validation_loop import RepairAttemptSummary, run_validation
 from villani_code.repo_map import build_repo_map
+from villani_code.prompting import build_initial_messages
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
 from villani_code.tools import execute_tool
@@ -307,3 +311,96 @@ def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
             runner.console.print(partial)
         else:
             runner.event_callback({"type": "stream_text", "text": partial})
+
+
+def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
+    files = ensure_project_memory(runner.repo)
+    runner.event_callback({"type": "planning_started"})
+    repo_map = load_repo_map(runner.repo)
+    validation_steps = []
+    val_file = runner.repo / ".villani" / "validation.json"
+    if val_file.exists():
+        try:
+            payload = json.loads(val_file.read_text(encoding="utf-8"))
+            validation_steps = [str(s.get("name", "")) for s in payload.get("steps", []) if isinstance(s, dict)]
+        except json.JSONDecodeError:
+            validation_steps = []
+    plan = generate_execution_plan(instruction, runner.repo, repo_map, validation_steps)
+    runner._execution_plan = plan
+    runner.event_callback({"type": "plan_generated", "plan": plan.to_dict(), "human": plan.to_human_text()})
+
+    session = SessionState(
+        current_task_summary=instruction[:220],
+        last_approved_plan_summary=f"{plan.risk_level.value}:{plan.task_goal[:140]}",
+    )
+
+    if runner.skip_plan or runner.plan_policy == "off":
+        update_session_state(runner.repo, session)
+        return
+
+    if not plan.non_trivial:
+        update_session_state(runner.repo, session)
+        return
+
+    if runner.villani_mode:
+        if plan.risk_level in {PlanRiskLevel.LOW, PlanRiskLevel.MEDIUM}:
+            runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
+            update_session_state(runner.repo, session)
+            return
+        runner.event_callback({"type": "plan_aborted", "reason": "high risk in autonomous mode"})
+        raise RuntimeError("High-risk plan in autonomous mode requires explicit confirmation; aborting safely.")
+
+    runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
+    approved = runner.approval_callback("ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value})
+    if not approved:
+        runner.event_callback({"type": "plan_rejected"})
+        raise RuntimeError("Execution plan rejected by user.")
+    runner.event_callback({"type": "plan_approved", "risk": plan.risk_level.value})
+    update_session_state(runner.repo, session)
+
+
+def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
+    if not changed_files:
+        return ""
+    runner.event_callback({"type": "validation_started", "changed_files": changed_files})
+    result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback)
+    if result.passed:
+        update_session_state(
+            runner.repo,
+            SessionState(
+                current_task_summary="",
+                last_approved_plan_summary=getattr(getattr(runner, "_execution_plan", None), "task_goal", "")[:140],
+                affected_files=changed_files,
+                validation_summary="passed",
+            ),
+        )
+        return "Validation: passed."
+
+    attempts: list[dict[str, Any]] = []
+    failing_step = result.steps[-1].step.name if result.steps else "unknown"
+    failure_summary = result.failure_summary
+    for attempt in range(1, int(getattr(runner, "max_repair_attempts", 2)) + 1):
+        runner.event_callback({"type": "repair_attempt_started", "attempt": attempt, "failing_step": failing_step})
+        prompt = (
+            "Repair validation failure only.\n"
+            f"Plan: {getattr(getattr(runner, '_execution_plan', None), 'task_goal', '')}\n"
+            f"Changed files: {', '.join(changed_files[:8])}\n"
+            f"Failing step: {failing_step}\n"
+            f"Failure summary:\n{failure_summary[:1200]}"
+        )
+        runner._in_repair_cycle = True
+        try:
+            sub = runner.run(prompt, messages=build_initial_messages(runner.repo, prompt))
+            _ = sub
+        finally:
+            runner._in_repair_cycle = False
+        result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback)
+        attempts.append({"attempt": attempt, "failing_step": failing_step, "failure_summary": failure_summary[:300], "repair_summary": "attempted targeted repair"})
+        if result.passed:
+            update_session_state(runner.repo, SessionState(affected_files=changed_files, validation_summary="passed after repair", repair_attempts=attempts))
+            return f"Validation recovered after repair attempt {attempt}."
+        failing_step = result.steps[-1].step.name if result.steps else failing_step
+        failure_summary = result.failure_summary
+
+    update_session_state(runner.repo, SessionState(affected_files=changed_files, validation_summary="failed", repair_attempts=attempts))
+    return "Validation failed after bounded repair attempts. Remaining failure: " + failure_summary[:400]

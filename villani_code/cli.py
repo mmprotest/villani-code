@@ -32,7 +32,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     return bool(getattr(settings, "villani_mode", False))
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: bool, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: bool, plan_policy: Literal["off", "auto", "strict"], skip_plan: bool, max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> Runner:
     if provider == "openai":
         resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
         client = OpenAIClient(base_url=base_url, api_key=resolved_api_key)
@@ -45,11 +45,11 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = json.loads(thinking)
         except json.JSONDecodeError:
             thinking_obj = thinking
-    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective)
+    return Runner(client=client, repo=repo.resolve(), model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, plan_policy=plan_policy, skip_plan=skip_plan, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective)
 
 
 def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False, small_model, provider, api_key, villani_mode=villani_mode, villani_objective=villani_objective)
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, True, "auto", False, 2, small_model, provider, api_key, villani_mode=villani_mode, villani_objective=villani_objective)
     shell = InteractiveShell(runner, repo.resolve(), villani_mode=villani_mode, villani_objective=villani_objective)
     interrupts = InterruptController()
     while True:
@@ -98,12 +98,15 @@ def run(
     redact: bool = typer.Option(False, "--redact"),
     dangerously_skip_permissions: bool = typer.Option(False, "--dangerously-skip-permissions"),
     auto_accept_edits: bool = typer.Option(False, "--auto-accept-edits"),
-    plan_mode: bool = typer.Option(False, "--plan-mode"),
+    plan_mode: bool = typer.Option(True, "--plan-mode/--no-plan-mode"),
+    plan_policy: Literal["off", "auto", "strict"] = typer.Option("auto", "--plan-policy"),
+    skip_plan: bool = typer.Option(False, "--skip-plan"),
+    max_repair_attempts: int = typer.Option(2, "--max-repair-attempts"),
     small_model: bool = typer.Option(False, "--small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, small_model, provider, api_key)
+    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, plan_policy, skip_plan, max_repair_attempts, small_model, provider, api_key)
     result = runner.run(instruction)
     for block in result["response"].get("content", []):
         if block.get("type") == "text":
@@ -152,11 +155,23 @@ def takeover_cmd(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, True, "auto", False, 2, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
     result = runner.run_villani_mode()
     for block in result["response"].get("content", []):
         if block.get("type") == "text":
             console.print(block.get("text", ""))
+
+
+@app.command()
+def init(
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository path"),
+) -> None:
+    from villani_code.project_memory import init_project_memory
+
+    files = init_project_memory(repo.resolve())
+    console.print("Initialized .villani project memory:")
+    for key, path in files.items():
+        console.print(f"- {key}: {path}")
 
 
 @mcp_app.command("list")

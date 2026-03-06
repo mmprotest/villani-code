@@ -161,6 +161,36 @@ Villani mode stop conditions:
 - repeated failure patterns indicate no progress
 - max wave limit reached
 
+
+
+### 5) Initialize compact project memory
+
+```bash
+villani-code init --repo .
+```
+
+This creates deterministic compact state under `.villani/`:
+- `project_rules.md`
+- `validation.json`
+- `repo_map.json`
+- `session_state.json`
+
+Lazy init is also enabled: if `.villani/` is missing when a task starts, Villani initializes it before planning.
+
+## Plan Mode and validation loop defaults
+
+- Plan Mode is on by default for non-trivial tasks.
+- Interactive mode shows the full execution plan inline and requires approval before execution.
+- Autonomous Villani mode auto-approves low/medium risk plans and safely aborts high-risk plans without a confirmation path.
+- After edits, validation runs automatically using `.villani/validation.json` in cost-aware order.
+- On validation failure, Villani attempts bounded self-repair (default: 2 attempts), then stops with a clear unresolved summary.
+
+Useful options:
+- `--plan-mode/--no-plan-mode`
+- `--plan-policy off|auto|strict`
+- `--skip-plan` (expert override)
+- `--max-repair-attempts N`
+
 ### Common options
 
 - `--base-url` API server root URL
