@@ -145,6 +145,28 @@ class RunnerController:
             tasks = event.get("tasks", [])
             self.app.post_message(LogAppend(f"[villani-mode] candidates: {', '.join(tasks)}", kind="meta"))
             return
+        if etype == "takeover_dashboard":
+            self.app.post_message(LogAppend(f"[takeover] repo assessment: {event.get('summary', '')}", kind="meta"))
+            return
+        if etype == "takeover_ranked":
+            top = event.get("top", [])
+            self.app.post_message(LogAppend(f"[takeover] ranked {event.get('count', 0)} opportunities; top: {', '.join(top)}", kind="meta"))
+            return
+        if etype == "takeover_wave":
+            self.app.post_message(LogAppend(f"[takeover] executing wave {event.get('wave')}: {', '.join(event.get('selected', []))}", kind="meta"))
+            return
+        if etype == "takeover_wave_complete":
+            self.app.post_message(LogAppend(f"[takeover] wave {event.get('wave')} complete, confidence {event.get('confidence')}, risk {event.get('risk')}, retired {event.get('retired')}", kind="meta"))
+            return
+        if etype == "failure_classified":
+            self.app.post_message(LogAppend(f"[failure] classified as {event.get('category')}: {event.get('next_strategy')}", kind="meta"))
+            return
+        if etype == "verification_ran":
+            self.app.post_message(LogAppend(f"[verification] status={event.get('status', 'unknown')} confidence={event.get('confidence', 'n/a')}", kind="meta"))
+            return
+        if etype == "confidence_risk":
+            self.app.post_message(LogAppend(f"[risk] confidence {event.get('confidence')} risk {event.get('risk')} :: {event.get('summary')}", kind="meta"))
+            return
         if etype == "stream_text":
             self._assistant_stream_saw_text = True
             self.app.post_message(LogAppend(str(event.get("text", "")), kind="stream"))

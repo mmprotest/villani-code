@@ -9,6 +9,7 @@ from typing import Any, Callable
 from rich.console import Console
 
 from villani_code.autonomous import VillaniModeConfig, VillaniModeController
+from villani_code.autonomy import FailureClassifier, VerificationEngine, VerificationStatus
 from villani_code.checkpoints import CheckpointManager
 from villani_code.context_budget import ContextBudget
 from villani_code.edits import ProposalStore
@@ -97,6 +98,8 @@ class Runner:
         self._context_budget = ContextBudget(max_chars=35000, keep_last_turns=4) if self.small_model else None
         self._files_read: set[str] = set()
         self._pending_verification = ""
+        self._failure_classifier = FailureClassifier()
+        self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
 
@@ -196,6 +199,13 @@ class Runner:
                         self._files_read.add(str(tool_input.get("file_path", "")))
                     if tool_name in {"Write", "Patch"} and not result.get("is_error"):
                         self._pending_verification = self._run_verification()
+
+                if tool_name in {"Write", "Patch", "Bash"}:
+                    self._pending_verification = self._run_verification(trigger=f"{tool_name} execution")
+
+                if result.get("is_error"):
+                    failure = self._failure_classifier.classify(f"{tool_name} failed", str(result.get("content", "")))
+                    self.event_callback({"type": "failure_classified", "category": failure.category.value, "summary": failure.cause_summary, "next_strategy": failure.suggested_strategy, "occurrence": failure.occurrence_count})
 
                 self.hooks.run_event("PostToolUse", {"event": "PostToolUse", "tool": tool_name, "input": tool_input, "result": result})
                 self.event_callback({"type": "tool_finished", "name": tool_name, "input": tool_input, "tool_use_id": tool_use_id, "is_error": result["is_error"]})
@@ -325,26 +335,42 @@ class Runner:
             result["content"] = content[:50000]
         return result
 
-    def _run_verification(self) -> str:
+    def _run_verification(self, trigger: str = "edit") -> str:
         commands = [["git", "diff", "--stat"], ["git", "diff", "--", "."]]
         if (self.repo / "pyproject.toml").exists() or (self.repo / "requirements.txt").exists():
             commands.append(["python", "-m", "compileall", "-q", str(self.repo)])
             if (self.repo / "tests").exists():
                 commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
-        lines = ["<verification>"]
+        lines = ["<verification>", f"trigger: {trigger}"]
+        cmd_results: list[dict[str, Any]] = []
         for cmd in commands:
             proc = subprocess.run(cmd, cwd=self.repo, capture_output=True, text=True)
             stderr_lines = "\n".join([ln for ln in proc.stderr.splitlines() if ln][:5])
             stdout = proc.stdout[:1500]
+            cmd_results.append({"command": " ".join(cmd), "exit": proc.returncode, "stdout": stdout, "stderr": stderr_lines})
             lines.append(f"command: {' '.join(cmd)}")
             lines.append(f"exit: {proc.returncode}")
             if stdout:
                 lines.append(f"stdout:\n{stdout}")
             if stderr_lines:
                 lines.append(f"key stderr:\n{stderr_lines}")
+        changed = self._git_changed_files()
+        verification = self._verification_engine.verify(trigger, changed, cmd_results)
+        lines.append(f"status: {verification.status.value}")
+        lines.append(f"confidence: {verification.confidence_score}")
+        if verification.findings:
+            lines.append("findings:")
+            for finding in verification.findings[:6]:
+                lines.append(f"- {finding.category.value}: {finding.message}")
         lines.append("</verification>")
-        self.event_callback({"type": "verification_ran"})
+        self.event_callback({"type": "verification_ran", "status": verification.status.value, "confidence": verification.confidence_score})
+        if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
+            self.event_callback({"type": "confidence_risk", "confidence": verification.confidence_score, "risk": "medium" if verification.status == VerificationStatus.UNCERTAIN else "high", "summary": verification.summary})
         return "\n".join(lines)
+
+    def _git_changed_files(self) -> list[str]:
+        proc = subprocess.run(["git", "status", "--short"], cwd=self.repo, capture_output=True, text=True)
+        return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
 
     def _emit_policy_event(self, tool_name: str, tool_input: dict[str, Any], decision: Decision, reason: str) -> None:
         if tool_name != "Bash":

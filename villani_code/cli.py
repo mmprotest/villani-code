@@ -107,9 +107,10 @@ def interactive(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
+    takeover: bool = typer.Option(False, "--takeover"),
     objective: Optional[str] = typer.Argument(None),
 ):
-    resolved_villani = _resolve_villani_flag(repo, villani_mode)
+    resolved_villani = takeover or _resolve_villani_flag(repo, villani_mode)
     _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, villani_objective=objective)
 
 
@@ -125,6 +126,24 @@ def villani_mode_cmd(
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
     _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+
+
+@app.command("takeover")
+def takeover_cmd(
+    objective: Optional[str] = typer.Argument(None, help="Optional takeover objective"),
+    base_url: str = typer.Option(..., "--base-url"),
+    model: str = typer.Option(..., "--model"),
+    repo: Path = typer.Option(Path("."), "--repo"),
+    max_tokens: int = typer.Option(4096, "--max-tokens"),
+    small_model: bool = typer.Option(False, "--small-model"),
+    provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+) -> None:
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, False, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+    result = runner.run_villani_mode()
+    for block in result["response"].get("content", []):
+        if block.get("type") == "text":
+            console.print(block.get("text", ""))
 
 
 @mcp_app.command("list")

@@ -122,31 +122,43 @@ villani-code run "summarize this repo" --base-url http://localhost:8000 --model 
 One prompt in, one useful answer out, plus traces of theatrical panic.
 
 
-### 4) Villani mode (autonomous self-directed improvement)
+### 4) Takeover mode (autonomous self-directed improvement)
 
-Villani mode is a first-class autonomous mode. It starts immediately without waiting for a user prompt, audits the repo, chooses high-value tasks, edits, verifies each task, iterates, and stops only when no clearly worthwhile verifiable work remains (or a real blocker is hit).
+Takeover mode is a first-class autonomous mode. It starts immediately without waiting for a user prompt, runs repo reconnaissance, ranks intervention opportunities, executes in bounded waves, adversarially verifies every wave, and stops when confidence/risk constraints require it.
 
 ```bash
-villani-code villani-mode --base-url http://localhost:8000 --model local-model
+villani-code takeover --base-url http://localhost:8000 --model local-model
 ```
 
 You can also enable it from interactive entrypoints:
 
 ```bash
 villani-code interactive --villani-mode --base-url http://localhost:8000 --model local-model
+villani-code interactive --takeover --base-url http://localhost:8000 --model local-model
 villani-code --villani-mode --base-url http://localhost:8000 --model local-model
 ```
 
 Optional steering objective:
 
 ```bash
-villani-code villani-mode "improve docs consistency" --base-url http://localhost:8000 --model local-model
+villani-code takeover "improve docs consistency" --base-url http://localhost:8000 --model local-model
 ```
 
-Safety behavior in Villani mode:
+Safety behavior in takeover mode:
 - normal repo-local write/patch/test commands auto-resolve approval prompts
 - hard destructive shell denylist remains active
 - denied commands are recorded as blockers unless you explicitly pass `--unsafe`
+
+New autonomy behaviors:
+- **Adversarial self-verification:** after meaningful edits/validation commands, Villani runs a compact reviewer pass focused on regressions, incomplete edits, stale references/docs, side effects, and test gaps.
+- **Failure-aware autonomy:** failures are classified (for example `test_failure`, `repo_ambiguity`, `verification_failure`, `repeated_no_progress`) and the next strategy changes based on class.
+- **Confidence + risk summaries:** each wave reports confidence and risk level, plus why the intervention was chosen.
+
+Takeover stop conditions:
+- no remaining opportunities above confidence threshold
+- blast radius exceeded configured wave constraints
+- repeated failure patterns indicate no progress
+- max wave limit reached
 
 ### Common options
 

@@ -62,7 +62,7 @@ def test_done_state_when_no_worthwhile_candidates(tmp_path: Path) -> None:
     controller = NoWorkController(StubRunner(tmp_path), tmp_path)
     summary = controller.run()
     assert "done_reason" in summary
-    assert "worthwhile" in summary["done_reason"]
+    assert "confidence threshold" in summary["done_reason"]
 
 
 def test_runner_villani_mode_auto_approves_edits(tmp_path: Path) -> None:
@@ -86,6 +86,12 @@ def test_cli_has_villani_mode_subcommand() -> None:
     assert result.exit_code == 0
 
 
+def test_cli_has_takeover_subcommand() -> None:
+    cli_runner = CliRunner()
+    result = cli_runner.invoke(cli.app, ["takeover", "--help"])
+    assert result.exit_code == 0
+
+
 def test_cli_flag_overrides_settings(tmp_path: Path) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "repo"
@@ -103,7 +109,7 @@ def test_summary_generation_includes_verification(tmp_path: Path) -> None:
     task.status = "passed"
     task.verification_results = [{"command": "echo ok", "exit": 0}]
     summary_text = VillaniModeController.format_summary({"tasks_attempted": [{"title": task.title, "status": task.status, "verification": task.verification_results}], "done_reason": "done", "blockers": [], "files_changed": [], "recommended_next_steps": []})
-    assert "verify `echo ok`" in summary_text
+    assert "verification" in summary_text
 
 
 def test_villani_mode_startup_without_prompt(tmp_path: Path) -> None:

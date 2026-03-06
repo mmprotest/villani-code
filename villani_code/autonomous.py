@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from villani_code.autonomy import FailureClassifier, Opportunity, TakeoverConfig, TakeoverPlanner, TakeoverState, VerificationEngine, VerificationStatus
+
 
 @dataclass(slots=True)
 class VillaniModeConfig:
@@ -41,33 +43,68 @@ class AutonomousTask:
 class VillaniModeController:
     """Deterministic autonomous repo-improvement loop for Villani mode."""
 
-    def __init__(self, runner: Any, repo: Path, steering_objective: str | None = None, event_callback: Callable[[dict[str, Any]], None] | None = None) -> None:
+    def __init__(self, runner: Any, repo: Path, steering_objective: str | None = None, event_callback: Callable[[dict[str, Any]], None] | None = None, takeover_config: TakeoverConfig | None = None) -> None:
         self.runner = runner
         self.repo = repo.resolve()
         self.steering_objective = steering_objective
         self.event_callback = event_callback or (lambda _event: None)
+        self.takeover_config = takeover_config or TakeoverConfig()
         self.attempted: list[AutonomousTask] = []
         self._attempted_titles: set[str] = set()
+        self.planner = TakeoverPlanner(self.repo)
+        self.verifier = VerificationEngine(self.repo)
+        self.failure_classifier = FailureClassifier()
 
     def run(self) -> dict[str, Any]:
-        self._emit("autonomous_phase", phase="scanning repo")
-        while True:
-            snapshot = self.inspect_repo()
-            tasks = self.generate_candidates(snapshot)
-            ranked = self.rank_tasks(tasks)
-            remaining = [t for t in ranked if t.title not in self._attempted_titles and self._is_worthwhile(t)]
-            if not remaining:
-                summary = self._build_final_summary("No clearly worthwhile, strongly verifiable tasks remain.")
-                self._emit("autonomous_phase", phase="summarizing")
-                return summary
+        state = TakeoverState(repo_summary=self.planner.build_repo_summary())
+        self._emit("takeover_dashboard", summary=state.repo_summary, wave=0, risk=state.current_risk_level)
+        state.discovered_opportunities = self.planner.discover_opportunities()
+        self._emit("takeover_ranked", count=len(state.discovered_opportunities), top=[o.title for o in state.discovered_opportunities[:5]])
 
-            task = remaining[0]
-            self._attempted_titles.add(task.title)
-            self._emit("autonomous_phase", phase="editing", task=task.title)
-            self._execute_task(task)
-            self._emit("autonomous_phase", phase="verifying", task=task.title)
-            self._verify_task(task)
-            self.attempted.append(task)
+        for wave in range(1, self.takeover_config.max_waves + 1):
+            remaining = [o for o in state.discovered_opportunities if o.confidence >= self.takeover_config.min_confidence and o.title not in self._attempted_titles]
+            if not remaining:
+                return self._build_takeover_summary(state, "No remaining opportunities above confidence threshold.")
+            selected = remaining[: self.takeover_config.max_commands_per_wave]
+            self._emit("autonomous_phase", phase=f"takeover wave {wave}")
+            self._emit("takeover_wave", wave=wave, selected=[o.title for o in selected], why="ranked by priority and confidence")
+
+            wave_files: set[str] = set()
+            retired = 0
+            for op in selected:
+                task = AutonomousTask(
+                    task_id=f"wave-{wave}-{retired+1}",
+                    title=op.title,
+                    rationale=op.evidence,
+                    priority=op.priority,
+                    confidence=op.confidence,
+                    verification_plan=["python -m compileall -q ."] if (self.repo / "pyproject.toml").exists() else [],
+                )
+                self._attempted_titles.add(task.title)
+                self._execute_task(task)
+                task.files_changed = self._git_changed_files()
+                wave_files.update(task.files_changed)
+
+                verification = self.verifier.verify(op.proposed_next_action, task.files_changed, task.verification_results)
+                task.verification_results.append({"summary": verification.summary, "status": verification.status.value, "confidence": verification.confidence_score, "findings": [f"{f.category.value}: {f.message}" for f in verification.findings]})
+                if verification.status in {VerificationStatus.PASS, VerificationStatus.UNCERTAIN}:
+                    task.status = "passed" if verification.status == VerificationStatus.PASS else "uncertain"
+                    retired += 1
+                else:
+                    task.status = "failed"
+                    event = self.failure_classifier.classify("verification failure", verification.summary)
+                    self._emit("failure_classified", category=event.category.value, summary=event.cause_summary, next_strategy=event.suggested_strategy)
+                self.attempted.append(task)
+
+            if len(wave_files) > self.takeover_config.max_files_per_wave:
+                state.current_risk_level = "high"
+                return self._build_takeover_summary(state, "Blast radius exceeded configured max files per wave.")
+
+            avg_conf = round(sum(t.confidence for t in self.attempted[-len(selected) :]) / max(1, len(selected)), 2)
+            state.completed_waves.append({"wave": wave, "retired": retired, "confidence": avg_conf, "files_touched": sorted(wave_files)})
+            self._emit("takeover_wave_complete", wave=wave, retired=retired, confidence=avg_conf, risk=state.current_risk_level)
+
+        return self._build_takeover_summary(state, "Reached maximum configured takeover waves.")
 
     def inspect_repo(self) -> RepoSnapshot:
         files = sorted(p.relative_to(self.repo).as_posix() for p in self.repo.rglob("*") if p.is_file() and ".git/" not in p.as_posix())
@@ -83,49 +120,8 @@ class VillaniModeController:
 
     def generate_candidates(self, snapshot: RepoSnapshot) -> list[AutonomousTask]:
         candidates: list[AutonomousTask] = []
-        check_failures = self._run_discovery_checks(snapshot.tooling_commands)
-        for cmd, result in check_failures:
-            if result["exit"] != 0:
-                candidates.append(
-                    AutonomousTask(
-                        task_id=f"fix-{cmd}",
-                        title=f"Fix failing check: {cmd}",
-                        rationale="A failing local verification command indicates a concrete quality gap.",
-                        priority=0.95,
-                        confidence=0.85,
-                        verification_plan=[cmd],
-                    )
-                )
-
-        if snapshot.todo_hits:
-            candidates.append(
-                AutonomousTask(
-                    task_id="todo-triage",
-                    title="Resolve highest-signal TODO/FIXME items",
-                    rationale="TODO/FIXME markers often indicate incomplete implementation or docs drift.",
-                    priority=0.55,
-                    confidence=0.6,
-                    verification_plan=snapshot.tooling_commands[:1] or ["python -m compileall -q ."],
-                )
-            )
-
-        if not candidates:
-            candidates.append(
-                AutonomousTask(
-                    task_id="docs-sync",
-                    title="Improve documentation consistency for current behavior",
-                    rationale="Repository has no high-confidence failing checks, so docs consistency is the safest verifiable improvement.",
-                    priority=0.4,
-                    confidence=0.55,
-                    verification_plan=snapshot.tooling_commands[:1] or ["python -m compileall -q ."],
-                )
-            )
-
-        if self.steering_objective:
-            for task in candidates:
-                if self.steering_objective.lower() in task.title.lower() or self.steering_objective.lower() in task.rationale.lower():
-                    task.priority += 0.2
-
+        for op in self.planner.discover_opportunities():
+            candidates.append(AutonomousTask(task_id=op.title.lower().replace(" ", "-"), title=op.title, rationale=op.evidence, priority=op.priority, confidence=op.confidence, verification_plan=[op.proposed_next_action]))
         self._emit("autonomous_candidates", count=len(candidates), tasks=[c.title for c in candidates])
         return candidates
 
@@ -137,41 +133,28 @@ class VillaniModeController:
     def _execute_task(self, task: AutonomousTask) -> None:
         task.status = "running"
         objective = (
-            "You are running in Villani mode autonomous execution. "
-            "Work directly on this repository to complete the task below, then summarize edits and intended verification. "
-            "Do not ask the user for permission for normal local repo operations. "
-            "Task: "
-            f"{task.title}\nRationale: {task.rationale}"
+            "You are in repo takeover mode. Execute one bounded intervention and summarize exact edits and validation. "
+            f"Intervention: {task.title}\nEvidence: {task.rationale}"
         )
-        if self.steering_objective:
-            objective += f"\nSteering objective: {self.steering_objective}"
         result = self.runner.run(objective)
         task.outcome = "\n".join(block.get("text", "") for block in result.get("response", {}).get("content", []) if block.get("type") == "text")
         task.files_changed = self._git_changed_files()
+        task.verification_results = self._extract_commands(result)
         if self._transcript_contains_denied(result):
             task.status = "blocked"
             task.outcome += "\nBlocked by hard safety policy."
 
-    def _verify_task(self, task: AutonomousTask) -> None:
-        results: list[dict[str, Any]] = []
-        for command in task.verification_plan:
-            proc = subprocess.run(command, cwd=self.repo, shell=True, capture_output=True, text=True)
-            results.append({"command": command, "exit": proc.returncode, "stdout": proc.stdout[:1200], "stderr": proc.stderr[:800]})
-        task.verification_results = results
-        if task.status == "blocked":
-            return
-        if results and all(r["exit"] == 0 for r in results):
-            task.status = "passed"
-        elif results and any(r["exit"] == 0 for r in results):
-            task.status = "partially_verified"
-        else:
-            task.status = "failed"
+    def _extract_commands(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for tr in result.get("transcript", {}).get("tool_results", []):
+            content = str(tr.get("content", ""))
+            if "command:" in content and "exit:" in content:
+                out.append({"command": content.splitlines()[0].replace("command:", "").strip(), "exit": 0 if "exit: 0" in content else 1})
+        return out
 
-    def _is_worthwhile(self, task: AutonomousTask) -> bool:
-        return task.confidence >= 0.5 and bool(task.verification_plan)
-
-    def _build_final_summary(self, done_reason: str) -> dict[str, Any]:
+    def _build_takeover_summary(self, state: TakeoverState, done_reason: str) -> dict[str, Any]:
         return {
+            "repo_summary": state.repo_summary,
             "tasks_attempted": [
                 {
                     "id": t.task_id,
@@ -186,6 +169,7 @@ class VillaniModeController:
             "files_changed": self._git_changed_files(),
             "blockers": [t.title for t in self.attempted if t.status == "blocked"],
             "done_reason": done_reason,
+            "completed_waves": state.completed_waves,
             "recommended_next_steps": self._recommended_next_steps(),
         }
 
@@ -196,13 +180,6 @@ class VillaniModeController:
         if any(f.startswith("tests/") for f in files):
             commands.append("pytest -q")
         return commands or ["python -m compileall -q ."]
-
-    def _run_discovery_checks(self, commands: list[str]) -> list[tuple[str, dict[str, Any]]]:
-        checks: list[tuple[str, dict[str, Any]]] = []
-        for cmd in commands[:2]:
-            proc = subprocess.run(cmd, cwd=self.repo, shell=True, capture_output=True, text=True)
-            checks.append((cmd, {"exit": proc.returncode, "stdout": proc.stdout[:600], "stderr": proc.stderr[:400]}))
-        return checks
 
     def _todo_hits(self, files: list[str]) -> list[str]:
         hits: list[str] = []
@@ -224,10 +201,10 @@ class VillaniModeController:
 
     def _recommended_next_steps(self) -> list[str]:
         if any(t.status == "blocked" for t in self.attempted):
-            return ["Review blocked tasks and rerun with --unsafe only if you trust the commands and need broader shell operations."]
+            return ["Review blocked tasks and rerun with --unsafe only if trusted and necessary."]
         if any(t.status == "failed" for t in self.attempted):
-            return ["Review failed verification commands and re-run Villani mode after resolving environment issues."]
-        return ["Run a full CI pipeline before merging autonomous changes."]
+            return ["Inspect verification findings, then rerun takeover with tighter wave limits."]
+        return ["Run full CI before merging autonomous changes."]
 
     def _git_changed_files(self) -> list[str]:
         proc = subprocess.run(["git", "status", "--short"], cwd=self.repo, capture_output=True, text=True)
@@ -253,16 +230,19 @@ class VillaniModeController:
 
     @staticmethod
     def format_summary(summary: dict[str, Any]) -> str:
-        lines = ["# Villani mode summary", ""]
+        lines = ["# Repo takeover summary", ""]
+        lines.append(f"Repo assessment: {summary.get('repo_summary', '')}")
         lines.append("## Tasks")
         for task in summary.get("tasks_attempted", []):
             lines.append(f"- {task['title']} :: {task['status']}")
             for vr in task.get("verification", []):
-                lines.append(f"  - verify `{vr['command']}` => exit {vr['exit']}")
+                lines.append(f"  - verification: {json.dumps(vr)}")
         lines.append("")
+        waves = summary.get("completed_waves", [])
+        for wave in waves:
+            lines.append(f"wave {wave.get('wave')}: retired={wave.get('retired')} confidence={wave.get('confidence')} files={len(wave.get('files_touched', []))}")
         lines.append(f"Done reason: {summary.get('done_reason', '')}")
-        blockers = summary.get("blockers", [])
-        lines.append(f"Blockers: {json.dumps(blockers)}")
+        lines.append(f"Blockers: {json.dumps(summary.get('blockers', []))}")
         lines.append(f"Files changed: {json.dumps(summary.get('files_changed', []))}")
         for step in summary.get("recommended_next_steps", []):
             lines.append(f"Next: {step}")
