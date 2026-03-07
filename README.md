@@ -1,137 +1,210 @@
 # Villani Code
 
-Villani Code is a **disciplined, small-model-aware coding agent** with an interactive terminal experience as the flagship workflow.
+```text
+╭──────────────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│    __     ___ _ _             _    ____          _                           │
+│    \ \   / (_) | | __ _ _ __ (_)  / ___|___   __| | ___                      │
+│     \ \ / /| | | |/ _` | '_ \| | | |   / _ \ / _` |/ _ \                     │
+│      \ V / | | | | (_| | | | | | | |__| (_) | (_| |  __/                     │
+│       \_/  |_|_|_|\__,_|_| |_|_|  \____\___/ \__,_|\___|                     │
+│                                                                              │
+│                      the terminal is under new management                    │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
-It is built for constrained inference environments (local, quantized, or weaker models) where reliability comes from explicit control loops rather than hidden magic.
+          Some tools help.  Some tools suggest.  Villani Code intervenes.
+```
 
-## Product focus
+**Villani Code** is terminal agent for repository inspection, correction, and controlled escalation.
 
-Villani keeps coding work narrow, inspectable, and recoverable:
-- explicit planning before edits
-- visible context governance under tight budgets
-- scoped validation and bounded repair
-- transparent transcripts and task outcomes
+Some tools help.  
+Some tools suggest.  
+**Villani Code intervenes.**
 
-## Installation
+You provide model backend.  
+You provide repository.  
+**Villani Code provide consequences.**
 
-### 1) Recommended for most users (interactive UI)
+Weak abstractions will be corrected.  
+Progress will be made.  
+Every repository yields eventually.
+
+## What it does
+
+Villani Code inspect files, search project, apply patches, write changes, run shell commands, stream output, request approvals, benchmark agents, and conduct bounded autonomous repair.
+
+It does not negotiate with disorder.  
+It identifies source of problem and applies pressure until matter becomes clearer.
+
+The terminal is under new management.  
+Compliance will be interpreted as success.  
+The diff remembers everything.
+
+## Install
+
+You install package.  
+Then operation begin.
+
 ```bash
 pip install .[tui]
 ```
 
-### 2) Lean/core install (automation, CI, minimal environments)
+You click nothing.  
+You type command.  
+Civilization advances.
+
+Headless:
+
 ```bash
 pip install .
 ```
 
-### 3) Development tooling (includes TUI + test/lint/type tooling)
+Development:
+
 ```bash
 pip install .[dev]
 ```
 
-Install-tier behavior:
+No dashboard.  
+No button clicking.  
+No sacred ceremony.  
+Only command, consequence, and forward movement.
 
-- `.[tui]` (recommended): full interactive experience (`interactive`, `villani-mode`, default launch path).
-- `.[dev]`: developer tooling plus TUI dependencies (same runtime UI surface, with lint/type/test tools).
-- base install (`.`): headless/automation commands (`init`, `run`, `context`, `eval`, benchmark/reporting).
-- if TUI extras are missing and interactive mode is requested, Villani prints: `Interactive mode requires the optional TUI dependencies. Install with: pip install .[tui]`.
+## Quickstart
 
-## Architecture (alpha, pragmatic)
-
-- `villani_code.cli`: Typer CLI entry points; interactive mode is still the default UX path.
-- `villani_code.interactive` + `villani_code.tui.*`: Textual application shell, loaded lazily when interactive commands are invoked.
-- `villani_code.state.Runner`: core runtime loop shared by interactive and headless execution paths.
-- `villani_code.state_runtime` / `villani_code.state_tooling` / `villani_code.state_execution`: focused runtime helpers for message prep, tool policy, and execution summarization.
-- `villani_code.autonomous` + `villani_code.autonomous_helpers` + `villani_code.autonomous_progress`: bounded Villani-mode planning, progress tracking, and stop/retry governance.
-- `villani_code.context_governance`: context inventory, pruning, checkpointing, and reset behavior.
-
-## Core vs UI dependency boundary
-
-- The interactive Textual UI is the **primary** product experience.
-- Core runtime and headless commands are intentionally decoupled from eager Textual imports, so CI/automation paths remain reliable.
-- Interactive commands (`interactive`, `villani-mode`, default no-subcommand path) load TUI dependencies lazily and fail with a clear install hint when missing.
-- Lean installs exist for testing and automation, but the recommended path for normal users remains the UI-enabled install.
-
-## Typical workflow
-
-1. Initialize repo memory (`villani-code init`).
-2. Use interactive mode (`villani-code interactive ...`), or default launch with no subcommand when base config is provided.
-3. Run narrow tasks (`villani-code run ...`) when scripting or automating.
-4. Review context pressure (`villani-code context --json`).
-5. Checkpoint and reset when stale (`checkpoint` / `reset-from-checkpoint`).
-
-## CLI examples
+Interactive control:
 
 ```bash
-villani-code interactive --base-url http://localhost:8000 --model local-model
-villani-code run "fix failing test in tests/test_parser.py" --base-url http://localhost:8000 --model local-model
-villani-code context --json
-villani-code eval --suite tests/fixtures/eval/suite.json --json
+villani-code interactive --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
 ```
 
-## Benchmark mode (agent-layer benchmark)
-
-`villani-code benchmark` compares coding **agents** (not model families) under fixed tasks, repo snapshot, and objective validation checks.
-
-Benchmark packs are intentionally split by interpretation target:
-- `internal_regressions`: Villani-only regression tracking (**never headline comparable**).
-- `general_coding`: neutral coding tasks for cross-agent comparison when fairness is not mixed.
-- `constrained_model`: low-context tasks intended for constrained-model comparisons under matched fairness settings.
-
-These are **starting packs**; they should be expanded and empirically pruned over time.
-
-### Interpretation status (hard rule in reports)
-
-Each run has one status:
-- `headline_comparable`: suitable for headline cross-agent comparisons.
-- `informational_only`: useful context, but not valid headline evidence.
-- `internal_only`: regression tracking only.
-
-Blunt rule: mixed-fairness runs and internal-regression packs are never headline-comparable.
-
-### Fairness modes
-
-- `same-backend`: every participating adapter is pinned to the same OpenAI-compatible backend + model identifier.
-- `native-cli`: single-agent/default-provider run.
-- `mixed`: heterogeneous setup (exploratory only, not apples-to-apples).
-
-### Benchmark preflight checks
-
-Before execution, benchmark mode runs a lightweight preflight to validate:
-- task pack metadata and task schema
-- repo/task directory existence
-- agent-name validity
-- validation command structure and likely command-resolution failures
-
-Likely missing validation executables are surfaced early as warnings so noisy runs can be avoided.
-
-### Windows validation behavior
-
-Validation command resolution is explicit and conservative across platforms:
-- `python` / `python3` / `py` resolve to the active interpreter
-- allowlisted module tools (for example `pytest`, `pip`) resolve to `python -m <tool>`
-- unknown commands are not rewritten and fail as environment-resolution failures
-
-### Run internal-regression benchmark (Villani-specific)
+One-shot intervention:
 
 ```bash
-villani-code benchmark   --tasks-dir benchmark_tasks/internal_regressions   --agent villani   --repo .   --base-url http://localhost:8000   --model your-model
+villani-code run "Add retry handling to API client and update tests." --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
 ```
 
-### Compare multiple agents
+Villani Mode:
 
 ```bash
-villani-code benchmark   --tasks-dir benchmark_tasks/general_coding   --agent villani   --agent claude-code   --agent opencode   --agent copilot-cli   --repo .   --base-url http://localhost:8000   --model your-model
+villani-code --villani-mode --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
 ```
 
-### Outputs
+You give objective.  
+Villani Code give outcome, damage report, or formal notice of resistance.
 
-Each benchmark run writes:
-- `benchmark_results.json`
-- `benchmark_results.md`
-- `benchmark_results.csv`
-- per-run artifacts (`stdout.txt`, `stderr.txt`, `git_diff.patch`, `changed_files.json`, `validation_results.json`, `metadata.json`)
+Order will be restored recursively.  
+Bad code has short future.  
+History will be rewritten with better formatting.
 
-### Current external-adapter limitations
+## Modes
 
-External adapters are CLI-driven and intentionally conservative. If an executable is missing, auth is not configured, or unattended mode is not supported on that machine/version, the run is reported as **skipped** (not as success, and distinct from failures).
+### Interactive
+
+This is primary mode of control.
+
+Streaming output.  
+Inline approvals.  
+Visible activity.  
+One continuous transcript.
+
+You see what it reads.  
+You see what it changes.  
+You see which command behave like traitor.
+
+No mystery.  
+No committee.  
+Only supervision.
+
+One repo.  
+One transcript.  
+One chain of command.
+
+### Run
+
+Direct strike.  
+Instruction goes in.  
+Result comes out.
+
+No panic.  
+Only restructuring.
+
+### Villani Mode
+
+Villani Mode inspects repository, selects opportunity, applies bounded improvement, verifies result, and stops with explicit reason.
+
+It does not wander like confused bureaucrat.  
+It proceeds until progress is achieved or resistance is properly documented.
+
+It came.  
+It parsed.  
+It corrected.
+
+## Benchmarking
+
+Villani Code includes benchmark packs for different kinds of conflict:
+
+- **internal regressions** for Villani self-repair and repo discipline
+- **general coding** for broader cross-agent comparison
+- **constrained model** for smaller-model and tight-context evaluation
+
+Not every benchmark result deserve trumpet fanfare.
+
+Some runs are `headline_comparable`.  
+Some are `informational_only`.  
+Some are `internal_only`.
+
+If run is mixed, weak, or contaminated by environment failure, report will say this plainly.  
+Score without context is vanity metric in cheap disguise.
+
+If benchmark is weak, benchmark will confess.  
+No fake rigor.  
+No decorative discipline.  
+Truth in artifacts. Precision in blame.
+
+## Safety
+
+Villani Code edits files and runs commands.
+
+Use git.  
+Review diff.  
+Read report.  
+Do not hand it something irreplaceable and then act surprised when intervention becomes memorable.
+
+Containment exists because ambition without containment becomes crater.
+
+Confidence is mandatory.  
+Carelessness is not.  
+Graceful exit is procedure, not mercy.
+
+## Development
+
+Typical local workflow:
+
+```bash
+python -m pytest
+ruff check .
+mypy villani_code
+```
+
+If you change benchmark logic, run benchmark tests.  
+If you change TUI behavior, verify real keyboard flow.  
+If you change autonomy, make sure stop reasons still tell truth.
+
+Beautiful structure with lying behavior is still failure.
+
+No superstition.  
+Only enforcement.
+
+## Final Word
+
+You do not install Villani Code because repository is healthy.
+
+You install Villani Code because repository has too many opinions, too many regressions, and no functioning central authority.
+
+This condition is now under treatment.
+
+Some tools help.  
+Some tools suggest.  
+**Villani Code intervenes.**
