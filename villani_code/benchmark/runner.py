@@ -27,8 +27,21 @@ from villani_code.benchmark.graders import (
 from villani_code.benchmark.logging import BenchmarkLogger, render_command
 from villani_code.benchmark.models import BenchmarkTask
 from villani_code.benchmark.reporting import aggregate_by_agent, persist_reports
-from villani_code.benchmark.task_loader import load_benchmark_tasks
+from villani_code.benchmark.task_loader import load_benchmark_tasks, load_task_pack_metadata, resolve_tasks_dir
 from villani_code.benchmark.utils import utc_timestamp_slug, write_json
+
+
+def _summarize_failure_provenance(run_result: Any, validation_results: list[Any]) -> str | None:
+    if run_result.skipped:
+        return "agent_failure"
+    if run_result.exit_reason == "timeout":
+        return "timeout"
+    if run_result.exit_reason.startswith("exit:") and run_result.exit_reason != "exit:0":
+        return "agent_failure"
+    failed = [item.failure_provenance for item in validation_results if not item.success and item.failure_provenance]
+    if failed:
+        return failed[0]
+    return None
 
 
 class BenchmarkRunner:
@@ -71,7 +84,9 @@ class BenchmarkRunner:
         seed: int | None = None,
     ) -> dict[str, Any]:
         self.logger.info(f"Benchmark started for repo: {repo_path}")
-        tasks = load_benchmark_tasks(tasks_dir, task_id=task_id)
+        resolved_tasks_dir = resolve_tasks_dir(tasks_dir)
+        pack = load_task_pack_metadata(resolved_tasks_dir)
+        tasks = load_benchmark_tasks(resolved_tasks_dir, task_id=task_id)
         self.logger.info(f"Loaded {len(tasks)} tasks and {len(agents)} agents")
         run_root = self.output_dir / utc_timestamp_slug()
         run_root.mkdir(parents=True, exist_ok=True)
@@ -178,6 +193,7 @@ class BenchmarkRunner:
                     "cost_usd": run_result.cost_usd,
                     "skipped": run_result.skipped,
                     "composite_score": composite,
+                    "failure_provenance": _summarize_failure_provenance(run_result, validation_results),
                 }
 
                 self.logger.info("Artifact persistence start")
@@ -190,6 +206,7 @@ class BenchmarkRunner:
                     "skip_reason": run_result.skip_reason,
                     "changed_files": run_result.changed_files,
                     "scorecard": scorecard,
+                    "failure_provenance": scorecard["failure_provenance"],
                 }
                 result_rows.append(row)
                 agent_rows.append(row)
@@ -213,10 +230,18 @@ class BenchmarkRunner:
             "base_url": base_url,
             "agents": agents,
             "seed": seed,
-            "tasks_dir": str(tasks_dir),
+            "tasks_dir": str(resolved_tasks_dir),
+            "pack_name": pack.name,
+            "pack_classification": pack.classification,
+            "pack_description": pack.description,
+            "comparison_suitability": pack.comparison_suitability,
+            "fairness_classification": pack.fairness_classification,
+            "environment_notes": "Validation commands normalized via active Python interpreter.",
+            "platform": __import__("sys").platform,
+            "python_executable": __import__("sys").executable,
             "repo_path": str(repo_path),
             "run_mode": run_mode,
-            "fairness_classification": run_mode,
+            "run_fairness": run_mode,
             "fairness_warning": fairness_warning,
             "config_provenance": {
                 "model": "cli flag" if model else "adapter default",

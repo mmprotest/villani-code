@@ -34,6 +34,10 @@ class FakeAdapter:
 def test_runner_smoke_with_fake_adapter(monkeypatch, tmp_path: Path) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
+    (tasks_dir / "pack.json").write_text(
+        '{"name":"tmp","classification":"general_coding","description":"d","comparison_suitability":"headline_comparison_suitable","fairness_classification":"standardized"}',
+        encoding="utf-8",
+    )
     (tasks_dir / "task.json").write_text(
         '{"id":"t1","name":"task","instruction":"x","category":"cat","validation_checks":[{"type":"file_contains","path":"marker.txt","substring":"ok"}]}',
         encoding="utf-8",
@@ -54,6 +58,7 @@ def test_runner_smoke_with_fake_adapter(monkeypatch, tmp_path: Path) -> None:
     assert result["results"]
     assert result["results"][0]["scorecard"]["task_success"] is True
     assert result["metadata"]["run_mode"] in {"native-cli", "same-backend", "mixed"}
+    assert result["metadata"]["pack_classification"] == "general_coding"
     output_dir = Path(result["output_dir"])
     assert (output_dir / "benchmark_results.json").exists()
     assert (output_dir / "benchmark_results.md").exists()

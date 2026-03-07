@@ -1,0 +1,23 @@
+{
+  "id": "cross_file_refactor",
+  "name": "Cross-file helper refactor",
+  "repo_path": ".",
+  "instruction": "Complete the task: Cross-file helper refactor. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "cross-file refactor",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "easy",
+  "expected_edit_scope": "2-5 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

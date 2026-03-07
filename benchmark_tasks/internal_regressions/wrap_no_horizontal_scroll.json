@@ -4,7 +4,11 @@
   "repo_path": ".",
   "instruction": "Fix UI text wrapping so long content wraps without requiring horizontal scrolling, and validate through focused tests.",
   "category": "ui-layout",
-  "tags": ["ui", "layout", "wrapping"],
+  "tags": [
+    "ui",
+    "layout",
+    "wrapping"
+  ],
   "timeout_seconds": 300,
   "expected_touched_paths": [
     "villani_code/tui/styles.tcss",
@@ -20,5 +24,6 @@
       "expect_exit_code": 0
     }
   ],
-  "notes": "Ensures line wrapping behavior remains stable."
+  "notes": "Ensures line wrapping behavior remains stable.",
+  "pack_classification": "internal_regression"
 }

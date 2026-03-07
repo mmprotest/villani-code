@@ -56,3 +56,24 @@ def test_benchmark_cli_defaults_to_verbose_and_stream(monkeypatch, tmp_path) -> 
     assert result.exit_code == 0
     assert captured["verbose"] is True
     assert captured["stream_agent_output"] is True
+
+
+def test_benchmark_cli_default_tasks_dir(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeRunner:
+        def __init__(self, output_dir, verbose, stream_agent_output):
+            pass
+
+        def run(self, **kwargs):
+            captured["tasks_dir"] = kwargs["tasks_dir"]
+            return {"output_dir": str(tmp_path / "out"), "metadata": {}, "results": []}
+
+    benchmark_callback = _benchmark_callback()
+    monkeypatch.setitem(benchmark_callback.__globals__, "BenchmarkRunner", FakeRunner)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["benchmark", "--repo", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert str(captured["tasks_dir"]).endswith("benchmark_tasks/internal_regressions")

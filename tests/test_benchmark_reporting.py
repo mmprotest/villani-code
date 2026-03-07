@@ -4,11 +4,12 @@ from pathlib import Path
 from villani_code.benchmark.reporting import aggregate_by_agent, persist_reports
 
 
-def _row(agent: str, task: str, success: bool, skipped: bool) -> dict:
+def _row(agent: str, task: str, success: bool, skipped: bool, provenance: str | None = None) -> dict:
     return {
         "agent_name": agent,
         "task_id": task,
         "exit_reason": "ok" if success else "failed",
+        "failure_provenance": provenance,
         "scorecard": {
             "task_success": success,
             "validation_success": success,
@@ -23,12 +24,13 @@ def _row(agent: str, task: str, success: bool, skipped: bool) -> dict:
             "cost_usd": None,
             "skipped": skipped,
             "composite_score": 99.9 if success else 0.0,
+            "failure_provenance": provenance,
         },
     }
 
 
 def test_reporting_outputs_json_markdown_and_csv(tmp_path: Path) -> None:
-    rows = [_row("villani", "task1", True, False), _row("claude-code", "task1", False, True)]
+    rows = [_row("villani", "task1", True, False), _row("claude-code", "task1", False, True, "agent_failure")]
     persist_reports(
         tmp_path,
         {
@@ -36,6 +38,10 @@ def test_reporting_outputs_json_markdown_and_csv(tmp_path: Path) -> None:
             "base_url": "u",
             "agents": ["villani", "claude-code"],
             "run_mode": "mixed",
+            "pack_name": "internal_regressions",
+            "pack_classification": "internal_regression",
+            "pack_description": "internal",
+            "comparison_suitability": "internal_only",
             "fairness_classification": "mixed",
             "fairness_warning": "Fairness warning: mixed-mode comparison.",
             "agent_capabilities": [
@@ -63,6 +69,8 @@ def test_reporting_outputs_json_markdown_and_csv(tmp_path: Path) -> None:
     markdown = (tmp_path / "benchmark_results.md").read_text(encoding="utf-8")
     assert "Fairness warning" in markdown
     assert "Agent Capabilities" in markdown
+    assert "internal-regression oriented" in markdown
+    assert "Pack classification" in markdown
 
 
 def test_aggregate_includes_skip_rate() -> None:

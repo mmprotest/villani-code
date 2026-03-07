@@ -1,0 +1,23 @@
+{
+  "id": "low_collateral_edit",
+  "name": "Low-collateral precision edit",
+  "repo_path": ".",
+  "instruction": "Complete the task: Low-collateral precision edit. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "low-collateral edit task",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "medium",
+  "expected_edit_scope": "2-5 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

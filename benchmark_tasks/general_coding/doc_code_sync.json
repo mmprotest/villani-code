@@ -1,0 +1,23 @@
+{
+  "id": "doc_code_sync",
+  "name": "Doc and code sync",
+  "repo_path": ".",
+  "instruction": "Complete the task: Doc and code sync. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "doc + code sync task",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "medium",
+  "expected_edit_scope": "2-5 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

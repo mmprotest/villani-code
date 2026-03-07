@@ -279,7 +279,7 @@ def eval_cmd(
 
 @app.command("benchmark")
 def benchmark_cmd(
-    tasks_dir: Path = typer.Option(Path("benchmark_tasks/villani_code"), "--tasks-dir"),
+    tasks_dir: Path = typer.Option(Path("benchmark_tasks/internal_regressions"), "--tasks-dir"),
     task: Optional[str] = typer.Option(None, "--task"),
     agent: list[str] = typer.Option(["villani"], "--agent"),
     repo: Path = typer.Option(Path("."), "--repo"),

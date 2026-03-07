@@ -41,6 +41,10 @@ def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
         f"- Base URL: `{metadata.get('base_url')}`",
         f"- Agents: {', '.join(metadata.get('agents', []))}",
         f"- Run mode: `{metadata.get('run_mode', 'mixed')}`",
+        f"- Pack: `{metadata.get('pack_name', 'unknown')}`",
+        f"- Pack classification: `{metadata.get('pack_classification', 'unknown')}`",
+        f"- Pack description: {metadata.get('pack_description', '')}",
+        f"- Comparison suitability: `{metadata.get('comparison_suitability', 'unknown')}`",
         f"- Fairness classification: `{metadata.get('fairness_classification', metadata.get('run_mode', 'mixed'))}`",
         "",
     "## Leaderboard",
@@ -56,6 +60,9 @@ def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
     fairness_warning = metadata.get("fairness_warning")
     if fairness_warning:
         lines.extend(["", f"> ⚠️ {fairness_warning}"])
+
+    if metadata.get("pack_classification") == "internal_regression":
+        lines.extend(["", "> ⚠️ This task pack is internal-regression oriented and not suitable for headline cross-agent claims."])
 
     capabilities = metadata.get("agent_capabilities", [])
     if capabilities:
@@ -73,11 +80,11 @@ def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
                 f"| {row.get('agent')} | {row.get('supports_explicit_base_url')} | {row.get('supports_explicit_model')} | {row.get('supports_noninteractive')} | {row.get('supports_unattended')} | {row.get('fairness_classification')} | {row.get('controllability')} |"
             )
 
-    lines.extend(["", "## Per-task Results", "", "| Agent | Task | Success | Validation | Skipped | Composite | Exit Reason | Skip Reason |", "|---|---|---|---|---|---:|---|---|"])
+    lines.extend(["", "## Per-task Results", "", "| Agent | Task | Success | Validation | Skipped | Composite | Exit Reason | Skip Reason | Failure Provenance |", "|---|---|---|---|---|---:|---|---|---|"])
     for row in rows:
         score = row["scorecard"]
         lines.append(
-            f"| {row['agent_name']} | {row['task_id']} | {score['task_success']} | {score['validation_success']} | {score['skipped']} | {score['composite_score']:.2f} | {row['exit_reason']} | {row.get('skip_reason') or ''} |"
+            f"| {row['agent_name']} | {row['task_id']} | {score['task_success']} | {score['validation_success']} | {score['skipped']} | {score['composite_score']:.2f} | {row['exit_reason']} | {row.get('skip_reason') or ''} | {row.get('failure_provenance') or ''} |"
         )
     return "\n".join(lines)
 
@@ -103,10 +110,11 @@ def persist_reports(output_dir: Path, metadata: dict[str, Any], rows: list[dict[
                 "skipped": score["skipped"],
                 "elapsed_seconds": score["elapsed_seconds"],
                 "composite_score": score["composite_score"],
+                "failure_provenance": row.get("failure_provenance"),
             }
         )
     write_csv(
         output_dir / "benchmark_results.csv",
         csv_rows,
-        ["agent_name", "task_id", "task_success", "validation_success", "skipped", "elapsed_seconds", "composite_score"],
+        ["agent_name", "task_id", "task_success", "validation_success", "skipped", "elapsed_seconds", "composite_score", "failure_provenance"],
     )

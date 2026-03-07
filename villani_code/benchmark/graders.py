@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from villani_code.benchmark.adapters.base import ValidationResult
+from villani_code.benchmark.command_resolution import normalize_command_for_platform
 from villani_code.benchmark.models import BenchmarkTask, ValidationCheckType
 
 
@@ -20,22 +21,71 @@ def execute_validation_checks(
             on_check_start(index, check)
         if check.type == ValidationCheckType.COMMAND:
             cwd = repo_root if check.cwd is None else (repo_root / check.cwd)
-            proc = subprocess.run(
-                ["bash", "-lc", check.command or ""],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            success = proc.returncode == check.expect_exit_code
-            details = f"expected={check.expect_exit_code} actual={proc.returncode}\n{proc.stdout}\n{proc.stderr}"
-            result = ValidationResult(
-                check_type=check.type.value,
-                success=success,
-                details=details,
-                exit_code=proc.returncode,
-                check_index=index,
-            )
+            resolved = normalize_command_for_platform(check.command or "")
+            if not resolved.argv:
+                result = ValidationResult(
+                    check_type=check.type.value,
+                    success=False,
+                    details="Validation command was empty.",
+                    check_index=index,
+                    failure_provenance="harness_failure",
+                )
+                results.append(result)
+                if on_check_end:
+                    on_check_end(index, check, result)
+                continue
+            try:
+                proc = subprocess.run(
+                    resolved.argv,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=check.timeout_seconds,
+                )
+                success = proc.returncode == check.expect_exit_code
+                if success:
+                    provenance = None
+                elif proc.returncode == 124:
+                    provenance = "timeout"
+                else:
+                    provenance = "validation_failure"
+                details = (
+                    f"command={resolved.display_command}\nexpected={check.expect_exit_code} actual={proc.returncode}\n"
+                    f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+                )
+                result = ValidationResult(
+                    check_type=check.type.value,
+                    success=success,
+                    details=details,
+                    exit_code=proc.returncode,
+                    check_index=index,
+                    failure_provenance=provenance,
+                )
+            except FileNotFoundError as exc:
+                result = ValidationResult(
+                    check_type=check.type.value,
+                    success=False,
+                    details=f"command not found: {exc}",
+                    check_index=index,
+                    failure_provenance="environment_failure",
+                )
+            except subprocess.TimeoutExpired as exc:
+                result = ValidationResult(
+                    check_type=check.type.value,
+                    success=False,
+                    details=f"validation timeout: {exc}",
+                    check_index=index,
+                    failure_provenance="timeout",
+                )
+            except Exception as exc:
+                result = ValidationResult(
+                    check_type=check.type.value,
+                    success=False,
+                    details=f"validation execution exception: {exc}",
+                    check_index=index,
+                    failure_provenance="harness_failure",
+                )
             results.append(result)
             if on_check_end:
                 on_check_end(index, check, result)
@@ -48,6 +98,7 @@ def execute_validation_checks(
                 success=False,
                 details=f"File not found: {file_path}",
                 check_index=index,
+                failure_provenance="validation_failure",
             )
             results.append(result)
             if on_check_end:
@@ -67,6 +118,7 @@ def execute_validation_checks(
             success=success,
             details=details,
             check_index=index,
+            failure_provenance=None if success else "validation_failure",
         )
         results.append(result)
         if on_check_end:

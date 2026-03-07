@@ -19,6 +19,7 @@ class ValidationCheck(BaseModel):
     command: str | None = None
     cwd: str | None = None
     expect_exit_code: int = 0
+    timeout_seconds: int | None = None
     path: str | None = None
     substring: str | None = None
 
@@ -49,6 +50,18 @@ class BenchmarkTask(BaseModel):
     validation_checks: list[ValidationCheck] = Field(default_factory=list)
     success_threshold: float | None = None
     notes: str | None = None
+    difficulty: str | None = None
+    expected_edit_scope: str | None = None
+    pack_classification: str | None = None
+
+
+class BenchmarkTaskPack(BaseModel):
+    name: str
+    classification: str
+    description: str
+    comparison_suitability: str
+    fairness_classification: str
+    deprecated_aliases: list[str] = Field(default_factory=list)
 
 
 class BenchmarkMetadata(BaseModel):
@@ -65,6 +78,7 @@ class ValidationResult(BaseModel):
     details: str
     exit_code: int | None = None
     check_index: int = 0
+    failure_provenance: str | None = None
 
 
 @dataclass(slots=True)

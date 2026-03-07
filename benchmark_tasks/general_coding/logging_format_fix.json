@@ -1,0 +1,23 @@
+{
+  "id": "logging_format_fix",
+  "name": "Logging format consistency fix",
+  "repo_path": ".",
+  "instruction": "Complete the task: Logging format consistency fix. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "logging/message formatting fix",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "medium",
+  "expected_edit_scope": "2-5 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

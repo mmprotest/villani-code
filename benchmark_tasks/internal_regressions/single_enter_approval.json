@@ -4,7 +4,11 @@
   "repo_path": ".",
   "instruction": "Fix the interactive approval input handling so pressing Enter once confirms approval once, and update/add targeted tests.",
   "category": "ui-bugfix",
-  "tags": ["approval", "keyboard", "ui"],
+  "tags": [
+    "approval",
+    "keyboard",
+    "ui"
+  ],
   "timeout_seconds": 300,
   "expected_touched_paths": [
     "villani_code/tui/widgets/approval.py",
@@ -20,5 +24,6 @@
       "expect_exit_code": 0
     }
   ],
-  "notes": "Uses existing approval dialog tests for objective verification."
+  "notes": "Uses existing approval dialog tests for objective verification.",
+  "pack_classification": "internal_regression"
 }

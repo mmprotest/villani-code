@@ -1,0 +1,23 @@
+{
+  "id": "constrained_02",
+  "name": "Constrained model task 2",
+  "repo_path": ".",
+  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "category": "constrained-eval",
+  "tags": [
+    "constrained",
+    "small-model",
+    "low-context"
+  ],
+  "difficulty": "easy",
+  "expected_edit_scope": "1-2 files",
+  "timeout_seconds": 240,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "constrained_model"
+}

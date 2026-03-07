@@ -81,11 +81,11 @@ Fairness is now explicit per run:
 
 If configuration cannot prove same-backend parity, reports are marked `mixed` and include a fairness warning.
 
-### Run Villani-only benchmark
+### Run internal-regression benchmark (Villani-specific)
 
 ```bash
 villani-code benchmark \
-  --tasks-dir benchmark_tasks/villani_code \
+  --tasks-dir benchmark_tasks/internal_regressions \
   --agent villani \
   --repo . \
   --base-url http://localhost:8000 \
@@ -96,7 +96,7 @@ villani-code benchmark \
 
 ```bash
 villani-code benchmark \
-  --tasks-dir benchmark_tasks/villani_code \
+  --tasks-dir benchmark_tasks/internal_regressions \
   --agent villani \
   --agent claude-code \
   --agent opencode \
@@ -107,6 +107,23 @@ villani-code benchmark \
 ```
 
 ### Outputs
+
+
+### Run neutral general-coding benchmark
+
+```bash
+villani-code benchmark \
+  --tasks-dir benchmark_tasks/general_coding \
+  --agent villani
+```
+
+### Run constrained-model benchmark
+
+```bash
+villani-code benchmark \
+  --tasks-dir benchmark_tasks/constrained_model \
+  --agent villani
+```
 
 Each benchmark run writes:
 - `benchmark_results.json`

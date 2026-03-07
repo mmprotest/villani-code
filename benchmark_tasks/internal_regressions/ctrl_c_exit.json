@@ -4,7 +4,11 @@
   "repo_path": ".",
   "instruction": "Fix Ctrl+C handling so repeated interrupts exit cleanly with the expected behavior, and keep tests passing.",
   "category": "runtime-stability",
-  "tags": ["interrupt", "cli", "stability"],
+  "tags": [
+    "interrupt",
+    "cli",
+    "stability"
+  ],
   "timeout_seconds": 300,
   "expected_touched_paths": [
     "villani_code/interrupts.py",
@@ -20,5 +24,6 @@
       "expect_exit_code": 0
     }
   ],
-  "notes": "Targets known interrupt behavior regressions."
+  "notes": "Targets known interrupt behavior regressions.",
+  "pack_classification": "internal_regression"
 }

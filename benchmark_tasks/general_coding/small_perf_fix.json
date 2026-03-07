@@ -1,0 +1,23 @@
+{
+  "id": "small_perf_fix",
+  "name": "Micro performance-safe cleanup",
+  "repo_path": ".",
+  "instruction": "Complete the task: Micro performance-safe cleanup. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "cross-file refactor",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "medium",
+  "expected_edit_scope": "1-3 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

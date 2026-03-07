@@ -1,0 +1,23 @@
+{
+  "id": "cli_flag_update",
+  "name": "CLI flag behavior update",
+  "repo_path": ".",
+  "instruction": "Complete the task: CLI flag behavior update. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "CLI flag addition/update",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "easy",
+  "expected_edit_scope": "1-3 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

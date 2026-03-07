@@ -1,0 +1,23 @@
+{
+  "id": "parser_bug_fix",
+  "name": "Parser validation bug fix",
+  "repo_path": ".",
+  "instruction": "Complete the task: Parser validation bug fix. Keep edits minimal and add/update tests to prove correctness.",
+  "category": "parser or validation bug fix",
+  "tags": [
+    "neutral",
+    "general",
+    "coding-agent"
+  ],
+  "difficulty": "easy",
+  "expected_edit_scope": "1-3 files",
+  "timeout_seconds": 300,
+  "validation_checks": [
+    {
+      "type": "command",
+      "command": "python -m pytest -q",
+      "expect_exit_code": 0
+    }
+  ],
+  "pack_classification": "general_coding"
+}

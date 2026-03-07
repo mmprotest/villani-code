@@ -38,6 +38,7 @@ class ValidationResult:
     details: str
     exit_code: int | None = None
     check_index: int = 0
+    failure_provenance: str | None = None
 
 
 @dataclass(slots=True)
