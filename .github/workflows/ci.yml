@@ -5,19 +5,35 @@ on:
   pull_request:
 
 jobs:
-  checks:
-    runs-on: ubuntu-latest
+  core-matrix:
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11"]
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
+      - name: Install base + pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+      - name: Core/headless smoke tests
+        run: pytest -q tests/test_cli_headless_optional_tui.py tests/test_init_cli.py tests/test_packaging_surface.py
+
+  dev-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
@@ -39,7 +55,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
-      - name: Install wheel and verify import surface
+      - name: Install wheel and verify release surface
         run: |
           python -m venv .venv-smoke
           . .venv-smoke/bin/activate
@@ -48,6 +64,7 @@ jobs:
           python - <<'PY'
 import importlib.util
 assert importlib.util.find_spec("villani_code") is not None
+assert importlib.util.find_spec("villani_code.cli") is not None
 assert importlib.util.find_spec("ui") is None
 print("packaging smoke ok")
 PY

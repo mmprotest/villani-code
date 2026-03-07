@@ -1,16 +1,16 @@
 {
   "id": "constrained_04",
-  "name": "Constrained model task 4",
+  "name": "Constrained: user error text clarity",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Improve one error message to be explicit and actionable without changing exit code behavior.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "errors",
+    "usability"
   ],
   "difficulty": "easy",
-  "expected_edit_scope": "1-2 files",
+  "expected_edit_scope": "1 file",
   "timeout_seconds": 240,
   "validation_checks": [
     {

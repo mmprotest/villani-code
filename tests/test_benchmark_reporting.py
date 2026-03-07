@@ -44,6 +44,8 @@ def test_reporting_outputs_json_markdown_and_csv(tmp_path: Path) -> None:
             "comparison_suitability": "internal_only",
             "fairness_classification": "mixed",
             "fairness_warning": "Fairness warning: mixed-mode comparison.",
+            "interpretation_status": "internal_only",
+            "interpretation_warning": "This run is internal-only and intended for regression tracking.",
             "agent_capabilities": [
                 {
                     "agent": "villani",
@@ -69,11 +71,18 @@ def test_reporting_outputs_json_markdown_and_csv(tmp_path: Path) -> None:
     markdown = (tmp_path / "benchmark_results.md").read_text(encoding="utf-8")
     assert "Fairness warning" in markdown
     assert "Agent Capabilities" in markdown
-    assert "internal-regression oriented" in markdown
-    assert "Pack classification" in markdown
+    assert "Interpretation status" in markdown
+    assert "internal-only" in markdown
+    assert "Failure Provenance Summary" in markdown
 
 
-def test_aggregate_includes_skip_rate() -> None:
-    rows = [_row("copilot-cli", "a", False, True), _row("copilot-cli", "b", True, False)]
+def test_aggregate_includes_skip_rate_and_provenance_counts() -> None:
+    rows = [
+        _row("copilot-cli", "a", False, True),
+        _row("copilot-cli", "b", False, False, "environment_failure"),
+        _row("copilot-cli", "c", True, False),
+    ]
     agg = aggregate_by_agent(rows)
-    assert agg["copilot-cli"]["skip_rate"] == 0.5
+    assert agg["copilot-cli"]["skip_rate"] == 1 / 3
+    assert agg["copilot-cli"]["environment_failure_count"] == 1
+    assert agg["copilot-cli"]["skip_count"] == 1

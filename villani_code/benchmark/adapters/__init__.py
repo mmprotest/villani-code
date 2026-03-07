@@ -14,3 +14,5 @@ __all__ = [
     "OpenCodeAdapter",
     "CopilotCLIAdapter",
 ]
+
+AVAILABLE_ADAPTERS = {"villani", "claude-code", "opencode", "copilot-cli"}

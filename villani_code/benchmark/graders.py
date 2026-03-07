@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from villani_code.benchmark.adapters.base import ValidationResult
-from villani_code.benchmark.command_resolution import normalize_command_for_platform
+from villani_code.benchmark.command_resolution import resolve_command
 from villani_code.benchmark.models import BenchmarkTask, ValidationCheckType
 
 
@@ -21,7 +21,8 @@ def execute_validation_checks(
             on_check_start(index, check)
         if check.type == ValidationCheckType.COMMAND:
             cwd = repo_root if check.cwd is None else (repo_root / check.cwd)
-            resolved = normalize_command_for_platform(check.command or "")
+            resolution = resolve_command(check.command or "")
+            resolved = resolution.resolved
             if not resolved.argv:
                 result = ValidationResult(
                     check_type=check.type.value,
@@ -34,6 +35,23 @@ def execute_validation_checks(
                 if on_check_end:
                     on_check_end(index, check, result)
                 continue
+            if not resolution.executable_found:
+                result = ValidationResult(
+                    check_type=check.type.value,
+                    success=False,
+                    details=(
+                        f"command resolution failed: executable not found for {resolved.argv[0]!r}\n"
+                        f"command={resolved.display_command}\n"
+                        f"resolution_status={resolved.status.value} reason={resolved.reason or 'none'}"
+                    ),
+                    check_index=index,
+                    failure_provenance="environment_failure",
+                )
+                results.append(result)
+                if on_check_end:
+                    on_check_end(index, check, result)
+                continue
+
             try:
                 proc = subprocess.run(
                     resolved.argv,
@@ -51,7 +69,9 @@ def execute_validation_checks(
                 else:
                     provenance = "validation_failure"
                 details = (
-                    f"command={resolved.display_command}\nexpected={check.expect_exit_code} actual={proc.returncode}\n"
+                    f"command={resolved.display_command}\n"
+                    f"resolution_status={resolved.status.value} reason={resolved.reason or 'none'}\n"
+                    f"expected={check.expect_exit_code} actual={proc.returncode}\n"
                     f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
                 )
                 result = ValidationResult(
@@ -66,7 +86,11 @@ def execute_validation_checks(
                 result = ValidationResult(
                     check_type=check.type.value,
                     success=False,
-                    details=f"command not found: {exc}",
+                    details=(
+                        f"command not found: {exc}\n"
+                        f"command={resolved.display_command}\n"
+                        f"resolution_status={resolved.status.value} reason={resolved.reason or 'none'}"
+                    ),
                     check_index=index,
                     failure_provenance="environment_failure",
                 )

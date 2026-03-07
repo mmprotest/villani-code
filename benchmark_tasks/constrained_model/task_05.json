@@ -1,15 +1,15 @@
 {
   "id": "constrained_05",
-  "name": "Constrained model task 5",
+  "name": "Constrained: small refactor with parity",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Extract a tiny helper to remove duplication in a local module while keeping behavior identical.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "refactor",
+    "parity"
   ],
-  "difficulty": "easy",
+  "difficulty": "medium",
   "expected_edit_scope": "1-2 files",
   "timeout_seconds": 240,
   "validation_checks": [

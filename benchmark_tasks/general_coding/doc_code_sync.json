@@ -1,16 +1,16 @@
 {
   "id": "doc_code_sync",
-  "name": "Doc and code sync",
+  "name": "Documentation and implementation sync",
   "repo_path": ".",
-  "instruction": "Complete the task: Doc and code sync. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Align user-facing documentation with actual runtime behavior and ensure examples still execute or validate.",
   "category": "doc + code sync task",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "docs",
+    "accuracy",
+    "consistency"
   ],
-  "difficulty": "medium",
-  "expected_edit_scope": "2-5 files",
+  "difficulty": "easy",
+  "expected_edit_scope": "1-2 files",
   "timeout_seconds": 300,
   "validation_checks": [
     {

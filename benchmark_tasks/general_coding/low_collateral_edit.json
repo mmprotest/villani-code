@@ -2,15 +2,15 @@
   "id": "low_collateral_edit",
   "name": "Low-collateral precision edit",
   "repo_path": ".",
-  "instruction": "Complete the task: Low-collateral precision edit. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Deliver the requested behavioral correction while touching the fewest files possible. Prioritize low-collateral impact and clear tests.",
   "category": "low-collateral edit task",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "precision-edit",
+    "minimal-change",
+    "safety"
   ],
   "difficulty": "medium",
-  "expected_edit_scope": "2-5 files",
+  "expected_edit_scope": "1-2 files",
   "timeout_seconds": 300,
   "validation_checks": [
     {

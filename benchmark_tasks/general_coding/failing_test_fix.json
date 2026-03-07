@@ -2,14 +2,14 @@
   "id": "failing_test_fix",
   "name": "Failing test diagnosis and fix",
   "repo_path": ".",
-  "instruction": "Complete the task: Failing test diagnosis and fix. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Identify the root cause of an existing failing test and fix behavior with minimal collateral change. Keep unrelated tests untouched.",
   "category": "failing test diagnosis and fix",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "tests",
+    "debugging",
+    "regression"
   ],
-  "difficulty": "easy",
+  "difficulty": "medium",
   "expected_edit_scope": "1-3 files",
   "timeout_seconds": 300,
   "validation_checks": [

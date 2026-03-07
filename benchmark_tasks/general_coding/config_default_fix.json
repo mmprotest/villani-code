@@ -1,16 +1,16 @@
 {
   "id": "config_default_fix",
-  "name": "Config default behavior fix",
+  "name": "Configuration default precedence fix",
   "repo_path": ".",
-  "instruction": "Complete the task: Config default behavior fix. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Fix a configuration default/override bug where explicit user input should win over fallback values. Add regression tests for precedence rules.",
   "category": "config/default behavior fix",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "config",
+    "defaults",
+    "precedence"
   ],
   "difficulty": "medium",
-  "expected_edit_scope": "2-5 files",
+  "expected_edit_scope": "1-2 files",
   "timeout_seconds": 300,
   "validation_checks": [
     {

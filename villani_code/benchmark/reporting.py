@@ -6,6 +6,21 @@ from typing import Any
 
 from villani_code.benchmark.utils import write_csv, write_json
 
+PROVENANCE_BUCKETS = [
+    "agent_failure",
+    "validation_failure",
+    "environment_failure",
+    "harness_failure",
+    "timeout",
+    "skip",
+]
+
+
+def _row_provenance(row: dict[str, Any]) -> str | None:
+    if row["scorecard"].get("skipped"):
+        return "skip"
+    return row.get("failure_provenance")
+
 
 def aggregate_by_agent(results: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -19,6 +34,12 @@ def aggregate_by_agent(results: list[dict[str, Any]]) -> dict[str, dict[str, flo
         validations = sum(1 for row in rows if row["scorecard"]["validation_success"])
         skips = sum(1 for row in rows if row["scorecard"]["skipped"])
         catastrophic = sum(1 for row in rows if row["scorecard"]["catastrophic_failure"])
+        counts = {f"{bucket}_count": 0 for bucket in PROVENANCE_BUCKETS}
+        for row in rows:
+            bucket = _row_provenance(row)
+            if bucket in PROVENANCE_BUCKETS:
+                counts[f"{bucket}_count"] += 1
+
         aggregates[agent] = {
             "success_rate": successes / total,
             "validation_pass_rate": validations / total,
@@ -27,6 +48,8 @@ def aggregate_by_agent(results: list[dict[str, Any]]) -> dict[str, dict[str, flo
             "average_elapsed_time": sum(row["scorecard"]["elapsed_seconds"] for row in rows) / total,
             "catastrophic_failure_rate": catastrophic / total,
             "average_unnecessary_files_touched": sum(row["scorecard"]["unnecessary_files_touched_count"] for row in rows) / total,
+            **counts,
+            **{f"{bucket}_rate": counts[f"{bucket}_count"] / total for bucket in PROVENANCE_BUCKETS},
         }
     return aggregates
 
@@ -46,23 +69,49 @@ def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
         f"- Pack description: {metadata.get('pack_description', '')}",
         f"- Comparison suitability: `{metadata.get('comparison_suitability', 'unknown')}`",
         f"- Fairness classification: `{metadata.get('fairness_classification', metadata.get('run_mode', 'mixed'))}`",
+        f"- Interpretation status: `{metadata.get('interpretation_status', 'informational_only')}`",
         "",
-    "## Leaderboard",
-        "",
-        "| Agent | Success Rate | Validation Pass Rate | Skip Rate | Avg Composite | Avg Time (s) | Catastrophic Failure Rate | Avg Unnecessary Files |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
+
+    interpretation_warning = metadata.get("interpretation_warning")
+    if interpretation_warning:
+        lines.extend([f"> ⚠️ {interpretation_warning}", ""])
+
+    lines.extend(
+        [
+            "## Leaderboard",
+            "",
+            "| Agent | Success Rate | Validation Pass Rate | Skip Rate | Avg Composite | Avg Time (s) | Catastrophic Failure Rate | Avg Unnecessary Files |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     for agent, agg in leaderboard:
         lines.append(
             f"| {agent} | {agg['success_rate']:.2%} | {agg['validation_pass_rate']:.2%} | {agg['skip_rate']:.2%} | {agg['average_composite_score']:.2f} | {agg['average_elapsed_time']:.2f} | {agg['catastrophic_failure_rate']:.2%} | {agg['average_unnecessary_files_touched']:.2f} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Failure Provenance Summary",
+            "",
+            "| Agent | Agent Fail | Validation Fail | Environment Fail | Harness Fail | Timeout | Skip |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for agent, agg in leaderboard:
+        lines.append(
+            f"| {agent} | {agg['agent_failure_count']} ({agg['agent_failure_rate']:.1%}) | {agg['validation_failure_count']} ({agg['validation_failure_rate']:.1%}) | {agg['environment_failure_count']} ({agg['environment_failure_rate']:.1%}) | {agg['harness_failure_count']} ({agg['harness_failure_rate']:.1%}) | {agg['timeout_count']} ({agg['timeout_rate']:.1%}) | {agg['skip_count']} ({agg['skip_rate']:.1%}) |"
+        )
+
+    total_runs = max(len(rows), 1)
+    env_or_harness = sum(1 for row in rows if _row_provenance(row) in {"environment_failure", "harness_failure"})
+    if env_or_harness / total_runs >= 0.2:
+        lines.extend(["", "> ⚠️ Significant environment/harness instability detected; do not interpret this as an agent-quality ranking."])
+
     fairness_warning = metadata.get("fairness_warning")
     if fairness_warning:
         lines.extend(["", f"> ⚠️ {fairness_warning}"])
-
-    if metadata.get("pack_classification") == "internal_regression":
-        lines.extend(["", "> ⚠️ This task pack is internal-regression oriented and not suitable for headline cross-agent claims."])
 
     capabilities = metadata.get("agent_capabilities", [])
     if capabilities:

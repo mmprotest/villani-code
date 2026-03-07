@@ -1,15 +1,15 @@
 {
   "id": "constrained_03",
-  "name": "Constrained model task 3",
+  "name": "Constrained: parser guard",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Add a defensive guard for malformed input in a parser-like path and preserve behavior for valid inputs.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "parser",
+    "guards"
   ],
-  "difficulty": "easy",
+  "difficulty": "medium",
   "expected_edit_scope": "1-2 files",
   "timeout_seconds": 240,
   "validation_checks": [

@@ -1,16 +1,16 @@
 {
   "id": "cross_file_refactor",
-  "name": "Cross-file helper refactor",
+  "name": "Cross-file helper extraction",
   "repo_path": ".",
-  "instruction": "Complete the task: Cross-file helper refactor. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Consolidate duplicated helper logic into one shared implementation without changing public behavior. Prove no regressions with tests.",
   "category": "cross-file refactor",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "refactor",
+    "shared-helper",
+    "tests"
   ],
-  "difficulty": "easy",
-  "expected_edit_scope": "2-5 files",
+  "difficulty": "hard",
+  "expected_edit_scope": "2-4 files",
   "timeout_seconds": 300,
   "validation_checks": [
     {
