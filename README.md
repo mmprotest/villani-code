@@ -19,17 +19,12 @@ Villani keeps coding work narrow, inspectable, and recoverable:
 pip install .[tui]
 ```
 
-### 2) Full install (UI + all optional extras)
-```bash
-pip install .[all]
-```
-
-### 3) Lean/core install (automation, CI, minimal environments)
+### 2) Lean/core install (automation, CI, minimal environments)
 ```bash
 pip install .
 ```
 
-### 4) Development tooling
+### 3) Development tooling (includes TUI + test/lint/type tooling)
 ```bash
 pip install .[dev]
 ```
@@ -37,6 +32,7 @@ pip install .[dev]
 Install-tier behavior:
 
 - `.[tui]` (recommended): full interactive experience (`interactive`, `villani-mode`, default launch path).
+- `.[dev]`: developer tooling plus TUI dependencies (same runtime UI surface, with lint/type/test tools).
 - base install (`.`): headless/automation commands (`init`, `run`, `context`, `eval`, benchmark/reporting).
 - if TUI extras are missing and interactive mode is requested, Villani prints: `Interactive mode requires the optional TUI dependencies. Install with: pip install .[tui]`.
 

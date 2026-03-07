@@ -2,7 +2,7 @@ from __future__ import annotations
 
 TUI_INSTALL_HINT = (
     "Interactive mode requires the optional TUI dependencies. "
-    "Install with `pip install .[tui]` (recommended) or `pip install .[all]`."
+    "Install with `pip install .[tui]`."
 )
 
 

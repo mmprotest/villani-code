@@ -20,10 +20,34 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e '.[dev,tui]'
+          pip install -e '.[dev]'
       - name: Run tests
         run: pytest
       - name: Ruff
         run: ruff check .
       - name: Mypy
         run: mypy villani_code
+
+  packaging-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build distribution artifacts
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Install wheel and verify import surface
+        run: |
+          python -m venv .venv-smoke
+          . .venv-smoke/bin/activate
+          pip install dist/*.whl
+          villani-code --help > /dev/null
+          python - <<'PY'
+import importlib.util
+assert importlib.util.find_spec("villani_code") is not None
+assert importlib.util.find_spec("ui") is None
+print("packaging smoke ok")
+PY

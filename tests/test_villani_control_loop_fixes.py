@@ -257,7 +257,6 @@ def test_model_request_lifecycle_events_emitted(tmp_path: Path) -> None:
     events: list[dict] = []
     runner = SequencedRunner([{"validation_artifacts": ["python -c 'import villani_code' (exit=0)"]}])
     controller = VillaniModeController(runner, tmp_path, event_callback=events.append)
-    task = type("T", (), {})()
     # reuse real task type
     from villani_code.autonomous import AutonomousTask
     real_task = AutonomousTask("1", "Validate baseline importability", "r", 1.0, 1.0, [], task_contract=TaskContract.VALIDATION.value, attempts=1)
