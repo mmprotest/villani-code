@@ -18,10 +18,6 @@
 
 **Villani Code** is terminal agent for repository inspection, correction, and controlled escalation.
 
-Some tools help.  
-Some tools suggest.  
-**Villani Code intervenes.**
-
 You provide model backend.  
 You provide repository.  
 **Villani Code provide consequences.**
