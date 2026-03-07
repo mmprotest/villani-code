@@ -12,7 +12,7 @@ from typing import Sequence
 
 
 KNOWN_PYTHON_ALIASES = {"python", "python3", "py"}
-KNOWN_MODULE_TOOLS = {"pytest", "pip", "ruff", "mypy"}
+KNOWN_MODULE_TOOLS = {"pytest", "pip"}
 
 
 class CommandResolutionStatus(str, Enum):

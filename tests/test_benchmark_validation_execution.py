@@ -43,6 +43,11 @@ def test_normalize_unknown_command_is_not_magically_rewritten() -> None:
     assert resolved.argv[0] == "definitely-missing-command"
 
 
+def test_normalize_non_allowlisted_module_tool_is_not_rewritten() -> None:
+    resolved = normalize_command_for_platform("ruff check .")
+    assert resolved.argv[0] == "ruff"
+
+
 def test_validation_success_classification(tmp_path: Path) -> None:
     results = execute_validation_checks(_task("python -c \"print('ok')\""), tmp_path)
     assert results[0].success is True
