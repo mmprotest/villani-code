@@ -13,6 +13,11 @@ from villani_code.benchmark.adapters import (
     VillaniAdapter,
 )
 from villani_code.benchmark.environment import BenchmarkEnvironment
+from villani_code.benchmark.fairness import (
+    AdapterCapabilities,
+    capability_table_payload,
+    classify_run_mode,
+)
 from villani_code.benchmark.graders import (
     compute_composite_score,
     compute_forbidden_files_touched,
@@ -27,6 +32,15 @@ from villani_code.benchmark.utils import utc_timestamp_slug, write_json
 
 
 class BenchmarkRunner:
+    _DEFAULT_CAPABILITIES = AdapterCapabilities(
+        supports_explicit_base_url=False,
+        supports_explicit_model=False,
+        supports_noninteractive=True,
+        supports_unattended=False,
+        default_fairness_classification="native-cli",
+        controllability_note="Adapter did not declare capability metadata.",
+    )
+
     def __init__(
         self,
         output_dir: Path,
@@ -62,6 +76,7 @@ class BenchmarkRunner:
         run_root = self.output_dir / utc_timestamp_slug()
         run_root.mkdir(parents=True, exist_ok=True)
         result_rows: list[dict[str, Any]] = []
+        adapter_capabilities: dict[str, AdapterCapabilities] = {}
 
         total_tasks = len(tasks)
         total_agents = len(agents)
@@ -84,6 +99,11 @@ class BenchmarkRunner:
                     on_output_line=self.logger.agent_output,
                     on_command_start=lambda run_agent, cmd: self.logger.info(f"Running command ({run_agent}): {render_command(cmd)}"),
                 ),
+            )
+            adapter_capabilities[agent_name] = getattr(
+                adapter,
+                "capabilities",
+                self._DEFAULT_CAPABILITIES,
             )
             agent_rows: list[dict[str, Any]] = []
             for task_index, task in enumerate(tasks, start=1):
@@ -182,6 +202,12 @@ class BenchmarkRunner:
 
             self._log_agent_summary(agent_name, agent_rows)
 
+        run_mode, fairness_warning = classify_run_mode(
+            agents=agents,
+            base_url=base_url,
+            model=model,
+            capabilities=adapter_capabilities,
+        )
         metadata = {
             "model": model,
             "base_url": base_url,
@@ -189,6 +215,14 @@ class BenchmarkRunner:
             "seed": seed,
             "tasks_dir": str(tasks_dir),
             "repo_path": str(repo_path),
+            "run_mode": run_mode,
+            "fairness_classification": run_mode,
+            "fairness_warning": fairness_warning,
+            "config_provenance": {
+                "model": "cli flag" if model else "adapter default",
+                "base_url": "cli flag" if base_url else "adapter default",
+            },
+            "agent_capabilities": capability_table_payload(agents, adapter_capabilities),
         }
         persist_reports(run_root, metadata, result_rows)
         agg = aggregate_by_agent(result_rows)

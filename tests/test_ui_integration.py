@@ -1,6 +1,10 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("textual")
+
 from textual.widgets import Input
 
 from villani_code.tui.app import VillaniTUI

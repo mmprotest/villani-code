@@ -4,10 +4,20 @@ import sys
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AgentAdapter, AgentRunResult
+from villani_code.benchmark.fairness import AdapterCapabilities
 from villani_code.benchmark.models import BenchmarkTask
 
 
 class VillaniAdapter(AgentAdapter):
+    capabilities = AdapterCapabilities(
+        supports_explicit_base_url=True,
+        supports_explicit_model=True,
+        supports_noninteractive=True,
+        supports_unattended=True,
+        default_fairness_classification="same-backend",
+        controllability_note="Explicit base_url and model are configurable.",
+    )
+
     def run_task(self, task: BenchmarkTask, workspace_repo: Path, artifact_dir: Path) -> AgentRunResult:
         command = [
             sys.executable,

@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("textual")
+
 from villani_code.tui.assets import spinner_themes
 from villani_code.tui.messages import SpinnerState
 from villani_code.tui.widgets.spinner import SpinnerWidget

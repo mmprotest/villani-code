@@ -1,24 +1,19 @@
 # Villani Code Keybindings
 
-## Primary
+## Core interaction
 
-- `Ctrl+P`: open command palette
-- `Ctrl+S`: quick save checkpoint
-- `Ctrl+D`: toggle diff panel
-- `Ctrl+F`: toggle focus mode
-- `Ctrl+/`: show shortcuts overlay
+- `Enter`: submit prompt.
+- `Ctrl+C`: first press interrupts current run; second press exits the TUI cleanly.
+- `Ctrl+Shift+C`: copy the visible console transcript text.
+- `Home` / `End`: jump log to top / bottom.
+- `PageUp` / `PageDown`: scroll the single main output pane.
 
-## Existing compatibility
+## Inline approval flow
 
-- `Ctrl+O`: toggle verbose tool output
-- `Ctrl+T`: toggle task panel
+When an approval request is visible inline:
 
-## ASCII mockup
+- `↑` / `↓`: move selection.
+- `Enter`: confirm selected option (single-press).
+- `Esc`: deny.
 
-```text
-┌ Shortcuts ───────────────────────────┐
-│ Ctrl+P palette   Ctrl+D diff         │
-│ Ctrl+S save      Ctrl+F focus mode   │
-│ Ctrl+/ help      Ctrl+O verbose      │
-└──────────────────────────────────────┘
-```
+All options are rendered inline together and selection highlight follows keyboard focus.

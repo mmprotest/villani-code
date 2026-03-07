@@ -84,11 +84,22 @@ def build_takeover_summary(
     recommended_next_steps_value: list[str],
     working_memory: dict[str, Any],
     blocked_value: str,
+    opportunities_considered: int,
+    opportunities_attempted: int,
 ) -> dict[str, Any]:
     preexisting = sorted(preexisting_changes)
     new_changes = sorted(current_changes - preexisting_changes)
     intentional_set = {p for t in attempted for p in t.intentional_changes}
     incidental_set = {p for t in attempted for p in t.incidental_changes}
+    successful_tasks = sum(1 for t in attempted if t.status == "passed")
+    failed_tasks = sum(1 for t in attempted if t.status in {"failed", "blocked", "retryable", "exhausted"})
+    if not attempted:
+        intentional_changes: list[str] = []
+        incidental_changes: list[str] = []
+    else:
+        intentional_changes = sorted(intentional_set & set(new_changes))
+        incidental_changes = sorted(incidental_set & set(new_changes))
+
     return {
         "repo_summary": state.repo_summary,
         "tasks_attempted": [
@@ -120,10 +131,14 @@ def build_takeover_summary(
         ],
         "files_changed": new_changes,
         "preexisting_changes": preexisting,
-        "intentional_changes": sorted(intentional_set & set(new_changes)),
-        "incidental_changes": sorted(incidental_set & set(new_changes)),
+        "intentional_changes": intentional_changes,
+        "incidental_changes": incidental_changes,
         "blockers": [t.title for t in attempted if t.status == blocked_value],
         "done_reason": done_reason,
+        "opportunities_considered": opportunities_considered,
+        "opportunities_attempted": opportunities_attempted,
+        "successful_tasks": successful_tasks,
+        "failed_tasks": failed_tasks,
         "completed_waves": state.completed_waves,
         "recommended_next_steps": recommended_next_steps_value,
         "working_memory": working_memory,

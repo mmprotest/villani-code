@@ -3,6 +3,10 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("textual")
+
 from textual.widgets import Input, ListView, Static
 
 from villani_code.tui.app import VillaniTUI

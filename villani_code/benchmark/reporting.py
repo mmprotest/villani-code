@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from villani_code.benchmark.models import Scorecard
 from villani_code.benchmark.utils import write_csv, write_json
 
 
@@ -42,8 +40,10 @@ def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
         f"- Model: `{metadata.get('model')}`",
         f"- Base URL: `{metadata.get('base_url')}`",
         f"- Agents: {', '.join(metadata.get('agents', []))}",
+        f"- Run mode: `{metadata.get('run_mode', 'mixed')}`",
+        f"- Fairness classification: `{metadata.get('fairness_classification', metadata.get('run_mode', 'mixed'))}`",
         "",
-        "## Leaderboard",
+    "## Leaderboard",
         "",
         "| Agent | Success Rate | Validation Pass Rate | Skip Rate | Avg Composite | Avg Time (s) | Catastrophic Failure Rate | Avg Unnecessary Files |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -53,11 +53,31 @@ def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
             f"| {agent} | {agg['success_rate']:.2%} | {agg['validation_pass_rate']:.2%} | {agg['skip_rate']:.2%} | {agg['average_composite_score']:.2f} | {agg['average_elapsed_time']:.2f} | {agg['catastrophic_failure_rate']:.2%} | {agg['average_unnecessary_files_touched']:.2f} |"
         )
 
-    lines.extend(["", "## Per-task Results", "", "| Agent | Task | Success | Validation | Skipped | Composite | Exit Reason |", "|---|---|---|---|---|---:|---|"])
+    fairness_warning = metadata.get("fairness_warning")
+    if fairness_warning:
+        lines.extend(["", f"> ⚠️ {fairness_warning}"])
+
+    capabilities = metadata.get("agent_capabilities", [])
+    if capabilities:
+        lines.extend(
+            [
+                "",
+                "## Agent Capabilities",
+                "",
+                "| Agent | Explicit Base URL | Explicit Model | Noninteractive | Unattended | Fairness | Controllability |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
+        for row in capabilities:
+            lines.append(
+                f"| {row.get('agent')} | {row.get('supports_explicit_base_url')} | {row.get('supports_explicit_model')} | {row.get('supports_noninteractive')} | {row.get('supports_unattended')} | {row.get('fairness_classification')} | {row.get('controllability')} |"
+            )
+
+    lines.extend(["", "## Per-task Results", "", "| Agent | Task | Success | Validation | Skipped | Composite | Exit Reason | Skip Reason |", "|---|---|---|---|---|---:|---|---|"])
     for row in rows:
         score = row["scorecard"]
         lines.append(
-            f"| {row['agent_name']} | {row['task_id']} | {score['task_success']} | {score['validation_success']} | {score['skipped']} | {score['composite_score']:.2f} | {row['exit_reason']} |"
+            f"| {row['agent_name']} | {row['task_id']} | {score['task_success']} | {score['validation_success']} | {score['skipped']} | {score['composite_score']:.2f} | {row['exit_reason']} | {row.get('skip_reason') or ''} |"
         )
     return "\n".join(lines)
 

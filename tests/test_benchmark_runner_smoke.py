@@ -53,6 +53,7 @@ def test_runner_smoke_with_fake_adapter(monkeypatch, tmp_path: Path) -> None:
     )
     assert result["results"]
     assert result["results"][0]["scorecard"]["task_success"] is True
+    assert result["metadata"]["run_mode"] in {"native-cli", "same-backend", "mixed"}
     output_dir = Path(result["output_dir"])
     assert (output_dir / "benchmark_results.json").exists()
     assert (output_dir / "benchmark_results.md").exists()

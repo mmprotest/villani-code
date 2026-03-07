@@ -7,6 +7,11 @@ from typer.testing import CliRunner
 from villani_code.cli import app
 
 
+def _benchmark_callback():
+    command = next(cmd for cmd in app.registered_commands if cmd.name == "benchmark")
+    return command.callback
+
+
 def test_benchmark_cli_quiet_disables_verbose_and_stream(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
@@ -18,7 +23,8 @@ def test_benchmark_cli_quiet_disables_verbose_and_stream(monkeypatch, tmp_path) 
         def run(self, **kwargs):
             return {"output_dir": str(tmp_path / "out"), "metadata": {}, "results": []}
 
-    monkeypatch.setattr("villani_code.cli.BenchmarkRunner", FakeRunner)
+    benchmark_callback = _benchmark_callback()
+    monkeypatch.setitem(benchmark_callback.__globals__, "BenchmarkRunner", FakeRunner)
 
     runner = CliRunner()
     result = runner.invoke(app, ["benchmark", "--quiet", "--repo", str(tmp_path), "--tasks-dir", str(tmp_path)])
@@ -41,7 +47,8 @@ def test_benchmark_cli_defaults_to_verbose_and_stream(monkeypatch, tmp_path) -> 
         def run(self, **kwargs):
             return {"output_dir": str(tmp_path / "out"), "metadata": {}, "results": []}
 
-    monkeypatch.setattr("villani_code.cli.BenchmarkRunner", FakeRunner)
+    benchmark_callback = _benchmark_callback()
+    monkeypatch.setitem(benchmark_callback.__globals__, "BenchmarkRunner", FakeRunner)
 
     runner = CliRunner()
     result = runner.invoke(app, ["benchmark", "--repo", str(tmp_path), "--tasks-dir", str(tmp_path)])

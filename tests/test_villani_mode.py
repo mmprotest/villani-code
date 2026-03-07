@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from villani_code.tui.components.settings import SettingsManager
@@ -200,6 +201,7 @@ def test_villani_mode_uses_unbounded_runner_budget(tmp_path: Path) -> None:
 
 
 def test_villani_mode_startup_without_prompt(tmp_path: Path) -> None:
+    pytest.importorskip("textual")
     from villani_code.tui.app import VillaniTUI
 
     class MinimalRunner:

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from textual.message import Message
+try:
+    from textual.message import Message
+except ModuleNotFoundError as exc:
+    if exc.name != "textual":
+        raise
+
+    class Message:  # type: ignore[override]
+        """Lean-environment fallback so headless imports do not require Textual."""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
 
 
 class LogAppend(Message):

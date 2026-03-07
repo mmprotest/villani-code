@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from villani_code.runtime_events import RuntimeEvent
 from villani_code.tui.messages import ApprovalRequest, LogAppend, SpinnerState, StatusUpdate
 
 
@@ -114,6 +115,7 @@ class RunnerController:
         return None
 
     def on_runner_event(self, event: dict[str, Any]) -> None:
+        _ = RuntimeEvent.from_runner_event(event)
         etype = event.get("type")
         if etype == "planning_started":
             self.app.post_message(StatusUpdate("Planning"))

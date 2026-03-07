@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from villani_code.autonomous_stop import category_exhaustion_reason
 from villani_code.autonomy import Opportunity, TaskContract
 
 
@@ -88,16 +89,5 @@ def surface_followups(category_state: dict[str, str]) -> list[Opportunity]:
 
 
 def stop_reason_from_categories(category_state: dict[str, str]) -> tuple[dict[str, str], str]:
-    rationale = {
-        "tests": category_state.get("tests", "unknown"),
-        "docs": category_state.get("docs", "unknown"),
-        "entrypoints": category_state.get("entrypoints", "unknown"),
-        "improvements": "exhausted",
-    }
-    reason = (
-        "No remaining opportunities above confidence threshold; "
-        f"tests examined: {rationale['tests']}; "
-        f"docs examined: {rationale['docs']}; "
-        f"entrypoints examined: {rationale['entrypoints']}."
-    )
-    return rationale, reason
+    stop = category_exhaustion_reason(category_state)
+    return stop.rationale, stop.done_reason

@@ -34,6 +34,12 @@ pip install .
 pip install .[dev]
 ```
 
+Install-tier behavior:
+
+- `.[tui]` (recommended): full interactive experience (`interactive`, `villani-mode`, default launch path).
+- base install (`.`): headless/automation commands (`init`, `run`, `context`, `eval`, benchmark/reporting).
+- if TUI extras are missing and interactive mode is requested, Villani prints: `Interactive mode requires the optional TUI dependencies. Install with: pip install .[tui]`.
+
 ## Architecture (alpha, pragmatic)
 
 - `villani_code.cli`: Typer CLI entry points; interactive mode is still the default UX path.
@@ -69,9 +75,15 @@ villani-code eval --suite tests/fixtures/eval/suite.json --json
 
 ## Benchmark mode (agent-layer benchmark)
 
-`villani-code benchmark` compares coding **agents** (not model families) under a controlled setup: same repo snapshot, same task prompt, same execution budget, and objective validation checks.
+`villani-code benchmark` compares coding **agents** (not model families) under fixed tasks, repo snapshot, and objective validation checks.
 
-It is designed to answer: *which agent performs better on real repo tasks when the backend model is held constant?*
+Fairness is now explicit per run:
+
+- `same-backend`: every participating adapter is proven to use the same OpenAI-compatible backend + model identifier.
+- `native-cli`: single-agent/default-provider run.
+- `mixed`: heterogeneous setup (exploratory, not apples-to-apples headline fairness).
+
+If configuration cannot prove same-backend parity, reports are marked `mixed` and include a fairness warning.
 
 ### Run Villani-only benchmark
 

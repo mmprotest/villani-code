@@ -207,6 +207,9 @@ def test_no_tasks_run_means_no_intentional_or_incidental_changes(
 
     assert summary["intentional_changes"] == []
     assert summary["incidental_changes"] == []
+    assert summary["opportunities_attempted"] == 0
+    assert summary["successful_tasks"] == 0
+    assert summary["failed_tasks"] == 0
 
 
 def test_rank_order_prefers_real_python_repo_work_over_docs_drift(

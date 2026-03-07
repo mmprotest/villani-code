@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("textual")
+
 from villani_code.tui.controller import RunnerController
 from villani_code.tui.messages import LogAppend, SpinnerState
 

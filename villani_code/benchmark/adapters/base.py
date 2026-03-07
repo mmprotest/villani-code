@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from villani_code.benchmark.models import BenchmarkTask
+from villani_code.benchmark.fairness import AdapterCapabilities
 
 
 @dataclass(slots=True)
@@ -74,6 +75,15 @@ class CommandExecutionResult:
 
 
 class AgentAdapter(ABC):
+    capabilities = AdapterCapabilities(
+        supports_explicit_base_url=False,
+        supports_explicit_model=False,
+        supports_noninteractive=True,
+        supports_unattended=True,
+        default_fairness_classification="native-cli",
+        controllability_note="Native/default CLI flow.",
+    )
+
     def __init__(self, config: AgentAdapterConfig) -> None:
         self.config = config
 

@@ -4,6 +4,14 @@
 
 The interactive terminal UX is implemented under `villani_code/tui/` (Textual app + lightweight component models).
 
+Behavioral guarantees:
+
+- single main transcript/output pane (no split secondary log).
+- vertical scrolling with wrapped lines (no horizontal-scroll workflow).
+- assistant output streams inline in the same pane.
+- approval prompts render inline with visible choices and single-enter confirmation.
+- durable progress events (including read/write/patch file activity) persist in transcript.
+
 ## Components
 
 - `villani_code/tui/app.py`: interactive Textual application shell.

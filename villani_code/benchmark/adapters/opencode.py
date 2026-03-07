@@ -3,11 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AgentAdapter, AgentRunResult
+from villani_code.benchmark.fairness import AdapterCapabilities
 from villani_code.benchmark.models import BenchmarkTask
 from villani_code.benchmark.utils import command_exists
 
 
 class OpenCodeAdapter(AgentAdapter):
+    capabilities = AdapterCapabilities(
+        supports_explicit_base_url=False,
+        supports_explicit_model=True,
+        supports_noninteractive=True,
+        supports_unattended=True,
+        default_fairness_classification="mixed",
+        controllability_note="Model can be set; backend routing is adapter-path dependent.",
+    )
+
     def run_task(self, task: BenchmarkTask, workspace_repo: Path, artifact_dir: Path) -> AgentRunResult:
         if not command_exists("opencode"):
             return AgentRunResult(

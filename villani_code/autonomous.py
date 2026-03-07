@@ -20,6 +20,7 @@ from villani_code.autonomy import (
     VerificationEngine,
     VerificationStatus,
 )
+from villani_code.autonomous_stop import DoneReason, StopDecision
 from villani_code.shells import (
     baseline_import_validation_command,
     classify_shell_portability_failure,
@@ -146,6 +147,8 @@ class VillaniModeController:
         self._lineage_last_fingerprint: dict[str, str] = {}
         self._lineage_last_intentional_changes: dict[str, tuple[str, ...]] = {}
         self._wave_had_model_activity: bool = False
+        self._opportunities_considered: int = 0
+        self._opportunities_attempted: int = 0
 
     def run(self) -> dict[str, Any]:
         self._preexisting_changes = set(self._git_changed_files())
@@ -166,13 +169,13 @@ class VillaniModeController:
             self._wave_had_model_activity = False
             if self.takeover_config.max_waves > 0 and wave > self.takeover_config.max_waves:
                 if self._has_pending_actionable_work():
-                    return self._finalize_stop(state, "budget_exhausted", "Villani mode budget exhausted.")
-                return self._finalize_stop(state, "no_opportunities", self._stop_reason_from_categories())
+                    return self._finalize_stop(state, StopDecision.BUDGET_EXHAUSTED, DoneReason.BUDGET_EXHAUSTED)
+                return self._finalize_stop(state, StopDecision.BELOW_THRESHOLD, self._stop_reason_from_categories())
             if (
                 self.takeover_config.max_total_task_attempts > 0
                 and self._attempt_counter >= self.takeover_config.max_total_task_attempts
             ):
-                return self._finalize_stop(state, "budget_exhausted", "Villani mode budget exhausted.")
+                return self._finalize_stop(state, StopDecision.BUDGET_EXHAUSTED, DoneReason.BUDGET_EXHAUSTED)
 
             state.repo_summary = self.planner.build_repo_summary()
             discovered = self.planner.discover_opportunities()
@@ -190,6 +193,15 @@ class VillaniModeController:
             )
 
             if not candidates:
+                if (
+                    not discovered
+                    and not self._retryable_queue
+                    and not self._followup_queue
+                    and getattr(self.planner, "enable_fallback", True) is False
+                ):
+                    return self._finalize_stop(
+                        state, StopDecision.NO_OPPORTUNITIES, DoneReason.NO_OPPORTUNITIES
+                    )
                 self._planner_only_cycles += 1
                 self._emit(
                     "villani_planner_churn",
@@ -199,31 +211,38 @@ class VillaniModeController:
                     repo_delta=False,
                 )
                 if self._planner_only_cycles >= 2:
-                    reason = "Stopped: planner loop with no model activity."
+                    reason = DoneReason.PLANNER_CHURN
                     self._stop_rationale["planner_churn"] = reason
-                    return self._finalize_stop(state, "planner_churn", reason)
+                    return self._finalize_stop(state, StopDecision.PLANNER_CHURN, reason)
                 if self._enqueue_surface_followups_if_needed():
                     continue
                 if (
                     not discovered
                     and not self._retryable_queue
                     and not self._followup_queue
+                    and getattr(self.planner, "enable_fallback", True) is False
                 ):
-                    if self._planner_only_cycles < 2:
-                        continue
                     return self._finalize_stop(
-                        state, "no_opportunities", "No opportunities discovered."
+                        state, StopDecision.NO_OPPORTUNITIES, DoneReason.NO_OPPORTUNITIES
                     )
                 if self._has_pending_actionable_work():
                     return self._finalize_stop(
-                        state, "budget_exhausted", "Retry budget exhausted for remaining work."
+                        state, StopDecision.BUDGET_EXHAUSTED, "Retry budget exhausted for remaining work."
                     )
-                return self._finalize_stop(state, "no_opportunities", self._stop_reason_from_categories())
+                if discovered:
+                    return self._finalize_stop(
+                        state, StopDecision.BELOW_THRESHOLD, self._stop_reason_from_categories()
+                    )
+                if self._planner_only_cycles < 2:
+                    continue
+                return self._finalize_stop(state, StopDecision.BELOW_THRESHOLD, self._stop_reason_from_categories())
 
             if self.takeover_config.max_commands_per_wave > 0:
                 selected = candidates[: self.takeover_config.max_commands_per_wave]
             else:
                 selected = candidates
+            self._opportunities_considered += len(candidates)
+            self._opportunities_attempted += len(selected)
             self._emit("autonomous_phase", phase=f"Villani mode wave {wave}")
             self._emit(
                 "takeover_wave",
@@ -242,7 +261,7 @@ class VillaniModeController:
                     and self._attempt_counter >= self.takeover_config.max_total_task_attempts
                 ):
                     return self._finalize_stop(
-                        state, "budget_exhausted", "Villani mode budget exhausted."
+                        state, StopDecision.BUDGET_EXHAUSTED, DoneReason.BUDGET_EXHAUSTED
                     )
                 before_dirty = set(self._git_changed_files())
                 task_key = self._task_key_for_opportunity(op)
@@ -381,9 +400,9 @@ class VillaniModeController:
             prior_changed_snapshot = current_changes
 
             if self._planner_only_cycles >= 2 or (self._planner_only_cycles >= 2 and not repo_delta):
-                reason = "Stopped: planner loop with no model activity."
+                reason = DoneReason.PLANNER_CHURN
                 self._stop_rationale["planner_churn"] = reason
-                return self._finalize_stop(state, "planner_churn", reason)
+                return self._finalize_stop(state, StopDecision.PLANNER_CHURN, reason)
 
             if (
                 self.takeover_config.stagnation_cycle_limit > 0
@@ -391,7 +410,7 @@ class VillaniModeController:
             ):
                 return self._finalize_stop(
                     state,
-                    "stagnation",
+                    StopDecision.STAGNATION,
                     f"No meaningful progress after {stagnation_cycles} consecutive cycles.",
                 )
 
@@ -952,6 +971,8 @@ class VillaniModeController:
             done_reason=done_reason,
             recommended_next_steps_value=self._recommended_next_steps(),
             blocked_value=TaskLifecycle.BLOCKED.value,
+            opportunities_considered=self._opportunities_considered,
+            opportunities_attempted=self._opportunities_attempted,
             working_memory={
                 "satisfied_task_keys": self._satisfied_task_keys,
                 "invalidated_task_keys": sorted(self._invalidated_task_keys),

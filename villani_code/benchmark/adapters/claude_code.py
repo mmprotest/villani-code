@@ -3,11 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AgentAdapter, AgentRunResult
+from villani_code.benchmark.fairness import AdapterCapabilities
 from villani_code.benchmark.models import BenchmarkTask
 from villani_code.benchmark.utils import command_exists
 
 
 class ClaudeCodeAdapter(AgentAdapter):
+    capabilities = AdapterCapabilities(
+        supports_explicit_base_url=False,
+        supports_explicit_model=False,
+        supports_noninteractive=True,
+        supports_unattended=False,
+        default_fairness_classification="native-cli",
+        controllability_note="Native CLI flow unless separately configured outside this adapter.",
+    )
+
     def run_task(self, task: BenchmarkTask, workspace_repo: Path, artifact_dir: Path) -> AgentRunResult:
         if not command_exists("claude"):
             return AgentRunResult(
