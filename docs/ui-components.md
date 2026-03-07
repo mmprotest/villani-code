@@ -21,7 +21,6 @@ Behavioral guarantees:
 - `villani_code/tui/components/task_board.py`: task and timeline model for async and long operations.
 - `villani_code/tui/components/diff_viewer.py`: parsed git diff with folding and annotations.
 - `villani_code/tui/components/settings.py`: user and project settings with precedence and hot reload polling.
-- `ui/`: compatibility shims that re-export `villani_code.tui.components.*` for legacy imports.
 
 ## ASCII mockup
 

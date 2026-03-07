@@ -1,7 +1,7 @@
 # Repository Code Review (2026-03-04)
 
 ## Scope
-- Reviewed architecture, security boundaries, and reliability across `villani_code/`, `ui/`, and tests.
+- Reviewed architecture, security boundaries, and reliability across `villani_code/` and tests.
 - Ran full automated test suite to confirm current baseline behavior.
 
 ## What looks good

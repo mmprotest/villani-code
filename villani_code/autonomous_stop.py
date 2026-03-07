@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 
-class StopDecision:
+class StopDecision(StrEnum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     NO_OPPORTUNITIES = "no_opportunities"
     BELOW_THRESHOLD = "below_threshold"
     PLANNER_CHURN = "planner_churn"
     STAGNATION = "stagnation"
 
+    @classmethod
+    def parse(cls, value: str) -> "StopDecision":
+        return cls(value)
 
-class DoneReason:
+
+class DoneReason(StrEnum):
     NO_OPPORTUNITIES = "No opportunities discovered."
     PLANNER_CHURN = "Stopped: planner loop with no model activity."
     BUDGET_EXHAUSTED = "Villani mode budget exhausted."
+
+    @classmethod
+    def parse(cls, value: str) -> "DoneReason":
+        return cls(value)
 
 
 @dataclass(slots=True)

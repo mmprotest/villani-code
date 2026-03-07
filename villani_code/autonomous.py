@@ -141,7 +141,7 @@ class VillaniModeController:
         self._model_request_count: int = 0
         self._planner_only_cycles: int = 0
         self._last_model_request_count: int = 0
-        self._stop_decision_kind: str = ""
+        self._stop_decision_kind: StopDecision | None = None
         self._followup_skip_reasons: list[dict[str, str]] = []
         self._lineage_terminal_fingerprint: dict[str, str] = {}
         self._lineage_last_fingerprint: dict[str, str] = {}
@@ -946,7 +946,7 @@ class VillaniModeController:
         return autonomous_reporting.extract_commands(result)
 
     def _finalize_stop(
-        self, state: TakeoverState, decision_kind: str, done_reason: str
+        self, state: TakeoverState, decision_kind: StopDecision, done_reason: str
     ) -> dict[str, Any]:
         self._stop_decision_kind = decision_kind
         self._emit(
@@ -984,7 +984,7 @@ class VillaniModeController:
                 "model_request_count": self._model_request_count,
                 "planner_only_cycles": self._planner_only_cycles,
                 "followup_skip_reasons": self._followup_skip_reasons,
-                "stop_decision_kind": self._stop_decision_kind,
+                "stop_decision_kind": self._stop_decision_kind.value if self._stop_decision_kind else "",
             },
         )
 
