@@ -1,15 +1,15 @@
 {
   "id": "constrained_07",
-  "name": "Constrained model task 7",
+  "name": "Constrained: deterministic ordering",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Make output ordering deterministic for stable tests and reproducible CLI output.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "determinism",
+    "testing"
   ],
-  "difficulty": "easy",
+  "difficulty": "medium",
   "expected_edit_scope": "1-2 files",
   "timeout_seconds": 240,
   "validation_checks": [

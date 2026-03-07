@@ -1,13 +1,13 @@
 {
   "id": "api_wrapper_fix",
-  "name": "API wrapper return behavior fix",
+  "name": "API wrapper return contract fix",
   "repo_path": ".",
-  "instruction": "Complete the task: API wrapper return behavior fix. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Repair an API wrapper so it returns the documented structure on both success and handled-error paths. Add or update focused tests that lock the response contract.",
   "category": "simple API wrapper behavior fix",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "api",
+    "contract",
+    "tests"
   ],
   "difficulty": "medium",
   "expected_edit_scope": "1-3 files",

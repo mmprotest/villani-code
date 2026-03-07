@@ -1,15 +1,15 @@
 {
   "id": "constrained_06",
-  "name": "Constrained model task 6",
+  "name": "Constrained: validation edge case",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Fix an input-validation edge case at a numeric or string boundary; include explicit boundary assertions.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "validation",
+    "boundary"
   ],
-  "difficulty": "easy",
+  "difficulty": "medium",
   "expected_edit_scope": "1-2 files",
   "timeout_seconds": 240,
   "validation_checks": [

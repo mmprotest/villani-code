@@ -1,13 +1,13 @@
 {
   "id": "constrained_01",
-  "name": "Constrained model task 1",
+  "name": "Constrained: single-branch bugfix",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Fix a one-branch logic bug with no more than two file edits. Add a focused regression test only for the failing branch.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "single-bug",
+    "minimal-edits"
   ],
   "difficulty": "easy",
   "expected_edit_scope": "1-2 files",

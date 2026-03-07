@@ -26,6 +26,8 @@ from villani_code.benchmark.graders import (
 )
 from villani_code.benchmark.logging import BenchmarkLogger, render_command
 from villani_code.benchmark.models import BenchmarkTask
+from villani_code.benchmark.interpretation import derive_interpretation_status
+from villani_code.benchmark.preflight import run_benchmark_preflight
 from villani_code.benchmark.reporting import aggregate_by_agent, persist_reports
 from villani_code.benchmark.task_loader import load_benchmark_tasks, load_task_pack_metadata, resolve_tasks_dir
 from villani_code.benchmark.utils import utc_timestamp_slug, write_json
@@ -87,6 +89,15 @@ class BenchmarkRunner:
         resolved_tasks_dir = resolve_tasks_dir(tasks_dir)
         pack = load_task_pack_metadata(resolved_tasks_dir)
         tasks = load_benchmark_tasks(resolved_tasks_dir, task_id=task_id)
+        preflight = run_benchmark_preflight(resolved_tasks_dir, repo_path, agents)
+        for note in preflight.notes:
+            self.logger.info(f"Preflight note: {note}")
+        for warning in preflight.warnings:
+            self.logger.warn(f"Preflight warning: {warning}")
+        if not preflight.ok:
+            for error in preflight.errors:
+                self.logger.error(f"Preflight error: {error}")
+            raise ValueError("Benchmark preflight failed. Fix errors before running benchmark.")
         self.logger.info(f"Loaded {len(tasks)} tasks and {len(agents)} agents")
         run_root = self.output_dir / utc_timestamp_slug()
         run_root.mkdir(parents=True, exist_ok=True)
@@ -225,6 +236,11 @@ class BenchmarkRunner:
             model=model,
             capabilities=adapter_capabilities,
         )
+        interpretation = derive_interpretation_status(
+            pack_classification=pack.classification,
+            comparison_suitability=pack.comparison_suitability,
+            run_fairness=run_mode,
+        )
         metadata = {
             "model": model,
             "base_url": base_url,
@@ -243,6 +259,9 @@ class BenchmarkRunner:
             "run_mode": run_mode,
             "run_fairness": run_mode,
             "fairness_warning": fairness_warning,
+            "interpretation_status": interpretation.status,
+            "interpretation_warning": interpretation.warning,
+            "preflight": {"warnings": preflight.warnings, "notes": preflight.notes},
             "config_provenance": {
                 "model": "cli flag" if model else "adapter default",
                 "base_url": "cli flag" if base_url else "adapter default",
@@ -253,7 +272,7 @@ class BenchmarkRunner:
         agg = aggregate_by_agent(result_rows)
         best_agent = None
         if agg:
-            best_agent = max(agg.items(), key=lambda item: item[1].get("avg_composite_score", 0.0))[0]
+            best_agent = max(agg.items(), key=lambda item: item[1].get("average_composite_score", 0.0))[0]
         self.logger.info(
             f"Final summary: output={run_root} tasks={total_tasks} agents={total_agents} runs={total_runs}"
             + (f" best_agent={best_agent}" if best_agent else "")

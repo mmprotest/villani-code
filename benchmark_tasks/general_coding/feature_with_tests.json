@@ -1,16 +1,16 @@
 {
   "id": "feature_with_tests",
-  "name": "Add small feature with tests",
+  "name": "Small feature with tests",
   "repo_path": ".",
-  "instruction": "Complete the task: Add small feature with tests. Keep edits minimal and add/update tests to prove correctness.",
+  "instruction": "Implement one small, clearly scoped feature extension with complete tests and no unrelated API changes.",
   "category": "small feature addition with tests",
   "tags": [
-    "neutral",
-    "general",
-    "coding-agent"
+    "feature",
+    "tests",
+    "scope-control"
   ],
-  "difficulty": "easy",
-  "expected_edit_scope": "2-5 files",
+  "difficulty": "medium",
+  "expected_edit_scope": "2-4 files",
   "timeout_seconds": 300,
   "validation_checks": [
     {

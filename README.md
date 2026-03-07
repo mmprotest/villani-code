@@ -73,57 +73,58 @@ villani-code eval --suite tests/fixtures/eval/suite.json --json
 
 `villani-code benchmark` compares coding **agents** (not model families) under fixed tasks, repo snapshot, and objective validation checks.
 
-Fairness is now explicit per run:
+Benchmark packs are intentionally split by interpretation target:
+- `internal_regressions`: Villani-only regression tracking (**never headline comparable**).
+- `general_coding`: neutral coding tasks for cross-agent comparison when fairness is not mixed.
+- `constrained_model`: low-context tasks intended for constrained-model comparisons under matched fairness settings.
 
-- `same-backend`: every participating adapter is proven to use the same OpenAI-compatible backend + model identifier.
+These are **starting packs**; they should be expanded and empirically pruned over time.
+
+### Interpretation status (hard rule in reports)
+
+Each run has one status:
+- `headline_comparable`: suitable for headline cross-agent comparisons.
+- `informational_only`: useful context, but not valid headline evidence.
+- `internal_only`: regression tracking only.
+
+Blunt rule: mixed-fairness runs and internal-regression packs are never headline-comparable.
+
+### Fairness modes
+
+- `same-backend`: every participating adapter is pinned to the same OpenAI-compatible backend + model identifier.
 - `native-cli`: single-agent/default-provider run.
-- `mixed`: heterogeneous setup (exploratory, not apples-to-apples headline fairness).
+- `mixed`: heterogeneous setup (exploratory only, not apples-to-apples).
 
-If configuration cannot prove same-backend parity, reports are marked `mixed` and include a fairness warning.
+### Benchmark preflight checks
+
+Before execution, benchmark mode runs a lightweight preflight to validate:
+- task pack metadata and task schema
+- repo/task directory existence
+- agent-name validity
+- validation command structure and likely command-resolution failures
+
+Likely missing validation executables are surfaced early as warnings so noisy runs can be avoided.
+
+### Windows validation behavior
+
+Validation command resolution is explicit and conservative across platforms:
+- `python` / `python3` / `py` resolve to the active interpreter
+- allowlisted module tools (for example `pytest`, `pip`) resolve to `python -m <tool>`
+- unknown commands are not rewritten and fail as environment-resolution failures
 
 ### Run internal-regression benchmark (Villani-specific)
 
 ```bash
-villani-code benchmark \
-  --tasks-dir benchmark_tasks/internal_regressions \
-  --agent villani \
-  --repo . \
-  --base-url http://localhost:8000 \
-  --model your-model
+villani-code benchmark   --tasks-dir benchmark_tasks/internal_regressions   --agent villani   --repo .   --base-url http://localhost:8000   --model your-model
 ```
 
 ### Compare multiple agents
 
 ```bash
-villani-code benchmark \
-  --tasks-dir benchmark_tasks/internal_regressions \
-  --agent villani \
-  --agent claude-code \
-  --agent opencode \
-  --agent copilot-cli \
-  --repo . \
-  --base-url http://localhost:8000 \
-  --model your-model
+villani-code benchmark   --tasks-dir benchmark_tasks/general_coding   --agent villani   --agent claude-code   --agent opencode   --agent copilot-cli   --repo .   --base-url http://localhost:8000   --model your-model
 ```
 
 ### Outputs
-
-
-### Run neutral general-coding benchmark
-
-```bash
-villani-code benchmark \
-  --tasks-dir benchmark_tasks/general_coding \
-  --agent villani
-```
-
-### Run constrained-model benchmark
-
-```bash
-villani-code benchmark \
-  --tasks-dir benchmark_tasks/constrained_model \
-  --agent villani
-```
 
 Each benchmark run writes:
 - `benchmark_results.json`

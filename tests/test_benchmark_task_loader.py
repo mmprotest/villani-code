@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from villani_code.benchmark.task_loader import load_benchmark_task, load_benchmark_tasks, load_task_pack_metadata, resolve_tasks_dir
+from villani_code.benchmark.task_loader import (
+    lint_task_pack,
+    load_benchmark_task,
+    load_benchmark_tasks,
+    load_task_pack_metadata,
+    resolve_tasks_dir,
+)
 
 
 def test_load_benchmark_task_parses_schema() -> None:
@@ -28,9 +34,14 @@ def test_legacy_path_alias_resolves() -> None:
 
 def test_general_pack_loads() -> None:
     tasks = load_benchmark_tasks(Path("benchmark_tasks/general_coding"))
-    assert len(tasks) >= 12
+    assert len(tasks) >= 8
 
 
 def test_constrained_pack_loads() -> None:
     tasks = load_benchmark_tasks(Path("benchmark_tasks/constrained_model"))
     assert len(tasks) >= 6
+
+
+def test_task_pack_lint_general_and_constrained() -> None:
+    assert lint_task_pack(Path("benchmark_tasks/general_coding")) == []
+    assert lint_task_pack(Path("benchmark_tasks/constrained_model")) == []

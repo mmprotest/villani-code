@@ -1,15 +1,15 @@
 {
   "id": "constrained_08",
-  "name": "Constrained model task 8",
+  "name": "Constrained: low-risk performance tweak",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Apply a tiny performance-minded change that does not alter externally visible behavior.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "performance",
+    "low-risk"
   ],
-  "difficulty": "easy",
+  "difficulty": "hard",
   "expected_edit_scope": "1-2 files",
   "timeout_seconds": 240,
   "validation_checks": [

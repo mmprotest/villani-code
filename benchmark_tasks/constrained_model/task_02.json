@@ -1,13 +1,13 @@
 {
   "id": "constrained_02",
-  "name": "Constrained model task 2",
+  "name": "Constrained: default handling fix",
   "repo_path": ".",
-  "instruction": "Fix the described localized bug with the fewest necessary edits and targeted tests.",
+  "instruction": "Correct incorrect default-handling behavior when optional input is omitted. Keep helper signatures stable.",
   "category": "constrained-eval",
   "tags": [
     "constrained",
-    "small-model",
-    "low-context"
+    "defaults",
+    "stability"
   ],
   "difficulty": "easy",
   "expected_edit_scope": "1-2 files",
