@@ -47,6 +47,41 @@
   background: $boost;
 }
 
+
+#input-area {
+  height: auto;
+}
+
+#slash-popup {
+  display: none;
+  height: auto;
+  max-height: 10;
+  margin: 0 1;
+  padding: 0 1;
+  border: round #3b3f4a;
+  background: #111827;
+}
+
+#slash-popup-title {
+  height: 1;
+  color: $text-muted;
+}
+
+#slash-popup-list {
+  height: auto;
+  max-height: 7;
+}
+
+#slash-popup-list > ListItem {
+  height: 1;
+}
+
+#slash-popup-list > ListItem.selected {
+  background: #1f6feb;
+  color: #ffffff;
+  text-style: bold;
+}
+
 #input-row {
   height: 3;
   align: left middle;

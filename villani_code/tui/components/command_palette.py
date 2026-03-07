@@ -23,6 +23,9 @@ class CommandPalette:
     def __init__(self) -> None:
         self.items = self._default_items()
 
+    def slash_items(self) -> list[PaletteItem]:
+        return [item for item in self.items if item.trigger.startswith("/")]
+
     def _default_items(self) -> list[PaletteItem]:
         data = [
             ("/help", "full command reference", "command", "help"),
@@ -41,6 +44,25 @@ class CommandPalette:
             PaletteItem(trigger=t, description=d, action=CommandAction(id=t, title=t, category=c, target=target))
             for t, d, c, target in data
         ]
+
+
+    def search_commands(self, query: str, limit: int = 8) -> list[tuple[int, PaletteItem]]:
+        query = query.strip().lower()
+        scored: list[tuple[int, PaletteItem]] = []
+        for item in self.slash_items():
+            haystack = f"{item.trigger} {item.description}".lower()
+            score = fuzzy_score(query, haystack)
+            if score > 0:
+                scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[:limit]
+
+    def command_by_trigger(self, trigger: str) -> PaletteItem | None:
+        normalized = trigger.strip().lower()
+        for item in self.slash_items():
+            if item.trigger.lower() == normalized:
+                return item
+        return None
 
     def search(self, query: str, limit: int = 8) -> list[tuple[int, PaletteItem]]:
         query = query.strip().lower()

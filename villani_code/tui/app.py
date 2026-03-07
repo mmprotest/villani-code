@@ -7,15 +7,18 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.events import Key, MouseScrollDown, MouseScrollUp
 from textual.timer import Timer
 from textual.widgets import Input, Static
 
 from villani_code.interrupts import InterruptController
 from villani_code.tui.assets import LAUNCH_BANNER
+from villani_code.tui.components.command_palette import CommandPalette, PaletteItem
 from villani_code.tui.controller import RunnerController
 from villani_code.tui.messages import ApprovalRequest, LogAppend, SpinnerState, StatusUpdate
 from villani_code.tui.widgets.approval import ApprovalBar
+from villani_code.tui.widgets.slash_popup import SlashCommandPopup
 from villani_code.tui.widgets.status import StatusBarWidget
 
 
@@ -83,15 +86,18 @@ class VillaniTUI(App[None]):
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
         self.controller = RunnerController(runner, self)
+        self.command_palette = CommandPalette()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main"):
             yield VillaniTranscript(id="log")
             yield ApprovalBar()
             yield StatusBarWidget(id="status")
-            with Horizontal(id="input-row"):
-                yield Static("🤖 Villani Code >", id="input-prompt")
-                yield Input(id="input")
+            with Vertical(id="input-area"):
+                yield SlashCommandPopup()
+                with Horizontal(id="input-row"):
+                    yield Static("🤖 Villani Code >", id="input-prompt")
+                    yield Input(id="input")
 
     def on_mount(self) -> None:
         log = self.query_one(VillaniTranscript)
@@ -139,14 +145,74 @@ class VillaniTUI(App[None]):
         except Exception:
             self.post_message(StatusUpdate("Failed to copy console text."))
 
+    def _log_local_meta(self, text: str) -> None:
+        if self.is_running:
+            self.post_message(LogAppend(text, kind="meta"))
+            return
+        self._log_plain_text += f"{text}\n"
+
+    def _slash_popup(self) -> SlashCommandPopup | None:
+        try:
+            return self.query_one(SlashCommandPopup)
+        except NoMatches:
+            return None
+
+    def _refresh_slash_popup(self, value: str) -> None:
+        popup = self._slash_popup()
+        if popup is None:
+            return
+        query = value.strip()
+        if not query.startswith("/"):
+            popup.hide_popup()
+            return
+        matches = [item for _, item in self.command_palette.search_commands(query)]
+        popup.set_suggestions(matches)
+
+    def _close_slash_popup(self) -> None:
+        popup = self._slash_popup()
+        if popup is not None:
+            popup.hide_popup()
+
+    def _execute_command_item(self, item: PaletteItem) -> None:
+        trigger = item.trigger
+        if trigger == "/help":
+            self._show_help()
+            return
+        self._log_local_meta(f"{trigger} is not implemented yet in this build.")
+
+    def _show_help(self) -> None:
+        lines = ["Available slash commands:"]
+        for item in self.command_palette.slash_items():
+            lines.append(f"  {item.trigger:<10} {item.description}")
+        self._log_local_meta("\n".join(lines))
+
+    def _handle_slash_command(self, text: str) -> bool:
+        if not text.startswith("/"):
+            return False
+        command = text.split()[0].lower()
+        item = self.command_palette.command_by_trigger(command)
+        if item is None:
+            self._log_local_meta(f"Unknown command: {command}. Type /help for commands.")
+            return True
+        self._execute_command_item(item)
+        return True
+
+    @on(Input.Changed)
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._refresh_slash_popup(event.value)
+
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
+        self._close_slash_popup()
         if not text:
             return
         if text == "/exit":
             self.exit()
+            return
+        if self._handle_slash_command(text):
+            self.query_one(Input).focus()
             return
         self._interrupts.reset_interrupt_state()
         self.controller.run_prompt(text)
@@ -259,6 +325,38 @@ class VillaniTUI(App[None]):
                 bar.action_confirm()
             elif event.key == "escape":
                 bar.action_deny()
+            event.stop()
+            event.prevent_default()
+            return
+
+        popup = self._slash_popup()
+        input_widget = self.query_one(Input)
+        if popup is None:
+            popup_visible = False
+        else:
+            popup_visible = popup.visible
+        if popup is not None and popup_visible and self.focused is input_widget:
+            if event.key == "down":
+                popup.cursor_down()
+            elif event.key == "up":
+                popup.cursor_up()
+            elif event.key == "escape":
+                popup.hide_popup()
+            elif event.key == "tab":
+                trigger = popup.accept_selected_trigger()
+                if trigger is not None:
+                    input_widget.value = trigger
+                    input_widget.cursor_position = len(trigger)
+                    self._refresh_slash_popup(trigger)
+            elif event.key == "enter":
+                selected = popup.selected_item()
+                if selected is not None:
+                    input_widget.value = selected.trigger
+                    self._close_slash_popup()
+                    self._handle_slash_command(selected.trigger)
+                    input_widget.focus()
+            else:
+                return
             event.stop()
             event.prevent_default()
             return
