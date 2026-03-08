@@ -1,0 +1,12 @@
+{
+  "source_type": "mutated",
+  "tags": [
+    "repro_test",
+    "hard"
+  ],
+  "task_version": "1.0",
+  "expected_files": [
+    "src/app/core.py"
+  ],
+  "primary_skill": "debug"
+}

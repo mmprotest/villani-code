@@ -1,0 +1,1 @@
+Fix the bug for duplicate log lines and keep tests green.

@@ -1,7 +1,12 @@
 # Benchmark Tasks
 
-This directory now uses the Villani Benchmark v1 task format under `benchmark_tasks/villani_bench_v1`.
+Task suite lives in `benchmark_tasks/villani_bench_v1` and now includes 25+ deterministic offline tasks.
 
-Legacy benchmark packs and old JSON task format were removed.
+Each task directory contains:
+- `task.yaml`
+- `prompt.txt` (single short instruction)
+- `repo/`
+- optional `hidden_checks/` assets
+- `metadata.json` (`source_type`, `tags`, `task_version`, etc.)
 
-See `docs/benchmark.md` for schema, scoring, CLI, and migration details.
+See `docs/benchmark.md` for scoring, anti-gaming policy, and CLI usage.
