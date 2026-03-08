@@ -33,5 +33,11 @@
     "workflow_correctness",
     "verification_discipline"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "allowed_support_files": [
+    "Makefile",
+    "pyproject.toml",
+    "app/__main__.py",
+    "tests/test_basic.py"
+  ]
 }

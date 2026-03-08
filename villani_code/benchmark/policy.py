@@ -19,24 +19,68 @@ RUNTIME_ARTIFACT_PATTERNS = [
     "**/.ruff_cache/**",
 ]
 
+PATH_CLASS_IGNORED_RUNTIME_ARTIFACT = "ignored_runtime_artifact"
+PATH_CLASS_EXACT_EXPECTED = "exact_expected"
+PATH_CLASS_TASK_ADJACENT_SUPPORT = "task_adjacent_support"
+PATH_CLASS_METADATA_OMISSION_REASONABLE = "metadata_omission_reasonable"
+PATH_CLASS_CLEARLY_UNRELATED = "clearly_unrelated_meaningful_edit"
 
-def _normalize_path(path: str) -> str:
-    normalized = path.replace('\\', '/')
-    while normalized.startswith('./'):
+
+def normalize_path(path: str) -> str:
+    normalized = str(path).replace("\\", "/").strip()
+    while normalized.startswith("./"):
         normalized = normalized[2:]
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    if normalized.endswith("/") and normalized != "/":
+        normalized = normalized.rstrip("/")
     return normalized
 
 
+def comparison_key(path: str) -> str:
+    return normalize_path(path).casefold()
+
+
+def paths_equal(path_a: str, path_b: str) -> bool:
+    return comparison_key(path_a) == comparison_key(path_b)
+
+
+def path_is_within(parent: str, child: str) -> bool:
+    parent_norm = normalize_path(parent)
+    child_norm = normalize_path(child)
+    parent_key = comparison_key(parent_norm)
+    child_key = comparison_key(child_norm)
+    return child_key == parent_key or child_key.startswith(f"{parent_key}/")
+
+
+def path_matches_glob(path: str, pattern: str) -> bool:
+    return fnmatch(comparison_key(path), comparison_key(pattern))
+
+
+def _path_matches_scope(path: str, scope: str) -> bool:
+    scope_norm = normalize_path(scope)
+    if scope.endswith("/"):
+        return path_is_within(scope_norm, path)
+    return paths_equal(path, scope_norm)
+
+
 def is_runtime_artifact_path(path: str) -> bool:
-    normalized = _normalize_path(path)
+    normalized = normalize_path(path)
     for pattern in RUNTIME_ARTIFACT_PATTERNS:
-        if fnmatch(normalized, pattern):
+        if path_matches_glob(normalized, pattern):
             return True
     return False
 
 
 def filter_meaningful_touched_paths(touched: list[str]) -> list[str]:
-    return [path for path in touched if not is_runtime_artifact_path(path)]
+    return [normalize_path(path) for path in touched if not is_runtime_artifact_path(path)]
+
+
+@dataclass
+class ClassifiedPath:
+    path: str
+    classification: str
+    reason: str
 
 
 @dataclass
@@ -45,6 +89,9 @@ class PolicyCheckResult:
     forbidden_ok: bool
     suspicious_patterns: list[str]
     ignored_junk_paths: list[str]
+    normalized_touched_paths: list[str]
+    path_classifications: dict[str, str]
+    path_classification_reasons: dict[str, str]
     meaningful_touched_paths: list[str]
     meaningful_expected_paths: list[str]
     meaningful_unexpected_paths: list[str]
@@ -54,42 +101,92 @@ class PolicyCheckResult:
     forbidden_reason_detail: str | None
 
 
-def _is_allowed_support_path(path: str, *, expected_paths: list[str], family: str, task_type: str | None, meaningful: list[str]) -> bool:
+def _has_parent_overlap(path: str, expected_paths: list[str]) -> bool:
+    path_parent = normalize_path(str(Path(path).parent))
+    expected_parents = {normalize_path(str(Path(expected).parent)) for expected in expected_paths}
+    return path_parent in expected_parents
+
+
+def _is_task_adjacent_support(
+    path: str,
+    *,
+    expected_paths: list[str],
+    family: str,
+    task_type: str | None,
+    allowed_support_files: list[str],
+    allowed_support_globs: list[str],
+) -> bool:
+    if any(paths_equal(path, support) for support in allowed_support_files):
+        return True
+    if any(path_matches_glob(path, pattern) for pattern in allowed_support_globs):
+        return True
+
+    path_name = Path(path).name
     if family == "terminal_workflow":
-        if path in {"Makefile", "pyproject.toml"} or path.endswith("/__main__.py"):
+        if path in {"Makefile", "pyproject.toml"}:
+            return True
+        if path_name in {"__main__.py", "main.py"} and _has_parent_overlap(path, expected_paths):
             return True
 
-    if task_type == "repo_navigation_bugfix" and path.endswith("/__init__.py"):
-        parent = str(Path(path).parent)
-        expected_parents = {str(Path(expected).parent) for expected in expected_paths}
-        if parent in expected_parents:
-            return True
+    if path_name == "__init__.py" and _has_parent_overlap(path, expected_paths):
+        return True
 
-    if family == "bugfix" and path.endswith("/__init__.py"):
-        parent = str(Path(path).parent)
-        expected_parents = {str(Path(expected).parent) for expected in expected_paths}
-        if parent in expected_parents:
-            return True
+    if task_type == "repo_navigation_bugfix" and path.endswith(".py") and _has_parent_overlap(path, expected_paths):
+        return True
+
+    if family == "localize_patch" and path.endswith(".py") and _has_parent_overlap(path, expected_paths):
+        return True
 
     if family == "repro_test":
-        touched_test = any(p.startswith("tests/") for p in meaningful)
-        if touched_test and (path.startswith("src/") or path.startswith("app/")):
+        if path.startswith("tests/") and any(expected.startswith("tests/") for expected in expected_paths):
+            return True
+        if path.endswith(".py") and _has_parent_overlap(path, expected_paths):
             return True
 
     return False
 
 
-def _is_metadata_omission_path(path: str, *, expected_paths: list[str], family: str) -> bool:
-    if path in {"Makefile", "pyproject.toml"} and family == "terminal_workflow":
+def _is_reasonable_metadata_omission(path: str, *, expected_paths: list[str], family: str) -> bool:
+    if family == "terminal_workflow" and path in {"Makefile", "pyproject.toml"}:
         return True
 
     if not path.endswith(".py"):
         return False
 
-    expected_py_dirs = {str(Path(expected).parent) for expected in expected_paths if expected.endswith(".py")}
-    if str(Path(path).parent) in expected_py_dirs:
+    if _has_parent_overlap(path, expected_paths):
         return True
-    return False
+
+    expected_roots = {normalize_path(expected).split("/")[0] for expected in expected_paths if "/" in normalize_path(expected)}
+    path_root = normalize_path(path).split("/")[0] if "/" in normalize_path(path) else ""
+    return bool(path_root and path_root in expected_roots)
+
+
+def classify_touched_path(
+    path: str,
+    *,
+    expected_paths: list[str],
+    family: str,
+    task_type: str | None,
+    allowed_support_files: list[str],
+    allowed_support_globs: list[str],
+) -> ClassifiedPath:
+    normalized = normalize_path(path)
+    if is_runtime_artifact_path(normalized):
+        return ClassifiedPath(normalized, PATH_CLASS_IGNORED_RUNTIME_ARTIFACT, "runtime artifact pattern")
+    if any(paths_equal(normalized, expected) for expected in expected_paths):
+        return ClassifiedPath(normalized, PATH_CLASS_EXACT_EXPECTED, "explicitly listed in expected_files")
+    if _is_task_adjacent_support(
+        normalized,
+        expected_paths=expected_paths,
+        family=family,
+        task_type=task_type,
+        allowed_support_files=allowed_support_files,
+        allowed_support_globs=allowed_support_globs,
+    ):
+        return ClassifiedPath(normalized, PATH_CLASS_TASK_ADJACENT_SUPPORT, "task/family support rule")
+    if _is_reasonable_metadata_omission(normalized, expected_paths=expected_paths, family=family):
+        return ClassifiedPath(normalized, PATH_CLASS_METADATA_OMISSION_REASONABLE, "task-related omission in expected_files metadata")
+    return ClassifiedPath(normalized, PATH_CLASS_CLEARLY_UNRELATED, "meaningful edit outside task scope")
 
 
 def enforce_path_policy(
@@ -100,35 +197,69 @@ def enforce_path_policy(
     expected_paths: list[str] | None = None,
     family: str = "",
     task_type: str | None = None,
+    allowed_support_files: list[str] | None = None,
+    allowed_support_globs: list[str] | None = None,
 ) -> PolicyCheckResult:
-    expected_paths = expected_paths or []
-    allowlist_ok = all(any(path.startswith(prefix) for prefix in allowlist) for path in touched)
-    forbidden_ok = not any(any(path.startswith(prefix) for prefix in forbidden) for path in touched)
+    expected_paths = [normalize_path(path) for path in (expected_paths or [])]
+    allowed_support_files = [normalize_path(path) for path in (allowed_support_files or [])]
+    allowed_support_globs = [normalize_path(path) for path in (allowed_support_globs or [])]
+    normalized_touched = [normalize_path(path) for path in touched]
+
+    classified = [
+        classify_touched_path(
+            path,
+            expected_paths=expected_paths,
+            family=family,
+            task_type=task_type,
+            allowed_support_files=allowed_support_files,
+            allowed_support_globs=allowed_support_globs,
+        )
+        for path in normalized_touched
+    ]
+
+    ignored_paths = [item.path for item in classified if item.classification == PATH_CLASS_IGNORED_RUNTIME_ARTIFACT]
+    meaningful = [item.path for item in classified if item.classification != PATH_CLASS_IGNORED_RUNTIME_ARTIFACT]
+
+    allowlist_ok = all(any(_path_matches_scope(path, prefix) for prefix in allowlist) for path in meaningful)
+    forbidden_hits = [path for path in meaningful if any(_path_matches_scope(path, prefix) for prefix in forbidden)]
+    forbidden_ok = not forbidden_hits
+
     suspicious = [
-        path for path in touched if path.endswith("conftest.py") or path.startswith(".github/") or path.startswith(".git/")
-    ]
-    meaningful_expected = [path for path in touched if path in expected_paths]
-    meaningful_unexpected = [path for path in touched if path not in expected_paths]
-    allowed_support = [
         path
-        for path in meaningful_unexpected
-        if _is_allowed_support_path(path, expected_paths=expected_paths, family=family, task_type=task_type, meaningful=touched)
+        for path in meaningful
+        if path.endswith("conftest.py") or path.startswith(".github/") or path.startswith(".git/")
     ]
-    metadata_omission = [
-        path
-        for path in meaningful_unexpected
-        if path not in allowed_support and _is_metadata_omission_path(path, expected_paths=expected_paths, family=family)
+
+    meaningful_expected = [item.path for item in classified if item.classification == PATH_CLASS_EXACT_EXPECTED]
+    meaningful_unexpected = [
+        item.path
+        for item in classified
+        if item.classification
+        in {PATH_CLASS_TASK_ADJACENT_SUPPORT, PATH_CLASS_METADATA_OMISSION_REASONABLE, PATH_CLASS_CLEARLY_UNRELATED}
     ]
-    violating_paths = [path for path in meaningful_unexpected if path not in allowed_support and path not in metadata_omission]
+    allowed_support = [item.path for item in classified if item.classification == PATH_CLASS_TASK_ADJACENT_SUPPORT]
+    metadata_omission = [item.path for item in classified if item.classification == PATH_CLASS_METADATA_OMISSION_REASONABLE]
+
+    violating_paths = [
+        item.path
+        for item in classified
+        if item.classification == PATH_CLASS_CLEARLY_UNRELATED or item.path in forbidden_hits
+    ]
+    violating_paths = list(dict.fromkeys(violating_paths))
+
     forbidden_reason_detail = None
     if violating_paths:
-        forbidden_reason_detail = f"unexpected meaningful edits outside task scope: {', '.join(violating_paths)}"
+        forbidden_reason_detail = f"clearly unrelated meaningful edits: {', '.join(violating_paths)}"
+
     return PolicyCheckResult(
         allowlist_ok=allowlist_ok,
         forbidden_ok=forbidden_ok,
         suspicious_patterns=suspicious,
-        ignored_junk_paths=[],
-        meaningful_touched_paths=touched,
+        ignored_junk_paths=ignored_paths,
+        normalized_touched_paths=normalized_touched,
+        path_classifications={item.path: item.classification for item in classified},
+        path_classification_reasons={item.path: item.reason for item in classified},
+        meaningful_touched_paths=meaningful,
         meaningful_expected_paths=meaningful_expected,
         meaningful_unexpected_paths=meaningful_unexpected,
         allowed_support_paths=allowed_support,

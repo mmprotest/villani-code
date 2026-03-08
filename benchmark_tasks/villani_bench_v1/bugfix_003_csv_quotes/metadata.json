@@ -29,5 +29,8 @@
     "correctness",
     "deterministic_tests"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "allowed_support_files": [
+    "src/app/cli.py"
+  ]
 }

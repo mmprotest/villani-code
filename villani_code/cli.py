@@ -32,25 +32,13 @@ console = Console()
 
 
 def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
-    try:
-        if not isinstance(result, dict):
+    def _print_content(value: Any) -> None:
+        if isinstance(value, str):
+            console.print(value)
             return
-
-        response = result.get("response")
-        if isinstance(response, str):
-            console.print(response)
+        if not isinstance(value, list):
             return
-        if not isinstance(response, dict):
-            return
-
-        content = response.get("content")
-        if isinstance(content, str):
-            console.print(content)
-            return
-        if not isinstance(content, list):
-            return
-
-        for block in content:
+        for block in value:
             if isinstance(block, str):
                 console.print(block)
                 continue
@@ -61,6 +49,20 @@ def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
             text = block.get("text")
             if isinstance(text, str):
                 console.print(text)
+
+    try:
+        if not isinstance(result, dict):
+            return
+
+        response = result.get("response")
+        if isinstance(response, str):
+            console.print(response)
+
+        if isinstance(response, dict):
+            _print_content(response.get("content"))
+
+        if "content" in result:
+            _print_content(result.get("content"))
     except Exception:  # noqa: BLE001
         return
 

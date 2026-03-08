@@ -78,6 +78,8 @@ class TaskMetadata(BaseModel):
     name: str | None = None
     difficulty: str | None = None
     expected_files: list[str] = Field(default_factory=list)
+    allowed_support_files: list[str] = Field(default_factory=list)
+    allowed_support_globs: list[str] = Field(default_factory=list)
     reference_patch_size_lines: int | None = None
     primary_skill: str | None = None
     secondary_skills: list[str] = Field(default_factory=list)
@@ -226,6 +228,8 @@ class BenchmarkRunResult(BaseModel):
     stderr_preview: str | None = None
     touched_file_paths: list[str]
     raw_touched_file_paths: list[str] = Field(default_factory=list)
+    normalized_touched_paths: list[str] = Field(default_factory=list)
+    path_classifications: dict[str, str] = Field(default_factory=dict)
     meaningful_touched_paths: list[str] = Field(default_factory=list)
     meaningful_expected_paths: list[str] = Field(default_factory=list)
     meaningful_unexpected_paths: list[str] = Field(default_factory=list)

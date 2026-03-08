@@ -24,7 +24,6 @@ from villani_code.benchmark.models import (
 from villani_code.benchmark.policy import (
     benchmark_asset_integrity,
     enforce_path_policy,
-    filter_meaningful_touched_paths,
 )
 from villani_code.benchmark.reporting import render_summary_table, summarize, write_markdown_report, write_results
 from villani_code.benchmark.task_loader import load_tasks
@@ -321,17 +320,17 @@ class BenchmarkRunner:
                 self._log(f"benchmark harness error: {self._stderr_snippet(error, max_len=300)}")
 
             raw_touched = list_touched_files(workspace_repo)
-            ignored_junk_paths = [path for path in raw_touched if path not in filter_meaningful_touched_paths(raw_touched)]
-            touched = filter_meaningful_touched_paths(raw_touched)
             policy_result = enforce_path_policy(
-                touched,
+                raw_touched,
                 task.allowlist_paths,
                 task.forbidden_paths,
                 expected_paths=task.metadata.expected_files,
                 family=task.family.value,
                 task_type=task.metadata.task_type,
+                allowed_support_files=task.metadata.allowed_support_files,
+                allowed_support_globs=task.metadata.allowed_support_globs,
             )
-            policy_result.ignored_junk_paths = ignored_junk_paths
+            touched = policy_result.meaningful_touched_paths
             files_touched = len(touched)
             lines_added, lines_deleted = line_stats(workspace_repo)
             runtime_seconds = time.monotonic() - started
@@ -351,24 +350,18 @@ class BenchmarkRunner:
             elif error:
                 failure_reason = failure_reason or FailureReason.AGENT_CRASH
             elif failure_reason is None:
-                non_fatal_path_edits: list[str] = []
-                if policy_result.allowed_support_paths:
-                    non_fatal_path_edits.extend(policy_result.allowed_support_paths)
-                if policy_result.metadata_omission_paths:
-                    non_fatal_path_edits.extend(policy_result.metadata_omission_paths)
-
-                forbidden_due_to_paths = not policy_result.forbidden_ok
-                forbidden_due_to_allowlist = not policy_result.allowlist_ok and bool(policy_result.violating_paths)
-                has_strong_violation = bool(policy_result.violating_paths)
-
                 if solved_checks_passed:
-                    if has_strong_violation:
+                    if policy_result.violating_paths:
                         failure_reason = FailureReason.FORBIDDEN_EDIT
-                    elif non_fatal_path_edits:
-                        policy_warning = "support_file_edits_allowed"
-                        policy_warning_detail = f"allowed support edits: {', '.join(non_fatal_path_edits)}"
-                elif forbidden_due_to_paths or forbidden_due_to_allowlist:
-                    failure_reason = FailureReason.FORBIDDEN_EDIT
+                    elif policy_result.metadata_omission_paths:
+                        policy_warning = "metadata_omission_reasonable"
+                        policy_warning_detail = f"allowed task-related edit: {', '.join(policy_result.metadata_omission_paths)}"
+                    elif policy_result.allowed_support_paths:
+                        policy_warning = "support_file_edits"
+                        policy_warning_detail = f"allowed support edits: {', '.join(policy_result.allowed_support_paths)}"
+                elif not visible_pass or not hidden_pass:
+                    if policy_result.violating_paths and failure_reason not in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED}:
+                        failure_reason = FailureReason.FORBIDDEN_EDIT
             if failure_reason is None and not artifacts_ok:
                 failure_reason = FailureReason.MISSING_ARTIFACT
                 if artifact_failure_detail:
@@ -393,9 +386,9 @@ class BenchmarkRunner:
             hidden_failed = any("hidden" in c for c in verifications[-len(task.hidden_verification) :]) if task.hidden_verification else False
             first_pass_success = bool(success and (retries_after_failure or 0) == 0)
             recovered_after_failed_attempt = bool(success and (retries_after_failure or 0) > 0)
-            expected_files_set = set(task.metadata.expected_files)
-            touched_unexpected = bool(any(p not in expected_files_set for p in touched)) if expected_files_set else False
-            expected_files_touched_count = sum(1 for p in touched if p in expected_files_set) if expected_files_set else 0
+            expected_files_set = set(policy_result.meaningful_expected_paths)
+            touched_unexpected = bool(policy_result.meaningful_unexpected_paths)
+            expected_files_touched_count = len(expected_files_set)
 
             detail = ""
             if failure_reason == FailureReason.MISSING_ARTIFACT and artifact_failure_detail:
@@ -404,13 +397,13 @@ class BenchmarkRunner:
                 if policy_result.meaningful_unexpected_paths:
                     detail = (
                         " detail="
-                        f"{policy_result.forbidden_reason_detail or 'unexpected meaningful edits outside task scope'}"
+                        f"{policy_result.forbidden_reason_detail or 'clearly unrelated meaningful edits'}"
                         f"; meaningful_unexpected_paths={', '.join(policy_result.meaningful_unexpected_paths)}"
                     )
                 elif policy_result.forbidden_reason_detail:
                     detail = f" detail={policy_result.forbidden_reason_detail}"
             elif success and policy_warning_detail:
-                detail = f" warning={policy_warning_detail}"
+                detail = f" warning={policy_warning} detail={policy_warning_detail}"
             self._log(
                 f"result success={success} visible={int(visible_pass)} hidden={int(hidden_pass)} reason={(None if success else failure_reason.value if failure_reason else 'unknown')}{detail}"
             )
@@ -455,6 +448,8 @@ class BenchmarkRunner:
                 stderr_preview=agent_stderr_preview,
                 touched_file_paths=touched,
                 raw_touched_file_paths=raw_touched,
+                normalized_touched_paths=policy_result.normalized_touched_paths,
+                path_classifications=policy_result.path_classifications,
                 meaningful_touched_paths=policy_result.meaningful_touched_paths,
                 meaningful_expected_paths=policy_result.meaningful_expected_paths,
                 meaningful_unexpected_paths=policy_result.meaningful_unexpected_paths,

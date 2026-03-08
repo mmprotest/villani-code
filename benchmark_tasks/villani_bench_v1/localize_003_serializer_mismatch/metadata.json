@@ -38,5 +38,8 @@
     "repair_efficiency",
     "test_interpretation"
   ],
-  "benchmark_bucket": "runtime_stressing"
+  "benchmark_bucket": "runtime_stressing",
+  "allowed_support_globs": [
+    "src/app/*.py"
+  ]
 }

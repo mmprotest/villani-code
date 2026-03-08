@@ -60,8 +60,9 @@ def test_print_response_text_blocks_prints_plain_response_and_content_strings(mo
 
     cli._print_response_text_blocks({"response": "plain response"})
     cli._print_response_text_blocks({"response": {"content": "plain content"}})
+    cli._print_response_text_blocks({"content": "top-level content"})
 
-    assert recorder.lines == ["plain response", "plain content"]
+    assert recorder.lines == ["plain response", "plain content", "top-level content"]
 
 
 def test_print_response_text_blocks_never_raises_when_console_print_fails(monkeypatch) -> None:

@@ -235,15 +235,15 @@ def test_solved_task_with_support_file_edit_is_allowed_with_warning(monkeypatch,
     )
 
     out = capsys.readouterr().out
-    assert "warning=allowed support edits: app/cli/__main__.py" in out
+    assert "warning=metadata_omission_reasonable detail=allowed task-related edit: app/cli/__main__.py" in out
 
     from villani_code.benchmark.reporting import load_results
 
     row = load_results(Path(data["results_path"]))[0]
     assert row.success == 1
     assert row.failure_reason is None
-    assert row.policy_warning == "support_file_edits_allowed"
-    assert row.policy_warning_detail == "allowed support edits: app/cli/__main__.py"
+    assert row.policy_warning == "metadata_omission_reasonable"
+    assert row.policy_warning_detail == "allowed task-related edit: app/cli/__main__.py"
     assert row.meaningful_touched_paths == ["app/cli/__main__.py", "Makefile"]
     assert row.meaningful_unexpected_paths == ["app/cli/__main__.py"]
 
@@ -289,7 +289,7 @@ def test_solved_task_with_unrelated_edit_still_fails_forbidden_with_detail(monke
 
     out = capsys.readouterr().out
     assert "reason=forbidden_edit" in out
-    assert "detail=unexpected meaningful edits outside task scope: README.md" in out
+    assert "detail=clearly unrelated meaningful edits: README.md" in out
 
     from villani_code.benchmark.reporting import load_results
 
@@ -297,7 +297,7 @@ def test_solved_task_with_unrelated_edit_still_fails_forbidden_with_detail(monke
     assert row.success == 0
     assert row.failure_reason is not None
     assert row.failure_reason.value == "forbidden_edit"
-    assert row.forbidden_reason_detail == "unexpected meaningful edits outside task scope: README.md"
+    assert row.forbidden_reason_detail == "clearly unrelated meaningful edits: README.md"
     assert row.meaningful_unexpected_paths == ["README.md"]
 
 
@@ -314,7 +314,7 @@ def test_policy_reports_unexpected_meaningful_paths() -> None:
     assert policy.meaningful_expected_paths == ["src/app.py"]
     assert policy.meaningful_unexpected_paths == ["tests/test_app.py"]
     assert policy.violating_paths == ["tests/test_app.py"]
-    assert policy.forbidden_reason_detail == "unexpected meaningful edits outside task scope: tests/test_app.py"
+    assert policy.forbidden_reason_detail == "clearly unrelated meaningful edits: tests/test_app.py"
 
 
 def test_solved_task_with_metadata_omission_edit_is_allowed_with_warning(monkeypatch, capsys) -> None:
@@ -357,14 +357,14 @@ def test_solved_task_with_metadata_omission_edit_is_allowed_with_warning(monkeyp
     )
 
     out = capsys.readouterr().out
-    assert "warning=allowed support edits: src/app/aliases.py" in out
+    assert "warning=support_file_edits detail=allowed support edits: src/app/aliases.py" in out
 
     from villani_code.benchmark.reporting import load_results
 
     row = load_results(Path(data["results_path"]))[0]
     assert row.success == 1
     assert row.failure_reason is None
-    assert row.policy_warning == "support_file_edits_allowed"
+    assert row.policy_warning == "support_file_edits"
     assert row.policy_warning_detail == "allowed support edits: src/app/aliases.py"
     assert row.meaningful_unexpected_paths == ["src/app/aliases.py"]
 
@@ -428,3 +428,68 @@ def test_solved_task_with_expected_file_outside_allowlist_still_succeeds(monkeyp
     assert row.success == 1
     assert row.failure_reason is None
     assert row.meaningful_unexpected_paths == []
+
+
+def test_path_classifier_categories_and_diagnostics() -> None:
+    policy = enforce_path_policy(
+        touched=["./src/app/a.py", "src/app/__init__.py", "src/app/helpers.py", ".villani_code/state.json", "README.md"],
+        allowlist=["src/", "tests/"],
+        forbidden=[".git/"],
+        expected_paths=["src/app/a.py"],
+        family="bugfix",
+        task_type="single_file_bugfix",
+    )
+    assert policy.path_classifications["src/app/a.py"] == "exact_expected"
+    assert policy.path_classifications["src/app/__init__.py"] == "task_adjacent_support"
+    assert policy.path_classifications["src/app/helpers.py"] == "metadata_omission_reasonable"
+    assert policy.path_classifications[".villani_code/state.json"] == "ignored_runtime_artifact"
+    assert policy.path_classifications["README.md"] == "clearly_unrelated_meaningful_edit"
+    assert "src/app/a.py" in policy.normalized_touched_paths
+    assert policy.violating_paths == ["README.md"]
+
+
+def test_metadata_omission_is_warning_not_failure_for_solved_task(monkeypatch) -> None:
+    from villani_code.benchmark.models import FairnessClassification
+
+    class FakeRunner:
+        name = "villani"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: ["src/app/a.py", "src/app/extra.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (2, 0))
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda repo, commands, timeout_seconds: (True, [], 1.0, 2.0))
+
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="bugfix_001_datetime_cli",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    from villani_code.benchmark.reporting import load_results
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.success == 1
+    assert row.policy_warning == "metadata_omission_reasonable"
+    assert row.path_classifications["src/app/extra.py"] == "metadata_omission_reasonable"
