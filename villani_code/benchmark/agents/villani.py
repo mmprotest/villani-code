@@ -44,7 +44,6 @@ class VillaniAgentRunner(AgentRunner):
             "--model",
             model,
             "--no-stream",
-            "--emit-runtime-events",
         ]
         if base_url:
             command.extend(["--base-url", base_url])

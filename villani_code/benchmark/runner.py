@@ -144,6 +144,13 @@ class BenchmarkRunner:
             "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
         }
 
+    @staticmethod
+    def _stderr_snippet(stderr: str, max_len: int = 240) -> str:
+        compact = " ".join(stderr.strip().split())
+        if len(compact) <= max_len:
+            return compact
+        return compact[: max_len - 3] + "..."
+
     def _run_task(
         self,
         task: BenchmarkTask,
@@ -227,6 +234,13 @@ class BenchmarkRunner:
                 telemetry_quality = execution.telemetry_quality
                 field_quality_map = execution.telemetry_field_quality_map
 
+                if not execution.timeout and execution.exit_code not in {None, 0}:
+                    snippet = self._stderr_snippet(execution.stderr)
+                    error = f"agent process exited with code {execution.exit_code}"
+                    if snippet:
+                        error = f"{error}; stderr: {snippet}"
+                    failure_reason = FailureReason.AGENT_CRASH
+
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
                 if field_quality_map.get("num_shell_commands") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     num_shell_commands = metrics["num_shell_commands"]
@@ -243,25 +257,26 @@ class BenchmarkRunner:
                     test_runs = metrics["test_runs"]
                     retries_after_failure = metrics["retries_after_failure"]
 
-                visible_pass, visible_outcomes, first_verify, l_verify = run_commands(workspace_repo, task.visible_verification, timeout_seconds)
-                if first_verify:
-                    time_to_first_verify = first_verify - started
-                last_verify = (l_verify - started) if l_verify else None
-                verifications.extend(item.command for item in visible_outcomes)
-                if not visible_pass:
-                    failure_reason = FailureReason.VISIBLE_VERIFICATION_FAILED
+                if error is None:
+                    visible_pass, visible_outcomes, first_verify, l_verify = run_commands(workspace_repo, task.visible_verification, timeout_seconds)
+                    if first_verify:
+                        time_to_first_verify = first_verify - started
+                    last_verify = (l_verify - started) if l_verify else None
+                    verifications.extend(item.command for item in visible_outcomes)
+                    if not visible_pass:
+                        failure_reason = FailureReason.VISIBLE_VERIFICATION_FAILED
 
-                if task.family == TaskFamily.REPRO_TEST:
-                    hidden_pass, invalid_repro = self._run_repro_hidden(task, workspace_repo, timeout_seconds)
-                    if not hidden_pass:
-                        failure_reason = FailureReason.INVALID_REPRO_TEST if invalid_repro else FailureReason.HIDDEN_VERIFICATION_FAILED
-                else:
-                    hidden_pass, hidden_outcomes, _, l_verify_hidden = run_commands(workspace_repo, task.hidden_verification, timeout_seconds)
-                    verifications.extend(item.command for item in hidden_outcomes)
-                    if l_verify_hidden:
-                        last_verify = l_verify_hidden - started
-                    if visible_pass and not hidden_pass and failure_reason is None:
-                        failure_reason = FailureReason.HIDDEN_VERIFICATION_FAILED
+                    if task.family == TaskFamily.REPRO_TEST:
+                        hidden_pass, invalid_repro = self._run_repro_hidden(task, workspace_repo, timeout_seconds)
+                        if not hidden_pass:
+                            failure_reason = FailureReason.INVALID_REPRO_TEST if invalid_repro else FailureReason.HIDDEN_VERIFICATION_FAILED
+                    else:
+                        hidden_pass, hidden_outcomes, _, l_verify_hidden = run_commands(workspace_repo, task.hidden_verification, timeout_seconds)
+                        verifications.extend(item.command for item in hidden_outcomes)
+                        if l_verify_hidden:
+                            last_verify = l_verify_hidden - started
+                        if visible_pass and not hidden_pass and failure_reason is None:
+                            failure_reason = FailureReason.HIDDEN_VERIFICATION_FAILED
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
                 failure_reason = FailureReason.BENCHMARK_ERROR
@@ -280,12 +295,12 @@ class BenchmarkRunner:
 
             if timeout:
                 failure_reason = FailureReason.TIMEOUT
+            elif error:
+                failure_reason = failure_reason or FailureReason.AGENT_CRASH
             elif not policy_result.allowlist_ok or not policy_result.forbidden_ok:
                 failure_reason = FailureReason.FORBIDDEN_EDIT
             elif not artifacts_ok:
                 failure_reason = FailureReason.MISSING_ARTIFACT
-            elif error:
-                failure_reason = failure_reason or FailureReason.AGENT_CRASH
 
             success = int(
                 (not timeout or not task.success_policy.fail_on_timeout)
