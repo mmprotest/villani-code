@@ -6,7 +6,9 @@
   ],
   "task_version": "1.0",
   "expected_files": [
-    "src/app/core.py"
+    "src/app/core.py",
+    "src/app/__init__.py",
+    "tests/test_core.py"
   ],
   "primary_skill": "debug",
   "name": "bugfix_006_markdown_escape",

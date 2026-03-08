@@ -6,7 +6,10 @@
   ],
   "task_version": "1.0",
   "expected_files": [
-    "src/app/core.py"
+    "app/__main__.py",
+    "Makefile",
+    "pyproject.toml",
+    "tests/test_basic.py"
   ],
   "primary_skill": "debug",
   "name": "terminal_005_lint_invocation",

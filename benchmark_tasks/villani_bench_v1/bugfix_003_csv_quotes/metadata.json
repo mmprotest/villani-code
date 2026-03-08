@@ -1,7 +1,8 @@
 {
   "seed_type": "bug-seeded",
   "expected_files": [
-    "src/app/csv_parser.py"
+    "src/app/csv_parser.py",
+    "tests/test_csv_quotes.py"
   ],
   "reference_patch_size_lines": 25,
   "primary_skill": "parser-debugging",

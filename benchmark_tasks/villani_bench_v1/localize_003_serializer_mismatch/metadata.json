@@ -6,7 +6,11 @@
   ],
   "task_version": "1.0",
   "expected_files": [
-    "src/app/core.py"
+    "src/app/a.py",
+    "src/app/b.py",
+    "src/app/c.py",
+    "src/app/__init__.py",
+    "tests/test_flow.py"
   ],
   "primary_skill": "debug",
   "name": "localize_003_serializer_mismatch",

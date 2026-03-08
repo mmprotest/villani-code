@@ -321,8 +321,17 @@ class BenchmarkRunner:
                 self._log(f"benchmark harness error: {self._stderr_snippet(error, max_len=300)}")
 
             raw_touched = list_touched_files(workspace_repo)
+            ignored_junk_paths = [path for path in raw_touched if path not in filter_meaningful_touched_paths(raw_touched)]
             touched = filter_meaningful_touched_paths(raw_touched)
-            policy_result = enforce_path_policy(touched, task.allowlist_paths, task.forbidden_paths)
+            policy_result = enforce_path_policy(
+                touched,
+                task.allowlist_paths,
+                task.forbidden_paths,
+                expected_paths=task.metadata.expected_files,
+                family=task.family.value,
+                task_type=task.metadata.task_type,
+            )
+            policy_result.ignored_junk_paths = ignored_junk_paths
             files_touched = len(touched)
             lines_added, lines_deleted = line_stats(workspace_repo)
             runtime_seconds = time.monotonic() - started
@@ -333,13 +342,27 @@ class BenchmarkRunner:
             if expected_files_found is None:
                 expected_files_found = sum(1 for rel in task.metadata.expected_files if (workspace_repo / rel).exists())
 
+            solved_checks_passed = visible_pass and hidden_pass
+            policy_warning = None
+            policy_warning_detail = None
+
             if timeout:
                 failure_reason = FailureReason.TIMEOUT
             elif error:
                 failure_reason = failure_reason or FailureReason.AGENT_CRASH
-            elif failure_reason is None and (not policy_result.allowlist_ok or not policy_result.forbidden_ok):
-                failure_reason = FailureReason.FORBIDDEN_EDIT
-            elif failure_reason is None and not artifacts_ok:
+            elif failure_reason is None:
+                forbidden_due_to_paths = not policy_result.forbidden_ok
+                forbidden_due_to_allowlist = not policy_result.allowlist_ok and bool(policy_result.violating_paths)
+                if forbidden_due_to_paths or forbidden_due_to_allowlist:
+                    if solved_checks_passed and policy_result.allowed_support_paths and not policy_result.violating_paths:
+                        policy_warning = "support_file_edits_allowed"
+                        policy_warning_detail = f"allowed support edits: {', '.join(policy_result.allowed_support_paths)}"
+                    else:
+                        failure_reason = FailureReason.FORBIDDEN_EDIT
+                elif solved_checks_passed and policy_result.allowed_support_paths and not policy_result.violating_paths:
+                    policy_warning = "support_file_edits_allowed"
+                    policy_warning_detail = f"allowed support edits: {', '.join(policy_result.allowed_support_paths)}"
+            if failure_reason is None and not artifacts_ok:
                 failure_reason = FailureReason.MISSING_ARTIFACT
                 if artifact_failure_detail:
                     error = artifact_failure_detail
@@ -366,6 +389,10 @@ class BenchmarkRunner:
             detail = ""
             if failure_reason == FailureReason.MISSING_ARTIFACT and artifact_failure_detail:
                 detail = f" detail={artifact_failure_detail}"
+            elif failure_reason == FailureReason.FORBIDDEN_EDIT and policy_result.forbidden_reason_detail:
+                detail = f" detail={policy_result.forbidden_reason_detail}"
+            elif success and policy_warning_detail:
+                detail = f" warning={policy_warning_detail}"
             self._log(
                 f"result success={success} visible={int(visible_pass)} hidden={int(hidden_pass)} reason={(None if success else failure_reason.value if failure_reason else 'unknown')}{detail}"
             )
@@ -402,11 +429,17 @@ class BenchmarkRunner:
                 wall_clock_seconds=runtime_seconds,
                 timeout=timeout,
                 failure_reason=None if success else failure_reason,
+                forbidden_reason_detail=(policy_result.forbidden_reason_detail if failure_reason == FailureReason.FORBIDDEN_EDIT else None),
+                policy_warning=policy_warning,
+                policy_warning_detail=policy_warning_detail,
                 error=error,
                 agent_exit_code=agent_exit_code,
                 stderr_preview=agent_stderr_preview,
                 touched_file_paths=touched,
                 raw_touched_file_paths=raw_touched,
+                meaningful_touched_paths=policy_result.meaningful_touched_paths,
+                meaningful_expected_paths=policy_result.meaningful_expected_paths,
+                meaningful_unexpected_paths=policy_result.meaningful_unexpected_paths,
                 files_touched=files_touched,
                 lines_added=lines_added,
                 lines_deleted=lines_deleted,

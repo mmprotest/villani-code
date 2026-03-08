@@ -1,7 +1,9 @@
 {
   "seed_type": "terminal",
   "expected_files": [
-    "app/__main__.py"
+    "app/__main__.py",
+    "app/main.py",
+    "pyproject.toml"
   ],
   "reference_patch_size_lines": 12,
   "primary_skill": "python-packaging",
