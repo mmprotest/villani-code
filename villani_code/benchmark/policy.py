@@ -1,7 +1,42 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
+
+
+RUNTIME_ARTIFACT_PATTERNS = [
+    ".villani/**",
+    ".villani_code/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.egg-info/**",
+    "build/**",
+    "dist/**",
+    ".pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+]
+
+
+def _normalize_path(path: str) -> str:
+    normalized = path.replace('\\', '/')
+    while normalized.startswith('./'):
+        normalized = normalized[2:]
+    return normalized
+
+
+def is_runtime_artifact_path(path: str) -> bool:
+    normalized = _normalize_path(path)
+    for pattern in RUNTIME_ARTIFACT_PATTERNS:
+        if fnmatch(normalized, pattern):
+            return True
+    return False
+
+
+def filter_meaningful_touched_paths(touched: list[str]) -> list[str]:
+    return [path for path in touched if not is_runtime_artifact_path(path)]
 
 
 @dataclass

@@ -219,7 +219,10 @@ class BenchmarkRunResult(BaseModel):
     timeout: bool
     failure_reason: FailureReason | None = None
     error: str | None = None
+    agent_exit_code: int | None = None
+    stderr_preview: str | None = None
     touched_file_paths: list[str]
+    raw_touched_file_paths: list[str] = Field(default_factory=list)
     files_touched: int
     lines_added: int
     lines_deleted: int

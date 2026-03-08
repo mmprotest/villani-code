@@ -30,6 +30,26 @@ app.add_typer(plugin_app, name="plugin")
 app.add_typer(benchmark_app, name="benchmark")
 console = Console()
 
+
+def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
+    response = result.get("response", {}) if isinstance(result, dict) else {}
+    if not isinstance(response, dict):
+        return
+    content = response.get("content", [])
+    if not isinstance(content, list):
+        return
+
+    for block in content:
+        if isinstance(block, str):
+            console.print(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text = block.get("text", "")
+            if isinstance(text, str):
+                console.print(text)
+
 def _load_settings_manager() -> Any | None:
     try:
         from villani_code.tui.components.settings import SettingsManager
@@ -155,9 +175,7 @@ def run(
 ) -> None:
     runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key)
     result = runner.run(instruction)
-    for block in result["response"].get("content", []):
-        if block.get("type") == "text":
-            console.print(block.get("text", ""))
+    _print_response_text_blocks(result)
 
 
 @app.command()
@@ -204,9 +222,7 @@ def takeover_cmd(
 ) -> None:
     runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, "auto", 2, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
     result = runner.run_villani_mode()
-    for block in result["response"].get("content", []):
-        if block.get("type") == "text":
-            console.print(block.get("text", ""))
+    _print_response_text_blocks(result)
 
 
 @app.command()
