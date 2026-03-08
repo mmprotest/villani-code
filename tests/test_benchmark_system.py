@@ -148,3 +148,49 @@ def test_new_tasks_fail_before_fix() -> None:
         repo = Path(f"benchmark_tasks/villani_bench_v1/{task_id}/repo")
         proc = subprocess.run(["pytest", "-q", test_file], cwd=repo, capture_output=True, text=True)
         assert proc.returncode != 0
+
+
+def test_runner_surfaces_agent_startup_stderr_snippet(monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FailureReason, FieldQuality, TelemetryQuality
+
+    class FakeRunner:
+        name = 'villani'
+        version = '1'
+        capability = 'cli_wrapper'
+        telemetry_capability = 'coarse_process_only'
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = 'fake'
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout='',
+                stderr='usage: villani_code.cli run ...\nerror: unrecognized arguments: --emit-runtime-events\n',
+                exit_code=2,
+                timeout=False,
+                runtime_seconds=0.05,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={'num_shell_commands': FieldQuality.INFERRED},
+                events=[AdapterEvent(type='command_started', timestamp=1.0, payload={})],
+            )
+
+    monkeypatch.setattr('villani_code.benchmark.runner.build_agent_runner', lambda agent: FakeRunner())
+
+    runner = BenchmarkRunner(output_dir=Path('artifacts/benchmark-test'))
+    data = runner.run(
+        suite_dir=Path('benchmark_tasks/villani_bench_v1'),
+        task_id='terminal_001_python_module_entry',
+        agent='villani',
+        model='tiny-model',
+        base_url=None,
+        api_key=None,
+    )
+    rows = load_results(Path(data['results_path']))
+    row = rows[0]
+    assert row.success == 0
+    assert row.failure_reason == FailureReason.AGENT_CRASH
+    assert row.error is not None
+    assert 'exited with code 2' in row.error
+    assert 'stderr:' in row.error
+    assert '--emit-runtime-events' in row.error

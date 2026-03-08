@@ -94,3 +94,51 @@ def test_command_runner_appends_prompt() -> None:
     runner = CommandAgentRunner("python -c 'print(1)'")
     cmd = runner.build_command(Path("."), "fix bug", None, None, None, None)
     assert cmd[-1] == "fix bug"
+
+
+def test_villani_command_keeps_no_stream_and_omits_emit_runtime_events() -> None:
+    runner = VillaniAgentRunner()
+    cmd = runner.build_command(
+        Path('/tmp/repo'),
+        'fix bug',
+        model='qwen-9b',
+        base_url=None,
+        api_key=None,
+        provider='anthropic',
+    )
+    assert '--no-stream' in cmd
+    assert '--emit-runtime-events' not in cmd
+
+
+def test_villani_run_agent_missing_runtime_events_file_is_best_effort(monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+    def fake_run_agent(self, repo_path, prompt, model, base_url, api_key, provider, timeout):
+        return AdapterRunResult(
+            stdout='ok',
+            stderr='',
+            exit_code=0,
+            timeout=False,
+            runtime_seconds=0.1,
+            telemetry_quality=TelemetryQuality.INFERRED,
+            telemetry_field_quality_map={'num_shell_commands': FieldQuality.INFERRED},
+            events=[AdapterEvent(type='command_started', timestamp=1.0, payload={})],
+        )
+
+    monkeypatch.setattr('villani_code.benchmark.agents.base.AgentRunner.run_agent', fake_run_agent)
+
+    runner = VillaniAgentRunner()
+    result = runner.run_agent(
+        repo_path=Path('/tmp'),
+        prompt='fix bug',
+        model='qwen-9b',
+        base_url=None,
+        api_key=None,
+        provider='anthropic',
+        timeout=10,
+    )
+
+    assert result.stdout == 'ok'
+    assert len(result.events) == 1
+    assert result.telemetry_quality == TelemetryQuality.INFERRED
