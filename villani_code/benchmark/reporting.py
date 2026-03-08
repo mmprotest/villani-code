@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import median
@@ -29,7 +28,9 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
         "benchmark_track",
         "agent_name",
         "adapter_name",
+        "adapter_capability",
         "fairness_classification",
+        "telemetry_capability",
         "success",
         "failure_reason",
         "runtime_seconds",
@@ -48,7 +49,9 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
                     "benchmark_track": r.benchmark_track.value,
                     "agent_name": r.agent_name,
                     "adapter_name": r.adapter_name,
+                    "adapter_capability": r.adapter_capability,
                     "fairness_classification": r.fairness_classification.value,
+                    "telemetry_capability": r.telemetry_capability,
                     "success": r.success,
                     "failure_reason": r.failure_reason.value if r.failure_reason else "",
                     "runtime_seconds": r.runtime_seconds,
@@ -87,28 +90,21 @@ def summarize(results: list[BenchmarkRunResult]) -> BenchmarkSummary:
 
 
 def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
-    by_agent: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
     by_track: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
     by_family: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
-    by_diff: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
-    by_lang: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
-    by_source: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
     by_quality: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
     by_fairness: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
     failures = Counter()
     hidden_after_visible = 0
+    invalid_repro = 0
+    forbidden_edits = 0
     solved_runtimes: list[float] = []
-    solved_files: list[int] = []
     solved_lines: list[int] = []
 
     for r in results:
         for bucket, key in [
-            (by_agent, r.agent_name),
             (by_track, r.benchmark_track.value),
             (by_family, r.task_family.value),
-            (by_diff, r.task_difficulty.value),
-            (by_lang, r.task_language),
-            (by_source, r.task_source_type.value),
             (by_quality, r.telemetry_quality.value),
             (by_fairness, r.fairness_classification.value),
         ]:
@@ -117,9 +113,12 @@ def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
 
         if r.visible_pass and not r.hidden_pass:
             hidden_after_visible += 1
+        if r.failure_reason and r.failure_reason.value == "invalid_repro_test":
+            invalid_repro += 1
+        if r.failure_reason and r.failure_reason.value == "forbidden_edit":
+            forbidden_edits += 1
         if r.success:
             solved_runtimes.append(r.runtime_seconds)
-            solved_files.append(r.files_touched)
             solved_lines.append(r.lines_added + r.lines_deleted)
         if r.failure_reason:
             failures[r.failure_reason.value] += 1
@@ -129,27 +128,23 @@ def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
     repeats: dict[str, list[int]] = defaultdict(list)
     for r in results:
         repeats[r.task_id].append(r.success)
-    stability = {k: {"runs": len(v), "solve_consistency": float(sum(v) / len(v))} for k, v in repeats.items() if len(v) > 1}
+    instability = {k: {"runs": len(v), "solve_consistency": float(sum(v) / len(v))} for k, v in repeats.items() if len(v) > 1 and len(set(v)) > 1}
 
     return {
         "summary": summarize(results).model_dump(),
-        "by_agent": dict(by_agent),
         "by_track": dict(by_track),
         "by_family": dict(by_family),
-        "by_difficulty": dict(by_diff),
-        "by_language": dict(by_lang),
-        "by_source_type": dict(by_source),
         "by_telemetry_quality": dict(by_quality),
         "by_fairness_class": dict(by_fairness),
         "hidden_fail_after_visible_pass_rate": hidden_after_visible / len(results) if results else 0.0,
-        "timeout_rate": sum(1 for r in results if r.timeout) / len(results) if results else 0.0,
-        "forbidden_edit_rate": sum(1 for r in results if r.failure_reason and r.failure_reason.value == "forbidden_edit") / len(results) if results else 0.0,
+        "invalid_repro_test_rate": invalid_repro / len(results) if results else 0.0,
+        "forbidden_edit_rate": forbidden_edits / len(results) if results else 0.0,
         "failure_reason_histogram": dict(failures),
         "solved_runtime_median": median(solved_runtimes) if solved_runtimes else None,
-        "solved_files_touched_median": median(solved_files) if solved_files else None,
         "solved_lines_changed_median": median(solved_lines) if solved_lines else None,
         "pass_rate_ci_95": {"low": ci[0], "high": ci[1]},
-        "stability": stability,
+        "instability": instability,
+        "small_sample_warning": "Sample size is small; avoid strong significance claims." if len(results) < 10 else None,
     }
 
 
@@ -175,31 +170,38 @@ def render_summary_table(results: list[BenchmarkRunResult]) -> str:
     lines = [
         f"tasks={d['summary']['total_tasks']} successes={d['summary']['successes']} success_rate={d['summary']['success_rate']:.2%}",
         f"ci95=({d['pass_rate_ci_95']['low']:.2%}, {d['pass_rate_ci_95']['high']:.2%}) hidden_after_visible={d['hidden_fail_after_visible_pass_rate']:.2%}",
-        "id | track | family | success | visible | hidden | runtime_s | fail_reason",
+        f"core={d['by_track'].get('core', {}).get('success', 0)}/{d['by_track'].get('core', {}).get('total', 0)} feature={d['by_track'].get('feature', {}).get('success', 0)}/{d['by_track'].get('feature', {}).get('total', 0)}",
+        "id | track | fairness | telemetry | success | visible | hidden | runtime_s | fail_reason",
     ]
     for row in results:
         lines.append(
-            f"{row.task_id} | {row.benchmark_track.value} | {row.task_family.value} | {row.success} | {row.visible_pass} | {row.hidden_pass} | {row.runtime_seconds:.2f} | {row.failure_reason.value if row.failure_reason else '-'}"
+            f"{row.task_id} | {row.benchmark_track.value} | {row.fairness_classification.value} | {row.telemetry_quality.value} | {row.success} | {row.visible_pass} | {row.hidden_pass} | {row.runtime_seconds:.2f} | {row.failure_reason.value if row.failure_reason else '-'}"
         )
     return "\n".join(lines)
 
 
 def write_markdown_report(results: list[BenchmarkRunResult], out: Path) -> None:
     d = diagnostics(results)
-    lines = ["# Benchmark Report", "", f"- tasks: {d['summary']['total_tasks']}", f"- success_rate: {d['summary']['success_rate']:.2%}", "", "## Failure histogram", ""]
-    for k, v in sorted(d["failure_reason_histogram"].items()):
-        lines.append(f"- {k}: {v}")
-    lines.append("\n## By track")
+    lines = ["# Benchmark Report", "", f"- tasks: {d['summary']['total_tasks']}", f"- success_rate: {d['summary']['success_rate']:.2%}"]
+    if d["small_sample_warning"]:
+        lines.append(f"- warning: {d['small_sample_warning']}")
+    lines.extend(["", "## Track summary (separate)", ""])
     for k, v in sorted(d["by_track"].items()):
         lines.append(f"- {k}: {v['success']}/{v['total']}")
-    out.write_text("\n".join(lines), encoding="utf-8")
+    lines.extend(["", "## Fairness caveats", ""])
+    for row in results:
+        lines.append(f"- {row.adapter_name}: {row.fairness_classification.value} ({row.fairness_notes})")
+    lines.extend(["", "## Telemetry quality", ""])
+    for k, v in sorted(d["by_telemetry_quality"].items()):
+        lines.append(f"- {k}: {v['success']}/{v['total']}")
+    out.write_text("\n".join(dict.fromkeys(lines)), encoding="utf-8")
 
 
 def write_html_report(results: list[BenchmarkRunResult], out: Path) -> None:
     d = diagnostics(results)
     rows = "".join(
-        f"<tr><td>{r.task_id}</td><td>{r.benchmark_track.value}</td><td>{r.task_family.value}</td><td>{r.success}</td><td>{r.failure_reason.value if r.failure_reason else ''}</td></tr>"
+        f"<tr><td>{r.task_id}</td><td>{r.benchmark_track.value}</td><td>{r.task_family.value}</td><td>{r.fairness_classification.value}</td><td>{r.telemetry_quality.value}</td><td>{r.success}</td></tr>"
         for r in results
     )
-    html = f"""<html><body><h1>Benchmark Report</h1><p>Tasks: {d['summary']['total_tasks']}</p><p>Success: {d['summary']['success_rate']:.2%}</p><table border='1'><tr><th>Task</th><th>Track</th><th>Family</th><th>Success</th><th>Failure</th></tr>{rows}</table></body></html>"""
+    html = f"""<html><body><h1>Benchmark Report</h1><p>Tasks: {d['summary']['total_tasks']}</p><p>Success: {d['summary']['success_rate']:.2%}</p><table border='1'><tr><th>Task</th><th>Track</th><th>Family</th><th>Fairness</th><th>Telemetry</th><th>Success</th></tr>{rows}</table></body></html>"""
     out.write_text(html, encoding="utf-8")

@@ -85,7 +85,7 @@ class TaskMetadata(BaseModel):
 
 class BenchmarkTask(BaseModel):
     id: str
-    benchmark_track: BenchmarkTrack = BenchmarkTrack.CORE
+    benchmark_track: BenchmarkTrack
     family: TaskFamily
     difficulty: TaskDifficulty
     language: str
@@ -178,7 +178,10 @@ class BenchmarkRunResult(BaseModel):
     agent_name: str
     adapter_name: str
     adapter_version: str
+    adapter_capability: str
     fairness_classification: FairnessClassification
+    fairness_notes: str
+    telemetry_capability: str
     model_name: str | None
     provider_label: str | None = None
     success: int
@@ -195,9 +198,15 @@ class BenchmarkRunResult(BaseModel):
     num_shell_commands: int | None = None
     num_failed_commands: int | None = None
     verifications_run: list[str]
+    verification_attempt_count: int = 0
     time_to_first_edit: float | None = None
     time_to_first_verify: float | None = None
     last_verification_time: float | None = None
+    expected_files_found: int | None = None
+    expected_files_total: int | None = None
+    expected_file_first_read_time: float | None = None
+    self_corrected_after_failed_verify: bool | None = None
+    touched_irrelevant_files: int | None = None
     telemetry_quality: TelemetryQuality = TelemetryQuality.UNAVAILABLE
     telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
     workspace_preserved: bool = False

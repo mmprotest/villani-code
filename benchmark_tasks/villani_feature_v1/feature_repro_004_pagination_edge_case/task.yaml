@@ -18,3 +18,4 @@ success_policy:
 allowlist_paths:
 - tests/
 - src/
+benchmark_track: feature

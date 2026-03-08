@@ -2,24 +2,23 @@
 
 ## Suites
 
-- Core suite: `benchmark_tasks/villani_bench_v1` (25+ deterministic offline tasks).
-- Feature suite scaffold: `benchmark_tasks/villani_feature_v1` (initial feature-scale tasks).
-- Optional held-out/private suites can be provided via CLI `--private-suite`.
+- Core suite: `benchmark_tasks/villani_bench_v1`
+- Feature suite: `benchmark_tasks/villani_feature_v1`
 
 ## Task directory contract
 
 Each task directory contains:
-- `task.yaml`
+- `task.yaml` (must include `benchmark_track: core|feature`)
 - `prompt.txt` (single short instruction)
 - `repo/`
 - optional `hidden_checks/` assets
-- `metadata.json` (source type, task version, tags, variant metadata)
+- `metadata.json` (source/version/tags/expected_files/skills)
 
-## Authoring notes
+## Hardening notes
 
-- Keep prompts short, bounded, objective.
-- Verification must remain execution-based and deterministic.
-- Hidden checks should include anti-overfit variants where possible.
-- Populate provenance (`source_type`) and version fields.
+- Track inference from path names is removed.
+- Core tasks may contain words like `feature_flag` in ids/paths without becoming feature-track.
+- Hidden checks should include anti-overfit variants where practical.
+- Keep `expected_files` + `primary_skill` populated for process diagnostics and health quality.
 
-See `docs/benchmark.md` for scoring, policy, telemetry quality semantics, reporting, and migration details.
+See `docs/benchmark.md` for telemetry quality, fairness caveats, healthcheck scope, and reporting semantics.

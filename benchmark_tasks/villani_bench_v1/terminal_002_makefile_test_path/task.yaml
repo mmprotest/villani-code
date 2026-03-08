@@ -21,3 +21,4 @@ allowlist_paths:
 - tests/
 - pyproject.toml
 - src/
+benchmark_track: core

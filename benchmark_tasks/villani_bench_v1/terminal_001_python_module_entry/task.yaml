@@ -19,3 +19,4 @@ allowlist_paths:
 - src/
 - app/
 - pyproject.toml
+benchmark_track: core

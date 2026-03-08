@@ -18,7 +18,7 @@ from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.benchmark.runner import BenchmarkRunner
-from villani_code.benchmark.health import run_healthcheck
+from villani_code.benchmark.health import run_healthcheck, validate_tasks
 from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, write_html_report, write_markdown_report
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
@@ -389,16 +389,20 @@ def benchmark_report_cmd(
 def benchmark_healthcheck_cmd(
     suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
 ) -> None:
-    console.print_json(json.dumps(run_healthcheck(suite.resolve())))
+    health = run_healthcheck(suite.resolve())
+    console.print_json(json.dumps(health))
+    if not health.get("ok", False):
+        raise typer.Exit(code=1)
 
 
 @benchmark_app.command("validate-tasks")
 def benchmark_validate_tasks_cmd(
     suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
 ) -> None:
-    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark"))
-    tasks = runner.list_tasks(suite.resolve())
-    console.print_json(json.dumps({"valid": len(tasks), "suite": str(suite)}))
+    payload = validate_tasks(suite.resolve())
+    console.print_json(json.dumps(payload))
+    if not payload.get("ok", False):
+        raise typer.Exit(code=1)
 
 
 @benchmark_app.command("manifest")
