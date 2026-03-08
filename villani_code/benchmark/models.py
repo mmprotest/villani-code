@@ -1,145 +1,110 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
-
-
-class ValidationCheckType(str, Enum):
-    COMMAND = "command"
-    FILE_CONTAINS = "file_contains"
-    FILE_NOT_CONTAINS = "file_not_contains"
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class ValidationCheck(BaseModel):
-    type: ValidationCheckType
-    command: str | None = None
-    cwd: str | None = None
-    expect_exit_code: int = 0
-    timeout_seconds: int | None = None
-    path: str | None = None
-    substring: str | None = None
+class TaskFamily(str, Enum):
+    BUGFIX = "bugfix"
+    REPRO_TEST = "repro_test"
+    LOCALIZE_PATCH = "localize_patch"
+    TERMINAL_WORKFLOW = "terminal_workflow"
 
-    @model_validator(mode="after")
-    def _validate_required_fields(self) -> "ValidationCheck":
-        if self.type == ValidationCheckType.COMMAND and not self.command:
-            raise ValueError("command check requires command")
-        if self.type in {ValidationCheckType.FILE_CONTAINS, ValidationCheckType.FILE_NOT_CONTAINS}:
-            if not self.path:
-                raise ValueError(f"{self.type.value} check requires path")
-            if self.substring is None:
-                raise ValueError(f"{self.type.value} check requires substring")
-        return self
+
+class TaskDifficulty(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+
+class SuccessPolicy(BaseModel):
+    require_visible_pass: bool = True
+    require_hidden_pass: bool = True
+    fail_on_timeout: bool = True
+    fail_on_repo_dirty_outside_allowlist: bool = True
 
 
 class BenchmarkTask(BaseModel):
     id: str
-    name: str
-    repo_path: str | None = None
-    repo_git_ref: str | None = None
-    instruction: str
-    category: str
-    tags: list[str] = Field(default_factory=list)
-    timeout_seconds: int = 300
-    max_turns: int | None = None
-    expected_touched_paths: list[str] = Field(default_factory=list)
-    forbidden_touched_paths: list[str] = Field(default_factory=list)
-    validation_checks: list[ValidationCheck] = Field(default_factory=list)
-    success_threshold: float | None = None
-    notes: str | None = None
-    difficulty: str | None = None
-    expected_edit_scope: str | None = None
-    pack_classification: str | None = None
+    family: TaskFamily
+    difficulty: TaskDifficulty
+    language: str
+    max_minutes: int = Field(ge=1)
+    max_files_touched: int = Field(ge=1)
+    expected_artifacts: list[str]
+    visible_verification: list[str]
+    hidden_verification: list[str]
+    success_policy: SuccessPolicy
+    allowlist_paths: list[str]
+
+    task_dir: Path
+    prompt: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        if not value or " " in value:
+            raise ValueError("Task id must be non-empty and contain no spaces")
+        return value
+
+    @field_validator("allowlist_paths")
+    @classmethod
+    def _validate_allowlist(cls, values: list[str]) -> list[str]:
+        if not values:
+            raise ValueError("allowlist_paths must not be empty")
+        return values
+
+    @model_validator(mode="after")
+    def _validate_task_dir(self) -> "BenchmarkTask":
+        if not (self.task_dir / "repo").is_dir():
+            raise ValueError(f"Task {self.id} is missing repo/")
+        return self
 
 
-class BenchmarkTaskPack(BaseModel):
-    name: str
-    classification: str
-    description: str
-    comparison_suitability: str
-    fairness_classification: str
-    deprecated_aliases: list[str] = Field(default_factory=list)
+class RunStatus(str, Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    ERROR = "error"
 
 
-class BenchmarkMetadata(BaseModel):
-    benchmark_name: str = "villani-agent-benchmark"
-    model: str | None = None
-    base_url: str | None = None
-    seed: int | None = None
-    repo_snapshot: str | None = None
-
-
-class ValidationResult(BaseModel):
-    check_type: ValidationCheckType
-    success: bool
-    details: str
-    exit_code: int | None = None
-    check_index: int = 0
-    failure_provenance: str | None = None
-
-
-@dataclass(slots=True)
-class Scorecard:
-    task_success: bool
-    validation_success: bool
-    elapsed_seconds: float
-    changed_files_count: int
-    unnecessary_files_touched_count: int
-    forbidden_files_touched_count: int
-    catastrophic_failure: bool
-    retry_count: int = 0
-    tokens_input: int | None = None
-    tokens_output: int | None = None
-    cost_usd: float | None = None
-    skipped: bool = False
-    composite_score: float = 0.0
-
-
-@dataclass(slots=True)
-class TaskExecutionResult:
-    agent_name: str
-    task_id: str
-    success: bool
-    exit_reason: str
-    elapsed_seconds: float
+class VerificationOutcome(BaseModel):
+    command: str
+    passed: bool
+    exit_code: int | None
     stdout: str
     stderr: str
-    changed_files: list[str]
-    git_diff: str
-    validation_results: list[ValidationResult] = field(default_factory=list)
-    catastrophic_failure: bool = False
-    tokens_input: int | None = None
-    tokens_output: int | None = None
-    cost_usd: float | None = None
-    raw_artifact_dir: str = ""
-    skipped: bool = False
-    skip_reason: str | None = None
-    retry_count: int = 0
 
 
-class AgentSelection(BaseModel):
-    name: Literal["villani", "claude-code", "opencode", "copilot-cli"]
+class BenchmarkRunResult(BaseModel):
+    task_id: str
+    agent: str
+    model: str | None
+    family: TaskFamily
+    difficulty: TaskDifficulty
+    success: int
+    visible_pass: bool
+    hidden_pass: bool
+    runtime_seconds: float
+    files_touched: int
+    touched_file_paths: list[str]
+    lines_added: int
+    lines_deleted: int
+    num_shell_commands: int
+    num_failed_commands: int
+    verifications_run: list[str]
+    timeout: bool
+    error: str | None = None
+    time_to_first_edit: float | None = None
+    time_to_first_verify: float | None = None
+    status: RunStatus = RunStatus.SUCCESS
 
 
-def ensure_within_repo(path: str, repo_root: Path) -> Path:
-    resolved = (repo_root / path).resolve()
-    if not str(resolved).startswith(str(repo_root.resolve())):
-        raise ValueError(f"Path escapes repository root: {path}")
-    return resolved
-
-
-def as_serializable(data: Any) -> Any:
-    if isinstance(data, BaseModel):
-        return data.model_dump()
-    if isinstance(data, Path):
-        return str(data)
-    if isinstance(data, list):
-        return [as_serializable(item) for item in data]
-    if isinstance(data, dict):
-        return {str(k): as_serializable(v) for k, v in data.items()}
-    if hasattr(data, "__dict__"):
-        return {k: as_serializable(v) for k, v in data.__dict__.items()}
-    return data
+class BenchmarkSummary(BaseModel):
+    total_tasks: int
+    successes: int
+    success_rate: float
+    by_family: dict[str, dict[str, float]]

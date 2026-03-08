@@ -1,10 +1,7 @@
 # Benchmark Tasks
 
-This directory stores objective, reproducible benchmark task packs used by `villani-code benchmark`.
+This directory now uses the Villani Benchmark v1 task format under `benchmark_tasks/villani_bench_v1`.
 
-## Packs
-- `internal_regressions`: Villani-specific self-repair/regression tasks. Useful for internal tracking, **not** for headline cross-agent claims.
-- `general_coding`: Neutral coding tasks intended for cross-agent comparison.
-- `constrained_model`: Low-context tasks for constrained/local/small-model workflows.
+Legacy benchmark packs and old JSON task format were removed.
 
-The legacy `villani_code` path is kept as a compatibility alias to `internal_regressions`.
+See `docs/benchmark.md` for schema, scoring, CLI, and migration details.

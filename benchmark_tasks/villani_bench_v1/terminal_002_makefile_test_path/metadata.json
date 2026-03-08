@@ -1,0 +1,11 @@
+{
+  "seed_type": "terminal",
+  "expected_files": [
+    "Makefile"
+  ],
+  "reference_patch_size_lines": 2,
+  "primary_skill": "shell-workflow",
+  "secondary_skills": [
+    "paths"
+  ]
+}

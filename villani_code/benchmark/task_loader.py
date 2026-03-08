@@ -3,83 +3,48 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from villani_code.benchmark.models import BenchmarkTask, BenchmarkTaskPack
+import yaml
+from pydantic import ValidationError
+
+from villani_code.benchmark.models import BenchmarkTask
 
 
-REQUIRED_PACK_FIELDS = {"name", "classification", "description", "comparison_suitability", "fairness_classification"}
+class TaskLoadError(RuntimeError):
+    pass
 
 
-def load_benchmark_task(path: Path) -> BenchmarkTask:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    task = BenchmarkTask.model_validate(payload)
-    if not task.id:
-        raise ValueError(f"Task in {path} is missing id")
-    return task
+def _read_prompt(prompt_file: Path) -> str:
+    prompt = prompt_file.read_text(encoding="utf-8").strip()
+    if "\n" in prompt:
+        raise TaskLoadError(f"{prompt_file} must contain exactly one short instruction")
+    if not prompt:
+        raise TaskLoadError(f"{prompt_file} is empty")
+    return prompt
 
 
-def resolve_tasks_dir(tasks_dir: Path) -> Path:
-    if tasks_dir.exists():
-        return tasks_dir
-    legacy = Path(str(tasks_dir).replace("benchmark_tasks/villani_code", "benchmark_tasks/internal_regressions"))
-    if legacy.exists():
-        return legacy
-    raise FileNotFoundError(f"Tasks directory does not exist: {tasks_dir}")
+def load_task(task_dir: Path) -> BenchmarkTask:
+    task_yaml = task_dir / "task.yaml"
+    prompt_txt = task_dir / "prompt.txt"
+    metadata_json = task_dir / "metadata.json"
+    if not task_yaml.exists() or not prompt_txt.exists() or not metadata_json.exists():
+        raise TaskLoadError(f"Task directory missing required files: {task_dir}")
+    payload = yaml.safe_load(task_yaml.read_text(encoding="utf-8"))
+    payload["task_dir"] = task_dir
+    payload["prompt"] = _read_prompt(prompt_txt)
+    payload["metadata"] = json.loads(metadata_json.read_text(encoding="utf-8"))
+    try:
+        return BenchmarkTask.model_validate(payload)
+    except ValidationError as exc:
+        raise TaskLoadError(f"Invalid task schema in {task_yaml}: {exc}") from exc
 
 
-def load_task_pack_metadata(tasks_dir: Path) -> BenchmarkTaskPack:
-    resolved = resolve_tasks_dir(tasks_dir)
-    metadata_file = resolved / "pack.json"
-    if metadata_file.exists():
-        payload = json.loads(metadata_file.read_text(encoding="utf-8"))
-        missing = REQUIRED_PACK_FIELDS - set(payload)
-        if missing:
-            raise ValueError(f"Pack metadata missing required fields: {sorted(missing)}")
-        return BenchmarkTaskPack.model_validate(payload)
-    return BenchmarkTaskPack(
-        name=resolved.name,
-        classification="exploratory",
-        description="Unclassified task pack.",
-        comparison_suitability="unknown",
-        fairness_classification="mixed",
-    )
-
-
-def load_benchmark_tasks(tasks_dir: Path, task_id: str | None = None) -> list[BenchmarkTask]:
-    resolved = resolve_tasks_dir(tasks_dir)
-    task_files = sorted(path for path in resolved.glob("*.json") if path.name != "pack.json")
-    tasks = [load_benchmark_task(path) for path in task_files]
-    if task_id is not None:
+def load_tasks(suite_dir: Path, task_id: str | None = None) -> list[BenchmarkTask]:
+    if not suite_dir.exists():
+        raise TaskLoadError(f"Task suite not found: {suite_dir}")
+    task_dirs = sorted([path for path in suite_dir.iterdir() if path.is_dir() and (path / "task.yaml").exists()])
+    tasks = [load_task(path) for path in task_dirs]
+    if task_id:
         tasks = [task for task in tasks if task.id == task_id]
         if not tasks:
-            raise ValueError(f"Task id '{task_id}' not found in {resolved}")
+            raise TaskLoadError(f"Task not found: {task_id}")
     return tasks
-
-
-def lint_task_pack(tasks_dir: Path) -> list[str]:
-    errors: list[str] = []
-    resolved = resolve_tasks_dir(tasks_dir)
-    try:
-        load_task_pack_metadata(resolved)
-    except Exception as exc:
-        errors.append(str(exc))
-        return errors
-
-    tasks = load_benchmark_tasks(resolved)
-    seen_ids: set[str] = set()
-    seen_titles: set[str] = set()
-    for task in tasks:
-        if task.id in seen_ids:
-            errors.append(f"Duplicate task id: {task.id}")
-        seen_ids.add(task.id)
-        if task.name in seen_titles:
-            errors.append(f"Duplicate task title: {task.name}")
-        seen_titles.add(task.name)
-        if not task.instruction.strip():
-            errors.append(f"Task {task.id} has empty instruction")
-        if not task.validation_checks:
-            errors.append(f"Task {task.id} has no validation checks")
-        if not task.tags:
-            errors.append(f"Task {task.id} has empty tags")
-        if not task.difficulty:
-            errors.append(f"Task {task.id} missing difficulty")
-    return errors

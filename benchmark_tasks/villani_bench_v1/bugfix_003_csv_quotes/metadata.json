@@ -1,0 +1,11 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/csv_parser.py"
+  ],
+  "reference_patch_size_lines": 25,
+  "primary_skill": "parser-debugging",
+  "secondary_skills": [
+    "edge-cases"
+  ]
+}

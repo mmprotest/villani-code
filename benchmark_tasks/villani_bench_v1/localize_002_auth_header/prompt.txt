@@ -1,0 +1,1 @@
+Authenticated requests are losing the Authorization header before they reach the client. Find the issue and make the minimal correct fix.

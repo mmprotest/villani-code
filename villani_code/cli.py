@@ -17,14 +17,16 @@ from villani_code.plugins import PluginManager
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
-from villani_code.eval_harness import render_human_summary, result_to_json, run_eval_suite
 from villani_code.benchmark.runner import BenchmarkRunner
+from villani_code.benchmark.reporting import load_results, render_summary_table
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
 plugin_app = typer.Typer(help="Manage local plugins")
+benchmark_app = typer.Typer(help="Objective repository benchmark tasks")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(plugin_app, name="plugin")
+app.add_typer(benchmark_app, name="benchmark")
 console = Console()
 
 def _load_settings_manager() -> Any | None:
@@ -264,61 +266,52 @@ def reset_from_checkpoint_cmd(
     console.print(f"Reset context from checkpoint {checkpoint.checkpoint_id}")
 
 
-@app.command("eval")
-def eval_cmd(
-    suite: Path = typer.Option(Path("tests/fixtures/eval/suite.json"), "--suite", help="Eval suite JSON file"),
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable eval report"),
+@benchmark_app.command("list")
+def benchmark_list_cmd(
+    suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
 ) -> None:
-    result = run_eval_suite(suite.resolve())
-    payload = result_to_json(result)
-    if json_output:
-        console.print_json(json.dumps(payload))
-        return
-    console.print(render_human_summary(result))
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark"))
+    tasks = runner.list_tasks(suite.resolve())
+    payload = [
+        {
+            "id": task.id,
+            "family": task.family.value,
+            "difficulty": task.difficulty.value,
+            "max_minutes": task.max_minutes,
+        }
+        for task in tasks
+    ]
+    console.print_json(json.dumps(payload))
 
 
-@app.command("benchmark")
-def benchmark_cmd(
-    tasks_dir: Path = typer.Option(Path("benchmark_tasks/internal_regressions"), "--tasks-dir"),
+@benchmark_app.command("run")
+def benchmark_run_cmd(
+    suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
     task: Optional[str] = typer.Option(None, "--task"),
-    agent: list[str] = typer.Option(["villani"], "--agent"),
-    repo: Path = typer.Option(Path("."), "--repo"),
-    base_url: Optional[str] = typer.Option(None, "--base-url"),
+    agent: str = typer.Option("villani", "--agent"),
     model: Optional[str] = typer.Option(None, "--model"),
+    base_url: Optional[str] = typer.Option(None, "--base-url"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
-    timeout_seconds: Optional[int] = typer.Option(None, "--timeout-seconds"),
     output_dir: Path = typer.Option(Path("artifacts/benchmark"), "--output-dir"),
-    seed: Optional[int] = typer.Option(None, "--seed"),
-    unsafe: bool = typer.Option(False, "--unsafe"),
-    thinking: Optional[str] = typer.Option(None, "--thinking"),
-    max_tokens: Optional[int] = typer.Option(None, "--max-tokens"),
-    verbose: bool = typer.Option(True, "--verbose/--no-verbose"),
-    stream_agent_output: bool = typer.Option(True, "--stream-agent-output/--no-stream-agent-output"),
-    quiet: bool = typer.Option(False, "--quiet"),
 ) -> None:
-    if quiet:
-        verbose = False
-        stream_agent_output = False
-    runner = BenchmarkRunner(
-        output_dir=output_dir.resolve(),
-        verbose=verbose,
-        stream_agent_output=stream_agent_output,
-    )
+    runner = BenchmarkRunner(output_dir=output_dir.resolve())
     result = runner.run(
-        tasks_dir=tasks_dir.resolve(),
+        suite_dir=suite.resolve(),
         task_id=task,
-        agents=agent,
-        repo_path=repo.resolve(),
+        agent=agent,
         model=model,
         base_url=base_url,
         api_key=api_key,
-        timeout_seconds=timeout_seconds,
-        seed=seed,
-        unsafe=unsafe,
-        thinking=thinking,
-        max_tokens=max_tokens,
     )
     console.print_json(json.dumps(result))
+
+
+@benchmark_app.command("summary")
+def benchmark_summary_cmd(
+    results: Path = typer.Option(..., "--results"),
+) -> None:
+    rows = load_results(results.resolve())
+    console.print(render_summary_table(rows))
 
 
 @mcp_app.command("list")

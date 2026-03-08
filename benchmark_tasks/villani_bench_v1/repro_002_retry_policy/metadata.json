@@ -1,0 +1,11 @@
+{
+  "seed_type": "repro",
+  "expected_files": [
+    "tests/test_retry_policy_regression.py"
+  ],
+  "reference_patch_size_lines": 18,
+  "primary_skill": "regression-testing",
+  "secondary_skills": [
+    "pytest"
+  ]
+}

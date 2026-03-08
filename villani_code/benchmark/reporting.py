@@ -1,169 +1,60 @@
 from __future__ import annotations
 
-from collections import defaultdict
+import json
 from pathlib import Path
-from typing import Any
 
-from villani_code.benchmark.utils import write_csv, write_json
-
-PROVENANCE_BUCKETS = [
-    "agent_failure",
-    "validation_failure",
-    "environment_failure",
-    "harness_failure",
-    "timeout",
-    "skip",
-]
+from villani_code.benchmark.models import BenchmarkRunResult, BenchmarkSummary
 
 
-def _row_provenance(row: dict[str, Any]) -> str | None:
-    if row["scorecard"].get("skipped"):
-        return "skip"
-    return row.get("failure_provenance")
+def write_results(results: list[BenchmarkRunResult], output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / "results.jsonl"
+    with out.open("w", encoding="utf-8") as handle:
+        for row in results:
+            handle.write(row.model_dump_json())
+            handle.write("\n")
+    summary = summarize(results)
+    (output_dir / "summary.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    return out
 
 
-def aggregate_by_agent(results: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in results:
-        grouped[row["agent_name"]].append(row)
-
-    aggregates: dict[str, dict[str, float]] = {}
-    for agent, rows in grouped.items():
-        total = max(len(rows), 1)
-        successes = sum(1 for row in rows if row["scorecard"]["task_success"])
-        validations = sum(1 for row in rows if row["scorecard"]["validation_success"])
-        skips = sum(1 for row in rows if row["scorecard"]["skipped"])
-        catastrophic = sum(1 for row in rows if row["scorecard"]["catastrophic_failure"])
-        counts = {f"{bucket}_count": 0 for bucket in PROVENANCE_BUCKETS}
-        for row in rows:
-            bucket = _row_provenance(row)
-            if bucket in PROVENANCE_BUCKETS:
-                counts[f"{bucket}_count"] += 1
-
-        aggregates[agent] = {
-            "success_rate": successes / total,
-            "validation_pass_rate": validations / total,
-            "skip_rate": skips / total,
-            "average_composite_score": sum(row["scorecard"]["composite_score"] for row in rows) / total,
-            "average_elapsed_time": sum(row["scorecard"]["elapsed_seconds"] for row in rows) / total,
-            "catastrophic_failure_rate": catastrophic / total,
-            "average_unnecessary_files_touched": sum(row["scorecard"]["unnecessary_files_touched_count"] for row in rows) / total,
-            **counts,
-            **{f"{bucket}_rate": counts[f"{bucket}_count"] / total for bucket in PROVENANCE_BUCKETS},
-        }
-    return aggregates
+def load_results(path: Path) -> list[BenchmarkRunResult]:
+    rows: list[BenchmarkRunResult] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows.append(BenchmarkRunResult.model_validate_json(line))
+    return rows
 
 
-def to_markdown(metadata: dict[str, Any], rows: list[dict[str, Any]]) -> str:
-    aggregates = aggregate_by_agent(rows)
-    leaderboard = sorted(aggregates.items(), key=lambda item: item[1]["average_composite_score"], reverse=True)
+def summarize(results: list[BenchmarkRunResult]) -> BenchmarkSummary:
+    total = len(results)
+    successes = sum(item.success for item in results)
+    by_family: dict[str, dict[str, float]] = {}
+    for item in results:
+        key = item.family.value
+        family = by_family.setdefault(key, {"total": 0.0, "successes": 0.0})
+        family["total"] += 1
+        family["successes"] += item.success
+    for family in by_family.values():
+        total_family = family["total"]
+        family["success_rate"] = round((family["successes"] / total_family) if total_family else 0.0, 4)
+    return BenchmarkSummary(
+        total_tasks=total,
+        successes=successes,
+        success_rate=round((successes / total) if total else 0.0, 4),
+        by_family=by_family,
+    )
+
+
+def render_summary_table(results: list[BenchmarkRunResult]) -> str:
+    summary = summarize(results)
     lines = [
-        "# Benchmark Results",
-        "",
-        f"- Model: `{metadata.get('model')}`",
-        f"- Base URL: `{metadata.get('base_url')}`",
-        f"- Agents: {', '.join(metadata.get('agents', []))}",
-        f"- Run mode: `{metadata.get('run_mode', 'mixed')}`",
-        f"- Pack: `{metadata.get('pack_name', 'unknown')}`",
-        f"- Pack classification: `{metadata.get('pack_classification', 'unknown')}`",
-        f"- Pack description: {metadata.get('pack_description', '')}",
-        f"- Comparison suitability: `{metadata.get('comparison_suitability', 'unknown')}`",
-        f"- Fairness classification: `{metadata.get('fairness_classification', metadata.get('run_mode', 'mixed'))}`",
-        f"- Interpretation status: `{metadata.get('interpretation_status', 'informational_only')}`",
-        "",
+        f"tasks={summary.total_tasks} successes={summary.successes} success_rate={summary.success_rate:.2%}",
+        "id | family | success | visible | hidden | runtime_s",
     ]
-
-    interpretation_warning = metadata.get("interpretation_warning")
-    if interpretation_warning:
-        lines.extend([f"> ⚠️ {interpretation_warning}", ""])
-
-    lines.extend(
-        [
-            "## Leaderboard",
-            "",
-            "| Agent | Success Rate | Validation Pass Rate | Skip Rate | Avg Composite | Avg Time (s) | Catastrophic Failure Rate | Avg Unnecessary Files |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
-        ]
-    )
-    for agent, agg in leaderboard:
+    for row in results:
         lines.append(
-            f"| {agent} | {agg['success_rate']:.2%} | {agg['validation_pass_rate']:.2%} | {agg['skip_rate']:.2%} | {agg['average_composite_score']:.2f} | {agg['average_elapsed_time']:.2f} | {agg['catastrophic_failure_rate']:.2%} | {agg['average_unnecessary_files_touched']:.2f} |"
-        )
-
-    lines.extend(
-        [
-            "",
-            "## Failure Provenance Summary",
-            "",
-            "| Agent | Agent Fail | Validation Fail | Environment Fail | Harness Fail | Timeout | Skip |",
-            "|---|---:|---:|---:|---:|---:|---:|",
-        ]
-    )
-    for agent, agg in leaderboard:
-        lines.append(
-            f"| {agent} | {agg['agent_failure_count']} ({agg['agent_failure_rate']:.1%}) | {agg['validation_failure_count']} ({agg['validation_failure_rate']:.1%}) | {agg['environment_failure_count']} ({agg['environment_failure_rate']:.1%}) | {agg['harness_failure_count']} ({agg['harness_failure_rate']:.1%}) | {agg['timeout_count']} ({agg['timeout_rate']:.1%}) | {agg['skip_count']} ({agg['skip_rate']:.1%}) |"
-        )
-
-    total_runs = max(len(rows), 1)
-    env_or_harness = sum(1 for row in rows if _row_provenance(row) in {"environment_failure", "harness_failure"})
-    if env_or_harness / total_runs >= 0.2:
-        lines.extend(["", "> ⚠️ Significant environment/harness instability detected; do not interpret this as an agent-quality ranking."])
-
-    fairness_warning = metadata.get("fairness_warning")
-    if fairness_warning:
-        lines.extend(["", f"> ⚠️ {fairness_warning}"])
-
-    capabilities = metadata.get("agent_capabilities", [])
-    if capabilities:
-        lines.extend(
-            [
-                "",
-                "## Agent Capabilities",
-                "",
-                "| Agent | Explicit Base URL | Explicit Model | Noninteractive | Unattended | Fairness | Controllability |",
-                "|---|---|---|---|---|---|---|",
-            ]
-        )
-        for row in capabilities:
-            lines.append(
-                f"| {row.get('agent')} | {row.get('supports_explicit_base_url')} | {row.get('supports_explicit_model')} | {row.get('supports_noninteractive')} | {row.get('supports_unattended')} | {row.get('fairness_classification')} | {row.get('controllability')} |"
-            )
-
-    lines.extend(["", "## Per-task Results", "", "| Agent | Task | Success | Validation | Skipped | Composite | Exit Reason | Skip Reason | Failure Provenance |", "|---|---|---|---|---|---:|---|---|---|"])
-    for row in rows:
-        score = row["scorecard"]
-        lines.append(
-            f"| {row['agent_name']} | {row['task_id']} | {score['task_success']} | {score['validation_success']} | {score['skipped']} | {score['composite_score']:.2f} | {row['exit_reason']} | {row.get('skip_reason') or ''} | {row.get('failure_provenance') or ''} |"
+            f"{row.task_id} | {row.family.value} | {row.success} | {row.visible_pass} | {row.hidden_pass} | {row.runtime_seconds:.2f}"
         )
     return "\n".join(lines)
-
-
-def persist_reports(output_dir: Path, metadata: dict[str, Any], rows: list[dict[str, Any]]) -> None:
-    aggregates = aggregate_by_agent(rows)
-    payload = {
-        "metadata": metadata,
-        "results": rows,
-        "aggregate_by_agent": aggregates,
-    }
-    write_json(output_dir / "benchmark_results.json", payload)
-    (output_dir / "benchmark_results.md").write_text(to_markdown(metadata, rows), encoding="utf-8")
-    csv_rows = []
-    for row in rows:
-        score = row["scorecard"]
-        csv_rows.append(
-            {
-                "agent_name": row["agent_name"],
-                "task_id": row["task_id"],
-                "task_success": score["task_success"],
-                "validation_success": score["validation_success"],
-                "skipped": score["skipped"],
-                "elapsed_seconds": score["elapsed_seconds"],
-                "composite_score": score["composite_score"],
-                "failure_provenance": row.get("failure_provenance"),
-            }
-        )
-    write_csv(
-        output_dir / "benchmark_results.csv",
-        csv_rows,
-        ["agent_name", "task_id", "task_success", "validation_success", "skipped", "elapsed_seconds", "composite_score", "failure_provenance"],
-    )

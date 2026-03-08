@@ -1,0 +1,11 @@
+{
+  "seed_type": "repro",
+  "expected_files": [
+    "tests/test_csv_newline_regression.py"
+  ],
+  "reference_patch_size_lines": 20,
+  "primary_skill": "regression-testing",
+  "secondary_skills": [
+    "pytest"
+  ]
+}

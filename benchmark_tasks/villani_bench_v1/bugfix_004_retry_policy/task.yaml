@@ -1,0 +1,20 @@
+id: bugfix_004_retry_policy
+family: bugfix
+difficulty: medium
+language: python
+max_minutes: 20
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_retry_policy.py::test_400_does_not_retry tests/test_retry_policy.py::test_500_retries
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/

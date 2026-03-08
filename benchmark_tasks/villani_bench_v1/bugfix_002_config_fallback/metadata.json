@@ -1,0 +1,11 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/config.py"
+  ],
+  "reference_patch_size_lines": 6,
+  "primary_skill": "config-debugging",
+  "secondary_skills": [
+    "env-handling"
+  ]
+}

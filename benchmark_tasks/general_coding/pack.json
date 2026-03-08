@@ -1,7 +1,0 @@
-{
-  "name": "general_coding",
-  "classification": "general_coding",
-  "description": "Neutral, repo-agnostic coding tasks for cross-agent comparison.",
-  "comparison_suitability": "headline_comparison_suitable",
-  "fairness_classification": "standardized"
-}

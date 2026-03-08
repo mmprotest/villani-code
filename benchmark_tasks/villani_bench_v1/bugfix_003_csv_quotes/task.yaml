@@ -1,0 +1,20 @@
+id: bugfix_003_csv_quotes
+family: bugfix
+difficulty: medium
+language: python
+max_minutes: 20
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_csv_quotes.py::test_quoted_comma
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/

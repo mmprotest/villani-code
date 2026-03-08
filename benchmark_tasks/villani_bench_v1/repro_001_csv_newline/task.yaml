@@ -1,0 +1,19 @@
+id: repro_001_csv_newline
+family: repro_test
+difficulty: medium
+language: python
+max_minutes: 20
+max_files_touched: 2
+expected_artifacts:
+- test
+visible_verification:
+- pytest -q tests/test_csv_newline_regression.py && exit 1 || exit 0
+hidden_verification:
+- pytest -q tests/test_csv_newline_regression.py
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- tests/

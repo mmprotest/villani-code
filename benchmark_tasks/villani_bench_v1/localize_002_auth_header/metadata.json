@@ -1,0 +1,11 @@
+{
+  "seed_type": "localization",
+  "expected_files": [
+    "src/app/middleware.py"
+  ],
+  "reference_patch_size_lines": 10,
+  "primary_skill": "request-pipeline",
+  "secondary_skills": [
+    "headers"
+  ]
+}

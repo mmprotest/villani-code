@@ -1,0 +1,21 @@
+id: terminal_001_python_module_entry
+family: terminal_workflow
+difficulty: easy
+language: python
+max_minutes: 15
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- python -m app --help
+hidden_verification:
+- python -c "import subprocess,sys;sys.exit(subprocess.run([sys.executable,'-m','app','--help']).returncode)"
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- app/
+- pyproject.toml

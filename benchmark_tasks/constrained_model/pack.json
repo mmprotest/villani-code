@@ -1,7 +1,0 @@
-{
-  "name": "constrained_model",
-  "classification": "constrained_model",
-  "description": "Low-context tasks designed for local/small-model agent evaluation.",
-  "comparison_suitability": "constrained_model_only",
-  "fairness_classification": "constrained"
-}

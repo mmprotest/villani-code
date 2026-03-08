@@ -1,0 +1,11 @@
+{
+  "seed_type": "localization",
+  "expected_files": [
+    "src/app/runtime.py"
+  ],
+  "reference_patch_size_lines": 8,
+  "primary_skill": "cross-file-localization",
+  "secondary_skills": [
+    "config"
+  ]
+}
