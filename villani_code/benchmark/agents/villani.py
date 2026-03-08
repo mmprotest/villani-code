@@ -20,7 +20,15 @@ class VillaniAgentRunner(AgentRunner):
     file_event_capture = FieldQuality.EXACT
     verify_capture = FieldQuality.EXACT
 
-    def build_command(self, repo_path: Path, prompt: str, model: str | None, base_url: str | None, api_key: str | None) -> list[str]:
+    def build_command(
+        self,
+        repo_path: Path,
+        prompt: str,
+        model: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        provider: str | None,
+    ) -> list[str]:
         if not model:
             raise ValueError("villani requires --model")
         command = [
@@ -32,7 +40,7 @@ class VillaniAgentRunner(AgentRunner):
             "--repo",
             str(repo_path),
             "--provider",
-            "anthropic",
+            provider or ("openai" if base_url else "anthropic"),
             "--model",
             model,
             "--no-stream",
@@ -44,8 +52,17 @@ class VillaniAgentRunner(AgentRunner):
             command.extend(["--api-key", api_key])
         return command
 
-    def run_agent(self, repo_path: Path, prompt: str, model: str | None, base_url: str | None, api_key: str | None, timeout: int) -> AdapterRunResult:
-        base = super().run_agent(repo_path, prompt, model, base_url, api_key, timeout)
+    def run_agent(
+        self,
+        repo_path: Path,
+        prompt: str,
+        model: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        provider: str | None,
+        timeout: int,
+    ) -> AdapterRunResult:
+        base = super().run_agent(repo_path, prompt, model, base_url, api_key, provider, timeout)
         events_file = repo_path / ".villani_code" / "runtime_events.jsonl"
         events: list[AdapterEvent] = []
         if events_file.exists():

@@ -8,7 +8,15 @@ from villani_code.benchmark.agents.base import AgentRunner
 class AiderAgentRunner(AgentRunner):
     name = "aider"
 
-    def build_command(self, repo_path: Path, prompt: str, model: str | None, base_url: str | None, api_key: str | None) -> list[str]:
+    def build_command(
+        self,
+        repo_path: Path,
+        prompt: str,
+        model: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        provider: str | None,
+    ) -> list[str]:
         if not model:
             raise ValueError("aider requires --model for fair same-model benchmarking")
         if not base_url:
