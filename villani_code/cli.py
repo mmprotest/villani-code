@@ -32,23 +32,35 @@ console = Console()
 
 
 def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
-    response = result.get("response", {}) if isinstance(result, dict) else {}
-    if not isinstance(response, dict):
-        return
-    content = response.get("content", [])
-    if not isinstance(content, list):
-        return
+    try:
+        if not isinstance(result, dict):
+            return
 
-    for block in content:
-        if isinstance(block, str):
-            console.print(block)
-            continue
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text":
-            text = block.get("text", "")
+        response = result.get("response")
+        if isinstance(response, str):
+            return
+        if not isinstance(response, dict):
+            return
+
+        content = response.get("content")
+        if isinstance(content, str):
+            return
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if isinstance(block, str):
+                console.print(block)
+                continue
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text")
             if isinstance(text, str):
                 console.print(text)
+    except Exception:  # noqa: BLE001
+        return
 
 def _load_settings_manager() -> Any | None:
     try:

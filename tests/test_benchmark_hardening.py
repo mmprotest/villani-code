@@ -63,3 +63,9 @@ def test_healthcheck_catches_duplicate_ids_and_hidden_leak(tmp_path: Path) -> No
 def test_explicit_track_is_respected() -> None:
     task = load_task(Path("benchmark_tasks/villani_feature_v1/feature_bugfix_001_datetime_cli"))
     assert task.benchmark_track.value == "feature"
+
+
+def test_localize_005_expected_files_point_to_real_repo_paths() -> None:
+    task = load_task(Path("benchmark_tasks/villani_bench_v1/localize_005_cache_invalidation"))
+    for rel in task.metadata.expected_files:
+        assert (task.task_dir / "repo" / rel).exists(), rel

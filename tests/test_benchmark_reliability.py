@@ -141,3 +141,55 @@ def test_forbidden_edit_policy_ignores_runtime_artifacts_but_flags_real_unexpect
     unexpected = filter_meaningful_touched_paths(["src/app.py", "tests/test_app.py"])
     unexpected_policy = enforce_path_policy(unexpected, allowlist, forbidden)
     assert not unexpected_policy.allowlist_ok
+
+
+def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
+    from villani_code.benchmark.models import FairnessClassification
+
+    class FakeRunner:
+        name = "villani"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: [])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (0, 0))
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda repo, commands, timeout_seconds: (True, [], 1.0, 2.0))
+
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="bugfix_001_datetime_cli",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    out = capsys.readouterr().out
+    assert "reason=missing_artifact" in out
+    assert "detail=missing required artifact: patch" in out
+
+    from villani_code.benchmark.reporting import load_results
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.failure_reason is not None
+    assert row.failure_reason.value == "missing_artifact"
+    assert row.error is not None
+    assert "missing required artifact: patch" in row.error

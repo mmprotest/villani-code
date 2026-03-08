@@ -326,7 +326,7 @@ class BenchmarkRunner:
             files_touched = len(touched)
             lines_added, lines_deleted = line_stats(workspace_repo)
             runtime_seconds = time.monotonic() - started
-            artifacts_ok = self._check_required_artifacts(task, touched)
+            artifacts_ok, artifact_failure_detail = self._check_required_artifacts(task, touched)
 
             if expected_files_total is None:
                 expected_files_total = len(task.metadata.expected_files)
@@ -337,10 +337,12 @@ class BenchmarkRunner:
                 failure_reason = FailureReason.TIMEOUT
             elif error:
                 failure_reason = failure_reason or FailureReason.AGENT_CRASH
-            elif not policy_result.allowlist_ok or not policy_result.forbidden_ok:
+            elif failure_reason is None and (not policy_result.allowlist_ok or not policy_result.forbidden_ok):
                 failure_reason = FailureReason.FORBIDDEN_EDIT
-            elif not artifacts_ok:
+            elif failure_reason is None and not artifacts_ok:
                 failure_reason = FailureReason.MISSING_ARTIFACT
+                if artifact_failure_detail:
+                    error = artifact_failure_detail
 
             success = int(
                 (not timeout or not task.success_policy.fail_on_timeout)
@@ -361,8 +363,11 @@ class BenchmarkRunner:
             touched_unexpected = bool(any(p not in expected_files_set for p in touched)) if expected_files_set else False
             expected_files_touched_count = sum(1 for p in touched if p in expected_files_set) if expected_files_set else 0
 
+            detail = ""
+            if failure_reason == FailureReason.MISSING_ARTIFACT and artifact_failure_detail:
+                detail = f" detail={artifact_failure_detail}"
             self._log(
-                f"result success={success} visible={int(visible_pass)} hidden={int(hidden_pass)} reason={(None if success else failure_reason.value if failure_reason else 'unknown')}"
+                f"result success={success} visible={int(visible_pass)} hidden={int(hidden_pass)} reason={(None if success else failure_reason.value if failure_reason else 'unknown')}{detail}"
             )
             return BenchmarkRunResult(
                 benchmark_track=task.benchmark_track,
@@ -440,13 +445,13 @@ class BenchmarkRunner:
                 repeat_index=repeat_index,
             )
 
-    def _check_required_artifacts(self, task: BenchmarkTask, touched: list[str]) -> bool:
+    def _check_required_artifacts(self, task: BenchmarkTask, touched: list[str]) -> tuple[bool, str | None]:
         expected = set(task.expected_artifacts)
         if "patch" in expected and not touched:
-            return False
+            return False, "missing required artifact: patch (no meaningful file changes detected)"
         if "test" in expected and not any(path.startswith("tests/") for path in touched):
-            return False
-        return True
+            return False, "missing required artifact: test (no changes under tests/)"
+        return True, None
 
     @staticmethod
     def _rmtree_onerror(func, path, _exc_info) -> None:
