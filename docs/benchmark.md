@@ -1,80 +1,126 @@
-# Villani Benchmark v2 (hardened)
+# Villani Benchmark v3 (evaluation platform)
 
-Villani benchmark is now an evaluation **system** for terminal coding agents, not just a task list.
+Villani benchmark is a layered evaluation **platform** for terminal coding agents, not a static task list.
 
-## What it measures
+## Headline scoring rule (non-negotiable)
 
-- Final repository correctness on bounded, deterministic tasks.
-- Headline metric remains binary task success (`visible_pass && hidden_pass && policy_pass`).
-- Hidden checks and policy constraints enforce anti-gaming.
+`success = 1` **only if** all are true:
+- visible verification passes
+- hidden verification passes
+- policy checks pass
 
-## What it does not measure
+Else `success = 0`.
 
-- Subjective code quality as primary score.
-- Agent self-reported confidence.
-- Internet-dependent workflows.
+Binary success rate is the headline metric. All other metrics are diagnostics.
 
-## Architecture
+## Tracks
 
-- `task_loader.py`: typed task loading, filtering, checksums.
-- `adapters/`: Villani/Claude/OpenCode/Copilot/generic command adapters.
-- `workspace.py`: isolated per-run workspace lifecycle with guaranteed cleanup unless `--keep-workspace`.
-- `verifier.py`: visible/hidden subprocess verification with timestamps.
-- `runner.py`: policy enforcement, reproducibility manifests, repro-test grading.
-- `reporting.py`: machine + human summaries, diagnostics, CSV + markdown reports.
-- `stats.py`: confidence intervals and paired bootstrap delta.
+- **Core track** (`benchmark_track=core`): bounded bugfix/repro/localize/terminal tasks, small patch radius.
+- **Feature track** (`benchmark_track=feature`): feature-scale tasks, separate reporting, not mixed into core score.
 
-## Fairness and comparability
+## Platform layers
 
-Exact comparability: same task set, same timeout, same model backend/provider settings, same deterministic options.
-Approximate comparability: different agent CLIs with different tool capabilities or telemetry support.
-Unsupported: cross-agent claims that rely on unavailable telemetry precision.
+1. public core suite
+2. private/held-out suite support
+3. rolling refresh via task version + checksum + variant fields
+4. task execution harness
+5. verification subsystem (visible + hidden)
+6. anti-gaming policy subsystem
+7. telemetry subsystem (exact/inferred/unavailable)
+8. reporting subsystem (jsonl/json/csv/markdown/html)
+9. statistical subsystem (Wilson CI + paired bootstrap)
+10. benchmark health subsystem
 
-## Telemetry quality levels
+## Typed task model
 
-- `exact`: adapter emits structured events.
-- `inferred`: derived from coarse execution metadata.
-- `unavailable`: only raw stdout/stderr available.
+Task schema supports:
+- identity/versioning: `id`, `task_version`, `task_checksum`, `source_type`
+- benchmark routing: `benchmark_track`, `family`, `difficulty`, `language`, `tags`
+- constraints: `max_minutes`, `max_files_touched`, `allowlist_paths`, `forbidden_paths`
+- verification: `visible_verification`, `hidden_verification`, `success_policy`
+- variant/mutation: `task_variant_family`, `variant_id`
+- metadata: expected files, skills, failure mode notes
 
-Inferred fields are explicitly tracked in result rows.
+## Adapter system and fairness
 
-## Task families
+Adapters:
+- Villani adapter
+- Claude Code adapter
+- OpenCode adapter
+- Copilot CLI adapter
+- generic shell command adapter (`cmd:` / `shell:`)
 
-- `bugfix`
-- `repro_test`
-- `localize_patch`
-- `terminal_workflow`
+Each adapter reports fairness classification:
+- `exact_comparable`
+- `approximately_comparable`
+- `coarse_wrapper_only`
+- `not_comparable`
 
-Task metadata supports: source type (`seeded|curated|mutated`), tags, task version, checksum.
+And explicit telemetry fidelity for fields:
+- `exact`
+- `inferred`
+- `unavailable`
+
+## Telemetry honesty
+
+Results include:
+- task metadata (track/family/difficulty/language/source/tags/version/checksum)
+- adapter metadata (name/version/fairness)
+- strict success/visible/hidden/failure reason
+- runtime + patch stats + verification attempts
+- telemetry quality + per-field quality map
+- reproducibility manifest path
+- repeat index for stability runs
+
+No guessed fields are presented as exact.
+
+## Reproducibility and hardening
+
+- fresh workspace per run
+- cleanup by default, `--keep-workspace` for debugging
+- baseline git init + diff stats
+- reproducibility manifest records benchmark/task/adapter/runtime checksums and environment details
+
+## Anti-gaming policy
+
+- allowlist path enforcement
+- forbidden path enforcement
+- benchmark asset integrity checks
+- invalid artifact / no-op edits rejected by policy
+- hardened repro-test grading (must fail on broken + pass on fixed, meaningful failure)
+
+## Statistics and reporting
+
+- Wilson CI for pass rate
+- paired bootstrap delta CI
+- stability summaries for repeated runs
+- diagnostics by track/family/difficulty/language/source/telemetry/fairness
+
+Outputs:
+- JSONL results
+- JSON summary
+- CSV export
+- Markdown report
+- HTML report
 
 ## CLI
 
-- `villani-code benchmark list --suite ... [--family --difficulty --tag --source-type]`
-- `villani-code benchmark run --suite ... [--task ...] --agent ... [--repeat N] [--keep-workspace]`
-- `villani-code benchmark summary --results artifacts/benchmark/results.jsonl`
-- `villani-code benchmark stats --results artifacts/benchmark/results.jsonl`
+- `villani-code benchmark list --suite ... [--private-suite ... --include-private] [--track core|feature]`
+- `villani-code benchmark run --suite ... --agent ... [--track ... --repeat N --keep-workspace]`
+- `villani-code benchmark summary --results ...`
+- `villani-code benchmark stats --results ...`
 - `villani-code benchmark compare --results-a ... --results-b ...`
-- `villani-code benchmark report --results ... --out artifacts/benchmark/report.md`
+- `villani-code benchmark report --results ... --format markdown|html --out ...`
+- `villani-code benchmark healthcheck --suite ...`
+- `villani-code benchmark validate-tasks --suite ...`
+- `villani-code benchmark manifest --results ...`
 
-## Repro-test grading rules
+## Migration notes (v2 -> v3)
 
-Candidate test must:
-1. fail on broken repo,
-2. pass on hidden fixed repo,
-3. fail meaningfully (not syntax/import noise).
-
-## Statistical honesty
-
-- Success rates include Wilson 95% confidence interval.
-- Paired comparison reports bootstrap CI for pass-rate delta.
-- Reports avoid strong claims on tiny shared sample sizes.
-
-## Migration notes
-
-From v1 to v2:
-- Added real adapter abstraction + structured run model.
-- Added reproducibility manifests and task checksums.
-- Added robust workspace cleanup semantics + debug preservation flag.
-- Added normalized failure reasons and telemetry quality fields.
-- Added diagnostics/statistics reporting and paired comparison.
-- Expanded task suite to >=25 tasks with tags/source metadata.
+- expanded task/result schema with track/source/version/variant/fairness fields
+- added held-out/private suite loading support
+- added feature-track scaffolding (`benchmark_tasks/villani_feature_v1`)
+- added anti-gaming policy module and benchmark healthchecks
+- added reproducibility manifest checksums for repo + verifier command sets
+- added telemetry field quality map (`exact|inferred|unavailable`)
+- added repeat-indexed stability summaries and richer reporting slices

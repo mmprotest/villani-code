@@ -18,7 +18,8 @@ from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.benchmark.runner import BenchmarkRunner
-from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, write_markdown_report
+from villani_code.benchmark.health import run_healthcheck
+from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, write_html_report, write_markdown_report
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -269,20 +270,45 @@ def reset_from_checkpoint_cmd(
 @benchmark_app.command("list")
 def benchmark_list_cmd(
     suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
+    private_suite: Optional[Path] = typer.Option(None, "--private-suite"),
     family: Optional[str] = typer.Option(None, "--family"),
     difficulty: Optional[str] = typer.Option(None, "--difficulty"),
     tag: Optional[str] = typer.Option(None, "--tag"),
     source_type: Optional[str] = typer.Option(None, "--source-type"),
+    language: Optional[str] = typer.Option(None, "--language"),
+    track: Optional[str] = typer.Option(None, "--track"),
+    include_private: bool = typer.Option(False, "--include-private"),
 ) -> None:
-    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark"))
-    tasks = runner.list_tasks(suite.resolve(), family=family, difficulty=difficulty, tag=tag, source_type=source_type)
-    payload = [{"id": task.id, "family": task.family.value, "difficulty": task.difficulty.value, "source_type": task.source_type.value, "tags": task.tags} for task in tasks]
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark"), private_suite_dir=private_suite.resolve() if private_suite else None)
+    tasks = runner.list_tasks(
+        suite.resolve(),
+        include_private=include_private,
+        family=family,
+        difficulty=difficulty,
+        tag=tag,
+        source_type=source_type,
+        language=language,
+        track=track,
+    )
+    payload = [
+        {
+            "id": task.id,
+            "track": task.benchmark_track.value,
+            "family": task.family.value,
+            "difficulty": task.difficulty.value,
+            "source_type": task.source_type.value,
+            "language": task.language,
+            "tags": task.tags,
+        }
+        for task in tasks
+    ]
     console.print_json(json.dumps(payload))
 
 
 @benchmark_app.command("run")
 def benchmark_run_cmd(
     suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
+    private_suite: Optional[Path] = typer.Option(None, "--private-suite"),
     task: Optional[str] = typer.Option(None, "--task"),
     agent: str = typer.Option("villani", "--agent"),
     model: Optional[str] = typer.Option(None, "--model"),
@@ -295,9 +321,31 @@ def benchmark_run_cmd(
     difficulty: Optional[str] = typer.Option(None, "--difficulty"),
     tag: Optional[str] = typer.Option(None, "--tag"),
     source_type: Optional[str] = typer.Option(None, "--source-type"),
+    language: Optional[str] = typer.Option(None, "--language"),
+    track: Optional[str] = typer.Option(None, "--track"),
+    include_private: bool = typer.Option(False, "--include-private"),
 ) -> None:
-    runner = BenchmarkRunner(output_dir=output_dir.resolve(), keep_workspace=keep_workspace)
-    result = runner.run(suite_dir=suite.resolve(), task_id=task, agent=agent, model=model, base_url=base_url, api_key=api_key, repeat=repeat, family=family, difficulty=difficulty, tag=tag, source_type=source_type)
+    runner = BenchmarkRunner(
+        output_dir=output_dir.resolve(),
+        keep_workspace=keep_workspace,
+        private_suite_dir=private_suite.resolve() if private_suite else None,
+    )
+    result = runner.run(
+        suite_dir=suite.resolve(),
+        task_id=task,
+        agent=agent,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        repeat=repeat,
+        include_private=include_private,
+        family=family,
+        difficulty=difficulty,
+        tag=tag,
+        source_type=source_type,
+        language=language,
+        track=track,
+    )
     console.print_json(json.dumps(result))
 
 
@@ -327,10 +375,37 @@ def benchmark_compare_cmd(
 def benchmark_report_cmd(
     results: Path = typer.Option(..., "--results"),
     out: Path = typer.Option(Path("artifacts/benchmark/report.md"), "--out"),
+    format: str = typer.Option("markdown", "--format"),
 ) -> None:
     rows = load_results(results.resolve())
-    write_markdown_report(rows, out.resolve())
+    if format == "html":
+        write_html_report(rows, out.resolve())
+    else:
+        write_markdown_report(rows, out.resolve())
     console.print(f"wrote {out}")
+
+
+@benchmark_app.command("healthcheck")
+def benchmark_healthcheck_cmd(
+    suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
+) -> None:
+    console.print_json(json.dumps(run_healthcheck(suite.resolve())))
+
+
+@benchmark_app.command("validate-tasks")
+def benchmark_validate_tasks_cmd(
+    suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
+) -> None:
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark"))
+    tasks = runner.list_tasks(suite.resolve())
+    console.print_json(json.dumps({"valid": len(tasks), "suite": str(suite)}))
+
+
+@benchmark_app.command("manifest")
+def benchmark_manifest_cmd(results: Path = typer.Option(..., "--results")) -> None:
+    rows = load_results(results.resolve())
+    manifests = [r.reproducibility_manifest_path for r in rows]
+    console.print_json(json.dumps({"manifests": manifests}))
 
 
 @mcp_app.command("list")

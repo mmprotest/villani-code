@@ -1,0 +1,13 @@
+{
+  "source_type": "mutated",
+  "tags": [
+    "localize_patch",
+    "hard"
+  ],
+  "task_version": "1.0",
+  "expected_files": [
+    "src/app/core.py"
+  ],
+  "primary_skill": "debug",
+  "expected_patch_size_band": "medium"
+}

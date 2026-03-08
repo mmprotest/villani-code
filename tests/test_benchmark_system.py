@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from villani_code.benchmark.diff_stats import ensure_git_repo, line_stats, list_touched_files
-from villani_code.benchmark.models import FailureReason, TelemetryQuality
+from villani_code.benchmark.health import run_healthcheck
+from villani_code.benchmark.models import BenchmarkTrack, FieldQuality, TaskSource, TelemetryQuality
 from villani_code.benchmark.reporting import diagnostics, paired_compare, render_summary_table, summarize
 from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.stats import wilson_interval
@@ -17,6 +18,8 @@ from villani_code.benchmark.workspace import WorkspaceManager
 def test_task_loader_parses_valid_task() -> None:
     task = load_task(Path("benchmark_tasks/villani_bench_v1/bugfix_001_datetime_cli"))
     assert task.id == "bugfix_001_datetime_cli"
+    assert task.benchmark_track == BenchmarkTrack.CORE
+    assert task.source_type in {TaskSource.CURATED, TaskSource.SEEDED, TaskSource.MUTATED}
     assert len(task.task_checksum or "") > 5
 
 
@@ -76,20 +79,7 @@ def test_allowlist_and_diff_stats(tmp_path: Path) -> None:
     assert deleted == 0
 
 
-def test_timeout_and_failure_reason_in_runner() -> None:
-    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
-    result = runner.run(
-        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
-        task_id="terminal_002_makefile_test_path",
-        agent="cmd:python -c 'import time; time.sleep(2)'",
-        model=None,
-        base_url=None,
-        api_key=None,
-    )
-    assert "summary" in result
-
-
-def test_summary_generation_and_stats() -> None:
+def test_run_emits_new_fields() -> None:
     runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
     data = runner.run(
         suite_dir=Path("benchmark_tasks/villani_bench_v1"),
@@ -102,25 +92,32 @@ def test_summary_generation_and_stats() -> None:
     from villani_code.benchmark.reporting import load_results
 
     rows = load_results(Path(data["results_path"]))
-    summary = summarize(rows)
-    text = render_summary_table(rows)
-    diag = diagnostics(rows)
-    assert summary.total_tasks >= 1
-    assert "tasks=" in text
-    assert "failure_reason_histogram" in diag
+    assert rows[0].adapter_name in {"cmd", "villani", "claude", "opencode", "copilot-cli"}
+    assert rows[0].telemetry_quality in {TelemetryQuality.EXACT, TelemetryQuality.INFERRED, TelemetryQuality.UNAVAILABLE}
+    assert rows[0].telemetry_field_quality_map.get("num_shell_commands") in {FieldQuality.EXACT, FieldQuality.INFERRED, FieldQuality.UNAVAILABLE}
 
 
-def test_repro_logic_against_broken_and_fixed() -> None:
+def test_summary_generation_and_stats() -> None:
     runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
-    result = runner.run(
+    data = runner.run(
         suite_dir=Path("benchmark_tasks/villani_bench_v1"),
-        task_id="repro_002_retry_policy",
-        agent='cmd:python -c "from pathlib import Path; Path(\'tests/test_retry_policy_regression.py\').write_text(\'from app.client import should_retry\\n\\ndef test_regression():\\n    assert should_retry(400) is False\\n\', encoding=\'utf-8\')"',
+        task_id="terminal_001_python_module_entry",
+        agent='cmd:python -c "from pathlib import Path; Path(\'app/__main__.py\').write_text(\'print(1)\\n\', encoding=\'utf-8\')"',
         model=None,
         base_url=None,
         api_key=None,
+        repeat=2,
     )
-    assert result["summary"]["total_tasks"] == 1
+    from villani_code.benchmark.reporting import load_results
+
+    rows = load_results(Path(data["results_path"]))
+    summary = summarize(rows)
+    text = render_summary_table(rows)
+    diag = diagnostics(rows)
+    assert summary.total_tasks >= 2
+    assert "tasks=" in text
+    assert "failure_reason_histogram" in diag
+    assert "stability" in diag
 
 
 def test_paired_comparison_and_ci() -> None:
@@ -135,7 +132,13 @@ def test_paired_comparison_and_ci() -> None:
     assert "delta_ci95" in comp
 
 
-def test_smoke_load_all_tasks() -> None:
-    tasks = load_tasks(Path("benchmark_tasks/villani_bench_v1"))
+def test_smoke_load_all_tasks_with_track_filter() -> None:
+    tasks = load_tasks(Path("benchmark_tasks/villani_bench_v1"), track="core")
     assert len(tasks) >= 25
     assert {task.family.value for task in tasks} == {"bugfix", "repro_test", "localize_patch", "terminal_workflow"}
+
+
+def test_healthcheck() -> None:
+    health = run_healthcheck(Path("benchmark_tasks/villani_bench_v1"))
+    assert health["tasks"] >= 25
+    assert "families" in health

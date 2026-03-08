@@ -21,4 +21,6 @@ def build_adapter(agent: str) -> AgentAdapter:
         return CopilotCliAdapter()
     if agent.startswith("cmd:"):
         return CommandAdapter(agent.removeprefix("cmd:"))
+    if agent.startswith("shell:"):
+        return CommandAdapter(agent.removeprefix("shell:"))
     raise ValueError(f"Unsupported agent: {agent}")

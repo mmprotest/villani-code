@@ -1,0 +1,21 @@
+id: feature_terminal_003_dev_script_config_path
+family: terminal_workflow
+difficulty: easy
+language: python
+max_minutes: 30
+max_files_touched: 8
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- app/
+- tests/
+- Makefile

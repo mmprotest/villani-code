@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -8,15 +9,15 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from villani_code.benchmark.models import TelemetryQuality
+from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
 
 
 class AdapterEvent(BaseModel):
     type: str
     timestamp: float
-    payload: dict[str, object] = {}
+    payload: dict[str, object] = Field(default_factory=dict)
 
 
 class AdapterRunConfig(BaseModel):
@@ -35,12 +36,19 @@ class AdapterRunResult(BaseModel):
     timeout: bool
     runtime_seconds: float
     telemetry_quality: TelemetryQuality
-    events: list[AdapterEvent] = []
+    telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
+    events: list[AdapterEvent] = Field(default_factory=list)
 
 
 class AgentAdapter(ABC):
     name: str
     version = "1"
+    fairness_classification: FairnessClassification = FairnessClassification.COARSE_WRAPPER_ONLY
+    command_capture: FieldQuality = FieldQuality.INFERRED
+    file_event_capture: FieldQuality = FieldQuality.UNAVAILABLE
+    model_identity_known: bool = False
+    provider_info_known: bool = False
+    timeout_enforced_by_harness: bool = True
 
     @abstractmethod
     def build_command(self, config: AdapterRunConfig) -> list[str]: ...
@@ -58,6 +66,13 @@ class AgentAdapter(ABC):
             stdout, stderr = proc.communicate()
             timeout = True
         events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": proc.returncode if not timeout else None}))
+
+        field_quality = {
+            "num_shell_commands": self.command_capture,
+            "num_failed_commands": FieldQuality.INFERRED,
+            "touched_file_paths": self.file_event_capture,
+            "time_to_first_edit": self.file_event_capture,
+        }
         return AdapterRunResult(
             stdout=stdout,
             stderr=stderr,
@@ -65,16 +80,22 @@ class AgentAdapter(ABC):
             timeout=timeout,
             runtime_seconds=time.monotonic() - started,
             telemetry_quality=TelemetryQuality.INFERRED,
+            telemetry_field_quality_map=field_quality,
             events=events,
         )
 
 
 class VillaniAdapter(AgentAdapter):
     name = "villani"
+    fairness_classification = FairnessClassification.EXACT_COMPARABLE
+    command_capture = FieldQuality.EXACT
+    file_event_capture = FieldQuality.EXACT
+    model_identity_known = True
+    provider_info_known = True
 
     def build_command(self, config: AdapterRunConfig) -> list[str]:
-        if not config.model or not config.base_url:
-            raise ValueError("villani requires model and base_url")
+        if not config.model:
+            raise ValueError("villani requires --model")
         command = [
             sys.executable,
             "-m",
@@ -87,17 +108,37 @@ class VillaniAdapter(AgentAdapter):
             "anthropic",
             "--model",
             config.model,
-            "--base-url",
-            config.base_url,
             "--no-stream",
+            "--emit-runtime-events",
         ]
+        if config.base_url:
+            command.extend(["--base-url", config.base_url])
         if config.api_key:
             command.extend(["--api-key", config.api_key])
         return command
 
+    def run(self, config: AdapterRunConfig) -> AdapterRunResult:
+        base = super().run(config)
+        events_file = config.workspace_repo / ".villani_code" / "runtime_events.jsonl"
+        events: list[AdapterEvent] = []
+        if events_file.exists():
+            for raw in events_file.read_text(encoding="utf-8").splitlines():
+                if not raw.strip():
+                    continue
+                payload = json.loads(raw)
+                events.append(AdapterEvent(type=payload.get("event", "model_message"), timestamp=float(payload.get("ts", time.time())), payload=payload))
+        merged = base.events + events
+        return AdapterRunResult(
+            **base.model_dump(exclude={"events", "telemetry_quality", "telemetry_field_quality_map"}),
+            events=merged,
+            telemetry_quality=TelemetryQuality.EXACT if events else TelemetryQuality.INFERRED,
+            telemetry_field_quality_map={k: FieldQuality.EXACT for k in ["num_shell_commands", "num_failed_commands", "touched_file_paths", "time_to_first_edit"]},
+        )
+
 
 class TemplateCliAdapter(AgentAdapter):
     template: list[str]
+    fairness_classification = FairnessClassification.APPROXIMATELY_COMPARABLE
 
     def build_command(self, config: AdapterRunConfig) -> list[str]:
         command = list(self.template)
@@ -122,6 +163,7 @@ class CopilotCliAdapter(TemplateCliAdapter):
 
 class CommandAdapter(AgentAdapter):
     name = "cmd"
+    fairness_classification = FairnessClassification.NOT_COMPARABLE
 
     def __init__(self, command: str) -> None:
         self.command = command

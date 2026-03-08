@@ -1,0 +1,14 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/date_utils.py"
+  ],
+  "reference_patch_size_lines": 8,
+  "primary_skill": "python-debugging",
+  "secondary_skills": [
+    "pytest"
+  ],
+  "source_type": "curated",
+  "task_version": "1.0",
+  "expected_patch_size_band": "medium"
+}
