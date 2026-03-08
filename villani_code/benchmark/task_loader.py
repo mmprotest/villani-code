@@ -33,11 +33,12 @@ def _checksum_files(task_dir: Path, rel_paths: list[str]) -> str:
     return hasher.hexdigest()[:16]
 
 
-def _infer_track(task_dir: Path, payload: dict[str, object]) -> BenchmarkTrack:
+def _resolve_track(task_dir: Path, payload: dict[str, object], metadata_raw: dict[str, object]) -> BenchmarkTrack:
     if "benchmark_track" in payload:
         return BenchmarkTrack(str(payload["benchmark_track"]))
-    path = task_dir.as_posix().lower()
-    return BenchmarkTrack.FEATURE if "feature" in path else BenchmarkTrack.CORE
+    if "benchmark_track" in metadata_raw:
+        return BenchmarkTrack(str(metadata_raw["benchmark_track"]))
+    raise TaskLoadError(f"Task {task_dir.name} missing required benchmark_track metadata (core|feature)")
 
 
 def load_task(task_dir: Path) -> BenchmarkTask:
@@ -52,7 +53,7 @@ def load_task(task_dir: Path) -> BenchmarkTask:
 
     payload["task_dir"] = task_dir
     payload["prompt"] = _read_prompt(prompt_txt)
-    payload["benchmark_track"] = _infer_track(task_dir, payload)
+    payload["benchmark_track"] = _resolve_track(task_dir, payload, metadata_raw)
     payload.setdefault("source_type", metadata_raw.get("source_type", "curated"))
     payload.setdefault("tags", metadata_raw.get("tags", []))
     payload.setdefault("task_version", str(metadata_raw.get("task_version", payload.get("task_version", "1.0"))))

@@ -43,15 +43,36 @@ class AdapterRunResult(BaseModel):
 class AgentAdapter(ABC):
     name: str
     version = "1"
+    capability = "coarse_wrapper"
+    telemetry_capability = "coarse_process_only"
     fairness_classification: FairnessClassification = FairnessClassification.COARSE_WRAPPER_ONLY
-    command_capture: FieldQuality = FieldQuality.INFERRED
+    fairness_notes = "Command-wrapper adapter; outcome-only comparison is safer than process-level comparisons."
+    command_capture: FieldQuality = FieldQuality.UNAVAILABLE
     file_event_capture: FieldQuality = FieldQuality.UNAVAILABLE
+    verify_capture: FieldQuality = FieldQuality.INFERRED
     model_identity_known: bool = False
     provider_info_known: bool = False
     timeout_enforced_by_harness: bool = True
 
     @abstractmethod
     def build_command(self, config: AdapterRunConfig) -> list[str]: ...
+
+    def _field_quality(self) -> dict[str, FieldQuality]:
+        return {
+            "num_shell_commands": self.command_capture,
+            "num_failed_commands": self.command_capture,
+            "touched_file_paths": self.file_event_capture,
+            "time_to_first_edit": self.file_event_capture,
+            "time_to_first_verify": self.verify_capture,
+            "last_verification_time": self.verify_capture,
+            "verifications_run": self.verify_capture,
+            "verification_attempt_count": self.verify_capture,
+            "expected_file_first_read_time": self.file_event_capture,
+            "expected_files_found": FieldQuality.INFERRED,
+            "expected_files_total": FieldQuality.EXACT,
+            "touched_irrelevant_files": FieldQuality.INFERRED,
+            "self_corrected_after_failed_verify": FieldQuality.INFERRED,
+        }
 
     def run(self, config: AdapterRunConfig) -> AdapterRunResult:
         started = time.monotonic()
@@ -67,12 +88,6 @@ class AgentAdapter(ABC):
             timeout = True
         events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": proc.returncode if not timeout else None}))
 
-        field_quality = {
-            "num_shell_commands": self.command_capture,
-            "num_failed_commands": FieldQuality.INFERRED,
-            "touched_file_paths": self.file_event_capture,
-            "time_to_first_edit": self.file_event_capture,
-        }
         return AdapterRunResult(
             stdout=stdout,
             stderr=stderr,
@@ -80,16 +95,20 @@ class AgentAdapter(ABC):
             timeout=timeout,
             runtime_seconds=time.monotonic() - started,
             telemetry_quality=TelemetryQuality.INFERRED,
-            telemetry_field_quality_map=field_quality,
+            telemetry_field_quality_map=self._field_quality(),
             events=events,
         )
 
 
 class VillaniAdapter(AgentAdapter):
     name = "villani"
+    capability = "native_runtime_instrumented"
+    telemetry_capability = "structured_runtime_events"
     fairness_classification = FairnessClassification.EXACT_COMPARABLE
+    fairness_notes = "Villani adapter exposes structured runtime events and is directly comparable across Villani model variants."
     command_capture = FieldQuality.EXACT
     file_event_capture = FieldQuality.EXACT
+    verify_capture = FieldQuality.EXACT
     model_identity_known = True
     provider_info_known = True
 
@@ -126,19 +145,22 @@ class VillaniAdapter(AgentAdapter):
                 if not raw.strip():
                     continue
                 payload = json.loads(raw)
-                events.append(AdapterEvent(type=payload.get("event", "model_message"), timestamp=float(payload.get("ts", time.time())), payload=payload))
+                events.append(AdapterEvent(type=str(payload.get("event", "model_message")), timestamp=float(payload.get("ts", time.time())), payload=payload))
         merged = base.events + events
         return AdapterRunResult(
             **base.model_dump(exclude={"events", "telemetry_quality", "telemetry_field_quality_map"}),
             events=merged,
             telemetry_quality=TelemetryQuality.EXACT if events else TelemetryQuality.INFERRED,
-            telemetry_field_quality_map={k: FieldQuality.EXACT for k in ["num_shell_commands", "num_failed_commands", "touched_file_paths", "time_to_first_edit"]},
+            telemetry_field_quality_map=self._field_quality(),
         )
 
 
 class TemplateCliAdapter(AgentAdapter):
     template: list[str]
-    fairness_classification = FairnessClassification.APPROXIMATELY_COMPARABLE
+    capability = "cli_wrapper"
+    telemetry_capability = "coarse_process_only"
+    fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+    fairness_notes = "External CLI wrapper without benchmark-native event capture; process telemetry is coarse and only approximately comparable."
 
     def build_command(self, config: AdapterRunConfig) -> list[str]:
         command = list(self.template)
@@ -163,7 +185,10 @@ class CopilotCliAdapter(TemplateCliAdapter):
 
 class CommandAdapter(AgentAdapter):
     name = "cmd"
+    capability = "raw_command"
+    telemetry_capability = "none"
     fairness_classification = FairnessClassification.NOT_COMPARABLE
+    fairness_notes = "Arbitrary shell command adapter for smoke tests/debugging; not a fair agent comparison target."
 
     def __init__(self, command: str) -> None:
         self.command = command

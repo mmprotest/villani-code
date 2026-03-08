@@ -19,3 +19,4 @@ allowlist_paths:
 - app/
 - tests/
 - Makefile
+benchmark_track: core

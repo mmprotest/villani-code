@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import platform
 import shutil
 import sys
@@ -67,6 +66,38 @@ class BenchmarkRunner:
             "repeat": repeat,
         }
 
+    def _event_metrics(self, events: list[object], started: float, expected_files: list[str]) -> dict[str, object]:
+        command_starts = 0
+        command_failures = 0
+        first_edit: float | None = None
+        first_expected_read: float | None = None
+        read_paths: set[str] = set()
+        for e in events:
+            if getattr(e, "type", "") == "command_started":
+                command_starts += 1
+            if getattr(e, "type", "") == "command_finished":
+                exit_code = getattr(e, "payload", {}).get("exit_code")
+                if isinstance(exit_code, int) and exit_code != 0:
+                    command_failures += 1
+            payload = getattr(e, "payload", {})
+            event_type = str(payload.get("event") or getattr(e, "type", ""))
+            ts = float(payload.get("ts", getattr(e, "timestamp", 0.0)))
+            path = payload.get("path")
+            if event_type in {"file_edit", "apply_patch", "write_file"} and first_edit is None:
+                first_edit = max(0.0, ts - started)
+            if event_type in {"file_read", "read_file", "open_file"} and isinstance(path, str):
+                read_paths.add(path)
+                if path in expected_files and first_expected_read is None:
+                    first_expected_read = max(0.0, ts - started)
+        return {
+            "num_shell_commands": command_starts if command_starts > 0 else None,
+            "num_failed_commands": command_failures if command_starts > 0 else None,
+            "time_to_first_edit": first_edit,
+            "expected_file_first_read_time": first_expected_read,
+            "expected_files_found": len(set(expected_files) & read_paths) if expected_files else 0,
+            "expected_files_total": len(expected_files),
+        }
+
     def _run_task(self, task: BenchmarkTask, agent: str, model: str | None, base_url: str | None, api_key: str | None, repeat_index: int = 0) -> BenchmarkRunResult:
         timeout_seconds = task.max_minutes * 60
         started = time.monotonic()
@@ -80,6 +111,10 @@ class BenchmarkRunner:
         telemetry_quality = TelemetryQuality.UNAVAILABLE
         num_shell_commands: int | None = None
         num_failed_commands: int | None = None
+        time_to_first_edit: float | None = None
+        expected_files_found: int | None = None
+        expected_files_total: int | None = None
+        expected_file_first_read_time: float | None = None
         timeout = False
         field_quality_map: dict[str, FieldQuality] = {}
 
@@ -127,9 +162,16 @@ class BenchmarkRunner:
                 )
                 timeout = execution.timeout
                 telemetry_quality = execution.telemetry_quality
-                num_shell_commands = len(execution.events)
-                num_failed_commands = 0 if execution.exit_code == 0 else 1
                 field_quality_map = execution.telemetry_field_quality_map
+
+                if field_quality_map.get("num_shell_commands") == FieldQuality.EXACT:
+                    metrics = self._event_metrics(execution.events, started, task.metadata.expected_files)
+                    num_shell_commands = metrics["num_shell_commands"]
+                    num_failed_commands = metrics["num_failed_commands"]
+                    time_to_first_edit = metrics["time_to_first_edit"]
+                    expected_file_first_read_time = metrics["expected_file_first_read_time"]
+                    expected_files_found = metrics["expected_files_found"]
+                    expected_files_total = metrics["expected_files_total"]
 
                 visible_pass, visible_outcomes, first_verify, l_verify = run_commands(workspace_repo, task.visible_verification, timeout_seconds)
                 if first_verify:
@@ -161,6 +203,11 @@ class BenchmarkRunner:
             runtime_seconds = time.monotonic() - started
             artifacts_ok = self._check_required_artifacts(task, touched)
 
+            if expected_files_total is None:
+                expected_files_total = len(task.metadata.expected_files)
+            if expected_files_found is None:
+                expected_files_found = sum(1 for rel in task.metadata.expected_files if (workspace_repo / rel).exists())
+
             if timeout:
                 failure_reason = FailureReason.TIMEOUT
             elif not policy_result.allowlist_ok or not policy_result.forbidden_ok:
@@ -182,6 +229,7 @@ class BenchmarkRunner:
             manifest.telemetry_quality = telemetry_quality
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
+            hidden_failed = any("hidden" in c for c in verifications[-len(task.hidden_verification) :]) if task.hidden_verification else False
             return BenchmarkRunResult(
                 benchmark_track=task.benchmark_track,
                 task_id=task.id,
@@ -195,7 +243,10 @@ class BenchmarkRunner:
                 agent_name=agent,
                 adapter_name=adapter.name,
                 adapter_version=adapter.version,
+                adapter_capability=adapter.capability,
                 fairness_classification=adapter.fairness_classification,
+                fairness_notes=adapter.fairness_notes,
+                telemetry_capability=adapter.telemetry_capability,
                 model_name=model,
                 provider_label=base_url,
                 success=success,
@@ -212,8 +263,15 @@ class BenchmarkRunner:
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
                 verifications_run=verifications,
+                verification_attempt_count=len(verifications),
+                time_to_first_edit=time_to_first_edit,
                 time_to_first_verify=time_to_first_verify,
                 last_verification_time=last_verify,
+                expected_files_found=expected_files_found,
+                expected_files_total=expected_files_total,
+                expected_file_first_read_time=expected_file_first_read_time,
+                self_corrected_after_failed_verify=(visible_pass and hidden_pass and not hidden_failed) if verifications else None,
+                touched_irrelevant_files=sum(1 for p in touched if not any(p.startswith(a) for a in task.allowlist_paths)),
                 telemetry_quality=telemetry_quality,
                 telemetry_field_quality_map=field_quality_map,
                 workspace_preserved=self.workspace.keep_workspace,
