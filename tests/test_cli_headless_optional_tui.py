@@ -118,3 +118,59 @@ def test_interactive_fails_cleanly_without_tui(monkeypatch, tmp_path: Path) -> N
     )
     assert result.exit_code != 0
     assert "requires the optional TUI dependencies" in result.output
+
+
+def test_run_tolerates_malformed_response_content(monkeypatch, tmp_path: Path) -> None:
+    _block_textual(monkeypatch)
+    sys.modules.pop("villani_code.cli", None)
+    sys.modules.pop("villani_code.interactive", None)
+    module = importlib.import_module("villani_code.cli")
+
+    class DummyRunner:
+        def run(self, _instruction: str):
+            return {"response": {"content": ["plain", 7, {"type": "text", "text": "ok"}, {"x": 1}]}}
+
+    monkeypatch.setattr(module, "_build_runner", lambda *a, **k: DummyRunner())
+    result = runner.invoke(
+        module.app,
+        [
+            "run",
+            "do thing",
+            "--base-url",
+            "http://localhost:8000",
+            "--model",
+            "demo-model",
+            "--repo",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "plain" in result.stdout
+    assert "ok" in result.stdout
+
+
+def test_run_tolerates_missing_response_shape(monkeypatch, tmp_path: Path) -> None:
+    _block_textual(monkeypatch)
+    sys.modules.pop("villani_code.cli", None)
+    sys.modules.pop("villani_code.interactive", None)
+    module = importlib.import_module("villani_code.cli")
+
+    class DummyRunner:
+        def run(self, _instruction: str):
+            return {"response": None}
+
+    monkeypatch.setattr(module, "_build_runner", lambda *a, **k: DummyRunner())
+    result = runner.invoke(
+        module.app,
+        [
+            "run",
+            "do thing",
+            "--base-url",
+            "http://localhost:8000",
+            "--model",
+            "demo-model",
+            "--repo",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import platform
 import shutil
+import stat
 import sys
 import time
 from pathlib import Path
@@ -19,7 +21,11 @@ from villani_code.benchmark.models import (
     TaskFamily,
     TelemetryQuality,
 )
-from villani_code.benchmark.policy import benchmark_asset_integrity, enforce_path_policy
+from villani_code.benchmark.policy import (
+    benchmark_asset_integrity,
+    enforce_path_policy,
+    filter_meaningful_touched_paths,
+)
 from villani_code.benchmark.reporting import render_summary_table, summarize, write_markdown_report, write_results
 from villani_code.benchmark.task_loader import load_tasks
 from villani_code.benchmark.verifier import run_commands
@@ -31,6 +37,10 @@ class BenchmarkRunner:
         self.output_dir = output_dir
         self.workspace = WorkspaceManager(keep_workspace=keep_workspace)
         self.private_suite_dir = private_suite_dir
+
+    @staticmethod
+    def _log(message: str) -> None:
+        print(f"[benchmark] {message}")
 
     def list_tasks(self, suite_dir: Path, include_private: bool = False, **filters: str | None) -> list[BenchmarkTask]:
         tasks = load_tasks(suite_dir, **filters)
@@ -55,14 +65,34 @@ class BenchmarkRunner:
         if include_private and self.private_suite_dir and self.private_suite_dir.exists():
             tasks.extend(load_tasks(self.private_suite_dir, task_id=task_id, **filters))
         results: list[BenchmarkRunResult] = []
+        self._log(
+            f"start suite={suite_dir} tasks={len(tasks)} agent={agent} model={model or '-'} provider={provider or '-'} base_url={base_url or '-'} output_dir={self.output_dir}"
+        )
         for repeat_index in range(repeat):
-            for task in tasks:
-                results.append(self._run_task(task, agent=agent, model=model, base_url=base_url, api_key=api_key, provider=provider, repeat_index=repeat_index))
+            for index, task in enumerate(tasks, start=1):
+                self._log(
+                    f"{index}/{len(tasks)} agent={agent} task={task.id} bucket={task.metadata.benchmark_bucket} type={task.metadata.task_type or '-'}"
+                )
+                results.append(
+                    self._run_task(
+                        task,
+                        agent=agent,
+                        model=model,
+                        base_url=base_url,
+                        api_key=api_key,
+                        provider=provider,
+                        repeat_index=repeat_index,
+                    )
+                )
         result_path = write_results(results, self.output_dir)
         write_markdown_report(results, self.output_dir / "report.md")
+        summary = summarize(results).model_dump()
+        self._log(
+            f"complete successes={summary['successes']}/{summary['total_tasks']} success_rate={summary['success_rate']:.3f} results={result_path}"
+        )
         return {
             "results_path": str(result_path),
-            "summary": summarize(results).model_dump(),
+            "summary": summary,
             "human_summary": render_summary_table(results),
             "repeat": repeat,
         }
@@ -186,6 +216,8 @@ class BenchmarkRunner:
         patch_attempts: int | None = None
         test_runs: int | None = None
         retries_after_failure: int | None = None
+        agent_exit_code: int | None = None
+        agent_stderr_preview: str | None = None
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -221,6 +253,7 @@ class BenchmarkRunner:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
+                self._log("starting agent process...")
                 execution = adapter.run_agent(
                     repo_path=workspace_repo,
                     prompt=task.prompt,
@@ -233,13 +266,18 @@ class BenchmarkRunner:
                 timeout = execution.timeout
                 telemetry_quality = execution.telemetry_quality
                 field_quality_map = execution.telemetry_field_quality_map
+                agent_exit_code = execution.exit_code
+                agent_stderr_preview = self._stderr_snippet(execution.stderr, max_len=400) if execution.stderr else None
+                self._log(
+                    f"agent exit_code={execution.exit_code} runtime={execution.runtime_seconds:.1f}s, running verification..."
+                )
 
                 if not execution.timeout and execution.exit_code not in {None, 0}:
-                    snippet = self._stderr_snippet(execution.stderr)
                     error = f"agent process exited with code {execution.exit_code}"
-                    if snippet:
-                        error = f"{error}; stderr: {snippet}"
+                    if agent_stderr_preview:
+                        error = f"{error}; stderr: {agent_stderr_preview}"
                     failure_reason = FailureReason.AGENT_CRASH
+                    self._log(f"agent crash: {agent_stderr_preview or 'no stderr preview available'}")
 
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
                 if field_quality_map.get("num_shell_commands") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
@@ -280,8 +318,10 @@ class BenchmarkRunner:
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
                 failure_reason = FailureReason.BENCHMARK_ERROR
+                self._log(f"benchmark harness error: {self._stderr_snippet(error, max_len=300)}")
 
-            touched = list_touched_files(workspace_repo)
+            raw_touched = list_touched_files(workspace_repo)
+            touched = filter_meaningful_touched_paths(raw_touched)
             policy_result = enforce_path_policy(touched, task.allowlist_paths, task.forbidden_paths)
             files_touched = len(touched)
             lines_added, lines_deleted = line_stats(workspace_repo)
@@ -318,9 +358,12 @@ class BenchmarkRunner:
             first_pass_success = bool(success and (retries_after_failure or 0) == 0)
             recovered_after_failed_attempt = bool(success and (retries_after_failure or 0) > 0)
             expected_files_set = set(task.metadata.expected_files)
-            touched_unexpected = bool(any(expected_files_set and p not in expected_files_set for p in touched))
+            touched_unexpected = bool(any(p not in expected_files_set for p in touched)) if expected_files_set else False
             expected_files_touched_count = sum(1 for p in touched if p in expected_files_set) if expected_files_set else 0
 
+            self._log(
+                f"result success={success} visible={int(visible_pass)} hidden={int(hidden_pass)} reason={(None if success else failure_reason.value if failure_reason else 'unknown')}"
+            )
             return BenchmarkRunResult(
                 benchmark_track=task.benchmark_track,
                 task_id=task.id,
@@ -355,7 +398,10 @@ class BenchmarkRunner:
                 timeout=timeout,
                 failure_reason=None if success else failure_reason,
                 error=error,
+                agent_exit_code=agent_exit_code,
+                stderr_preview=agent_stderr_preview,
                 touched_file_paths=touched,
+                raw_touched_file_paths=raw_touched,
                 files_touched=files_touched,
                 lines_added=lines_added,
                 lines_deleted=lines_deleted,
@@ -402,17 +448,37 @@ class BenchmarkRunner:
             return False
         return True
 
+    @staticmethod
+    def _rmtree_onerror(func, path, _exc_info) -> None:
+        path_obj = Path(path)
+        os.chmod(path_obj, stat.S_IWRITE)
+        func(path)
+
+    @classmethod
+    def _safe_rmtree(cls, path: Path) -> None:
+        if path.exists():
+            shutil.rmtree(path, onerror=cls._rmtree_onerror)
+
+    @staticmethod
+    def _copytree_ignore_runtime(_src: str, names: list[str]) -> set[str]:
+        ignored: set[str] = set()
+        for name in names:
+            if name == "__pycache__" or name.endswith((".pyc", ".pyo")):
+                ignored.add(name)
+        return ignored
+
     def _run_repro_hidden(self, task: BenchmarkTask, workspace_repo: Path, timeout_seconds: int) -> tuple[bool, bool]:
         fixed_repo = task.task_dir / "hidden_checks" / "fixed_repo"
         if not fixed_repo.exists():
             return False, True
         temp_root = workspace_repo.parent / "fixed"
-        shutil.copytree(fixed_repo, temp_root)
+        self._safe_rmtree(temp_root)
+        shutil.copytree(fixed_repo, temp_root, ignore=self._copytree_ignore_runtime)
         workspace_tests = workspace_repo / "tests"
         fixed_tests = temp_root / "tests"
-        if fixed_tests.exists():
-            shutil.rmtree(fixed_tests)
-        shutil.copytree(workspace_tests, fixed_tests)
+        self._safe_rmtree(fixed_tests)
+        if workspace_tests.exists():
+            shutil.copytree(workspace_tests, fixed_tests, ignore=self._copytree_ignore_runtime)
 
         broken_pass, broken_outcomes, _, _ = run_commands(workspace_repo, task.hidden_verification, timeout_seconds)
         fixed_pass, fixed_outcomes, _, _ = run_commands(temp_root, task.hidden_verification, timeout_seconds)
