@@ -1,10 +1,42 @@
-# Villani Benchmark v1
+# Villani Benchmark v2 (hardened)
 
-Villani Benchmark v1 replaces the old JSON-pack benchmark and eval simulation with repository-grounded, deterministic, objectively scored tasks for terminal coding agents.
+Villani benchmark is now an evaluation **system** for terminal coding agents, not just a task list.
 
-## Why the old benchmark was replaced
+## What it measures
 
-The previous benchmark/eval stack mixed subjective logic, legacy pack aliases, and simulation-oriented eval behavior. v1 removes that architecture and evaluates only bounded, self-contained repository tasks with explicit verification commands.
+- Final repository correctness on bounded, deterministic tasks.
+- Headline metric remains binary task success (`visible_pass && hidden_pass && policy_pass`).
+- Hidden checks and policy constraints enforce anti-gaming.
+
+## What it does not measure
+
+- Subjective code quality as primary score.
+- Agent self-reported confidence.
+- Internet-dependent workflows.
+
+## Architecture
+
+- `task_loader.py`: typed task loading, filtering, checksums.
+- `adapters/`: Villani/Claude/OpenCode/Copilot/generic command adapters.
+- `workspace.py`: isolated per-run workspace lifecycle with guaranteed cleanup unless `--keep-workspace`.
+- `verifier.py`: visible/hidden subprocess verification with timestamps.
+- `runner.py`: policy enforcement, reproducibility manifests, repro-test grading.
+- `reporting.py`: machine + human summaries, diagnostics, CSV + markdown reports.
+- `stats.py`: confidence intervals and paired bootstrap delta.
+
+## Fairness and comparability
+
+Exact comparability: same task set, same timeout, same model backend/provider settings, same deterministic options.
+Approximate comparability: different agent CLIs with different tool capabilities or telemetry support.
+Unsupported: cross-agent claims that rely on unavailable telemetry precision.
+
+## Telemetry quality levels
+
+- `exact`: adapter emits structured events.
+- `inferred`: derived from coarse execution metadata.
+- `unavailable`: only raw stdout/stderr available.
+
+Inferred fields are explicitly tracked in result rows.
 
 ## Task families
 
@@ -13,57 +45,36 @@ The previous benchmark/eval stack mixed subjective logic, legacy pack aliases, a
 - `localize_patch`
 - `terminal_workflow`
 
-## Task layout
-
-Each task lives under `benchmark_tasks/villani_bench_v1/<task_id>/` with:
-
-- `task.yaml` (typed schema)
-- `prompt.txt` (single short instruction)
-- `repo/` (seed repository copied into temp workspace)
-- `visible_checks/` (optional visible assets)
-- `hidden_checks/` (hidden verification assets; never copied to agent workspace)
-- `metadata.json` (internal metadata)
-
-## Scoring philosophy
-
-Primary score is binary:
-
-- `success = 1` only when visible + hidden verification both pass and policy constraints are met.
-- otherwise `success = 0`.
-
-Binary success rate is the headline metric.
-
-## Hidden checks
-
-Hidden checks are executed after the agent run from task-owned hidden data and are not exposed to the agent execution workspace.
-
-For `repro_test` tasks, hidden grading runs the agent-written test against a hidden fixed reference copy.
+Task metadata supports: source type (`seeded|curated|mutated`), tags, task version, checksum.
 
 ## CLI
 
-- `villani-code benchmark list --suite benchmark_tasks/villani_bench_v1`
-- `villani-code benchmark run --suite benchmark_tasks/villani_bench_v1 --task bugfix_001_datetime_cli --agent villani --model <model> --base-url <url>`
-- `villani-code benchmark run --suite benchmark_tasks/villani_bench_v1 --agent villani --model <model> --base-url <url>`
+- `villani-code benchmark list --suite ... [--family --difficulty --tag --source-type]`
+- `villani-code benchmark run --suite ... [--task ...] --agent ... [--repeat N] [--keep-workspace]`
 - `villani-code benchmark summary --results artifacts/benchmark/results.jsonl`
+- `villani-code benchmark stats --results artifacts/benchmark/results.jsonl`
+- `villani-code benchmark compare --results-a ... --results-b ...`
+- `villani-code benchmark report --results ... --out artifacts/benchmark/report.md`
 
-## Authoring new tasks
+## Repro-test grading rules
 
-1. Create a new task folder under `benchmark_tasks/villani_bench_v1/`.
-2. Add a bounded broken `repo/`.
-3. Add `task.yaml` with required fields:
-   - `id`, `family`, `difficulty`, `language`, `max_minutes`, `max_files_touched`,
-     `expected_artifacts`, `visible_verification`, `hidden_verification`, `success_policy`, `allowlist_paths`.
-4. Add a one-line `prompt.txt`.
-5. Add `metadata.json` for internal diagnostics.
-6. Keep checks deterministic, offline, and fast.
+Candidate test must:
+1. fail on broken repo,
+2. pass on hidden fixed repo,
+3. fail meaningfully (not syntax/import noise).
+
+## Statistical honesty
+
+- Success rates include Wilson 95% confidence interval.
+- Paired comparison reports bootstrap CI for pass-rate delta.
+- Reports avoid strong claims on tiny shared sample sizes.
 
 ## Migration notes
 
-Removed/replaced behavior:
-
-- Removed old benchmark pack alias flow (`internal_regressions`, `general_coding`, `constrained_model`).
-- Removed old benchmark command semantics that depended on legacy JSON task format.
-- Replaced old benchmark reporting outputs with JSONL task-run records + summary JSON.
-- Legacy eval simulation is no longer the benchmark path for agent comparison.
-
-Use the new benchmark subcommands under `villani-code benchmark ...`.
+From v1 to v2:
+- Added real adapter abstraction + structured run model.
+- Added reproducibility manifests and task checksums.
+- Added robust workspace cleanup semantics + debug preservation flag.
+- Added normalized failure reasons and telemetry quality fields.
+- Added diagnostics/statistics reporting and paired comparison.
+- Expanded task suite to >=25 tasks with tags/source metadata.

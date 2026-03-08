@@ -1,0 +1,1 @@
+Fix the bug for markdown escape and keep tests green.

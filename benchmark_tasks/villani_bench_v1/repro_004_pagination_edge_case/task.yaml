@@ -1,0 +1,20 @@
+id: repro_004_pagination_edge_case
+family: repro_test
+difficulty: hard
+language: python
+max_minutes: 15
+max_files_touched: 4
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- tests/
+- src/

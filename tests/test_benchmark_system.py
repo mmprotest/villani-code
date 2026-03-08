@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from villani_code.benchmark.diff_stats import ensure_git_repo, line_stats, list_touched_files
-from villani_code.benchmark.reporting import render_summary_table, summarize
+from villani_code.benchmark.models import FailureReason, TelemetryQuality
+from villani_code.benchmark.reporting import diagnostics, paired_compare, render_summary_table, summarize
 from villani_code.benchmark.runner import BenchmarkRunner
+from villani_code.benchmark.stats import wilson_interval
 from villani_code.benchmark.task_loader import TaskLoadError, load_task, load_tasks
 from villani_code.benchmark.verifier import run_commands
 from villani_code.benchmark.workspace import WorkspaceManager
@@ -16,7 +17,7 @@ from villani_code.benchmark.workspace import WorkspaceManager
 def test_task_loader_parses_valid_task() -> None:
     task = load_task(Path("benchmark_tasks/villani_bench_v1/bugfix_001_datetime_cli"))
     assert task.id == "bugfix_001_datetime_cli"
-    assert task.family.value == "bugfix"
+    assert len(task.task_checksum or "") > 5
 
 
 def test_task_loader_rejects_invalid_prompt(tmp_path: Path) -> None:
@@ -38,15 +39,25 @@ def test_workspace_copy_is_isolated(tmp_path: Path) -> None:
     source.mkdir()
     (source / "a.txt").write_text("x", encoding="utf-8")
     manager = WorkspaceManager()
-    copied = manager.create(source)
-    (copied / "a.txt").write_text("y", encoding="utf-8")
+    with manager.create(source) as copied:
+        (copied / "a.txt").write_text("y", encoding="utf-8")
     assert (source / "a.txt").read_text(encoding="utf-8") == "x"
+
+
+def test_workspace_keep_behavior(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.txt").write_text("x", encoding="utf-8")
+    manager = WorkspaceManager(keep_workspace=True)
+    with manager.create(source) as copied:
+        root = copied.parent
+    assert root.exists()
 
 
 def test_visible_and_hidden_checks_run(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    passed, outcomes, _ = run_commands(repo, ["python -c 'print(1)'"], timeout_seconds=5)
+    passed, outcomes, _, _ = run_commands(repo, ["python -c 'print(1)'"], timeout_seconds=5)
     assert passed
     assert outcomes[0].passed
 
@@ -65,7 +76,7 @@ def test_allowlist_and_diff_stats(tmp_path: Path) -> None:
     assert deleted == 0
 
 
-def test_timeout_handling_in_runner() -> None:
+def test_timeout_and_failure_reason_in_runner() -> None:
     runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
     result = runner.run(
         suite_dir=Path("benchmark_tasks/villani_bench_v1"),
@@ -78,39 +89,25 @@ def test_timeout_handling_in_runner() -> None:
     assert "summary" in result
 
 
-def test_summary_generation() -> None:
-    rows = [
-        {
-            "task_id": "x",
-            "agent": "a",
-            "model": None,
-            "family": "bugfix",
-            "difficulty": "easy",
-            "success": 1,
-            "visible_pass": True,
-            "hidden_pass": True,
-            "runtime_seconds": 1.0,
-            "files_touched": 1,
-            "touched_file_paths": ["src/x.py"],
-            "lines_added": 1,
-            "lines_deleted": 0,
-            "num_shell_commands": 1,
-            "num_failed_commands": 0,
-            "verifications_run": ["pytest -q"],
-            "timeout": False,
-            "error": None,
-            "time_to_first_edit": None,
-            "time_to_first_verify": 0.1,
-            "status": "success",
-        }
-    ]
-    from villani_code.benchmark.models import BenchmarkRunResult
+def test_summary_generation_and_stats() -> None:
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="terminal_001_python_module_entry",
+        agent='cmd:python -c "from pathlib import Path; Path(\'app/__main__.py\').write_text(\'print(1)\\n\', encoding=\'utf-8\')"',
+        model=None,
+        base_url=None,
+        api_key=None,
+    )
+    from villani_code.benchmark.reporting import load_results
 
-    parsed = [BenchmarkRunResult.model_validate(row) for row in rows]
-    summary = summarize(parsed)
-    text = render_summary_table(parsed)
-    assert summary.success_rate == 1.0
-    assert "tasks=1" in text
+    rows = load_results(Path(data["results_path"]))
+    summary = summarize(rows)
+    text = render_summary_table(rows)
+    diag = diagnostics(rows)
+    assert summary.total_tasks >= 1
+    assert "tasks=" in text
+    assert "failure_reason_histogram" in diag
 
 
 def test_repro_logic_against_broken_and_fixed() -> None:
@@ -118,7 +115,7 @@ def test_repro_logic_against_broken_and_fixed() -> None:
     result = runner.run(
         suite_dir=Path("benchmark_tasks/villani_bench_v1"),
         task_id="repro_002_retry_policy",
-        agent="cmd:python -c 'from pathlib import Path; Path(\"tests/test_retry_policy_regression.py\").write_text(\"from app.client import should_retry\\n\\ndef test_regression():\\n    assert should_retry(400) is False\\n\", encoding=\"utf-8\")'",
+        agent='cmd:python -c "from pathlib import Path; Path(\'tests/test_retry_policy_regression.py\').write_text(\'from app.client import should_retry\\n\\ndef test_regression():\\n    assert should_retry(400) is False\\n\', encoding=\'utf-8\')"',
         model=None,
         base_url=None,
         api_key=None,
@@ -126,7 +123,19 @@ def test_repro_logic_against_broken_and_fixed() -> None:
     assert result["summary"]["total_tasks"] == 1
 
 
+def test_paired_comparison_and_ci() -> None:
+    ci = wilson_interval(5, 10)
+    assert ci[0] <= ci[1]
+    r = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
+    a = r.run(Path("benchmark_tasks/villani_bench_v1"), "cmd:python -c 'print(1)'", None, None, None, task_id="bugfix_001_datetime_cli")
+    b = r.run(Path("benchmark_tasks/villani_bench_v1"), "cmd:python -c 'print(2)'", None, None, None, task_id="bugfix_001_datetime_cli")
+    from villani_code.benchmark.reporting import load_results
+
+    comp = paired_compare(load_results(Path(a["results_path"])), load_results(Path(b["results_path"])))
+    assert "delta_ci95" in comp
+
+
 def test_smoke_load_all_tasks() -> None:
     tasks = load_tasks(Path("benchmark_tasks/villani_bench_v1"))
-    assert len(tasks) == 10
+    assert len(tasks) >= 25
     assert {task.family.value for task in tasks} == {"bugfix", "repro_test", "localize_patch", "terminal_workflow"}

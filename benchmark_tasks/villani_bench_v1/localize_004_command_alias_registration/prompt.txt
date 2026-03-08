@@ -1,0 +1,1 @@
+Find and fix the source of command alias registration with minimal edits.
