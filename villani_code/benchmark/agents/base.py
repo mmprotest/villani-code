@@ -23,7 +23,15 @@ class AgentRunner(ABC):
     supports_model_override: bool = True
 
     @abstractmethod
-    def build_command(self, repo_path: Path, prompt: str, model: str | None, base_url: str | None, api_key: str | None) -> list[str]:
+    def build_command(
+        self,
+        repo_path: Path,
+        prompt: str,
+        model: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        provider: str | None,
+    ) -> list[str]:
         raise NotImplementedError
 
     def build_env(self, *, base_url: str | None, api_key: str | None) -> dict[str, str]:
@@ -64,10 +72,11 @@ class AgentRunner(ABC):
         model: str | None,
         base_url: str | None,
         api_key: str | None,
+        provider: str | None,
         timeout: int,
     ) -> AdapterRunResult:
         started = time.monotonic()
-        command = self.build_command(repo_path, prompt, model, base_url, api_key)
+        command = self.build_command(repo_path, prompt, model, base_url, api_key, provider)
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]
         proc = subprocess.Popen(command, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)

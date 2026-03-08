@@ -45,6 +45,7 @@ class BenchmarkRunner:
         model: str | None,
         base_url: str | None,
         api_key: str | None,
+        provider: str | None = None,
         task_id: str | None = None,
         repeat: int = 1,
         include_private: bool = False,
@@ -56,7 +57,7 @@ class BenchmarkRunner:
         results: list[BenchmarkRunResult] = []
         for repeat_index in range(repeat):
             for task in tasks:
-                results.append(self._run_task(task, agent=agent, model=model, base_url=base_url, api_key=api_key, repeat_index=repeat_index))
+                results.append(self._run_task(task, agent=agent, model=model, base_url=base_url, api_key=api_key, provider=provider, repeat_index=repeat_index))
         result_path = write_results(results, self.output_dir)
         write_markdown_report(results, self.output_dir / "report.md")
         return {
@@ -143,7 +144,16 @@ class BenchmarkRunner:
             "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
         }
 
-    def _run_task(self, task: BenchmarkTask, agent: str, model: str | None, base_url: str | None, api_key: str | None, repeat_index: int = 0) -> BenchmarkRunResult:
+    def _run_task(
+        self,
+        task: BenchmarkTask,
+        agent: str,
+        model: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        provider: str | None,
+        repeat_index: int = 0,
+    ) -> BenchmarkRunResult:
         timeout_seconds = task.max_minutes * 60
         started = time.monotonic()
         failure_reason: FailureReason | None = None
@@ -173,7 +183,7 @@ class BenchmarkRunner:
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
             adapter = build_agent_runner(agent)
-            if not adapter.supports_model_override:
+            if model and not agent.startswith(("cmd:", "shell:")) and not adapter.supports_model_override:
                 raise ValueError(f"Agent '{agent}' does not support model override; benchmark cannot ensure fair comparison.")
             if not benchmark_asset_integrity(task.task_dir):
                 failure_reason = FailureReason.BENCHMARK_ERROR
@@ -195,7 +205,7 @@ class BenchmarkRunner:
                 python_version=sys.version,
                 agent_name=agent,
                 model_name=model,
-                provider="custom" if base_url else None,
+                provider=provider or ("openai" if base_url else None),
                 base_url=base_url,
                 env_allowlist=task.env_allowlist,
                 workspace_preserved=self.workspace.keep_workspace,
@@ -210,6 +220,7 @@ class BenchmarkRunner:
                     model=model,
                     base_url=base_url,
                     api_key=api_key,
+                    provider=provider,
                     timeout=timeout_seconds,
                 )
                 timeout = execution.timeout
@@ -317,7 +328,7 @@ class BenchmarkRunner:
                 fairness_notes=adapter.fairness_notes,
                 telemetry_capability=adapter.telemetry_capability,
                 model_name=model,
-                provider_label=base_url,
+                provider_label=provider or ("openai" if base_url else None),
                 success=success,
                 pass_rate=float(success),
                 failed=1 - success,
