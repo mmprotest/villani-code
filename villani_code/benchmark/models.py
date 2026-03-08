@@ -75,13 +75,33 @@ class SuccessPolicy(BaseModel):
 
 
 class TaskMetadata(BaseModel):
+    name: str | None = None
+    difficulty: str | None = None
     expected_files: list[str] = Field(default_factory=list)
+    reference_patch_size_lines: int | None = None
     primary_skill: str | None = None
     secondary_skills: list[str] = Field(default_factory=list)
+    runtime_stressors: list[str] = Field(default_factory=list)
+    task_type: str | None = None
+    requires_repo_navigation: bool = False
+    requires_multi_step_reasoning: bool = False
+    has_false_fix_trap: bool = False
+    requires_retry_recovery: bool = False
+    likely_tool_sequence: list[str] = Field(default_factory=list)
+    evaluation_focus: list[str] = Field(default_factory=list)
+    benchmark_bucket: str = "baseline"
     failure_mode: str | None = None
     reference_solution_notes: str | None = None
     mutability_notes: str | None = None
 
+
+
+    @field_validator("benchmark_bucket")
+    @classmethod
+    def _validate_bucket(cls, value: str) -> str:
+        if value not in {"baseline", "runtime_stressing"}:
+            raise ValueError("benchmark_bucket must be baseline|runtime_stressing")
+        return value
 
 class BenchmarkTask(BaseModel):
     id: str
@@ -174,6 +194,10 @@ class BenchmarkRunResult(BaseModel):
     task_language: str
     task_source_type: TaskSource = TaskSource.CURATED
     task_tags: list[str] = Field(default_factory=list)
+    task_type: str | None = None
+    benchmark_bucket: str = "baseline"
+    runtime_stressors: list[str] = Field(default_factory=list)
+    expected_files: list[str] = Field(default_factory=list)
     task_checksum: str
     agent_name: str
     adapter_name: str
@@ -185,9 +209,13 @@ class BenchmarkRunResult(BaseModel):
     model_name: str | None
     provider_label: str | None = None
     success: int
+    pass_rate: float = 0.0
+    failed: int = 0
+    timed_out: int = 0
     visible_pass: bool
     hidden_pass: bool
     runtime_seconds: float
+    wall_clock_seconds: float | None = None
     timeout: bool
     failure_reason: FailureReason | None = None
     error: str | None = None
@@ -197,6 +225,22 @@ class BenchmarkRunResult(BaseModel):
     lines_deleted: int
     num_shell_commands: int | None = None
     num_failed_commands: int | None = None
+    tokens_input: int | None = None
+    tokens_output: int | None = None
+    total_tokens: int | None = None
+    estimated_cost: float | None = None
+    number_of_turns: int | None = None
+    tool_calls_total: int | None = None
+    file_reads: int | None = None
+    file_writes: int | None = None
+    patch_attempts: int | None = None
+    test_runs: int | None = None
+    retries_after_failure: int | None = None
+    first_pass_success: bool | None = None
+    recovered_after_failed_attempt: bool | None = None
+    expected_files_touched_count: int | None = None
+    actual_files_touched_count: int | None = None
+    touched_unexpected_files: bool | None = None
     verifications_run: list[str]
     verification_attempt_count: int = 0
     time_to_first_edit: float | None = None

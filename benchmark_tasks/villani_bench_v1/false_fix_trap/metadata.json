@@ -1,0 +1,38 @@
+{
+  "name": "false_fix_trap",
+  "difficulty": "medium",
+  "expected_files": [
+    "src/config/loader.py"
+  ],
+  "reference_patch_size_lines": 1,
+  "primary_skill": "iterative-repair",
+  "secondary_skills": [
+    "config-debugging",
+    "failure-recovery"
+  ],
+  "runtime_stressors": [
+    "false_fix_trap",
+    "retry_recovery",
+    "fault_localization",
+    "test_interpretation"
+  ],
+  "task_type": "false_fix_trap",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": true,
+  "likely_tool_sequence": [
+    "read_tests",
+    "inspect_loader",
+    "inspect_validator",
+    "run_tests",
+    "apply_minimal_fix",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "trap_avoidance",
+    "recovery_after_failed_attempt",
+    "minimal_patch"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

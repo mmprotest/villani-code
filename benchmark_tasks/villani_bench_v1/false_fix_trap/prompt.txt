@@ -1,0 +1,1 @@
+Fix config loading so an environment override of port=0 is accepted as present, not missing.

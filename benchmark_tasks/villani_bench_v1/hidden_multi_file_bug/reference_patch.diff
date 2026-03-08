@@ -1,0 +1,7 @@
+--- a/src/pagination/cursor.py
++++ b/src/pagination/cursor.py
+@@
+-def next_cursor(current: int, page_size: int) -> int:
+-    return current + page_size - 1
++def next_cursor(current: int, page_size: int) -> int:
++    return current + page_size

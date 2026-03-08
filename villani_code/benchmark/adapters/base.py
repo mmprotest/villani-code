@@ -72,6 +72,17 @@ class AgentAdapter(ABC):
             "expected_files_total": FieldQuality.EXACT,
             "touched_irrelevant_files": FieldQuality.INFERRED,
             "self_corrected_after_failed_verify": FieldQuality.INFERRED,
+            "tool_calls_total": self.file_event_capture,
+            "file_reads": self.file_event_capture,
+            "file_writes": self.file_event_capture,
+            "patch_attempts": self.file_event_capture,
+            "test_runs": self.verify_capture,
+            "retries_after_failure": FieldQuality.INFERRED,
+            "number_of_turns": self.file_event_capture,
+            "tokens_input": FieldQuality.UNAVAILABLE,
+            "tokens_output": FieldQuality.UNAVAILABLE,
+            "total_tokens": FieldQuality.UNAVAILABLE,
+            "estimated_cost": FieldQuality.UNAVAILABLE,
         }
 
     def run(self, config: AdapterRunConfig) -> AdapterRunResult:

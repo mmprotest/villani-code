@@ -1,103 +1,97 @@
-# Villani Benchmark v3 (hardened)
+# Villani Benchmark v4 (runtime advantage focused)
 
-Villani benchmark is a layered evaluation **platform** for terminal coding agents, not a static task list.
+Villani benchmark now explicitly measures **runtime advantage on the same backend model**, not just raw bugfix skill.
 
-## Headline scoring rule
+## Product thesis alignment
 
-`success = 1` only if visible checks, hidden checks, and policy checks all pass.
+Primary question:
 
-## Tracks (explicit metadata only)
+> Given the same constrained model, which agent runtime completes more real repo maintenance tasks with higher success, lower cost, and less intervention?
 
-- Every task **must** declare `benchmark_track` in task metadata (`core` or `feature`).
-- Path-based inference was removed; no substring/path heuristics are used.
-- Core and feature are reported separately and not merged into one headline score.
+## Task design buckets
 
-### Core vs feature intent
+Each task now declares:
 
-- **Core:** bounded bugfix/repro/localize/terminal tasks, tighter patch radius.
-- **Feature:** larger end-to-end feature tasks with objective verification; still locally bounded.
+- `benchmark_bucket`: `baseline` or `runtime_stressing`
+- `task_type`
+- `runtime_stressors`
 
-## Adapter fairness + telemetry capability
+Use this split in analysis:
 
-Each adapter declares:
+- **baseline**: obvious/small fixes (model competence floor)
+- **runtime_stressing**: navigation, traps, iterative recovery, multi-stage repair (runtime design matters)
 
-- `adapter_capability`
-- `telemetry_capability`
-- `fairness_classification`
-- `fairness_notes`
+## Metadata schema (important new fields)
 
-Fairness classes:
-- `exact_comparable`
-- `approximately_comparable`
-- `coarse_wrapper_only`
-- `not_comparable`
+Task metadata includes:
 
-Current caveats:
-- `villani`: exact comparable when runtime events are emitted.
-- `claude`, `opencode`, `copilot-cli`: coarse wrapper adapters; not process-level apples-to-apples.
-- `cmd`/`shell`: not comparable (debug/smoke utility only).
+- `name`, `difficulty`, `primary_skill`, `expected_files`, `reference_patch_size_lines`
+- `runtime_stressors[]`
+- `task_type`
+- `requires_repo_navigation`
+- `requires_multi_step_reasoning`
+- `has_false_fix_trap`
+- `requires_retry_recovery`
+- `likely_tool_sequence[]`
+- `evaluation_focus[]`
+- `benchmark_bucket`
 
-## Telemetry honesty policy
+## New runtime-stressing tasks
 
-Every telemetry-like field includes `telemetry_field_quality_map` (`exact|inferred|unavailable`).
+Core suite now includes:
 
-- Exact: directly instrumented.
-- Inferred: coarse calculation with caveat.
-- Unavailable: null/None; never fabricated.
+- `hidden_multi_file_bug`
+- `false_fix_trap`
+- `two_stage_fix`
 
-Important hardening changes:
-- `num_shell_commands` and `num_failed_commands` are no longer faked from generic event length/exit code.
-- Process metrics are only populated when quality justifies it.
+These are deterministic, small-repo maintenance tasks with compact patches and explicit runtime stressors.
 
-## Health subsystem
+## Result metrics beyond pass/fail
 
-Healthcheck now reports machine-readable `errors` and `warnings` and fails CI/CLI on serious issues.
+Per-run outputs now include:
 
-Coverage includes:
-- invalid tasks/schema
-- invalid/missing track metadata
-- duplicate task ids
-- duplicate checksums
-- missing visible/hidden checks
-- broken allowlist
-- leaked hidden assets in visible repo
-- stale version warnings
-- missing expected_files / primary_skill warnings
+- Core outcomes: `success`, `pass_rate`, `failed`, `timed_out`
+- Efficiency: `wall_clock_seconds`, `tokens_input/output/total`, `estimated_cost`, `model_name`, `agent_name`
+- Interaction/runtime: `number_of_turns`, `tool_calls_total`, `file_reads`, `file_writes`, `patch_attempts`, `test_runs`, `retries_after_failure`, `first_pass_success`, `recovered_after_failed_attempt`
+- Task fit: `expected_files_touched_count`, `actual_files_touched_count`, `touched_unexpected_files`
 
-## Anti-gaming
+If an adapter cannot capture a metric, value is `null` and the run remains valid.
 
-Current enforced defenses:
-- hidden verification required
-- allowlist/forbidden-path policy
-- benchmark asset integrity checks
-- repro-test validity hardening (must fail broken + pass fixed)
+## Aggregation model
 
-Known limitation: task-by-task metamorphic variant coverage is still partial; framework is in place but not universal yet.
+Aggregates are exported for:
 
-## Reporting and stats
+- task
+- task_type
+- runtime_stressor
+- agent
+- model
+- agent+model pair
+- benchmark bucket
 
-Outputs:
-- JSONL results
-- JSON summary
-- CSV export
-- Markdown report
-- HTML report
+## Reporting outputs
 
-Summary/report now highlight:
-- separate core vs feature summary
-- fairness class slices
-- telemetry quality slices
-- hidden-fail-after-visible-pass rate
-- invalid repro-test rate
-- forbidden-edit rate
-- solved-only runtime/diff medians
-- small-sample warnings
+Generated outputs include:
 
-## Migration notes (this hardening pass)
+- `results.jsonl`
+- `results.csv`
+- `summary.json`
+- `aggregates.json`
+- `report.md`
 
-- fixed track inference bug: explicit metadata required; no path substring fallback.
-- downgraded/removed misleading telemetry behavior.
-- narrowed fairness claims for wrapper adapters.
-- strengthened feature/core separation in docs/reporting/filters.
-- expanded healthcheck integrity coverage and hard failure behavior.
-- improved benchmark diagnostics and caveat surfacing.
+`report.md` includes:
+
+- overall leaderboard (agent/model/agent+model)
+- same-model comparison table (prominent)
+- runtime-stressor breakdown
+- task-type breakdown
+- efficiency summary
+- task-by-task outcomes
+
+## Recommended workflow
+
+```bash
+python -m villani_code.cli benchmark run --suite benchmark_tasks/villani_bench_v1 --agent villani --model <small-model>
+python -m villani_code.cli benchmark summary --results artifacts/benchmark/results.jsonl
+python -m villani_code.cli benchmark report --results artifacts/benchmark/results.jsonl --out artifacts/benchmark/report.md
+```

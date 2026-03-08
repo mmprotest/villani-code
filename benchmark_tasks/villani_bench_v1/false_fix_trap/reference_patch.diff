@@ -1,0 +1,6 @@
+--- a/src/config/loader.py
++++ b/src/config/loader.py
+@@
+-    if env_overrides.get("port"):
++    if "port" in env_overrides:
+         config["port"] = int(env_overrides["port"])

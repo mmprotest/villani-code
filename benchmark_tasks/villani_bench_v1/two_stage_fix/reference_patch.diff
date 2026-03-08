@@ -1,0 +1,16 @@
+--- a/src/cache/serializer.py
++++ b/src/cache/serializer.py
+@@
+-def serialize(value: object) -> str:
+-    return json.dumps(value, sort_keys=True)
++def serialize(value: object) -> bytes:
++    return json.dumps(value, sort_keys=True).encode("utf-8")
+--- a/src/cache/memory_cache.py
++++ b/src/cache/memory_cache.py
+@@
+-        payload = serialize(value)
+-        return hashlib.sha256(payload).hexdigest()
++        payload = serialize(value)
++        if not isinstance(payload, bytes):
++            payload = str(payload).encode("utf-8")
++        return hashlib.sha256(payload).hexdigest()
