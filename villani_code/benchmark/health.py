@@ -43,6 +43,12 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
             warnings.append({"code": "missing_primary_skill", "task": task.id, "message": "metadata.primary_skill is empty"})
         if task.task_version.startswith("0."):
             warnings.append({"code": "stale_task_version", "task": task.id, "message": "task_version starts with 0."})
+        if task.metadata.benchmark_bucket not in {"baseline", "runtime_stressing"}:
+            errors.append({"code": "invalid_benchmark_bucket", "task": task.id, "message": "metadata.benchmark_bucket must be baseline|runtime_stressing"})
+        if not task.metadata.task_type:
+            warnings.append({"code": "missing_task_type", "task": task.id, "message": "metadata.task_type is empty"})
+        if not task.metadata.runtime_stressors:
+            warnings.append({"code": "missing_runtime_stressors", "task": task.id, "message": "metadata.runtime_stressors is empty"})
         leaked = [p for p in (task.task_dir / "repo").rglob("*") if p.is_file() and "hidden_checks" in p.as_posix()]
         if leaked:
             errors.append({"code": "hidden_asset_leak", "task": task.id, "message": "hidden_checks assets leaked into repo"})

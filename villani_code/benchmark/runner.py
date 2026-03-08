@@ -66,29 +66,67 @@ class BenchmarkRunner:
             "repeat": repeat,
         }
 
-    def _event_metrics(self, events: list[object], started: float, expected_files: list[str]) -> dict[str, object]:
+    def _event_metrics(self, events: list[object], started: float, expected_files: list[str], visible_commands: list[str], hidden_commands: list[str]) -> dict[str, object]:
         command_starts = 0
         command_failures = 0
         first_edit: float | None = None
         first_expected_read: float | None = None
         read_paths: set[str] = set()
+        touched_paths: set[str] = set()
+        tool_calls_total = 0
+        file_reads = 0
+        file_writes = 0
+        patch_attempts = 0
+        test_runs = 0
+        number_of_turns = 0
+        retries_after_failure = 0
+        verification_seen = False
+        verification_failed = False
+
+        verification_commands = set(visible_commands + hidden_commands)
         for e in events:
-            if getattr(e, "type", "") == "command_started":
+            etype = getattr(e, "type", "")
+            payload = getattr(e, "payload", {})
+            if etype == "command_started":
                 command_starts += 1
-            if getattr(e, "type", "") == "command_finished":
-                exit_code = getattr(e, "payload", {}).get("exit_code")
+                command = str(payload.get("command", ""))
+                if any(cmd in command for cmd in verification_commands):
+                    test_runs += 1
+                    verification_seen = True
+            if etype == "command_finished":
+                exit_code = payload.get("exit_code")
                 if isinstance(exit_code, int) and exit_code != 0:
                     command_failures += 1
-            payload = getattr(e, "payload", {})
-            event_type = str(payload.get("event") or getattr(e, "type", ""))
+                    if verification_seen:
+                        verification_failed = True
+                elif isinstance(exit_code, int) and exit_code == 0 and verification_failed:
+                    retries_after_failure += 1
+                    verification_failed = False
+
+            event_type = str(payload.get("event") or etype)
             ts = float(payload.get("ts", getattr(e, "timestamp", 0.0)))
             path = payload.get("path")
-            if event_type in {"file_edit", "apply_patch", "write_file"} and first_edit is None:
-                first_edit = max(0.0, ts - started)
+
+            if event_type in {"tool_call", "tool_invocation", "tool_result", "tool_use"}:
+                tool_calls_total += 1
+            if event_type in {"model_message", "assistant_message", "turn_started", "turn_completed"}:
+                number_of_turns += 1
+            if event_type in {"file_edit", "apply_patch", "write_file"}:
+                file_writes += 1
+                if event_type == "apply_patch":
+                    patch_attempts += 1
+                if first_edit is None:
+                    first_edit = max(0.0, ts - started)
             if event_type in {"file_read", "read_file", "open_file"} and isinstance(path, str):
+                file_reads += 1
                 read_paths.add(path)
                 if path in expected_files and first_expected_read is None:
                     first_expected_read = max(0.0, ts - started)
+            if isinstance(path, str):
+                touched_paths.add(path)
+
+        if number_of_turns == 0:
+            number_of_turns = None
         return {
             "num_shell_commands": command_starts if command_starts > 0 else None,
             "num_failed_commands": command_failures if command_starts > 0 else None,
@@ -96,6 +134,13 @@ class BenchmarkRunner:
             "expected_file_first_read_time": first_expected_read,
             "expected_files_found": len(set(expected_files) & read_paths) if expected_files else 0,
             "expected_files_total": len(expected_files),
+            "tool_calls_total": tool_calls_total if tool_calls_total > 0 else None,
+            "file_reads": file_reads if file_reads > 0 else None,
+            "file_writes": file_writes if file_writes > 0 else None,
+            "patch_attempts": patch_attempts if patch_attempts > 0 else None,
+            "test_runs": test_runs if test_runs > 0 else None,
+            "number_of_turns": number_of_turns,
+            "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
         }
 
     def _run_task(self, task: BenchmarkTask, agent: str, model: str | None, base_url: str | None, api_key: str | None, repeat_index: int = 0) -> BenchmarkRunResult:
@@ -117,6 +162,13 @@ class BenchmarkRunner:
         expected_file_first_read_time: float | None = None
         timeout = False
         field_quality_map: dict[str, FieldQuality] = {}
+        number_of_turns: int | None = None
+        tool_calls_total: int | None = None
+        file_reads: int | None = None
+        file_writes: int | None = None
+        patch_attempts: int | None = None
+        test_runs: int | None = None
+        retries_after_failure: int | None = None
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -164,14 +216,21 @@ class BenchmarkRunner:
                 telemetry_quality = execution.telemetry_quality
                 field_quality_map = execution.telemetry_field_quality_map
 
-                if field_quality_map.get("num_shell_commands") == FieldQuality.EXACT:
-                    metrics = self._event_metrics(execution.events, started, task.metadata.expected_files)
+                metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
+                if field_quality_map.get("num_shell_commands") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     num_shell_commands = metrics["num_shell_commands"]
                     num_failed_commands = metrics["num_failed_commands"]
                     time_to_first_edit = metrics["time_to_first_edit"]
                     expected_file_first_read_time = metrics["expected_file_first_read_time"]
                     expected_files_found = metrics["expected_files_found"]
                     expected_files_total = metrics["expected_files_total"]
+                    number_of_turns = metrics["number_of_turns"]
+                    tool_calls_total = metrics["tool_calls_total"]
+                    file_reads = metrics["file_reads"]
+                    file_writes = metrics["file_writes"]
+                    patch_attempts = metrics["patch_attempts"]
+                    test_runs = metrics["test_runs"]
+                    retries_after_failure = metrics["retries_after_failure"]
 
                 visible_pass, visible_outcomes, first_verify, l_verify = run_commands(workspace_repo, task.visible_verification, timeout_seconds)
                 if first_verify:
@@ -230,6 +289,12 @@ class BenchmarkRunner:
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
             hidden_failed = any("hidden" in c for c in verifications[-len(task.hidden_verification) :]) if task.hidden_verification else False
+            first_pass_success = bool(success and (retries_after_failure or 0) == 0)
+            recovered_after_failed_attempt = bool(success and (retries_after_failure or 0) > 0)
+            expected_files_set = set(task.metadata.expected_files)
+            touched_unexpected = bool(any(expected_files_set and p not in expected_files_set for p in touched))
+            expected_files_touched_count = sum(1 for p in touched if p in expected_files_set) if expected_files_set else 0
+
             return BenchmarkRunResult(
                 benchmark_track=task.benchmark_track,
                 task_id=task.id,
@@ -239,6 +304,10 @@ class BenchmarkRunner:
                 task_language=task.language,
                 task_source_type=task.source_type,
                 task_tags=task.tags,
+                task_type=task.metadata.task_type,
+                benchmark_bucket=task.metadata.benchmark_bucket,
+                runtime_stressors=task.metadata.runtime_stressors,
+                expected_files=task.metadata.expected_files,
                 task_checksum=task.task_checksum or "",
                 agent_name=agent,
                 adapter_name=adapter.name,
@@ -250,9 +319,13 @@ class BenchmarkRunner:
                 model_name=model,
                 provider_label=base_url,
                 success=success,
+                pass_rate=float(success),
+                failed=1 - success,
+                timed_out=int(timeout),
                 visible_pass=visible_pass,
                 hidden_pass=hidden_pass,
                 runtime_seconds=runtime_seconds,
+                wall_clock_seconds=runtime_seconds,
                 timeout=timeout,
                 failure_reason=None if success else failure_reason,
                 error=error,
@@ -262,6 +335,22 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
+                tokens_input=None,
+                tokens_output=None,
+                total_tokens=None,
+                estimated_cost=None,
+                number_of_turns=number_of_turns,
+                tool_calls_total=tool_calls_total,
+                file_reads=file_reads,
+                file_writes=file_writes,
+                patch_attempts=patch_attempts,
+                test_runs=test_runs,
+                retries_after_failure=retries_after_failure,
+                first_pass_success=first_pass_success,
+                recovered_after_failed_attempt=recovered_after_failed_attempt,
+                expected_files_touched_count=expected_files_touched_count,
+                actual_files_touched_count=files_touched,
+                touched_unexpected_files=touched_unexpected,
                 verifications_run=verifications,
                 verification_attempt_count=len(verifications),
                 time_to_first_edit=time_to_first_edit,

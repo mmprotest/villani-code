@@ -7,7 +7,7 @@ import pytest
 from villani_code.benchmark.adapters import ClaudeCodeAdapter, VillaniAdapter
 from villani_code.benchmark.health import run_healthcheck
 from villani_code.benchmark.models import BenchmarkTrack, FieldQuality, TaskSource, TelemetryQuality
-from villani_code.benchmark.reporting import diagnostics, paired_compare, render_summary_table, summarize
+from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, summarize
 from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.stats import wilson_interval
 from villani_code.benchmark.task_loader import TaskLoadError, load_task, load_tasks
@@ -83,7 +83,7 @@ def test_summary_generation_and_stats() -> None:
     text = render_summary_table(rows)
     diag = diagnostics(rows)
     assert summary.total_tasks >= 2
-    assert "core=" in text
+    assert "same_model_comparison" in text
     assert "by_fairness_class" in diag
     assert "small_sample_warning" in diag
 
@@ -111,3 +111,40 @@ def test_healthcheck_expanded() -> None:
     assert health["tasks"] >= 25
     assert "errors" in health
     assert health["ok"]
+
+
+def test_new_runtime_stressing_tasks_load() -> None:
+    for task_id in ["hidden_multi_file_bug", "false_fix_trap", "two_stage_fix"]:
+        task = load_task(Path(f"benchmark_tasks/villani_bench_v1/{task_id}"))
+        assert task.metadata.benchmark_bucket == "runtime_stressing"
+        assert task.metadata.runtime_stressors
+
+
+def test_reporting_exposes_same_model_comparison() -> None:
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="terminal_001_python_module_entry",
+        agent="cmd:python -c 'from pathlib import Path; Path(\"app/__main__.py\").write_text(\"print(1)\\n\", encoding=\"utf-8\")'",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+    rows = load_results(Path(data["results_path"]))
+    table = render_summary_table(rows)
+    assert "same_model_comparison" in table
+    assert rows[0].pass_rate in {0.0, 1.0}
+    assert rows[0].failed in {0, 1}
+
+
+def test_new_tasks_fail_before_fix() -> None:
+    import subprocess
+
+    for task_id, test_file in [
+        ("hidden_multi_file_bug", "tests/test_pagination.py"),
+        ("false_fix_trap", "tests/test_config_loading.py"),
+        ("two_stage_fix", "tests/test_cache.py"),
+    ]:
+        repo = Path(f"benchmark_tasks/villani_bench_v1/{task_id}/repo")
+        proc = subprocess.run(["pytest", "-q", test_file], cwd=repo, capture_output=True, text=True)
+        assert proc.returncode != 0

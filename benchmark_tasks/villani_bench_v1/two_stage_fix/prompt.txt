@@ -1,0 +1,1 @@
+Fix caching for list payloads so cache keys are stable and round-trip serialization works for list values.

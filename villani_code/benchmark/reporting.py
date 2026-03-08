@@ -3,10 +3,35 @@ from __future__ import annotations
 import csv
 from collections import Counter, defaultdict
 from pathlib import Path
-from statistics import median
+from statistics import mean, median
 
 from villani_code.benchmark.models import BenchmarkRunResult, BenchmarkSummary
 from villani_code.benchmark.stats import bootstrap_delta, wilson_interval
+
+
+def _safe_mean(values: list[float | int | None]) -> float | None:
+    usable = [float(v) for v in values if v is not None]
+    return round(mean(usable), 4) if usable else None
+
+
+def _group_pass(rows: list[BenchmarkRunResult]) -> dict[str, float]:
+    total = len(rows)
+    success = sum(r.success for r in rows)
+    return {"total": total, "successes": success, "pass_rate": round(success / total, 4) if total else 0.0}
+
+
+def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
+    return {
+        **_group_pass(rows),
+        "avg_total_tokens": _safe_mean([r.total_tokens for r in rows]),
+        "avg_wall_clock_seconds": _safe_mean([r.wall_clock_seconds for r in rows]),
+        "avg_tool_calls_total": _safe_mean([r.tool_calls_total for r in rows]),
+        "avg_test_runs": _safe_mean([r.test_runs for r in rows]),
+        "avg_patch_attempts": _safe_mean([r.patch_attempts for r in rows]),
+        "avg_retries_after_failure": _safe_mean([r.retries_after_failure for r in rows]),
+        "first_pass_success_rate": round(sum(1 for r in rows if r.first_pass_success) / total, 4) if (total := len(rows)) else 0.0,
+        "recovered_after_failed_attempt_rate": round(sum(1 for r in rows if r.recovered_after_failed_attempt) / total, 4) if total else 0.0,
+    }
 
 
 def write_results(results: list[BenchmarkRunResult], output_dir: Path) -> Path:
@@ -18,6 +43,7 @@ def write_results(results: list[BenchmarkRunResult], output_dir: Path) -> Path:
             handle.write("\n")
     summary = summarize(results)
     (output_dir / "summary.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    (output_dir / "aggregates.json").write_text(aggregate_results(results), encoding="utf-8")
     write_csv(results, output_dir / "results.csv")
     return out
 
@@ -26,17 +52,35 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
     fields = [
         "task_id",
         "benchmark_track",
+        "benchmark_bucket",
+        "task_type",
         "agent_name",
+        "model_name",
         "adapter_name",
         "adapter_capability",
         "fairness_classification",
         "telemetry_capability",
         "success",
-        "failure_reason",
+        "pass_rate",
+        "failed",
+        "timed_out",
         "runtime_seconds",
+        "wall_clock_seconds",
+        "total_tokens",
+        "estimated_cost",
+        "number_of_turns",
+        "tool_calls_total",
+        "file_reads",
+        "file_writes",
+        "patch_attempts",
+        "test_runs",
+        "retries_after_failure",
+        "first_pass_success",
+        "recovered_after_failed_attempt",
         "files_touched",
-        "lines_added",
-        "lines_deleted",
+        "expected_files_touched_count",
+        "actual_files_touched_count",
+        "touched_unexpected_files",
         "telemetry_quality",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -47,17 +91,35 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
                 {
                     "task_id": r.task_id,
                     "benchmark_track": r.benchmark_track.value,
+                    "benchmark_bucket": r.benchmark_bucket,
+                    "task_type": r.task_type,
                     "agent_name": r.agent_name,
+                    "model_name": r.model_name,
                     "adapter_name": r.adapter_name,
                     "adapter_capability": r.adapter_capability,
                     "fairness_classification": r.fairness_classification.value,
                     "telemetry_capability": r.telemetry_capability,
                     "success": r.success,
-                    "failure_reason": r.failure_reason.value if r.failure_reason else "",
+                    "pass_rate": r.pass_rate,
+                    "failed": r.failed,
+                    "timed_out": r.timed_out,
                     "runtime_seconds": r.runtime_seconds,
+                    "wall_clock_seconds": r.wall_clock_seconds,
+                    "total_tokens": r.total_tokens,
+                    "estimated_cost": r.estimated_cost,
+                    "number_of_turns": r.number_of_turns,
+                    "tool_calls_total": r.tool_calls_total,
+                    "file_reads": r.file_reads,
+                    "file_writes": r.file_writes,
+                    "patch_attempts": r.patch_attempts,
+                    "test_runs": r.test_runs,
+                    "retries_after_failure": r.retries_after_failure,
+                    "first_pass_success": r.first_pass_success,
+                    "recovered_after_failed_attempt": r.recovered_after_failed_attempt,
                     "files_touched": r.files_touched,
-                    "lines_added": r.lines_added,
-                    "lines_deleted": r.lines_deleted,
+                    "expected_files_touched_count": r.expected_files_touched_count,
+                    "actual_files_touched_count": r.actual_files_touched_count,
+                    "touched_unexpected_files": r.touched_unexpected_files,
                     "telemetry_quality": r.telemetry_quality.value,
                 }
             )
@@ -87,6 +149,39 @@ def summarize(results: list[BenchmarkRunResult]) -> BenchmarkSummary:
         total_family = family["total"]
         family["success_rate"] = round((family["successes"] / total_family) if total_family else 0.0, 4)
     return BenchmarkSummary(total_tasks=total, successes=successes, success_rate=round((successes / total) if total else 0.0, 4), by_family=by_family)
+
+
+def aggregate_results(results: list[BenchmarkRunResult]) -> str:
+    by_task: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    by_task_type: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    by_stressor: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    by_agent: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    by_model: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    by_agent_model: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    by_bucket: dict[str, list[BenchmarkRunResult]] = defaultdict(list)
+    for r in results:
+        by_task[r.task_id].append(r)
+        by_task_type[r.task_type or "unknown"].append(r)
+        for stressor in r.runtime_stressors:
+            by_stressor[stressor].append(r)
+        by_agent[r.agent_name].append(r)
+        by_model[r.model_name or "unknown"].append(r)
+        by_agent_model[f"{r.agent_name}::{r.model_name or 'unknown'}"].append(r)
+        by_bucket[r.benchmark_bucket].append(r)
+
+    import json
+
+    payload = {
+        "overall": _aggregate(results),
+        "by_task": {k: _aggregate(v) for k, v in sorted(by_task.items())},
+        "by_task_type": {k: _aggregate(v) for k, v in sorted(by_task_type.items())},
+        "by_runtime_stressor": {k: _aggregate(v) for k, v in sorted(by_stressor.items())},
+        "by_agent": {k: _aggregate(v) for k, v in sorted(by_agent.items())},
+        "by_model": {k: _aggregate(v) for k, v in sorted(by_model.items())},
+        "by_agent_model": {k: _aggregate(v) for k, v in sorted(by_agent_model.items())},
+        "by_bucket": {k: _aggregate(v) for k, v in sorted(by_bucket.items())},
+    }
+    return json.dumps(payload, indent=2)
 
 
 def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
@@ -132,6 +227,7 @@ def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
 
     return {
         "summary": summarize(results).model_dump(),
+        "aggregates": aggregate_results(results),
         "by_track": dict(by_track),
         "by_family": dict(by_family),
         "by_telemetry_quality": dict(by_quality),
@@ -167,41 +263,70 @@ def paired_compare(results_a: list[BenchmarkRunResult], results_b: list[Benchmar
 
 def render_summary_table(results: list[BenchmarkRunResult]) -> str:
     d = diagnostics(results)
+    import json
+
+    agg = json.loads(d["aggregates"])
     lines = [
         f"tasks={d['summary']['total_tasks']} successes={d['summary']['successes']} success_rate={d['summary']['success_rate']:.2%}",
         f"ci95=({d['pass_rate_ci_95']['low']:.2%}, {d['pass_rate_ci_95']['high']:.2%}) hidden_after_visible={d['hidden_fail_after_visible_pass_rate']:.2%}",
-        f"core={d['by_track'].get('core', {}).get('success', 0)}/{d['by_track'].get('core', {}).get('total', 0)} feature={d['by_track'].get('feature', {}).get('success', 0)}/{d['by_track'].get('feature', {}).get('total', 0)}",
-        "id | track | fairness | telemetry | success | visible | hidden | runtime_s | fail_reason",
+        "same_model_comparison(agent::model pass_rate first_pass recovered avg_total_tokens avg_wall_s)",
     ]
+    for key, row in sorted(agg["by_agent_model"].items()):
+        lines.append(
+            f"- {key}: {row['pass_rate']:.2%} {row['first_pass_success_rate']:.2%} {row['recovered_after_failed_attempt_rate']:.2%} {row['avg_total_tokens']} {row['avg_wall_clock_seconds']}"
+        )
+    lines.append("id | bucket | task_type | success | first_pass | recovered | retries | runtime_s")
     for row in results:
         lines.append(
-            f"{row.task_id} | {row.benchmark_track.value} | {row.fairness_classification.value} | {row.telemetry_quality.value} | {row.success} | {row.visible_pass} | {row.hidden_pass} | {row.runtime_seconds:.2f} | {row.failure_reason.value if row.failure_reason else '-'}"
+            f"{row.task_id} | {row.benchmark_bucket} | {row.task_type or '-'} | {row.success} | {row.first_pass_success} | {row.recovered_after_failed_attempt} | {row.retries_after_failure} | {row.runtime_seconds:.2f}"
         )
     return "\n".join(lines)
 
 
 def write_markdown_report(results: list[BenchmarkRunResult], out: Path) -> None:
     d = diagnostics(results)
-    lines = ["# Benchmark Report", "", f"- tasks: {d['summary']['total_tasks']}", f"- success_rate: {d['summary']['success_rate']:.2%}"]
-    if d["small_sample_warning"]:
-        lines.append(f"- warning: {d['small_sample_warning']}")
-    lines.extend(["", "## Track summary (separate)", ""])
-    for k, v in sorted(d["by_track"].items()):
-        lines.append(f"- {k}: {v['success']}/{v['total']}")
-    lines.extend(["", "## Fairness caveats", ""])
+    import json
+
+    agg = json.loads(d["aggregates"])
+    lines = ["# Benchmark Report", "", "## Overall leaderboard", "", "| group | pass_rate | successes/total |", "|---|---:|---:|"]
+    for group, rows in [("Agent", agg["by_agent"]), ("Model", agg["by_model"]), ("Agent+Model", agg["by_agent_model"])]:
+        for key, val in sorted(rows.items()):
+            lines.append(f"| {group}:{key} | {val['pass_rate']:.2%} | {val['successes']}/{val['total']} |")
+
+    lines.extend(["", "## Same-model comparison (small-model focus)", "", "| agent::model | pass_rate | first_pass_success | recovered_after_failed_attempt | avg_total_tokens | avg_wall_clock_seconds |", "|---|---:|---:|---:|---:|---:|"])
+    for key, val in sorted(agg["by_agent_model"].items()):
+        lines.append(
+            f"| {key} | {val['pass_rate']:.2%} | {val['first_pass_success_rate']:.2%} | {val['recovered_after_failed_attempt_rate']:.2%} | {val['avg_total_tokens']} | {val['avg_wall_clock_seconds']} |"
+        )
+
+    lines.extend(["", "## Runtime-stressor breakdown", "", "| stressor | pass_rate | avg_retries_after_failure | first_pass_success |", "|---|---:|---:|---:|"])
+    for key, val in sorted(agg["by_runtime_stressor"].items()):
+        lines.append(f"| {key} | {val['pass_rate']:.2%} | {val['avg_retries_after_failure']} | {val['first_pass_success_rate']:.2%} |")
+
+    lines.extend(["", "## Task-type breakdown", "", "| task_type | pass_rate |", "|---|---:|"])
+    for key, val in sorted(agg["by_task_type"].items()):
+        lines.append(f"| {key} | {val['pass_rate']:.2%} |")
+
+    lines.extend(["", "## Efficiency summary", "", "| group | avg_total_tokens | avg_wall_clock_seconds | avg_tool_calls_total | avg_test_runs | avg_patch_attempts |", "|---|---:|---:|---:|---:|---:|"])
+    overall = agg["overall"]
+    lines.append(
+        f"| overall | {overall['avg_total_tokens']} | {overall['avg_wall_clock_seconds']} | {overall['avg_tool_calls_total']} | {overall['avg_test_runs']} | {overall['avg_patch_attempts']} |"
+    )
+
+    lines.extend(["", "## Task-by-task outcomes", "", "| task | bucket | type | success | retries_after_failure | first_pass_success | recovered_after_failed_attempt |", "|---|---|---|---:|---:|---|---|"])
     for row in results:
-        lines.append(f"- {row.adapter_name}: {row.fairness_classification.value} ({row.fairness_notes})")
-    lines.extend(["", "## Telemetry quality", ""])
-    for k, v in sorted(d["by_telemetry_quality"].items()):
-        lines.append(f"- {k}: {v['success']}/{v['total']}")
-    out.write_text("\n".join(dict.fromkeys(lines)), encoding="utf-8")
+        lines.append(
+            f"| {row.task_id} | {row.benchmark_bucket} | {row.task_type or '-'} | {row.success} | {row.retries_after_failure} | {row.first_pass_success} | {row.recovered_after_failed_attempt} |"
+        )
+
+    out.write_text("\n".join(lines), encoding="utf-8")
 
 
 def write_html_report(results: list[BenchmarkRunResult], out: Path) -> None:
     d = diagnostics(results)
     rows = "".join(
-        f"<tr><td>{r.task_id}</td><td>{r.benchmark_track.value}</td><td>{r.task_family.value}</td><td>{r.fairness_classification.value}</td><td>{r.telemetry_quality.value}</td><td>{r.success}</td></tr>"
+        f"<tr><td>{r.task_id}</td><td>{r.benchmark_track.value}</td><td>{r.task_family.value}</td><td>{r.benchmark_bucket}</td><td>{r.task_type or '-'}</td><td>{r.success}</td></tr>"
         for r in results
     )
-    html = f"""<html><body><h1>Benchmark Report</h1><p>Tasks: {d['summary']['total_tasks']}</p><p>Success: {d['summary']['success_rate']:.2%}</p><table border='1'><tr><th>Task</th><th>Track</th><th>Family</th><th>Fairness</th><th>Telemetry</th><th>Success</th></tr>{rows}</table></body></html>"""
+    html = f"""<html><body><h1>Benchmark Report</h1><p>Tasks: {d['summary']['total_tasks']}</p><p>Success: {d['summary']['success_rate']:.2%}</p><table border='1'><tr><th>Task</th><th>Track</th><th>Family</th><th>Bucket</th><th>TaskType</th><th>Success</th></tr>{rows}</table></body></html>"""
     out.write_text(html, encoding="utf-8")
