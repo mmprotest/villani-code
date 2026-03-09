@@ -31,6 +31,9 @@ def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
         "avg_retries_after_failure": _safe_mean([r.retries_after_failure for r in rows]),
         "first_pass_success_rate": round(sum(1 for r in rows if r.first_pass_success) / total, 4) if (total := len(rows)) else 0.0,
         "recovered_after_failed_attempt_rate": round(sum(1 for r in rows if r.recovered_after_failed_attempt) / total, 4) if total else 0.0,
+        "forbidden_edit_rate": round(sum(1 for r in rows if r.failure_reason and r.failure_reason.value == "forbidden_edit") / total, 4) if total else 0.0,
+        "visible_only_rate": round(sum(1 for r in rows if r.visible_pass and not r.hidden_pass) / total, 4) if total else 0.0,
+        "self_corrected_after_failed_verify_rate": _safe_mean([1.0 if r.self_corrected_after_failed_verify else 0.0 if r.self_corrected_after_failed_verify is not None else None for r in rows]),
     }
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 import subprocess
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,7 @@ from villani_code.context_governance import ContextCompactor, ContextInclusionRe
 from villani_code.prompting import build_system_blocks
 from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
+from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
@@ -130,7 +132,39 @@ def init_small_model_support(runner: Any) -> None:
     runner._repo_map = build_repo_map(idx)
 
 
+def _is_strongly_adjacent_path(candidate: str, locked_paths: set[str]) -> bool:
+    c_norm = candidate.replace("\\", "/").lstrip("./")
+    if not locked_paths:
+        return False
+    from pathlib import Path
+
+    c_path = Path(c_norm)
+    c_parent = str(c_path.parent)
+    c_stem = c_path.stem
+    for locked in locked_paths:
+        l_norm = locked.replace("\\", "/").lstrip("./")
+        l_path = Path(l_norm)
+        if c_parent == str(l_path.parent):
+            return True
+        if c_path.name == "__init__.py" and c_parent == str(l_path.parent):
+            return True
+        if l_path.name == "__init__.py" and c_parent == str(l_path.parent):
+            return True
+        if c_stem == l_path.stem:
+            return True
+        if c_stem.startswith("test_") and c_stem[5:] == l_path.stem:
+            return True
+        if l_path.stem.startswith("test_") and l_path.stem[5:] == c_stem:
+            return True
+        if c_path.name == f"test_{l_path.stem}.py" or l_path.name == f"test_{c_stem}.py":
+            return True
+    return False
+
+
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
+    if not constrained:
+        return None
     if tool_name in {"Write", "Patch"}:
         fp = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
         if fp:
@@ -146,6 +180,25 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 if read_result.get("is_error"):
                     return f"Read-before-edit policy: failed to auto-read {fp}. Read it explicitly before editing."
                 runner._files_read.add(fp)
+
+            intended = set(getattr(runner, "_intended_targets", set()))
+            if intended and fp not in intended:
+                benchmark_ok = (not runner.benchmark_config.enabled) or runner.benchmark_config.in_allowlist(fp)
+                has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(fp, intended)
+                if (not runner._scope_expansion_used) and benchmark_ok and has_evidence and classify_repo_path(fp) == "authoritative" and not is_ignored_repo_path(fp):
+                    runner._scope_expansion_used = True
+                elif runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp) and runner.benchmark_config.is_expected_or_support(fp):
+                    pass
+                else:
+                    reason = "scope expansion exhausted" if runner._scope_expansion_used else "new path lacks read/evidence adjacency"
+                    runner.event_callback({"type": "small_model_scope_blocked", "file_path": fp, "intended_targets": sorted(intended), "reason": reason})
+                    return f"Constrained scope lock: blocked widening to {fp}; {reason}. Locked targets: {sorted(intended)}."
+
+            if path.exists() and path.is_file() and fp not in runner._before_contents:
+                before_text = path.read_text(encoding="utf-8", errors="replace")
+                runner._before_contents[fp] = before_text
+                if fp in getattr(runner, "_current_verification_targets", set()):
+                    runner._current_verification_before_contents.setdefault(fp, before_text)
     if tool_name == "Write":
         file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
         path = (runner.repo / file_path).resolve()
@@ -154,7 +207,6 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             if len(text) > 10_000 or len(text.splitlines()) > 200:
                 return "Small-model mode policy: avoid whole-file writes for large files; use Patch instead."
     return None
-
 
 def tighten_tool_input(tool_name: str, tool_input: dict[str, Any]) -> None:
     if tool_name == "Read":
@@ -194,8 +246,17 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     if attributed_intentional:
         commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
         commands.append(["git", "diff", "--", *attributed_intentional])
-    if (runner.repo / "tests").exists() and attributed_intentional:
-        commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
+
+    touched_tests = [p for p in attributed_intentional if p.startswith("tests/") and p.endswith(".py")]
+    touched_sources = [p for p in attributed_intentional if p.endswith(".py") and not p.startswith("tests/")]
+    task_mode = getattr(runner, "_task_mode", TaskMode.GENERAL)
+    if touched_tests:
+        commands.append(["pytest", "-q", *touched_tests])
+    elif touched_sources:
+        family = shell_family_for_platform(sys.platform)
+        commands.append(["bash", "-lc", baseline_import_validation_command(family)])
+    elif task_mode in {TaskMode.DOCS_UPDATE_SAFE, TaskMode.INSPECT_AND_PLAN}:
+        pass
 
     lines = ["<verification>", f"trigger: {trigger}"]
     cmd_results: list[dict[str, Any]] = []
@@ -203,7 +264,14 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
         stderr_lines = "\n".join([ln for ln in proc.stderr.splitlines() if ln][:5])
         stdout = proc.stdout[:1500]
-        cmd_results.append({"command": " ".join(cmd), "exit": proc.returncode, "stdout": stdout, "stderr": stderr_lines})
+        cmd_results.append(
+            {
+                "command": " ".join(cmd),
+                "exit": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr_lines,
+            }
+        )
         lines.append(f"command: {' '.join(cmd)}")
         lines.append(f"exit: {proc.returncode}")
         if stdout:
@@ -211,7 +279,9 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         if stderr_lines:
             lines.append(f"key stderr:\n{stderr_lines}")
 
-    verification_artifacts = [r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0]
+    verification_artifacts = [
+        r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
+    ]
     verification = runner._verification_engine.verify(
         trigger,
         attributed_intentional,
@@ -262,11 +332,22 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "occurrence": runner._repeated_stale_verification_count,
             }
         )
-        return ""
+        return (
+            "<verification>\n"
+            "verification state repeated\n"
+            "no new evidence was produced\n"
+            "next step must either change target, change validation evidence, or stop\n"
+            "</verification>"
+        )
 
     lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")
     if attributed_incidental:
         lines.append(f"incidental_changed: {json.dumps(sorted(attributed_incidental))}")
+    if runner._intended_targets and not attributed_intentional:
+        lines.append(f"locked_targets: {json.dumps(sorted(runner._intended_targets))}")
+        lines.append("note: no intentional diff is currently attributable in locked scope")
+        if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
+            lines.append("next: inspect locked file, produce one bounded patch, or stop")
     lines.append(f"status: {verification.status.value}")
     lines.append(f"confidence: {verification.confidence_score}")
     if verification.findings:
@@ -287,47 +368,46 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             {
                 "type": "confidence_risk",
                 "confidence": verification.confidence_score,
-                "risk": "medium" if verification.status == VerificationStatus.UNCERTAIN else "high",
+                "risk": "medium"
+                if verification.status == VerificationStatus.UNCERTAIN
+                else "high",
                 "summary": verification.summary,
             }
         )
     return "\n".join(lines)
 
 
-def emit_policy_event(runner: Any, tool_name: str, tool_input: dict[str, Any], decision: Any, reason: str) -> None:
-    if tool_name != "Bash":
-        return
-    command = str(tool_input.get("command", ""))
-    cwd = str((runner.repo / str(tool_input.get("cwd", "."))).resolve())
-    outcome = {"allow": "AUTO_APPROVE", "ask": "ASK", "deny": "DENY"}.get(str(decision.value if hasattr(decision, 'value') else decision).lower(), "ASK")
-    ts = datetime.now(timezone.utc).isoformat()
-    line = json.dumps({"timestamp": ts, "cwd": cwd, "command": command, "outcome": outcome, "reason": reason})
-    log_dir = runner.repo / ".villani_code" / "logs"
-    ensure_dir(log_dir)
-    with (log_dir / "commands.log").open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-    runner.event_callback({"type": "command_policy", "command": command, "cwd": cwd, "outcome": outcome, "reason": reason})
+def emit_policy_event(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    decision: Any,
+    reason: str,
+) -> None:
+    runner.event_callback(
+        {
+            "type": "policy_decision",
+            "name": tool_name,
+            "input": tool_input,
+            "decision": getattr(decision, "value", str(decision)),
+            "reason": reason,
+        }
+    )
 
 
-def capture_edit_proposal(runner: Any, response: dict[str, Any]) -> Any:
-    text_blocks = [b.get("text", "") for b in response.get("content", []) if b.get("type") == "text"]
-    if not text_blocks:
+def capture_edit_proposal(runner: Any, response: dict[str, Any]):
+    from villani_code.patch_apply import extract_unified_diff_targets
+
+    text_blocks = [
+        block.get("text", "")
+        for block in response.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    diff_text = "\n".join([t for t in text_blocks if "--- a/" in t and "+++ b/" in t])
+    if not diff_text:
         return None
-    merged = "\n".join(text_blocks)
-    has_diff = "--- " in merged and "+++ " in merged and "@@" in merged
-    if not (runner.capture_next_diff_proposal or has_diff):
-        return None
-    files: list[str] = []
-    for ln in merged.splitlines():
-        if ln.startswith("+++ "):
-            p = ln[4:].strip().split("\t")[0]
-            if p.startswith("b/"):
-                p = p[2:]
-            files.append(p)
-    proposal = runner.proposals.create(diff_text=merged, files_touched=files, summary=f"Proposed edit touching {len(files)} file(s)")
-    runner.capture_next_diff_proposal = False
-    return proposal
-
+    files = extract_unified_diff_targets(diff_text)
+    return runner.proposals.create(diff_text=diff_text, files_touched=files, summary="Assistant proposed unified diff")
 
 def is_no_progress_response(response: dict[str, Any]) -> bool:
     blocks = response.get("content", [])

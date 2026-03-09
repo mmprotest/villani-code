@@ -336,3 +336,39 @@ def test_stall_final_stop_after_recovery_attempts(tmp_path: Path):
     result = runner.run("x")
     text_blocks = [b.get("text","") for b in result["response"]["content"] if b.get("type")=="text"]
     assert any("still blocked" in t for t in text_blocks)
+
+
+def test_stall_recovery_messages_are_narrow_and_staged(tmp_path: Path):
+    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False)
+    runner.run("x")
+    recovery_messages = []
+    for p in runner.client.payloads[1:]:
+        for m in p["messages"]:
+            if m["role"] == "user" and m["content"] and "RECOVERY MODE" in m["content"][0].get("text", ""):
+                recovery_messages.append(m["content"][0]["text"])
+    assert any("single target file" in msg for msg in recovery_messages)
+    assert any("Do not edit yet" in msg for msg in recovery_messages)
+
+
+def test_small_model_run_injects_task_contract_steering_message(tmp_path: Path):
+    client = FakeClientStall()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True)
+    runner.run("fix failing test in src/foo.py")
+    first_payload = client.payloads[0]
+    user_texts = [
+        b.get("text", "")
+        for m in first_payload["messages"]
+        if m.get("role") == "user"
+        for b in m.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    assert any("Task contract" in t and "name likely target file first" in t for t in user_texts)
+
+
+def test_stall_in_villani_mode_terminates_without_relax_prompt(tmp_path: Path):
+    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    result = runner.run("x")
+    text_blocks = [b.get("text", "") for b in result["response"]["content"] if b.get("type") == "text"]
+    joined = "\n".join(text_blocks)
+    assert "constraint should I relax" not in joined
+    assert "Stopping due to constrained-run blocker" in joined

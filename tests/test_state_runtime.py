@@ -144,3 +144,73 @@ def test_validate_anthropic_tool_sequence_rejects_non_user_followup() -> None:
 
     with pytest.raises(RuntimeError, match="message index 0"):
         state_runtime.validate_anthropic_tool_sequence(messages)
+
+
+def test_run_verification_targets_touched_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["tests/test_x.py"])
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        class P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    out = runner._run_verification("edit")
+    assert "pytest -q tests/test_x.py" in out
+    assert any(cmd[:2] == ["pytest", "-q"] for cmd in seen)
+
+
+def test_run_verification_uses_baseline_import_for_touched_python_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=1\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["src/a.py"])
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        class P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    out = runner._run_verification("edit")
+    assert "python -c" in out
+    assert any(cmd[:2] == ["bash", "-lc"] for cmd in seen)
+
+
+def test_repeated_stale_verification_returns_compact_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
+
+    for _ in range(2):
+        runner._run_verification("edit")
+    third = runner._run_verification("edit")
+    assert "verification state repeated" in third
+    assert third.startswith("<verification>")
+
+
+def test_verification_reports_locked_scope_without_attributable_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._intended_targets = {"villani_code/__init__.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
+
+    out = runner._run_verification("edit")
+    assert "no intentional diff is currently attributable in locked scope" in out

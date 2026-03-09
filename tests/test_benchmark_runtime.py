@@ -13,6 +13,7 @@ from villani_code.benchmark.models import (
 )
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.benchmark.runner import BenchmarkRunner
+from villani_code.benchmark.reporting import aggregate_results
 from villani_code.patch_apply import extract_unified_diff_targets
 from villani_code.prompting import build_system_blocks
 from villani_code.state import Runner
@@ -234,3 +235,97 @@ def test_benchmark_runner_passes_runtime_config_to_native_agent(tmp_path: Path, 
     assert result.task_id == "task_1"
     assert captured["payload"] is not None
     assert '"task_id":"task_1"' in str(captured["payload"])
+
+
+def test_benchmark_scope_expansion_allowlisted_second_target_permitted(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, _benchmark_config())
+    runner.small_model = True
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "app.py").write_text("x=0\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_app.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    runner._intended_targets = {"src/app.py"}
+
+    err = runner._small_model_tool_guard("Patch", {"file_path": "tests/test_app.py", "patch": "x"})
+    assert err is None
+
+
+def test_aggregate_results_includes_new_constraint_metrics() -> None:
+    from villani_code.benchmark.models import (
+        BenchmarkRunResult,
+        FairnessClassification,
+        FailureReason,
+        TaskDifficulty,
+        TaskFamily,
+        BenchmarkTrack,
+        TelemetryQuality,
+    )
+
+    base = dict(
+        task_id="t1",
+        benchmark_track=BenchmarkTrack.CORE,
+        task_family=TaskFamily.BUGFIX,
+        task_difficulty=TaskDifficulty.EASY,
+        task_language="python",
+        task_checksum="abc",
+        benchmark_bucket="b",
+        task_type="bugfix",
+        agent_name="a",
+        adapter_name="x",
+        adapter_version="1",
+        adapter_capability="x",
+        fairness_classification=FairnessClassification.EXACT_COMPARABLE,
+        fairness_notes="",
+        telemetry_capability="x",
+        model_name="m",
+        success=0,
+        pass_rate=0.0,
+        failed=1,
+        timed_out=0,
+        visible_pass=True,
+        hidden_pass=False,
+        runtime_seconds=1.0,
+        wall_clock_seconds=1.0,
+        timeout=False,
+        failure_reason=FailureReason.FORBIDDEN_EDIT,
+        touched_file_paths=["src/a.py"],
+        files_touched=1,
+        lines_added=1,
+        lines_deleted=0,
+        total_tokens=1,
+        number_of_turns=1,
+        tool_calls_total=1,
+        file_reads=0,
+        file_writes=1,
+        patch_attempts=1,
+        test_runs=0,
+        retries_after_failure=0,
+        first_pass_success=False,
+        recovered_after_failed_attempt=False,
+        expected_files_touched_count=1,
+        actual_files_touched_count=1,
+        touched_unexpected_files=False,
+        verifications_run=[],
+        runtime_stressors=[],
+        telemetry_quality=TelemetryQuality.INFERRED,
+        telemetry_field_quality_map={},
+        self_corrected_after_failed_verify=None,
+    )
+    row1 = BenchmarkRunResult(**base)
+    row2 = row1.model_copy(
+        update={
+            "task_id": "t2",
+            "success": 1,
+            "failed": 0,
+            "visible_pass": True,
+            "hidden_pass": True,
+            "failure_reason": None,
+            "self_corrected_after_failed_verify": True,
+        }
+    )
+    import json
+
+    agg = json.loads(aggregate_results([row1, row2]))
+    assert "forbidden_edit_rate" in agg["overall"]
+    assert "visible_only_rate" in agg["overall"]
+    assert "self_corrected_after_failed_verify_rate" in agg["overall"]

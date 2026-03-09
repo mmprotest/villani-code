@@ -27,6 +27,7 @@ from villani_code.live_display import apply_live_display_delta
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
 from villani_code.prompting import build_initial_messages, build_system_blocks
+from villani_code.planning import TaskMode, classify_task_mode
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
 from villani_code.repo_map import build_repo_map
@@ -148,6 +149,9 @@ class Runner:
         self._current_verification_targets: set[str] = set()
         self._current_verification_before_contents: dict[str, str] = {}
         self._verification_baseline_changed: set[str] = set()
+        self._scope_expansion_used = False
+        self._task_mode: TaskMode = TaskMode.GENERAL
+        self._task_contract: dict[str, Any] = {}
         self._last_verification_fingerprint = ""
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
@@ -184,6 +188,7 @@ class Runner:
             repo_map=self._repo_map if self.small_model else "",
             villani_mode=self.villani_mode,
             benchmark_config=self.benchmark_config,
+            task_mode=self._task_mode,
         )
         tools = tool_specs()
         transcript: dict[str, Any] = {
@@ -217,6 +222,41 @@ class Runner:
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional = set()
         self._last_verification_artifact_count = 0
+        self._scope_expansion_used = False
+
+        self._task_mode = classify_task_mode(instruction)
+        source_targets = list(getattr(getattr(self, "_execution_plan", None), "relevant_files", []))
+        preferred_targets = [p for p in source_targets if not p.startswith("tests/")] + [p for p in source_targets if p.startswith("tests/")]
+        success_predicates = {
+            TaskMode.FIX_FAILING_TEST: "patch the failing implementation or directly relevant test target and improve failing verification",
+            TaskMode.FIX_LINT_OR_TYPE: "resolve the lint/type issue with minimal file scope",
+            TaskMode.NARROW_REFACTOR: "perform a bounded refactor without widening scope",
+            TaskMode.DOCS_UPDATE_SAFE: "docs-only update with no code edits",
+            TaskMode.INSPECT_AND_PLAN: "inspect repo and stop without code edits unless explicit evidence makes a tiny patch unavoidable",
+            TaskMode.GENERAL: "make one bounded, verifiable repo improvement",
+        }
+        self._task_contract = {
+            "task_mode": self._task_mode.value,
+            "success_predicate": success_predicates.get(self._task_mode, success_predicates[TaskMode.GENERAL]),
+            "preferred_targets": preferred_targets[:6],
+            "no_go_paths": [".git/", ".villani_code/", "__pycache__/"],
+        }
+        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
+            preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Task contract ({self._task_contract['task_mode']}): name likely target file first (prefer {preferred_text}); "
+                                f"keep scope tight; verify against: {self._task_contract['success_predicate']}; avoid speculative multi-file edits."
+                            ),
+                        }
+                    ],
+                }
+            )
         previous_attributed = set()
 
         def _attributed_changed_files() -> list[str]:
@@ -415,15 +455,13 @@ class Runner:
                                 response, reason, reason == "completed"
                             )
                     if self._no_progress_cycles < 3:
+                        recovery_text = "RECOVERY MODE: State the single target file, the exact verification goal, and make exactly one next tool call."
+                        if self._recovery_count >= 1:
+                            recovery_text = "RECOVERY MODE: Do not edit yet. In <=5 lines explain the blocker, inspect exactly one relevant file/diff, then either patch the locked target or finish."
                         messages.append(
                             {
                                 "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": "No progress detected. Continue with one concrete next step.",
-                                    }
-                                ],
+                                "content": [{"type": "text", "text": recovery_text}],
                             }
                         )
                         reason = _budget_reason()
@@ -437,30 +475,37 @@ class Runner:
                     self._recovery_count = 0
                 if self._no_progress_cycles >= 3:
                     if self._recovery_count >= 2:
-                        response = {
-                            "role": "assistant",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "I’m still blocked after two recovery attempts. Which one constraint should I relax first: permissions, test scope, or patch strategy?",
-                                }
-                            ],
-                        }
-                        transcript["responses"].append(response)
-                    else:
-                        self._recovery_count += 1
-                        self._no_progress_cycles = 0
-                        messages.append(
-                            {
-                                "role": "user",
+                        if self.benchmark_config.enabled or self.villani_mode:
+                            blocked_reason = "repeated no-progress recovery with no new verification evidence"
+                            response = {
+                                "role": "assistant",
                                 "content": [
                                     {
                                         "type": "text",
-                                        "text": "RECOVERY MODE: In <=6 lines recap current state, then list next 3 concrete actions, then choose exactly 1 tool call to run next with arguments.",
+                                        "text": (
+                                            f"Stopping due to constrained-run blocker: {blocked_reason}. "
+                                            f"Locked targets: {sorted(self._intended_targets)}. "
+                                            f"Scope expansion consumed: {self._scope_expansion_used}. "
+                                            "Missing evidence: a new bounded patch or new verification signal."
+                                        ),
                                     }
                                 ],
                             }
-                        )
+                            transcript["responses"].append(response)
+                        else:
+                            response = {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "I’m still blocked after two recovery attempts. Which target scope or verification evidence constraint should I relax first?",
+                                    }
+                                ],
+                            }
+                            transcript["responses"].append(response)
+                    else:
+                        self._recovery_count += 1
+                        self._no_progress_cycles = 0
                         continue
                 if self.benchmark_config.enabled and not _has_meaningful_benchmark_edit():
                     self._benchmark_noop_completion_attempts += 1

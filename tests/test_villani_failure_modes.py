@@ -217,3 +217,41 @@ def test_validation_task_with_successful_artifact_is_not_marked_not_executed(tmp
     assert task.produced_validation is True
     assert status == "passed"
     assert "validation_not_executed" not in reason
+
+
+def test_small_model_scope_lock_allows_one_expansion_then_blocks(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=0\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("y=0\n", encoding="utf-8")
+    (tmp_path / "src" / "c.py").write_text("z=0\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._intended_targets = {"src/a.py"}
+    runner._files_read = {"src/b.py", "src/c.py"}
+
+    assert runner._small_model_tool_guard("Patch", {"file_path": "src/b.py", "patch": "x"}) is None
+    runner._intended_targets.add("src/b.py")
+    blocked = runner._small_model_tool_guard("Patch", {"file_path": "src/c.py", "patch": "x"})
+    assert blocked is not None
+    assert "blocked widening" in blocked
+
+
+def test_small_model_scope_lock_allows_adjacent_test_expansion(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "foo.py").write_text("x=0\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_foo.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._intended_targets = {"src/foo.py"}
+
+    assert runner._small_model_tool_guard("Patch", {"file_path": "tests/test_foo.py", "patch": "x"}) is None
+
+
+def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "src" / "a.py"
+    target.write_text("x=0\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+
+    err = runner._small_model_tool_guard("Patch", {"file_path": "src/a.py", "patch": "x"})
+    assert err is None
+    assert runner._before_contents["src/a.py"] == "x=0\n"
