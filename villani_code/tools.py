@@ -155,12 +155,21 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
 
 
 def _safe_path(repo: Path, raw: str) -> Path:
-    path = (repo / raw).resolve()
+    raw_path = Path(raw)
+    if raw_path.is_absolute():
+        path = raw_path.resolve()
+    else:
+        path = (repo / raw).resolve()
     repo_resolved = repo.resolve()
     try:
         path.relative_to(repo_resolved)
     except ValueError:
         raise ValueError("Path escapes repository")
+    for parent in [path, *path.parents]:
+        if parent == repo_resolved:
+            break
+        if parent.is_symlink() and not parent.resolve().is_relative_to(repo_resolved):
+            raise ValueError("Path escapes repository via symlink")
     return path
 
 
@@ -193,7 +202,14 @@ def _run_grep(data: GrepInput, repo: Path) -> str:
 
 
 def _run_glob(data: GlobInput, repo: Path) -> str:
-    hits = [str(Path(p).relative_to(repo)) for p in glob.glob(str(repo / data.pattern), recursive=True)]
+    hits: list[str] = []
+    for value in glob.glob(str(repo / data.pattern), recursive=True):
+        resolved = Path(value).resolve()
+        try:
+            rel = resolved.relative_to(repo.resolve())
+        except ValueError:
+            continue
+        hits.append(str(rel))
     return "\n".join(sorted(hits))
 
 

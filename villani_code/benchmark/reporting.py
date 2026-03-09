@@ -31,6 +31,12 @@ def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
         "avg_retries_after_failure": _safe_mean([r.retries_after_failure for r in rows]),
         "first_pass_success_rate": round(sum(1 for r in rows if r.first_pass_success) / total, 4) if (total := len(rows)) else 0.0,
         "recovered_after_failed_attempt_rate": round(sum(1 for r in rows if r.recovered_after_failed_attempt) / total, 4) if total else 0.0,
+        "avg_unnecessary_edits": _safe_mean([r.unnecessary_edits for r in rows]),
+        "avg_files_touched": _safe_mean([r.files_touched for r in rows]),
+        "avg_risky_commands_attempted": _safe_mean([r.risky_commands_attempted for r in rows]),
+        "avg_checkpoint_events": _safe_mean([r.checkpoint_events for r in rows]),
+        "avg_validation_failures_before_success": _safe_mean([r.validation_failures_before_success for r in rows]),
+        "avg_transcript_audit_score": _safe_mean([r.transcript_audit_score for r in rows]),
     }
 
 
@@ -268,6 +274,7 @@ def render_summary_table(results: list[BenchmarkRunResult]) -> str:
     agg = json.loads(d["aggregates"])
     lines = [
         f"tasks={d['summary']['total_tasks']} successes={d['summary']['successes']} success_rate={d['summary']['success_rate']:.2%}",
+        "safe_local_track emphasizes trust metrics (restraint, checkpointing, audit clarity).",
         f"ci95=({d['pass_rate_ci_95']['low']:.2%}, {d['pass_rate_ci_95']['high']:.2%}) hidden_after_visible={d['hidden_fail_after_visible_pass_rate']:.2%}",
         "same_model_comparison(agent::model pass_rate first_pass recovered avg_total_tokens avg_wall_s)",
     ]

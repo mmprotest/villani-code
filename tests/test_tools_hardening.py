@@ -19,6 +19,15 @@ def test_safe_path_rejects_sibling_prefix_escape(tmp_path: Path) -> None:
         _safe_path(tmp_path, f"../{sibling.name}/loot.txt")
 
 
+def test_safe_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}_outside"
+    outside.mkdir(exist_ok=True)
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="Path escapes repository"):
+        _safe_path(tmp_path, "link/loot.txt")
+
+
 def test_model_defaults_do_not_share_list_state() -> None:
     ls_one = LsInput()
     ls_two = LsInput()

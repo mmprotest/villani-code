@@ -29,8 +29,8 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
             errors.append({"code": "duplicate_task_id", "task": task_id, "message": "Duplicate task id"})
 
     for task in tasks:
-        if task.benchmark_track not in {BenchmarkTrack.CORE, BenchmarkTrack.FEATURE}:
-            errors.append({"code": "invalid_track", "task": task.id, "message": "benchmark_track must be core|feature"})
+        if task.benchmark_track not in {BenchmarkTrack.CORE, BenchmarkTrack.FEATURE, BenchmarkTrack.SAFE_LOCAL}:
+            errors.append({"code": "invalid_track", "task": task.id, "message": "benchmark_track must be core|feature|safe-local"})
         if not task.visible_verification:
             errors.append({"code": "missing_visible_checks", "task": task.id, "message": "visible_verification is empty"})
         if not task.hidden_verification:

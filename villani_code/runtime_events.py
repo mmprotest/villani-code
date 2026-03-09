@@ -14,6 +14,9 @@ class RuntimeEventChannel(StrEnum):
 
 
 class RuntimeEventType(StrEnum):
+    USER_REQUEST = "user_request"
+    PLAN = "plan"
+    RETRIEVED_CONTEXT = "retrieved_context"
     STREAM_CHUNK = "stream_chunk"
     TOOL_ACTIVITY = "tool_activity"
     STATUS = "status"
@@ -21,6 +24,9 @@ class RuntimeEventType(StrEnum):
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_RESOLVED = "approval_resolved"
     VALIDATION = "validation"
+    CHECKPOINT = "checkpoint"
+    FILE_CHANGE = "file_change"
+    FINAL_OUTCOME = "final_outcome"
     BENCHMARK_LIFECYCLE = "benchmark_lifecycle"
     AUTONOMOUS_COMPLETION = "autonomous_completion"
 
@@ -36,6 +42,15 @@ class RuntimeEvent:
     @classmethod
     def from_runner_event(cls, event: dict[str, Any]) -> "RuntimeEvent | None":
         etype = str(event.get("type", ""))
+
+        if etype in {"user_request"}:
+            return cls(RuntimeEventType.USER_REQUEST, RuntimeEventChannel.TRANSCRIPT, etype, True, event)
+
+        if etype in {"plan_generated", "plan_approval_required", "plan_approved", "plan_rejected", "plan_auto_approved"}:
+            return cls(RuntimeEventType.PLAN, RuntimeEventChannel.TRANSCRIPT, etype, True, event)
+
+        if etype in {"retrieved_context"}:
+            return cls(RuntimeEventType.RETRIEVED_CONTEXT, RuntimeEventChannel.TRANSCRIPT, etype, True, event)
 
         if etype in {"stream_text", "model_output_chunk"}:
             return cls(
@@ -60,7 +75,7 @@ class RuntimeEvent:
                 event_type=RuntimeEventType.APPROVAL_REQUESTED,
                 channel=RuntimeEventChannel.APPROVAL,
                 message=etype,
-                durable=False,
+                durable=True,
                 payload=event,
             )
 
@@ -81,6 +96,15 @@ class RuntimeEvent:
                 durable=True,
                 payload=event,
             )
+
+        if etype in {"checkpoint_created"}:
+            return cls(RuntimeEventType.CHECKPOINT, RuntimeEventChannel.TRANSCRIPT, etype, True, event)
+
+        if etype in {"edit_proposed"}:
+            return cls(RuntimeEventType.FILE_CHANGE, RuntimeEventChannel.TRANSCRIPT, etype, True, event)
+
+        if etype in {"execution_completed"}:
+            return cls(RuntimeEventType.FINAL_OUTCOME, RuntimeEventChannel.TRANSCRIPT, etype, True, event)
 
         if etype.startswith("benchmark_"):
             return cls(

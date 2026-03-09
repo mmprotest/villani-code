@@ -1,31 +1,47 @@
 # Getting Started with Villani Code
 
-## Quick start
-
-1. Install dependencies.
-2. Run `villani-code interactive --base-url ... --model ...`.
-3. Use `Ctrl+P` to open the command palette.
-4. Use `/settings` to review settings locations.
-
-## Settings files
-
-- User scope: `~/.villani/settings.json`
-- Project scope: `.villani/settings.json`
-
-## ASCII mockup
-
-```text
-🤖 Villani Code > Write tests for parser
-net:connected/0s | tok:12 (12/m) | tools:0:- | settings:Ctrl+P
-```
-
-
-## Villani mode quick start
-
-Run autonomous mode (no initial prompt required):
+## 1) Run local-safe (default)
 
 ```bash
-villani-code villani-mode --base-url http://127.0.0.1:1234 --model my-model
+villani-code interactive --base-url http://127.0.0.1:1234 --model your-local-model
 ```
 
-Villani mode scans the repository, ranks tasks, executes edits, verifies results, and prints a final structured summary with verification status.
+Defaults:
+
+- `preset=local-safe`
+- `small_model=true`
+- strict planning/approval flow
+- conservative context and execution budgets
+
+## 2) Understand the runtime loop
+
+Villani Code defaults to:
+
+`plan -> approval -> execute -> checkpoint -> validate -> review`
+
+This is designed for weak local models that need strict control.
+
+## 3) Choose a preset intentionally
+
+- `--preset local-safe` (default)
+- `--preset local-fast`
+- `--preset cloud-power` (explicit opt-in)
+
+## 4) Roll back safely
+
+```bash
+villani-code rollback
+```
+
+or a specific checkpoint:
+
+```bash
+villani-code rollback --checkpoint-id <id>
+```
+
+## 5) Settings files
+
+- User: `~/.villani/settings.json`
+- Project: `.villani/settings.json`
+
+Use settings to pin preferred defaults, but local-safe remains the product baseline.

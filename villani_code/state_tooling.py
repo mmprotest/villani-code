@@ -90,12 +90,14 @@ def execute_tool_with_policy(
         else:
             runner.event_callback(
                 {
-                    "type": "approval_required",
+                    "type": "approval_requested",
                     "name": tool_name,
                     "input": tool_input,
                 }
             )
-            if not runner.approval_callback(tool_name, tool_input):
+            approved = runner.approval_callback(tool_name, tool_input)
+            runner.event_callback({"type": "approval_resolved", "name": tool_name, "approved": approved, "input": tool_input})
+            if not approved:
                 return {"content": "User denied tool execution", "is_error": True}
     elif runner.plan_mode != "off" and tool_name in {"Write", "Patch"}:
         return {"content": "Plan mode: edit not executed", "is_error": False}
@@ -140,12 +142,10 @@ def execute_tool_with_policy(
                 before_text = target_path.read_text(encoding="utf-8", errors="replace")
                 runner._before_contents[normalized_target] = before_text
                 runner._current_verification_before_contents[normalized_target] = before_text
-        checkpoint_target = str(tool_input.get("file_path", "")).strip()
-        if checkpoint_target:
-            runner.checkpoints.create(
-                [Path(checkpoint_target)],
-                message_index=message_count,
-            )
+        checkpoint_targets = _benchmark_mutation_targets(tool_name, tool_input)
+        checkpoint_files = [Path(path) for path in checkpoint_targets if path]
+        checkpoint = runner.checkpoints.create(checkpoint_files, message_index=message_count)
+        runner.event_callback({"type": "checkpoint_created", "checkpoint_id": checkpoint.id, "files": checkpoint.files, "tool": tool_name})
     runner.event_callback(
         {
             "type": "tool_started",

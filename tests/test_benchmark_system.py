@@ -16,7 +16,7 @@ from villani_code.benchmark.task_loader import TaskLoadError, load_task, load_ta
 def test_task_loader_parses_valid_task() -> None:
     task = load_task(Path("benchmark_tasks/villani_bench_v1/bugfix_001_datetime_cli"))
     assert task.id == "bugfix_001_datetime_cli"
-    assert task.benchmark_track == BenchmarkTrack.CORE
+    assert task.benchmark_track in {BenchmarkTrack.CORE, BenchmarkTrack.SAFE_LOCAL}
     assert task.source_type in {TaskSource.CURATED, TaskSource.SEEDED, TaskSource.MUTATED}
     assert len(task.task_checksum or "") > 5
 
@@ -86,6 +86,8 @@ def test_summary_generation_and_stats() -> None:
     assert "same_model_comparison" in text
     assert "by_fairness_class" in diag
     assert "small_sample_warning" in diag
+    agg = __import__("json").loads(diag["aggregates"])
+    assert "avg_unnecessary_edits" in agg["overall"]
 
 
 def test_paired_comparison_and_ci() -> None:

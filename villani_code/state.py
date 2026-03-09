@@ -31,6 +31,7 @@ from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
 from villani_code.repo_map import build_repo_map
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
+from villani_code.runtime_events import RuntimeEvent
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
@@ -65,11 +66,12 @@ class Runner:
         redact: bool = False,
         bypass_permissions: bool = False,
         auto_accept_edits: bool = False,
-        plan_mode: Literal["off", "auto", "strict"] = "auto",
-        max_repair_attempts: int = 2,
+        plan_mode: Literal["off", "auto", "strict"] = "strict",
+        max_repair_attempts: int = 1,
         approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
-        small_model: bool = False,
+        small_model: bool = True,
+        preset: Literal["local-safe", "local-fast", "cloud-power"] = "local-safe",
         villani_mode: bool = False,
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
@@ -91,8 +93,11 @@ class Runner:
         self.plan_mode = plan_mode
         self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)
-        self.event_callback = event_callback or (lambda _event: None)
+        self._event_log: list[dict[str, Any]] = []
+        self._external_event_callback = event_callback or (lambda _event: None)
+        self.event_callback = self._event_callback
         self.small_model = small_model
+        self.preset = preset
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
         self.villani_config = VillaniModeConfig(
@@ -137,9 +142,17 @@ class Runner:
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
-            ContextBudget(max_chars=35000, keep_last_turns=4)
+            ContextBudget(max_chars=24000, keep_last_turns=3)
             if self.small_model
             else None
+        )
+        self._max_files_touched = 8 if self.preset == "local-safe" else (20 if self.preset == "local-fast" else 200)
+        self._default_execution_budget = ExecutionBudget(
+            max_turns=12 if self.preset == "local-safe" else (18 if self.preset == "local-fast" else 30),
+            max_tool_calls=30 if self.preset == "local-safe" else (48 if self.preset == "local-fast" else 120),
+            max_seconds=120.0 if self.preset == "local-safe" else (180.0 if self.preset == "local-fast" else 600.0),
+            max_no_edit_turns=4 if self.preset == "local-safe" else 6,
+            max_reconsecutive_recon_turns=3 if self.preset == "local-safe" else 5,
         )
         self._files_read: set[str] = set()
         self._pending_verification = ""
@@ -157,6 +170,19 @@ class Runner:
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
+
+    def _event_callback(self, event: dict[str, Any]) -> None:
+        runtime_event = RuntimeEvent.from_runner_event(event)
+        if runtime_event and runtime_event.durable:
+            self._event_log.append(
+                {
+                    "event_type": runtime_event.event_type.value,
+                    "channel": runtime_event.channel.value,
+                    "message": runtime_event.message,
+                    "payload": runtime_event.payload,
+                }
+            )
+        self._external_event_callback(event)
 
     def run_villani_mode(self) -> dict[str, Any]:
         ensure_runtime_dependencies_not_shadowed(self.repo)
@@ -177,6 +203,21 @@ class Runner:
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
     ) -> dict[str, Any]:
+        if execution_budget is None and self.preset != "cloud-power":
+            execution_budget = self._default_execution_budget
+        self._event_log = [
+            {
+                "event_type": "user_request",
+                "channel": "transcript",
+                "message": "user_request",
+                "payload": {
+                    "instruction": instruction,
+                    "preset": self.preset,
+                    "small_model": self.small_model,
+                },
+            }
+        ]
+        self.event_callback({"type": "user_request", "instruction": instruction, "preset": self.preset, "small_model": self.small_model})
         messages = messages or build_initial_messages(self.repo, instruction)
         self._ensure_project_memory_and_plan(instruction)
         system = build_system_blocks(
@@ -184,14 +225,17 @@ class Runner:
             repo_map=self._repo_map if self.small_model else "",
             villani_mode=self.villani_mode,
             benchmark_config=self.benchmark_config,
+            preset=self.preset,
         )
         tools = tool_specs()
         transcript: dict[str, Any] = {
+            "schema_version": "2.0",
             "requests": [],
             "responses": [],
             "tool_invocations": [],
             "tool_results": [],
             "streamed_events_count": 0,
+            "durable_events": [],
         }
         if self.benchmark_config.enabled:
             self.event_callback({
@@ -268,7 +312,9 @@ class Runner:
                 terminated_reason=reason,
                 completed=completed,
             )
+            self.event_callback({"type": "execution_completed", "terminated_reason": reason, "completed": completed, "files_changed": all_changes})
             transcript["execution"] = execution.to_dict()
+            transcript["durable_events"] = list(self._event_log)
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
             post = self._run_post_execution_validation(_change_summary()[2])
@@ -304,6 +350,8 @@ class Runner:
                 return "no_edits"
             if model_idle:
                 return "model_idle"
+            if len(_attributed_changed_files()) > self._max_files_touched:
+                return "max_files_touched"
             if completed:
                 return "completed"
             return None
@@ -383,6 +431,7 @@ class Runner:
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
+                    transcript["durable_events"] = list(self._event_log)
                     transcript_path = save_transcript(
                         self.repo, transcript, redact=self.redact
                     )
@@ -475,6 +524,7 @@ class Runner:
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
+                transcript["durable_events"] = list(self._event_log)
                 transcript_path = save_transcript(
                     self.repo, transcript, redact=self.redact
                 )

@@ -321,7 +321,7 @@ class FakeClientStall:
 
 
 def test_stall_recovery_injects_instruction(tmp_path: Path):
-    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False)
+    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False, preset="cloud-power")
     runner.run("x")
     found = False
     for p in runner.client.payloads[1:]:
@@ -332,7 +332,7 @@ def test_stall_recovery_injects_instruction(tmp_path: Path):
 
 
 def test_stall_final_stop_after_recovery_attempts(tmp_path: Path):
-    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False)
+    runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False, preset="cloud-power")
     result = runner.run("x")
     text_blocks = [b.get("text","") for b in result["response"]["content"] if b.get("type")=="text"]
     assert any("still blocked" in t for t in text_blocks)

@@ -23,6 +23,8 @@ def save_transcript(repo: Path, transcript: dict[str, Any], redact: bool = False
     ensure_dir(out_dir)
     path = out_dir / f"{now_stamp()}.json"
     to_write = dict(transcript)
+    to_write.setdefault("schema_version", "2.0")
+    to_write.setdefault("durable_events", [])
     if redact and "requests" in to_write:
         to_write["requests"] = [maybe_redact_payload(p, True) for p in to_write["requests"]]
     path.write_text(json.dumps(to_write, indent=2), encoding="utf-8")

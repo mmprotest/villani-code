@@ -21,7 +21,7 @@ def test_runtime_event_maps_approval_and_autonomous_completion() -> None:
     assert approval is not None
     assert approval.event_type is RuntimeEventType.APPROVAL_REQUESTED
     assert approval.channel is RuntimeEventChannel.APPROVAL
-    assert approval.durable is False
+    assert approval.durable is True
 
     done = RuntimeEvent.from_runner_event({"type": "villani_stop_decision", "done_reason": "done"})
     assert done is not None
@@ -41,3 +41,13 @@ def test_runtime_event_maps_benchmark_lifecycle_and_status() -> None:
     assert status.event_type is RuntimeEventType.STATUS
     assert status.channel is RuntimeEventChannel.STATUS
     assert status.durable is False
+
+
+def test_runtime_event_maps_plan_and_checkpoint_durable_events() -> None:
+    plan = RuntimeEvent.from_runner_event({"type": "plan_generated"})
+    assert plan is not None
+    assert plan.durable is True
+
+    checkpoint = RuntimeEvent.from_runner_event({"type": "checkpoint_created", "checkpoint_id": "c1"})
+    assert checkpoint is not None
+    assert checkpoint.durable is True

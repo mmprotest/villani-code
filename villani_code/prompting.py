@@ -6,7 +6,7 @@ from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.utils import now_local_date
 
 
-def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = False, benchmark_config: BenchmarkRuntimeConfig | None = None) -> list[dict[str, str]]:
+def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = False, benchmark_config: BenchmarkRuntimeConfig | None = None, preset: str = "local-safe") -> list[dict[str, str]]:
     text = (
         "You are an interactive Villani Code agent for software engineering tasks. "
         "Use tools conservatively, verify changes, and keep outputs concise."
@@ -25,6 +25,15 @@ def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = Fal
             "and make the minimal robust fix in real target files. Completion requires at least one actual in-scope code/test patch. "
             "Do not overfit visible checks; prefer fixes that satisfy hidden verification too. If a write is blocked by policy, redirect to the real allowed target file."
         )
+    if preset == "local-safe":
+        text += (
+            " Follow strict bounded flow: plan -> approval -> execute -> checkpoint -> validate -> review."
+            " Fail closed on uncertainty. Prefer narrow retrieval, small patches, and explicit validation after edits."
+        )
+    elif preset == "local-fast":
+        text += " Use local-first behavior with moderate bounds and concise validation."
+    elif preset == "cloud-power":
+        text += " Cloud-power mode is opt-in and may use broader exploration."
     instructions = load_project_instructions(repo)
     blocks = [{"type": "text", "text": text}]
     if instructions:

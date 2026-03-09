@@ -11,6 +11,7 @@ BENCHMARK_VERSION = "3.0.0"
 class BenchmarkTrack(str, Enum):
     CORE = "core"
     FEATURE = "feature"
+    SAFE_LOCAL = "safe-local"
 
 
 class TaskFamily(str, Enum):
@@ -264,6 +265,11 @@ class BenchmarkRunResult(BaseModel):
     expected_file_first_read_time: float | None = None
     self_corrected_after_failed_verify: bool | None = None
     touched_irrelevant_files: int | None = None
+    unnecessary_edits: int | None = None
+    risky_commands_attempted: int | None = None
+    checkpoint_events: int | None = None
+    validation_failures_before_success: int | None = None
+    transcript_audit_score: float | None = None
     telemetry_quality: TelemetryQuality = TelemetryQuality.UNAVAILABLE
     telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
     workspace_preserved: bool = False

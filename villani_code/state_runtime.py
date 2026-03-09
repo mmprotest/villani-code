@@ -105,11 +105,12 @@ def inject_retrieval_briefing(runner: Any, messages: list[dict[str, Any]]) -> No
     )
     if not user_text or "<retrieval-briefing>" in user_text:
         return
-    hits = runner._retriever.query(user_text, k=8)
+    hits = runner._retriever.query(user_text, k=4)
     if not hits:
         return
     briefing = "\n".join(f"- {h.path}: {h.reason}" for h in hits)
     content.insert(0, {"type": "text", "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>"})
+    runner.event_callback({"type": "retrieved_context", "hits": [{"path": h.path, "reason": h.reason} for h in hits]})
 
 
 def init_small_model_support(runner: Any) -> None:

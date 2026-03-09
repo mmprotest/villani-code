@@ -18,6 +18,7 @@ from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.benchmark.runner import BenchmarkRunner
+from villani_code.checkpoints import CheckpointManager
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.benchmark.health import run_healthcheck, validate_tasks
 from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, write_html_report, write_markdown_report
@@ -83,6 +84,18 @@ def _load_interactive_shell() -> tuple[Any, type[Exception]]:
     return InteractiveShell, OptionalTUIDependencyError
 
 
+
+
+def _resolve_preset(preset: str, small_model: bool | None = None, no_small_model: bool = False, plan_mode: str | None = None, max_repair_attempts: int | None = None) -> tuple[bool, str, int]:
+    if preset not in {"local-safe", "local-fast", "cloud-power"}:
+        raise typer.BadParameter("--preset must be one of: local-safe, local-fast, cloud-power")
+    resolved_small = small_model if small_model is not None else preset != "cloud-power"
+    if no_small_model:
+        resolved_small = False
+    resolved_plan_mode = plan_mode or ("strict" if preset == "local-safe" else "auto")
+    resolved_repairs = max_repair_attempts if max_repair_attempts is not None else (1 if preset == "local-safe" else 2)
+    return resolved_small, resolved_plan_mode, resolved_repairs
+
 def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     if cli_value is not None:
         return cli_value
@@ -93,7 +106,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     return bool(getattr(settings, "villani_mode", False))
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None) -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], preset: Literal["local-safe", "local-fast", "cloud-power"] = "local-safe", villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None) -> Runner:
     resolved_repo = repo.resolve()
     try:
         ensure_runtime_dependencies_not_shadowed(resolved_repo)
@@ -114,11 +127,11 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
         except json.JSONDecodeError:
             thinking_obj = thinking
     benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json) if benchmark_runtime_json else None
-    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config)
+    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, preset=preset)
 
 
-def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, "auto", 2, small_model, provider, api_key, villani_mode=villani_mode, villani_objective=villani_objective)
+def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], preset: Literal["local-safe", "local-fast", "cloud-power"] = "local-safe", plan_mode: Literal["off", "auto", "strict"] = "strict", max_repair_attempts: int = 1, villani_mode: bool = False, villani_objective: str | None = None) -> None:
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, plan_mode, max_repair_attempts, small_model, provider, api_key, preset=preset, villani_mode=villani_mode, villani_objective=villani_objective)
     try:
         shell_cls, dependency_error = _load_interactive_shell()
         shell = shell_cls(runner, repo.resolve(), villani_mode=villani_mode, villani_objective=villani_objective)
@@ -158,7 +171,9 @@ def main(
     model: Optional[str] = typer.Option(None, "--model"),
     repo: Path = typer.Option(Path("."), "--repo"),
     max_tokens: int = typer.Option(4096, "--max-tokens"),
-    small_model: bool = typer.Option(False, "--small-model"),
+    preset: Literal["local-safe", "local-fast", "cloud-power"] = typer.Option("local-safe", "--preset"),
+    small_model: bool | None = typer.Option(None, "--small-model/--no-small-model"),
+    no_small_model: bool = typer.Option(False, "--no-small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
@@ -167,7 +182,8 @@ def main(
         if not base_url or not model:
             raise typer.BadParameter("--base-url and --model are required when no subcommand is provided")
         resolved_villani = _resolve_villani_flag(repo, villani_mode)
-        _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani)
+        resolved_small_model, resolved_plan_mode, resolved_repairs = _resolve_preset(preset, small_model=small_model, no_small_model=no_small_model)
+        _run_interactive(base_url, model, repo, max_tokens, resolved_small_model, provider, api_key, preset=preset, plan_mode=resolved_plan_mode, max_repair_attempts=resolved_repairs, villani_mode=resolved_villani)
 
 
 @app.command()
@@ -185,14 +201,17 @@ def run(
     redact: bool = typer.Option(False, "--redact"),
     dangerously_skip_permissions: bool = typer.Option(False, "--dangerously-skip-permissions"),
     auto_accept_edits: bool = typer.Option(False, "--auto-accept-edits"),
-    plan_mode: Literal["off", "auto", "strict"] = typer.Option("auto", "--plan-mode"),
-    max_repair_attempts: int = typer.Option(2, "--max-repair-attempts"),
-    small_model: bool = typer.Option(False, "--small-model"),
+    plan_mode: Literal["off", "auto", "strict"] | None = typer.Option(None, "--plan-mode"),
+    max_repair_attempts: Optional[int] = typer.Option(None, "--max-repair-attempts"),
+    preset: Literal["local-safe", "local-fast", "cloud-power"] = typer.Option("local-safe", "--preset"),
+    small_model: bool | None = typer.Option(None, "--small-model/--no-small-model"),
+    no_small_model: bool = typer.Option(False, "--no-small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json)
+    resolved_small_model, resolved_plan_mode, resolved_repairs = _resolve_preset(preset, small_model=small_model, no_small_model=no_small_model, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts)
+    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, resolved_plan_mode, resolved_repairs, resolved_small_model, provider, api_key, preset=preset, benchmark_runtime_json=benchmark_runtime_json)
     result = runner.run(instruction)
     _print_response_text_blocks(result)
 
@@ -203,7 +222,9 @@ def interactive(
     model: str = typer.Option(..., "--model"),
     repo: Path = typer.Option(Path("."), "--repo"),
     max_tokens: int = typer.Option(4096, "--max-tokens"),
-    small_model: bool = typer.Option(False, "--small-model"),
+    preset: Literal["local-safe", "local-fast", "cloud-power"] = typer.Option("local-safe", "--preset"),
+    small_model: bool | None = typer.Option(None, "--small-model/--no-small-model"),
+    no_small_model: bool = typer.Option(False, "--no-small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
@@ -211,7 +232,8 @@ def interactive(
     objective: Optional[str] = typer.Argument(None),
 ):
     resolved_villani = takeover or _resolve_villani_flag(repo, villani_mode)
-    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, villani_objective=objective)
+    resolved_small_model, resolved_plan_mode, resolved_repairs = _resolve_preset(preset, small_model=small_model, no_small_model=no_small_model)
+    _run_interactive(base_url, model, repo, max_tokens, resolved_small_model, provider, api_key, preset=preset, plan_mode=resolved_plan_mode, max_repair_attempts=resolved_repairs, villani_mode=resolved_villani, villani_objective=objective)
 
 
 @app.command("villani-mode")
@@ -221,11 +243,14 @@ def villani_mode_cmd(
     model: str = typer.Option(..., "--model"),
     repo: Path = typer.Option(Path("."), "--repo"),
     max_tokens: int = typer.Option(4096, "--max-tokens"),
-    small_model: bool = typer.Option(False, "--small-model"),
+    preset: Literal["local-safe", "local-fast", "cloud-power"] = typer.Option("local-safe", "--preset"),
+    small_model: bool | None = typer.Option(None, "--small-model/--no-small-model"),
+    no_small_model: bool = typer.Option(False, "--no-small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+    resolved_small_model, resolved_plan_mode, resolved_repairs = _resolve_preset(preset, small_model=small_model, no_small_model=no_small_model)
+    _run_interactive(base_url, model, repo, max_tokens, resolved_small_model, provider, api_key, preset=preset, plan_mode=resolved_plan_mode, max_repair_attempts=resolved_repairs, villani_mode=True, villani_objective=objective)
 
 
 @app.command("takeover", hidden=True)
@@ -235,11 +260,14 @@ def takeover_cmd(
     model: str = typer.Option(..., "--model"),
     repo: Path = typer.Option(Path("."), "--repo"),
     max_tokens: int = typer.Option(4096, "--max-tokens"),
-    small_model: bool = typer.Option(False, "--small-model"),
+    preset: Literal["local-safe", "local-fast", "cloud-power"] = typer.Option("local-safe", "--preset"),
+    small_model: bool | None = typer.Option(None, "--small-model/--no-small-model"),
+    no_small_model: bool = typer.Option(False, "--no-small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, "auto", 2, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+    resolved_small_model, resolved_plan_mode, resolved_repairs = _resolve_preset("local-safe", small_model=small_model, no_small_model=False)
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, resolved_plan_mode, resolved_repairs, resolved_small_model, provider, api_key, preset="local-safe", villani_mode=True, villani_objective=objective)
     result = runner.run_villani_mode()
     _print_response_text_blocks(result)
 
@@ -300,6 +328,24 @@ def reset_from_checkpoint_cmd(
     manager = ContextGovernanceManager(repo.resolve())
     checkpoint = manager.reset_from_checkpoint(checkpoint_id)
     console.print(f"Reset context from checkpoint {checkpoint.checkpoint_id}")
+
+
+
+
+@app.command("rollback")
+def rollback_cmd(
+    checkpoint_id: Optional[str] = typer.Option(None, "--checkpoint-id"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository path"),
+) -> None:
+    manager = CheckpointManager(repo.resolve())
+    target = checkpoint_id
+    if target is None:
+        items = manager.list()
+        if not items:
+            raise typer.BadParameter("No checkpoints available")
+        target = items[-1].id
+    manager.rewind(target)
+    console.print(f"Rolled back file state from checkpoint {target}")
 
 
 @benchmark_app.command("list")

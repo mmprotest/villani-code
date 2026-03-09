@@ -156,6 +156,13 @@ _NETWORK_FETCH_PREFIXES = {
     ("curl",),
     ("wget",),
 }
+_DESTRUCTIVE_PREFIXES = {
+    ("rm",),
+    ("del",),
+    ("git", "reset"),
+    ("git", "clean"),
+    ("git", "checkout", "--"),
+}
 
 
 _INSTALL_PREFIXES = {
@@ -190,6 +197,10 @@ def classify_bash_command(command: str) -> BashClassification:
     for pfx in _INSTALL_PREFIXES:
         if lowered[: len(pfx)] == pfx:
             return BashClassification(Decision.ASK, "Install command requires explicit approval")
+
+    for pfx in _DESTRUCTIVE_PREFIXES:
+        if lowered[: len(pfx)] == pfx:
+            return BashClassification(Decision.ASK, "Destructive command requires explicit approval")
 
     if any(lowered[: len(prefix)] == prefix for prefix in _NETWORK_FETCH_PREFIXES):
         return BashClassification(Decision.ASK, "Network fetch command requires explicit approval")

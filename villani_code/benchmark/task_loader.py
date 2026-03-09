@@ -38,7 +38,7 @@ def _resolve_track(task_dir: Path, payload: dict[str, object], metadata_raw: dic
         return BenchmarkTrack(str(payload["benchmark_track"]))
     if "benchmark_track" in metadata_raw:
         return BenchmarkTrack(str(metadata_raw["benchmark_track"]))
-    raise TaskLoadError(f"Task {task_dir.name} missing required benchmark_track metadata (core|feature)")
+    raise TaskLoadError(f"Task {task_dir.name} missing required benchmark_track metadata (core|feature|safe-local)")
 
 
 def load_task(task_dir: Path) -> BenchmarkTask:
