@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from villani_code.planning import PlanRiskLevel, generate_execution_plan
 from villani_code.project_memory import SessionState, init_project_memory, load_repo_map, load_validation_config

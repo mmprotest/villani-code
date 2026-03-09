@@ -29,7 +29,6 @@ from villani_code.shells import (
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.repo_rules import (
     classify_repo_path,
-    is_authoritative_doc_path,
     is_ignored_repo_path,
 )
 

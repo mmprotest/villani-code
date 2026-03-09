@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import copy
-import json
-import subprocess
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -14,7 +11,6 @@ from villani_code.autonomous import VillaniModeConfig, VillaniModeController
 from villani_code.autonomy import (
     FailureClassifier,
     VerificationEngine,
-    VerificationStatus,
 )
 from villani_code.checkpoints import CheckpointManager
 from villani_code.context_budget import ContextBudget
@@ -22,15 +18,12 @@ from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
 from villani_code.hooks import HookRunner
-from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
-from villani_code.live_display import apply_live_display_delta
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
 from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.planning import TaskMode, classify_task_mode
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
-from villani_code.repo_map import build_repo_map
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
@@ -43,7 +36,6 @@ from villani_code.state_execution import (
     summarize_changes,
 )
 from villani_code.utils import (
-    ensure_dir,
     is_effectively_empty_content,
     merge_extra_json,
     normalize_content_blocks,

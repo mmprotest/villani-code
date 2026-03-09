@@ -8,7 +8,6 @@ from typer.testing import CliRunner
 from villani_code.tui.components.settings import SettingsManager
 from villani_code import cli
 from villani_code.autonomous import AutonomousTask, RepoSnapshot, VillaniModeController
-from villani_code.permissions import Decision
 from villani_code.state import Runner
 from villani_code.execution import ExecutionBudget
 

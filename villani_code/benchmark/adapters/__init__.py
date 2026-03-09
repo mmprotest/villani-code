@@ -1,6 +1,6 @@
 from villani_code.benchmark.adapters.base import (
-    AdapterRunConfig,
-    AdapterRunResult,
+    AdapterRunConfig as AdapterRunConfig,
+    AdapterRunResult as AdapterRunResult,
     AgentAdapter,
     ClaudeCodeAdapter,
     CommandAdapter,

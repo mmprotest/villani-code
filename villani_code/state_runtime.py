@@ -4,17 +4,14 @@ import json
 from dataclasses import asdict
 import subprocess
 import sys
-from datetime import datetime, timezone
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
-from villani_code.edits import ProposalStore
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
-from villani_code.planning import PlanRiskLevel, TaskMode, generate_execution_plan
+from villani_code.planning import TaskMode, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
-from villani_code.prompting import build_system_blocks
 from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
 from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
