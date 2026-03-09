@@ -490,6 +490,6 @@ def test_verification_relevant_touched_test_and_module_true(tmp_path: Path) -> N
 def test_recovery_attempt_semantics() -> None:
     from villani_code.benchmark.models import FailureReason
 
-    assert BenchmarkRunner._recovery_attempted(1, False, False, FailureReason.HIDDEN_VERIFICATION_FAILED, ["pytest"]) is True
-    assert BenchmarkRunner._recovery_attempted(0, True, True, None, ["pytest"]) is False
-    assert BenchmarkRunner._recovery_attempted(0, False, False, FailureReason.VISIBLE_VERIFICATION_FAILED, ["pytest", "pytest"]) is True
+    assert BenchmarkRunner._recovery_attempted(1, 1, False, FailureReason.HIDDEN_VERIFICATION_FAILED) is True
+    assert BenchmarkRunner._recovery_attempted(0, 1, True, None) is False
+    assert BenchmarkRunner._recovery_attempted(0, 2, False, FailureReason.VISIBLE_VERIFICATION_FAILED) is True

@@ -63,11 +63,12 @@ def execute_tool_with_policy(
     if not hook_pre.allow:
         return {"content": f"Blocked by hook: {hook_pre.reason}", "is_error": True}
 
-    if runner.small_model:
+    if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
         policy_error = runner._small_model_tool_guard(tool_name, tool_input)
         if policy_error:
             return {"content": policy_error, "is_error": True}
-        runner._tighten_tool_input(tool_name, tool_input)
+        if runner.small_model:
+            runner._tighten_tool_input(tool_name, tool_input)
 
     policy = runner.permissions.evaluate_with_reason(
         tool_name,

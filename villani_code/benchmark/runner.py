@@ -183,39 +183,43 @@ class BenchmarkRunner:
     def _verification_relevant(cls, task: BenchmarkTask, executed_commands: list[str], touched: list[str]) -> bool:
         if not executed_commands:
             return False
-        touched_set = set(touched)
-        expected_set = set(task.metadata.expected_files)
-        allowlist_set = set(task.allowlist_paths + task.allowed_paths)
+        touched_set = {str(p) for p in touched}
+        expected_set = {str(p) for p in task.metadata.expected_files}
+        allowlisted = {str(p) for p in (task.allowlist_paths + task.allowed_paths)}
         narrow_task = bool(expected_set) or task.max_files_touched <= 3
+
+        def _module_for(path: str) -> str | None:
+            if not path.endswith('.py'):
+                return None
+            return Path(path).with_suffix('').as_posix().replace('/', '.')
+
         for command in executed_commands:
             tokens = cls._tokenize_command(command)
-            if any(path in command or path in tokens for path in touched_set):
+            if any(path in command or path in tokens or Path(path).name in tokens for path in touched_set):
                 return True
-            if any(path in command or path in tokens for path in expected_set):
-                return True
-            if any(path.endswith('.py') and (f"-m {Path(path).with_suffix('').as_posix().replace('/', '.')}" in command or Path(path).stem in tokens) for path in touched_set | expected_set):
+            if any(path in command or path in tokens or Path(path).name in tokens for path in expected_set):
                 return True
             if any(path.startswith('tests/') and (path in command or Path(path).name in tokens) for path in touched_set):
                 return True
-            if narrow_task and any(scope in command for scope in allowlist_set if scope):
+            modules = {m for m in [_module_for(p) for p in (touched_set | expected_set)] if m}
+            if any((f'-m {module}' in command) or (module in tokens) for module in modules):
                 return True
-            if 'pytest -q' in command and narrow_task:
+            if narrow_task and any(scope and (scope in command or scope in tokens) for scope in allowlisted):
+                return True
+            if narrow_task and ('pytest -q' in command or command.strip() == 'pytest'):
                 continue
         return False
 
     @staticmethod
     def _recovery_attempted(
         retries_after_failure: int | None,
-        visible_pass: bool,
-        hidden_pass: bool,
+        verification_attempt_count: int,
+        final_success: bool,
         failure_reason: FailureReason | None,
-        verifications: list[str],
     ) -> bool:
         if (retries_after_failure or 0) > 0:
             return True
-        if len(verifications) > 1 and visible_pass and hidden_pass:
-            return True
-        if failure_reason in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED} and len(verifications) > 1:
+        if verification_attempt_count > 1 and (failure_reason in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED} or final_success):
             return True
         return False
     @staticmethod
@@ -445,8 +449,8 @@ class BenchmarkRunner:
             visible_only_pass = bool(visible_pass and not hidden_pass)
             unrelated_file_touch = any(cls == PATH_CLASS_CLEARLY_UNRELATED for cls in policy_result.path_classifications.values())
             verification_relevant = self._verification_relevant(task, verifications, touched)
-            recovery_attempted = self._recovery_attempted(retries_after_failure, visible_pass, hidden_pass, failure_reason, verifications)
-            recovery_success = bool(success) if recovery_attempted else None
+            recovery_attempted = self._recovery_attempted(retries_after_failure, len(verifications), bool(success), failure_reason)
+            recovery_success = (bool(success) if recovery_attempted else None)
             no_progress_termination = failure_reason == FailureReason.NO_PROGRESS
 
             detail = ""

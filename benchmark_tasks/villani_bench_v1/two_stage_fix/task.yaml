@@ -26,3 +26,6 @@ expected_touched_max: 2
 adjacency_expected: true
 recovery_expected: true
 task_type: adjacent_two_file_fix
+forbidden_paths:
+- docs/
+- README.md

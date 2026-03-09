@@ -183,16 +183,39 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
 
             intended = set(getattr(runner, "_intended_targets", set()))
             if intended and fp not in intended:
-                benchmark_ok = (not runner.benchmark_config.enabled) or runner.benchmark_config.in_allowlist(fp)
+                explicit_allowlisted = runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp)
+                benchmark_scope_ok = (not runner.benchmark_config.enabled) or explicit_allowlisted
                 has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(fp, intended)
-                if (not runner._scope_expansion_used) and benchmark_ok and has_evidence and classify_repo_path(fp) == "authoritative" and not is_ignored_repo_path(fp):
+                can_expand_once = (
+                    (not runner._scope_expansion_used)
+                    and benchmark_scope_ok
+                    and has_evidence
+                    and classify_repo_path(fp) == "authoritative"
+                    and not is_ignored_repo_path(fp)
+                )
+                if can_expand_once:
                     runner._scope_expansion_used = True
-                elif runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp) and runner.benchmark_config.is_expected_or_support(fp):
+                elif explicit_allowlisted:
                     pass
                 else:
-                    reason = "scope expansion exhausted" if runner._scope_expansion_used else "new path lacks read/evidence adjacency"
-                    runner.event_callback({"type": "small_model_scope_blocked", "file_path": fp, "intended_targets": sorted(intended), "reason": reason})
-                    return f"Constrained scope lock: blocked widening to {fp}; {reason}. Locked targets: {sorted(intended)}."
+                    if runner._scope_expansion_used:
+                        reason = "scope expansion already consumed"
+                    elif not benchmark_scope_ok:
+                        reason = "target is outside benchmark allowlist"
+                    else:
+                        reason = "target lacks prior read evidence or strong adjacency"
+                    runner.event_callback(
+                        {
+                            "type": "small_model_scope_blocked",
+                            "file_path": fp,
+                            "intended_targets": sorted(intended),
+                            "reason": reason,
+                        }
+                    )
+                    return (
+                        f"Constrained scope lock: blocked widening to {fp}; {reason}. "
+                        f"Locked targets: {sorted(intended)}."
+                    )
 
             if path.exists() and path.is_file() and fp not in runner._before_contents:
                 before_text = path.read_text(encoding="utf-8", errors="replace")
@@ -259,6 +282,10 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         pass
 
     lines = ["<verification>", f"trigger: {trigger}"]
+    if runner._intended_targets and not attributed_intentional:
+        lines.append(f"locked_targets: {json.dumps(sorted(runner._intended_targets))}")
+        lines.append("note: no intentional diff is currently attributable in locked scope")
+        lines.append("next: inspect locked file, produce one bounded patch, or stop")
     cmd_results: list[dict[str, Any]] = []
     for cmd in commands:
         proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
@@ -343,11 +370,6 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")
     if attributed_incidental:
         lines.append(f"incidental_changed: {json.dumps(sorted(attributed_incidental))}")
-    if runner._intended_targets and not attributed_intentional:
-        lines.append(f"locked_targets: {json.dumps(sorted(runner._intended_targets))}")
-        lines.append("note: no intentional diff is currently attributable in locked scope")
-        if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
-            lines.append("next: inspect locked file, produce one bounded patch, or stop")
     lines.append(f"status: {verification.status.value}")
     lines.append(f"confidence: {verification.confidence_score}")
     if verification.findings:

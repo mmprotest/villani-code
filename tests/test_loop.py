@@ -372,3 +372,4 @@ def test_stall_in_villani_mode_terminates_without_relax_prompt(tmp_path: Path):
     joined = "\n".join(text_blocks)
     assert "constraint should I relax" not in joined
     assert "Stopping due to constrained-run blocker" in joined
+    assert "Success predicate:" in joined

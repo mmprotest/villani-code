@@ -11,7 +11,7 @@ from villani_code.benchmark.task_loader import TaskLoadError, load_task
 
 def _looks_bounded(task) -> bool:
     marker = f"{task.task_type or ''} {task.metadata.task_type or ''} {task.family.value}".lower()
-    return any(k in marker for k in ("localize", "adjacent", "forbidden_scope", "bounded", "inspect"))
+    return any(k in marker for k in ("localize", "adjacent", "forbidden_scope", "bounded", "inspect", "narrow"))
 
 
 def run_healthcheck(suite_dir: Path) -> dict[str, object]:
@@ -67,12 +67,14 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
         if raw_hidden_verification is not None and raw_hidden_verifier is not None and raw_hidden_verification != raw_hidden_verifier:
             warnings.append({"code": "hidden_verifier_conflict", "task": task.id, "message": "hidden_verification and hidden_verifier differ; hidden_verification takes precedence"})
 
-        inspect_marker = f"{task.task_type or ''} {task.metadata.task_type or ''}".lower()
-        if task.inspect_only and not any(k in inspect_marker for k in ("inspect", "read_only", "stop")):
+        inspect_marker = f"{task.task_type or ''} {task.metadata.task_type or ''} {task.family.value}".lower()
+        if task.inspect_only and any(k in inspect_marker for k in ("bugfix", "fix", "refactor", "patch", "repro")):
+            warnings.append({"code": "inspect_only_task_suggests_code_modification", "task": task.id, "message": "inspect_only=true but task metadata/family suggests code modification"})
+        elif task.inspect_only and not any(k in inspect_marker for k in ("inspect", "read_only", "stop")):
             warnings.append({"code": "inspect_only_metadata_mismatch", "task": task.id, "message": "inspect_only=true but task_type metadata does not look inspect-only"})
 
-        if _looks_bounded(task) and not (task.allowlist_paths or task.allowed_paths or task.forbidden_paths):
-            warnings.append({"code": "bounded_scope_missing_path_metadata", "task": task.id, "message": "bounded task missing allowlist/forbidden path metadata"})
+        if _looks_bounded(task) and not ((task.allowlist_paths or task.allowed_paths) and task.forbidden_paths):
+            warnings.append({"code": "bounded_scope_missing_path_metadata", "task": task.id, "message": "bounded task should define allowlist/allowed paths and forbidden paths"})
 
     families = Counter(task.family.value for task in tasks)
     difficulties = Counter(task.difficulty.value for task in tasks)

@@ -183,13 +183,7 @@ class Runner:
     ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
         self._ensure_project_memory_and_plan(instruction)
-        system = build_system_blocks(
-            self.repo,
-            repo_map=self._repo_map if self.small_model else "",
-            villani_mode=self.villani_mode,
-            benchmark_config=self.benchmark_config,
-            task_mode=self._task_mode,
-        )
+        self._task_mode = classify_task_mode(instruction)
         tools = tool_specs()
         transcript: dict[str, Any] = {
             "requests": [],
@@ -224,9 +218,22 @@ class Runner:
         self._last_verification_artifact_count = 0
         self._scope_expansion_used = False
 
-        self._task_mode = classify_task_mode(instruction)
         source_targets = list(getattr(getattr(self, "_execution_plan", None), "relevant_files", []))
-        preferred_targets = [p for p in source_targets if not p.startswith("tests/")] + [p for p in source_targets if p.startswith("tests/")]
+        if self.benchmark_config.enabled:
+            source_targets.extend(self.benchmark_config.expected_files)
+            source_targets.extend(self.benchmark_config.allowlist_paths)
+        seen_targets: set[str] = set()
+        deduped_targets: list[str] = []
+        for target in source_targets:
+            norm = str(target).replace("\\", "/").lstrip("./")
+            if not norm or norm in seen_targets:
+                continue
+            seen_targets.add(norm)
+            deduped_targets.append(norm)
+        preferred_targets = [p for p in deduped_targets if not p.startswith("tests/")] + [p for p in deduped_targets if p.startswith("tests/")]
+        no_go_paths = [".git/", ".villani_code/", "__pycache__/"]
+        if self.benchmark_config.enabled:
+            no_go_paths.extend(self.benchmark_config.forbidden_paths)
         success_predicates = {
             TaskMode.FIX_FAILING_TEST: "patch the failing implementation or directly relevant test target and improve failing verification",
             TaskMode.FIX_LINT_OR_TYPE: "resolve the lint/type issue with minimal file scope",
@@ -239,8 +246,15 @@ class Runner:
             "task_mode": self._task_mode.value,
             "success_predicate": success_predicates.get(self._task_mode, success_predicates[TaskMode.GENERAL]),
             "preferred_targets": preferred_targets[:6],
-            "no_go_paths": [".git/", ".villani_code/", "__pycache__/"],
+            "no_go_paths": sorted(set(no_go_paths)),
         }
+        system = build_system_blocks(
+            self.repo,
+            repo_map=self._repo_map if self.small_model else "",
+            villani_mode=self.villani_mode,
+            benchmark_config=self.benchmark_config,
+            task_mode=self._task_mode,
+        )
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
             messages.append(
@@ -252,6 +266,7 @@ class Runner:
                             "text": (
                                 f"Task contract ({self._task_contract['task_mode']}): name likely target file first (prefer {preferred_text}); "
                                 f"keep scope tight; verify against: {self._task_contract['success_predicate']}; avoid speculative multi-file edits."
+                                " Stop if verification repeats without new evidence."
                             ),
                         }
                     ],
@@ -486,7 +501,8 @@ class Runner:
                                             f"Stopping due to constrained-run blocker: {blocked_reason}. "
                                             f"Locked targets: {sorted(self._intended_targets)}. "
                                             f"Scope expansion consumed: {self._scope_expansion_used}. "
-                                            "Missing evidence: a new bounded patch or new verification signal."
+                                            "Missing evidence: a new bounded patch or new verification signal. "
+                                            f"Success predicate: {self._task_contract.get('success_predicate', 'make one bounded, verifiable repo improvement')}."
                                         ),
                                     }
                                 ],
@@ -498,7 +514,7 @@ class Runner:
                                 "content": [
                                     {
                                         "type": "text",
-                                        "text": "I’m still blocked after two recovery attempts. Which target scope or verification evidence constraint should I relax first?",
+                                        "text": "I’m still blocked after two recovery attempts. Which target scope or missing verification evidence should I relax first?",
                                     }
                                 ],
                             }

@@ -21,3 +21,6 @@ allowlist_paths:
 - tests/
 recovery_expected: true
 task_type: verify_and_recover
+forbidden_paths:
+- docs/
+- README.md

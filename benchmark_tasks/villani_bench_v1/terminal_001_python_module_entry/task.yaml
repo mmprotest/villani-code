@@ -19,6 +19,6 @@ allowlist_paths:
 - app/
 - pyproject.toml
 inspect_only: false
-task_type: inspect_and_stop
+task_type: terminal_module_entry_fix
 benchmark_track: core
 
