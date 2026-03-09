@@ -43,6 +43,7 @@ class FailureReason(str, Enum):
     HIDDEN_VERIFICATION_FAILED = "hidden_verification_failed"
     TIMEOUT = "timeout"
     FORBIDDEN_EDIT = "forbidden_edit"
+    INSPECT_ONLY_VIOLATION = "inspect_only_violation"
     MISSING_ARTIFACT = "missing_artifact"
     AGENT_CRASH = "agent_crash"
     VERIFIER_CRASH = "verifier_crash"
@@ -155,6 +156,15 @@ class BenchmarkTask(BaseModel):
 
     @model_validator(mode="after")
     def _validate_task_dir(self) -> "BenchmarkTask":
+        if self.hidden_verifier:
+            if self.hidden_verification and self.hidden_verifier != self.hidden_verification:
+                # keep deterministic canonical behavior: hidden_verification wins
+                self.hidden_verifier = None
+            elif not self.hidden_verification:
+                self.hidden_verification = list(self.hidden_verifier)
+                self.hidden_verifier = None
+            else:
+                self.hidden_verifier = None
         if not (self.task_dir / "repo").is_dir():
             raise ValueError(f"Task {self.id} is missing repo/")
         return self
@@ -265,7 +275,7 @@ class BenchmarkRunResult(BaseModel):
     unrelated_file_touch: bool = False
     verification_relevant: bool = False
     recovery_attempted: bool = False
-    recovery_success: bool = False
+    recovery_success: bool | None = None
     no_progress_termination: bool = False
     verifications_run: list[str]
     verification_attempt_count: int = 0

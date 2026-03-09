@@ -51,6 +51,14 @@ def load_task(task_dir: Path) -> BenchmarkTask:
     payload = yaml.safe_load(task_yaml.read_text(encoding="utf-8"))
     metadata_raw = json.loads(metadata_json.read_text(encoding="utf-8"))
 
+    hidden_verification = payload.get("hidden_verification")
+    hidden_verifier = payload.get("hidden_verifier")
+    if hidden_verification is None and hidden_verifier is not None:
+        payload["hidden_verification"] = hidden_verifier
+    elif hidden_verification is not None and hidden_verifier is not None:
+        if hidden_verification == hidden_verifier:
+            payload.pop("hidden_verifier", None)
+
     payload["task_dir"] = task_dir
     payload["prompt"] = _read_prompt(prompt_txt)
     payload["benchmark_track"] = _resolve_track(task_dir, payload, metadata_raw)

@@ -310,6 +310,7 @@ def test_aggregate_results_includes_new_constraint_metrics() -> None:
         telemetry_quality=TelemetryQuality.INFERRED,
         telemetry_field_quality_map={},
         self_corrected_after_failed_verify=None,
+        recovery_success=False,
     )
     row1 = BenchmarkRunResult(**base)
     row2 = row1.model_copy(
@@ -395,7 +396,7 @@ def test_visible_only_and_hidden_verifier_scoring(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
     monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
 
-    task = _minimal_task(tmp_path, hidden_verifier=["python -c 'print(2)'"])
+    task = _minimal_task(tmp_path, hidden_verification=["python -c 'print(2)'"])
     task.metadata.expected_files = ["src/app.py"]
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.visible_only_pass is True
@@ -428,6 +429,67 @@ def test_inspect_only_forbidden_unrelated_and_recovery_fields(tmp_path: Path, mo
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.success == 0
     assert row.unrelated_file_touch is True
-    assert row.verification_relevant is True
+    assert row.verification_relevant is False
     assert row.recovery_attempted is False
-    assert row.recovery_success is False
+    assert row.recovery_success is None
+
+
+def test_inspect_only_uses_dedicated_failure_reason(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FailureReason, FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(stdout="", stderr="", exit_code=0, timeout=False, runtime_seconds=0.01, telemetry_quality=TelemetryQuality.INFERRED, telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED}, events=[])
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda _repo, _cmds, _timeout: (True, [], 1.0, 2.0))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    task = _minimal_task(tmp_path, inspect_only=True)
+    row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
+    assert row.failure_reason == FailureReason.INSPECT_ONLY_VIOLATION
+
+
+def test_verification_relevant_unrelated_command_false() -> None:
+    task = BenchmarkTask.model_validate({
+        "id": "x",
+        "benchmark_track": "core",
+        "family": "bugfix",
+        "difficulty": "easy",
+        "language": "python",
+        "max_minutes": 1,
+        "max_files_touched": 2,
+        "visible_verification": ["pytest -q tests/test_other.py"],
+        "hidden_verification": ["python -m unrelated_mod"],
+        "success_policy": {"require_visible_pass": True, "require_hidden_pass": True, "fail_on_timeout": True, "fail_on_repo_dirty_outside_allowlist": True},
+        "allowlist_paths": ["src/"],
+        "task_dir": str(Path("benchmark_tasks/villani_bench_v1/bugfix_001_datetime_cli")),
+        "prompt": "fix",
+    })
+    task.metadata.expected_files = ["src/app.py"]
+    assert BenchmarkRunner._verification_relevant(task, ["pytest -q tests/test_unrelated.py"], ["src/app.py"]) is False
+
+
+def test_verification_relevant_touched_test_and_module_true(tmp_path: Path) -> None:
+    task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+    assert BenchmarkRunner._verification_relevant(task, ["pytest -q tests/test_app.py"], ["tests/test_app.py"]) is True
+    assert BenchmarkRunner._verification_relevant(task, ["python -m src.app"], ["src/app.py"]) is True
+
+
+def test_recovery_attempt_semantics() -> None:
+    from villani_code.benchmark.models import FailureReason
+
+    assert BenchmarkRunner._recovery_attempted(1, False, False, FailureReason.HIDDEN_VERIFICATION_FAILED, ["pytest"]) is True
+    assert BenchmarkRunner._recovery_attempted(0, True, True, None, ["pytest"]) is False
+    assert BenchmarkRunner._recovery_attempted(0, False, False, FailureReason.VISIBLE_VERIFICATION_FAILED, ["pytest", "pytest"]) is True

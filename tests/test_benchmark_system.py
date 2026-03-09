@@ -208,3 +208,22 @@ def test_runner_surfaces_agent_startup_stderr_snippet(monkeypatch) -> None:
     assert 'exited with code 2' in row.error
     assert 'stderr:' in row.error
     assert '--emit-runtime-events' in row.error
+
+
+def test_hidden_verifier_alias_normalized_to_hidden_verification(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task"
+    (task_dir / "repo").mkdir(parents=True)
+    (task_dir / "prompt.txt").write_text("fix bug", encoding="utf-8")
+    (task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    (task_dir / "task.yaml").write_text(
+        "id: x\nbenchmark_track: core\nfamily: bugfix\ndifficulty: easy\nlanguage: python\nmax_minutes: 1\nmax_files_touched: 1\nexpected_artifacts: [patch]\nvisible_verification: ['true']\nhidden_verifier: ['python -m pytest tests/test_x.py -q']\nhidden_verification: ['python -m pytest tests/test_x.py -q']\nsuccess_policy: {require_visible_pass: true, require_hidden_pass: true, fail_on_timeout: true, fail_on_repo_dirty_outside_allowlist: true}\nallowlist_paths: ['src/']\n",
+        encoding="utf-8",
+    )
+    task = load_task(task_dir)
+    assert task.hidden_verification == ["python -m pytest tests/test_x.py -q"]
+    assert task.hidden_verifier is None
+
+
+def test_terminal_001_is_not_inspect_only() -> None:
+    task = load_task(Path("benchmark_tasks/villani_bench_v1/terminal_001_python_module_entry"))
+    assert task.inspect_only is False

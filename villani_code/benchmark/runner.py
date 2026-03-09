@@ -176,6 +176,49 @@ class BenchmarkRunner:
         }
 
     @staticmethod
+    def _tokenize_command(command: str) -> set[str]:
+        return {token.strip("\'\" ") for token in command.replace("=", " ").split() if token.strip("\'\" ")}
+
+    @classmethod
+    def _verification_relevant(cls, task: BenchmarkTask, executed_commands: list[str], touched: list[str]) -> bool:
+        if not executed_commands:
+            return False
+        touched_set = set(touched)
+        expected_set = set(task.metadata.expected_files)
+        allowlist_set = set(task.allowlist_paths + task.allowed_paths)
+        narrow_task = bool(expected_set) or task.max_files_touched <= 3
+        for command in executed_commands:
+            tokens = cls._tokenize_command(command)
+            if any(path in command or path in tokens for path in touched_set):
+                return True
+            if any(path in command or path in tokens for path in expected_set):
+                return True
+            if any(path.endswith('.py') and (f"-m {Path(path).with_suffix('').as_posix().replace('/', '.')}" in command or Path(path).stem in tokens) for path in touched_set | expected_set):
+                return True
+            if any(path.startswith('tests/') and (path in command or Path(path).name in tokens) for path in touched_set):
+                return True
+            if narrow_task and any(scope in command for scope in allowlist_set if scope):
+                return True
+            if 'pytest -q' in command and narrow_task:
+                continue
+        return False
+
+    @staticmethod
+    def _recovery_attempted(
+        retries_after_failure: int | None,
+        visible_pass: bool,
+        hidden_pass: bool,
+        failure_reason: FailureReason | None,
+        verifications: list[str],
+    ) -> bool:
+        if (retries_after_failure or 0) > 0:
+            return True
+        if len(verifications) > 1 and visible_pass and hidden_pass:
+            return True
+        if failure_reason in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED} and len(verifications) > 1:
+            return True
+        return False
+    @staticmethod
     def _stderr_snippet(stderr: str, max_len: int = 240) -> str:
         compact = " ".join(stderr.strip().split())
         if len(compact) <= max_len:
@@ -312,7 +355,7 @@ class BenchmarkRunner:
                         if not hidden_pass:
                             failure_reason = FailureReason.INVALID_REPRO_TEST if invalid_repro else FailureReason.HIDDEN_VERIFICATION_FAILED
                     else:
-                        hidden_commands = task.hidden_verifier or task.hidden_verification
+                        hidden_commands = task.hidden_verification
                         hidden_pass, hidden_outcomes, _, l_verify_hidden = run_commands(workspace_repo, hidden_commands, timeout_seconds)
                         verifications.extend(item.command for item in hidden_outcomes)
                         if l_verify_hidden:
@@ -347,14 +390,14 @@ class BenchmarkRunner:
                 expected_files_found = sum(1 for rel in task.metadata.expected_files if (workspace_repo / rel).exists())
 
             solved_checks_passed = visible_pass and hidden_pass
-            hidden_required = task.success_policy.require_hidden_pass or bool(task.hidden_verifier)
+            hidden_required = task.success_policy.require_hidden_pass or bool(task.hidden_verification)
             policy_warning = None
             policy_warning_detail = None
 
             if timeout:
                 failure_reason = FailureReason.TIMEOUT
             elif task.inspect_only and files_touched > 0:
-                failure_reason = FailureReason.FORBIDDEN_EDIT
+                failure_reason = FailureReason.INSPECT_ONLY_VIOLATION
             elif error:
                 failure_reason = failure_reason or FailureReason.AGENT_CRASH
             elif failure_reason is None:
@@ -387,11 +430,12 @@ class BenchmarkRunner:
                 and files_touched <= (task.expected_touched_max if task.expected_touched_max is not None else task.max_files_touched)
                 and artifacts_ok
                 and error is None
+                and failure_reason is None
             )
             manifest.telemetry_quality = telemetry_quality
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
-            hidden_checks = task.hidden_verifier or task.hidden_verification
+            hidden_checks = task.hidden_verification
             hidden_failed = any("hidden" in c for c in verifications[-len(hidden_checks) :]) if hidden_checks else False
             first_pass_success = bool(success and (retries_after_failure or 0) == 0)
             recovered_after_failed_attempt = bool(success and (retries_after_failure or 0) > 0)
@@ -400,9 +444,9 @@ class BenchmarkRunner:
             expected_files_touched_count = len(expected_files_set)
             visible_only_pass = bool(visible_pass and not hidden_pass)
             unrelated_file_touch = any(cls == PATH_CLASS_CLEARLY_UNRELATED for cls in policy_result.path_classifications.values())
-            verification_relevant = bool(task.visible_verification or task.hidden_verifier or task.hidden_verification)
-            recovery_attempted = bool((retries_after_failure or 0) > 0)
-            recovery_success = bool(success and recovery_attempted)
+            verification_relevant = self._verification_relevant(task, verifications, touched)
+            recovery_attempted = self._recovery_attempted(retries_after_failure, visible_pass, hidden_pass, failure_reason, verifications)
+            recovery_success = bool(success) if recovery_attempted else None
             no_progress_termination = failure_reason == FailureReason.NO_PROGRESS
 
             detail = ""
@@ -456,7 +500,7 @@ class BenchmarkRunner:
                 wall_clock_seconds=runtime_seconds,
                 timeout=timeout,
                 failure_reason=None if success else failure_reason,
-                forbidden_reason_detail=(policy_result.forbidden_reason_detail if failure_reason == FailureReason.FORBIDDEN_EDIT else None),
+                forbidden_reason_detail=(policy_result.forbidden_reason_detail if failure_reason in {FailureReason.FORBIDDEN_EDIT, FailureReason.INSPECT_ONLY_VIOLATION} else None),
                 policy_warning=policy_warning,
                 policy_warning_detail=policy_warning_detail,
                 error=error,

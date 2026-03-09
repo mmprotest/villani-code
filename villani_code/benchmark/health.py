@@ -1,19 +1,27 @@
 from __future__ import annotations
 
-import json
 from collections import Counter
 from pathlib import Path
 
+import yaml
+
 from villani_code.benchmark.models import BenchmarkTrack
-from villani_code.benchmark.task_loader import TaskLoadError, load_task, load_tasks
+from villani_code.benchmark.task_loader import TaskLoadError, load_task
+
+
+def _looks_bounded(task) -> bool:
+    marker = f"{task.task_type or ''} {task.metadata.task_type or ''} {task.family.value}".lower()
+    return any(k in marker for k in ("localize", "adjacent", "forbidden_scope", "bounded", "inspect"))
 
 
 def run_healthcheck(suite_dir: Path) -> dict[str, object]:
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     tasks = []
+    raw_by_task: dict[str, dict[str, object]] = {}
     for task_dir in sorted(path for path in suite_dir.iterdir() if path.is_dir() and (path / "task.yaml").exists()):
         try:
+            raw_by_task[task_dir.name] = yaml.safe_load((task_dir / "task.yaml").read_text(encoding="utf-8")) or {}
             tasks.append(load_task(task_dir))
         except TaskLoadError as exc:
             errors.append({"code": "invalid_task", "task": task_dir.name, "message": str(exc)})
@@ -29,6 +37,7 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
             errors.append({"code": "duplicate_task_id", "task": task_id, "message": "Duplicate task id"})
 
     for task in tasks:
+        raw = raw_by_task.get(task.task_dir.name, {})
         if task.benchmark_track not in {BenchmarkTrack.CORE, BenchmarkTrack.FEATURE}:
             errors.append({"code": "invalid_track", "task": task.id, "message": "benchmark_track must be core|feature"})
         if not task.visible_verification:
@@ -52,6 +61,18 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
         leaked = [p for p in (task.task_dir / "repo").rglob("*") if p.is_file() and "hidden_checks" in p.as_posix()]
         if leaked:
             errors.append({"code": "hidden_asset_leak", "task": task.id, "message": "hidden_checks assets leaked into repo"})
+
+        raw_hidden_verification = raw.get("hidden_verification")
+        raw_hidden_verifier = raw.get("hidden_verifier")
+        if raw_hidden_verification is not None and raw_hidden_verifier is not None and raw_hidden_verification != raw_hidden_verifier:
+            warnings.append({"code": "hidden_verifier_conflict", "task": task.id, "message": "hidden_verification and hidden_verifier differ; hidden_verification takes precedence"})
+
+        inspect_marker = f"{task.task_type or ''} {task.metadata.task_type or ''}".lower()
+        if task.inspect_only and not any(k in inspect_marker for k in ("inspect", "read_only", "stop")):
+            warnings.append({"code": "inspect_only_metadata_mismatch", "task": task.id, "message": "inspect_only=true but task_type metadata does not look inspect-only"})
+
+        if _looks_bounded(task) and not (task.allowlist_paths or task.allowed_paths or task.forbidden_paths):
+            warnings.append({"code": "bounded_scope_missing_path_metadata", "task": task.id, "message": "bounded task missing allowlist/forbidden path metadata"})
 
     families = Counter(task.family.value for task in tasks)
     difficulties = Counter(task.difficulty.value for task in tasks)

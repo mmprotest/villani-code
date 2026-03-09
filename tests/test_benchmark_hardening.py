@@ -69,3 +69,13 @@ def test_localize_005_expected_files_point_to_real_repo_paths() -> None:
     task = load_task(Path("benchmark_tasks/villani_bench_v1/localize_005_cache_invalidation"))
     for rel in task.metadata.expected_files:
         assert (task.task_dir / "repo" / rel).exists(), rel
+
+
+def test_healthcheck_warns_hidden_verifier_conflict(tmp_path: Path) -> None:
+    _write_task(tmp_path, "t1")
+    data = yaml.safe_load((tmp_path / "t1" / "task.yaml").read_text(encoding="utf-8"))
+    data["hidden_verifier"] = ["python -m pytest tests/test_other.py -q"]
+    (tmp_path / "t1" / "task.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    health = run_healthcheck(tmp_path)
+    warning_codes = {w["code"] for w in health["warnings"]}
+    assert "hidden_verifier_conflict" in warning_codes

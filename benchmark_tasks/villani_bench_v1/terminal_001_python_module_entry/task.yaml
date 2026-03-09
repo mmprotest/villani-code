@@ -18,6 +18,7 @@ allowlist_paths:
 - src/
 - app/
 - pyproject.toml
-inspect_only: true
+inspect_only: false
 task_type: inspect_and_stop
 benchmark_track: core
+

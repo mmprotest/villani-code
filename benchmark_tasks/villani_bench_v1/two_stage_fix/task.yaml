@@ -11,8 +11,6 @@ visible_verification:
 - pytest -q tests/test_cache.py
 hidden_verification:
 - pytest -q
-hidden_verifier:
-- pytest -q
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true
