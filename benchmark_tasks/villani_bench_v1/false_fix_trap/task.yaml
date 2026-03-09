@@ -19,3 +19,7 @@ success_policy:
 allowlist_paths:
 - src/
 - tests/
+forbidden_paths:
+- docs/
+- README.md
+task_type: forbidden_scope_trap

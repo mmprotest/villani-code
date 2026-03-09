@@ -22,6 +22,7 @@ from villani_code.benchmark.models import (
     TelemetryQuality,
 )
 from villani_code.benchmark.policy import (
+    PATH_CLASS_CLEARLY_UNRELATED,
     benchmark_asset_integrity,
     enforce_path_policy,
 )
@@ -311,7 +312,8 @@ class BenchmarkRunner:
                         if not hidden_pass:
                             failure_reason = FailureReason.INVALID_REPRO_TEST if invalid_repro else FailureReason.HIDDEN_VERIFICATION_FAILED
                     else:
-                        hidden_pass, hidden_outcomes, _, l_verify_hidden = run_commands(workspace_repo, task.hidden_verification, timeout_seconds)
+                        hidden_commands = task.hidden_verifier or task.hidden_verification
+                        hidden_pass, hidden_outcomes, _, l_verify_hidden = run_commands(workspace_repo, hidden_commands, timeout_seconds)
                         verifications.extend(item.command for item in hidden_outcomes)
                         if l_verify_hidden:
                             last_verify = l_verify_hidden - started
@@ -329,7 +331,7 @@ class BenchmarkRunner:
                 task.forbidden_paths,
                 expected_paths=task.metadata.expected_files,
                 family=task.family.value,
-                task_type=task.metadata.task_type,
+                task_type=task.task_type or task.metadata.task_type,
                 allowed_support_files=task.metadata.allowed_support_files,
                 allowed_support_globs=task.metadata.allowed_support_globs,
             )
@@ -345,11 +347,14 @@ class BenchmarkRunner:
                 expected_files_found = sum(1 for rel in task.metadata.expected_files if (workspace_repo / rel).exists())
 
             solved_checks_passed = visible_pass and hidden_pass
+            hidden_required = task.success_policy.require_hidden_pass or bool(task.hidden_verifier)
             policy_warning = None
             policy_warning_detail = None
 
             if timeout:
                 failure_reason = FailureReason.TIMEOUT
+            elif task.inspect_only and files_touched > 0:
+                failure_reason = FailureReason.FORBIDDEN_EDIT
             elif error:
                 failure_reason = failure_reason or FailureReason.AGENT_CRASH
             elif failure_reason is None:
@@ -377,21 +382,28 @@ class BenchmarkRunner:
             success = int(
                 (not timeout or not task.success_policy.fail_on_timeout)
                 and (visible_pass or not task.success_policy.require_visible_pass)
-                and (hidden_pass or not task.success_policy.require_hidden_pass)
+                and (hidden_pass or not hidden_required)
                 and (policy_repo_clean_ok or not task.success_policy.fail_on_repo_dirty_outside_allowlist)
-                and files_touched <= task.max_files_touched
+                and files_touched <= (task.expected_touched_max if task.expected_touched_max is not None else task.max_files_touched)
                 and artifacts_ok
                 and error is None
             )
             manifest.telemetry_quality = telemetry_quality
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
-            hidden_failed = any("hidden" in c for c in verifications[-len(task.hidden_verification) :]) if task.hidden_verification else False
+            hidden_checks = task.hidden_verifier or task.hidden_verification
+            hidden_failed = any("hidden" in c for c in verifications[-len(hidden_checks) :]) if hidden_checks else False
             first_pass_success = bool(success and (retries_after_failure or 0) == 0)
             recovered_after_failed_attempt = bool(success and (retries_after_failure or 0) > 0)
             expected_files_set = set(policy_result.meaningful_expected_paths)
             touched_unexpected = bool(policy_result.meaningful_unexpected_paths)
             expected_files_touched_count = len(expected_files_set)
+            visible_only_pass = bool(visible_pass and not hidden_pass)
+            unrelated_file_touch = any(cls == PATH_CLASS_CLEARLY_UNRELATED for cls in policy_result.path_classifications.values())
+            verification_relevant = bool(task.visible_verification or task.hidden_verifier or task.hidden_verification)
+            recovery_attempted = bool((retries_after_failure or 0) > 0)
+            recovery_success = bool(success and recovery_attempted)
+            no_progress_termination = failure_reason == FailureReason.NO_PROGRESS
 
             detail = ""
             if failure_reason == FailureReason.MISSING_ARTIFACT and artifact_failure_detail:
@@ -419,7 +431,7 @@ class BenchmarkRunner:
                 task_language=task.language,
                 task_source_type=task.source_type,
                 task_tags=task.tags,
-                task_type=task.metadata.task_type,
+                task_type=task.task_type or task.metadata.task_type,
                 benchmark_bucket=task.metadata.benchmark_bucket,
                 runtime_stressors=task.metadata.runtime_stressors,
                 expected_files=task.metadata.expected_files,
@@ -439,6 +451,7 @@ class BenchmarkRunner:
                 timed_out=int(timeout),
                 visible_pass=visible_pass,
                 hidden_pass=hidden_pass,
+                visible_only_pass=visible_only_pass,
                 runtime_seconds=runtime_seconds,
                 wall_clock_seconds=runtime_seconds,
                 timeout=timeout,
@@ -477,6 +490,11 @@ class BenchmarkRunner:
                 expected_files_touched_count=expected_files_touched_count,
                 actual_files_touched_count=files_touched,
                 touched_unexpected_files=touched_unexpected,
+                unrelated_file_touch=unrelated_file_touch,
+                verification_relevant=verification_relevant,
+                recovery_attempted=recovery_attempted,
+                recovery_success=recovery_success,
+                no_progress_termination=no_progress_termination,
                 verifications_run=verifications,
                 verification_attempt_count=len(verifications),
                 time_to_first_edit=time_to_first_edit,

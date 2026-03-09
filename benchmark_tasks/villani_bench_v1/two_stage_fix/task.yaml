@@ -11,6 +11,8 @@ visible_verification:
 - pytest -q tests/test_cache.py
 hidden_verification:
 - pytest -q
+hidden_verifier:
+- pytest -q
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true
@@ -19,3 +21,10 @@ success_policy:
 allowlist_paths:
 - src/
 - tests/
+allowed_paths:
+- src/
+- tests/
+expected_touched_max: 2
+adjacency_expected: true
+recovery_expected: true
+task_type: adjacent_two_file_fix

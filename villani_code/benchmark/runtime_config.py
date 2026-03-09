@@ -55,7 +55,7 @@ def benchmark_runtime_config_from_task(task: object) -> BenchmarkRuntimeConfig:
     return BenchmarkRuntimeConfig(
         enabled=True,
         task_id=str(getattr(task, "id")),
-        allowlist_paths=list(getattr(task, "allowlist_paths")),
+        allowlist_paths=list(getattr(task, "allowlist_paths", [])) or list(getattr(task, "allowed_paths", [])),
         forbidden_paths=list(getattr(task, "forbidden_paths")),
         expected_files=list(getattr(metadata, "expected_files", [])),
         allowed_support_files=list(getattr(metadata, "allowed_support_files", [])),
@@ -63,5 +63,5 @@ def benchmark_runtime_config_from_task(task: object) -> BenchmarkRuntimeConfig:
         max_files_touched=int(getattr(task, "max_files_touched", 1)),
         require_patch_artifact="patch" in expected_artifacts,
         visible_verification=list(getattr(task, "visible_verification", [])),
-        hidden_verification=list(getattr(task, "hidden_verification", [])),
+        hidden_verification=list(getattr(task, "hidden_verifier") or getattr(task, "hidden_verification", [])),
     )

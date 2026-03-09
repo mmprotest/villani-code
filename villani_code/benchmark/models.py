@@ -120,9 +120,16 @@ class BenchmarkTask(BaseModel):
     expected_artifacts: list[str] = Field(default_factory=lambda: ["patch"])
     visible_verification: list[str]
     hidden_verification: list[str]
+    hidden_verifier: list[str] | None = None
     success_policy: SuccessPolicy
     allowlist_paths: list[str]
-    forbidden_paths: list[str] = Field(default_factory=lambda: [".git/", "hidden_checks/"])
+    allowed_paths: list[str] = Field(default_factory=list)
+    forbidden_paths: list[str] = Field(default_factory=list)
+    expected_touched_max: int | None = None
+    inspect_only: bool = False
+    recovery_expected: bool = False
+    adjacency_expected: bool = False
+    task_type: str | None = None
     env_allowlist: list[str] = Field(default_factory=list)
     task_variant_family: str | None = None
     variant_id: str | None = None
@@ -216,6 +223,7 @@ class BenchmarkRunResult(BaseModel):
     timed_out: int = 0
     visible_pass: bool
     hidden_pass: bool
+    visible_only_pass: bool = False
     runtime_seconds: float
     wall_clock_seconds: float | None = None
     timeout: bool
@@ -254,6 +262,11 @@ class BenchmarkRunResult(BaseModel):
     expected_files_touched_count: int | None = None
     actual_files_touched_count: int | None = None
     touched_unexpected_files: bool | None = None
+    unrelated_file_touch: bool = False
+    verification_relevant: bool = False
+    recovery_attempted: bool = False
+    recovery_success: bool = False
+    no_progress_termination: bool = False
     verifications_run: list[str]
     verification_attempt_count: int = 0
     time_to_first_edit: float | None = None

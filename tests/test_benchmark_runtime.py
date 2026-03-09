@@ -320,6 +320,8 @@ def test_aggregate_results_includes_new_constraint_metrics() -> None:
             "visible_pass": True,
             "hidden_pass": True,
             "failure_reason": None,
+            "recovery_success": True,
+            "no_progress_termination": True,
             "self_corrected_after_failed_verify": True,
         }
     )
@@ -327,5 +329,105 @@ def test_aggregate_results_includes_new_constraint_metrics() -> None:
 
     agg = json.loads(aggregate_results([row1, row2]))
     assert "forbidden_edit_rate" in agg["overall"]
+    assert "hidden_pass_rate" in agg["overall"]
     assert "visible_only_rate" in agg["overall"]
+    assert "unrelated_touch_rate" in agg["overall"]
+    assert "verification_relevance_rate" in agg["overall"]
+    assert "recovery_success_rate" in agg["overall"]
+    assert "no_progress_collapse_rate" in agg["overall"]
     assert "self_corrected_after_failed_verify_rate" in agg["overall"]
+    assert agg["overall"]["recovery_success_rate"] == 0.5
+    assert agg["overall"]["no_progress_collapse_rate"] == 0.5
+
+
+def _minimal_task(tmp_path: Path, **overrides) -> BenchmarkTask:
+    task_dir = tmp_path / "task"
+    repo = task_dir / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (task_dir / "task.yaml").write_text("id: task_1\n", encoding="utf-8")
+    (task_dir / "prompt.txt").write_text("fix\n", encoding="utf-8")
+    (task_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    (repo / "src").mkdir(parents=True, exist_ok=True)
+    (repo / "src" / "app.py").write_text("x=0\n", encoding="utf-8")
+    base = dict(
+        id="task_1",
+        benchmark_track=BenchmarkTrack.CORE,
+        family=TaskFamily.BUGFIX,
+        difficulty=TaskDifficulty.EASY,
+        language="python",
+        max_minutes=1,
+        max_files_touched=3,
+        visible_verification=["python -c 'print(1)'"],
+        hidden_verification=["python -c 'print(1)'"],
+        success_policy=SuccessPolicy(),
+        allowlist_paths=["src/", "tests/"],
+        task_dir=task_dir,
+        prompt="fix",
+    )
+    base.update(overrides)
+    return BenchmarkTask(**base)
+
+
+def test_visible_only_and_hidden_verifier_scoring(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(stdout="", stderr="", exit_code=0, timeout=False, runtime_seconds=0.01, telemetry_quality=TelemetryQuality.INFERRED, telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED}, events=[])
+
+    calls = {"n": 0}
+
+    def fake_run_commands(_repo, _cmds, _timeout=None, timeout_seconds=None):
+        calls["n"] += 1
+        return (True, [], 1.0, 2.0) if calls["n"] == 1 else (False, [], 2.0, 3.0)
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", fake_run_commands)
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    task = _minimal_task(tmp_path, hidden_verifier=["python -c 'print(2)'"])
+    task.metadata.expected_files = ["src/app.py"]
+    row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
+    assert row.visible_only_pass is True
+    assert row.success == 0
+
+
+def test_inspect_only_forbidden_unrelated_and_recovery_fields(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(stdout="", stderr="", exit_code=0, timeout=False, runtime_seconds=0.01, telemetry_quality=TelemetryQuality.INFERRED, telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED}, events=[])
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda _repo, _cmds, _timeout: (True, [], 1.0, 2.0))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["docs/readme.md"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    task = _minimal_task(tmp_path, inspect_only=True, forbidden_paths=["docs/"], expected_touched_max=0)
+    task.metadata.expected_files = ["src/app.py"]
+    row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
+    assert row.success == 0
+    assert row.unrelated_file_touch is True
+    assert row.verification_relevant is True
+    assert row.recovery_attempted is False
+    assert row.recovery_success is False
