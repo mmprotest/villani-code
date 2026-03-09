@@ -180,7 +180,7 @@ def git_changed_files(repo: Any) -> list[str]:
 
 
 def run_verification(runner: Any, trigger: str = "edit") -> str:
-    current_changed = set(git_changed_files(runner.repo))
+    current_changed = set(runner._git_changed_files()) if hasattr(runner, "_git_changed_files") else set(git_changed_files(runner.repo))
     attributed_changed = sorted(current_changed - runner._verification_baseline_changed)
     attributed_intentional: list[str] = []
     attributed_incidental: list[str] = []
@@ -191,11 +191,24 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             attributed_intentional.append(path)
 
     commands: list[list[str]] = []
-    if attributed_intentional:
-        commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
-        commands.append(["git", "diff", "--", *attributed_intentional])
-    if (runner.repo / "tests").exists() and attributed_intentional:
-        commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
+    benchmark_mode = bool(getattr(runner, "benchmark_config", None) and runner.benchmark_config.enabled)
+    if benchmark_mode:
+        visible = [cmd.strip() for cmd in runner.benchmark_config.visible_verification if cmd.strip()]
+        if not attributed_intentional:
+            runner.event_callback({"type": "benchmark_verification_skipped_repeated", "reason": "no_code_change"})
+            return ""
+        if visible:
+            commands.append(["bash", "-lc", visible[0]])
+            runner.event_callback({"type": "benchmark_verification_planned", "commands": [visible[0]], "task_id": runner.benchmark_config.task_id})
+        else:
+            commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
+            runner.event_callback({"type": "benchmark_verification_planned", "commands": ["git diff --stat"], "task_id": runner.benchmark_config.task_id})
+    else:
+        if attributed_intentional:
+            commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
+            commands.append(["git", "diff", "--", *attributed_intentional])
+        if (runner.repo / "tests").exists() and attributed_intentional:
+            commands.append(["pytest", "-q", "tests/test_runner_defaults.py"])
 
     lines = ["<verification>", f"trigger: {trigger}"]
     cmd_results: list[dict[str, Any]] = []
@@ -255,13 +268,15 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     if repeated_stale and runner._repeated_stale_verification_count >= 2:
         runner.event_callback(
             {
-                "type": "failure_classified",
+                "type": "benchmark_verification_skipped_repeated" if benchmark_mode else "failure_classified",
                 "category": "repeated_no_progress",
                 "summary": "repeated identical verification state with no new evidence",
                 "next_strategy": "Change strategy or stop this task in budgeted mode.",
                 "occurrence": runner._repeated_stale_verification_count,
             }
         )
+        if benchmark_mode and runner._repeated_stale_verification_count >= 3:
+            runner.event_callback({"type": "benchmark_early_stop", "reason": "benchmark_repeated_identical_verification"})
         return ""
 
     lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")

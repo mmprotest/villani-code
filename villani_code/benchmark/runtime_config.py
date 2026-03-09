@@ -26,6 +26,11 @@ class BenchmarkRuntimeConfig(BaseModel):
     require_patch_artifact: bool = True
     visible_verification: list[str] = Field(default_factory=list)
     hidden_verification: list[str] = Field(default_factory=list)
+    task_type: str | None = None
+    requires_repo_navigation: bool = False
+    requires_multi_step_reasoning: bool = False
+    likely_tool_sequence: list[str] = Field(default_factory=list)
+    reference_patch_size_lines: int | None = None
 
     def normalized_path(self, raw_path: str) -> str:
         return normalize_path(raw_path)
@@ -64,4 +69,9 @@ def benchmark_runtime_config_from_task(task: object) -> BenchmarkRuntimeConfig:
         require_patch_artifact="patch" in expected_artifacts,
         visible_verification=list(getattr(task, "visible_verification", [])),
         hidden_verification=list(getattr(task, "hidden_verification", [])),
+        task_type=getattr(metadata, "task_type", None),
+        requires_repo_navigation=bool(getattr(metadata, "requires_repo_navigation", False)),
+        requires_multi_step_reasoning=bool(getattr(metadata, "requires_multi_step_reasoning", False)),
+        likely_tool_sequence=list(getattr(metadata, "likely_tool_sequence", [])),
+        reference_patch_size_lines=getattr(metadata, "reference_patch_size_lines", None),
     )

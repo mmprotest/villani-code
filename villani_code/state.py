@@ -4,6 +4,7 @@ import copy
 import json
 import subprocess
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -28,6 +29,10 @@ from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
 from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
+from villani_code.benchmark.strategy import (
+    BenchmarkExecutionStrategy,
+    benchmark_strategy_from_config,
+)
 from villani_code.llm_client import LLMClient
 from villani_code.repo_map import build_repo_map
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
@@ -99,6 +104,24 @@ class Runner:
             enabled=villani_mode, steering_objective=villani_objective
         )
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
+        self._benchmark_strategy: BenchmarkExecutionStrategy | None = (
+            benchmark_strategy_from_config(self.benchmark_config)
+            if self.benchmark_config.enabled
+            else None
+        )
+        self._benchmark_tool_counters: dict[str, int] = {
+            "reads": 0,
+            "searches": 0,
+            "bash": 0,
+            "verification_bash": 0,
+            "patch_attempts": 0,
+            "blocked_mutations": 0,
+        }
+        self._benchmark_seen_reads: dict[str, int] = {}
+        self._benchmark_seen_searches: dict[str, int] = {}
+        self._benchmark_seen_bash: dict[str, int] = {}
+        self._benchmark_expected_file_read = False
+        self._benchmark_expected_reminder_sent = False
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
         self.permissions = PermissionEngine(
@@ -200,6 +223,13 @@ class Runner:
                 "allowlist_paths": self.benchmark_config.allowlist_paths,
                 "expected_files": self.benchmark_config.expected_files,
             })
+            if self._benchmark_strategy:
+                self.event_callback({
+                    "type": "benchmark_strategy_selected",
+                    "task_id": self.benchmark_config.task_id,
+                    "task_class": self._benchmark_strategy.task_class,
+                    "strategy": asdict(self._benchmark_strategy),
+                })
         self._save_session_snapshot(messages)
         empty_turn_retries = 0
         start = time.monotonic()
@@ -218,6 +248,7 @@ class Runner:
         self._last_verification_intentional = set()
         self._last_verification_artifact_count = 0
         previous_attributed = set()
+        pending_benchmark_hint = ""
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -491,6 +522,43 @@ class Runner:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
                 tool_use_id = str(block.get("id"))
+                if self.benchmark_config.enabled and self._benchmark_strategy:
+                    if tool_name == "Read":
+                        self._benchmark_tool_counters["reads"] += 1
+                        read_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                        if read_path:
+                            self._benchmark_seen_reads[read_path] = self._benchmark_seen_reads.get(read_path, 0) + 1
+                            if self._benchmark_seen_reads[read_path] >= 3:
+                                self.event_callback({"type": "benchmark_stall_detected", "kind": "repeated_reads", "path": read_path})
+                        expected = {p.replace('\\', '/').lstrip('./') for p in self.benchmark_config.expected_files}
+                        if read_path and read_path in expected:
+                            self._benchmark_expected_file_read = True
+                            self.event_callback({"type": "benchmark_expected_file_read", "task_id": self.benchmark_config.task_id, "path": read_path})
+                    elif tool_name in {"Grep", "Search", "Glob"}:
+                        self._benchmark_tool_counters["searches"] += 1
+                    elif tool_name == "Bash":
+                        self._benchmark_tool_counters["bash"] += 1
+
+                    if self._benchmark_tool_counters["reads"] > self._benchmark_strategy.max_reads:
+                        self.event_callback({"type": "benchmark_budget_exceeded", "reason": "benchmark_max_reads", "counters": dict(self._benchmark_tool_counters)})
+                        return _finish_bounded(response, "benchmark_max_reads", False)
+                    if self._benchmark_tool_counters["searches"] > self._benchmark_strategy.max_searches:
+                        self.event_callback({"type": "benchmark_budget_exceeded", "reason": "benchmark_max_searches", "counters": dict(self._benchmark_tool_counters)})
+                        return _finish_bounded(response, "benchmark_max_searches", False)
+                    if self._benchmark_tool_counters["bash"] > self._benchmark_strategy.max_bash:
+                        self.event_callback({"type": "benchmark_budget_exceeded", "reason": "benchmark_max_bash", "counters": dict(self._benchmark_tool_counters)})
+                        return _finish_bounded(response, "benchmark_max_bash", False)
+
+                    exploratory = self._benchmark_tool_counters["reads"] + self._benchmark_tool_counters["searches"]
+                    if (
+                        not self._benchmark_expected_file_read
+                        and self.benchmark_config.expected_files
+                        and exploratory >= 3
+                        and not self._benchmark_expected_reminder_sent
+                    ):
+                        self._benchmark_expected_reminder_sent = True
+                        self.event_callback({"type": "benchmark_expected_file_prompted", "task_id": self.benchmark_config.task_id})
+                        pending_benchmark_hint = "Benchmark hint: read expected file now and attempt focused patch."
                 self.event_callback(
                     {
                         "type": "tool_use",
@@ -515,6 +583,16 @@ class Runner:
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
+
+                if self.benchmark_config.enabled and self._benchmark_strategy and tool_name in {"Write", "Patch"}:
+                    self._benchmark_tool_counters["patch_attempts"] += 1
+                    self.event_callback({
+                        "type": "benchmark_patch_attempt_recorded",
+                        "count": self._benchmark_tool_counters["patch_attempts"],
+                    })
+                    if self._benchmark_tool_counters["patch_attempts"] > self._benchmark_strategy.max_patch_attempts:
+                        self.event_callback({"type": "benchmark_early_stop", "reason": "benchmark_repeated_failed_patch"})
+                        return _finish_bounded(response, "benchmark_repeated_failed_patch", False)
 
                 if result.get("is_error"):
                     failure = self._failure_classifier.classify(
@@ -619,6 +697,12 @@ class Runner:
                     else self._pending_verification
                 )
                 self._pending_verification = ""
+            if pending_benchmark_hint and next_user_content:
+                existing = str(next_user_content[-1].get("content", ""))
+                next_user_content[-1]["content"] = (
+                    f"{existing}\n\n{pending_benchmark_hint}" if existing else pending_benchmark_hint
+                )
+                pending_benchmark_hint = ""
             messages.append({"role": "user", "content": next_user_content})
 
             reason = _budget_reason()

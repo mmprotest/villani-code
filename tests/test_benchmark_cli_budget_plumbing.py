@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from villani_code import cli
+
+
+class _Runner:
+    def __init__(self):
+        self.execution_budget = None
+
+    def run(self, instruction: str, execution_budget=None):
+        self.execution_budget = execution_budget
+        return {"response": {"content": []}}
+
+
+def test_cli_run_passes_budget_when_benchmark_runtime_json(monkeypatch) -> None:
+    holder: dict[str, object] = {}
+
+    def fake_build_runner(*args, **kwargs):
+        runner = _Runner()
+        holder["runner"] = runner
+        return runner
+
+    monkeypatch.setattr(cli, "_build_runner", fake_build_runner)
+
+    cfg = '{"enabled":true,"task_id":"t","task_type":"single_file_bugfix"}'
+    cli.run(
+        instruction="fix",
+        base_url="http://x",
+        model="m",
+        benchmark_runtime_json=cfg,
+    )
+    assert holder["runner"].execution_budget is not None
+
+
+def test_cli_run_non_benchmark_does_not_pass_budget(monkeypatch) -> None:
+    holder: dict[str, object] = {}
+
+    def fake_build_runner(*args, **kwargs):
+        runner = _Runner()
+        holder["runner"] = runner
+        return runner
+
+    monkeypatch.setattr(cli, "_build_runner", fake_build_runner)
+
+    cli.run(
+        instruction="fix",
+        base_url="http://x",
+        model="m",
+        benchmark_runtime_json=None,
+    )
+    assert holder["runner"].execution_budget is None

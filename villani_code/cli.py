@@ -21,6 +21,7 @@ from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.benchmark.health import run_healthcheck, validate_tasks
 from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, write_html_report, write_markdown_report
+from villani_code.execution import execution_budget_from_benchmark_config
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -193,7 +194,11 @@ def run(
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
 ) -> None:
     runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json)
-    result = runner.run(instruction)
+    execution_budget = None
+    if benchmark_runtime_json:
+        benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json)
+        execution_budget = execution_budget_from_benchmark_config(benchmark_config)
+    result = runner.run(instruction, execution_budget=execution_budget)
     _print_response_text_blocks(result)
 
 
