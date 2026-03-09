@@ -19,6 +19,20 @@ def test_task_loader_parses_valid_task() -> None:
     assert task.benchmark_track == BenchmarkTrack.CORE
     assert task.source_type in {TaskSource.CURATED, TaskSource.SEEDED, TaskSource.MUTATED}
     assert len(task.task_checksum or "") > 5
+    assert task.allowed_paths == ["src/", "tests/"]
+    assert task.expected_touched_max == 3
+
+
+def test_task_loader_new_optional_fields_default_back_compat() -> None:
+    task = load_task(Path("benchmark_tasks/villani_bench_v1/localize_001_feature_flag"))
+    assert task.allowed_paths == []
+    assert task.forbidden_paths == []
+    assert task.expected_touched_max is None
+    assert task.inspect_only is False
+    assert task.recovery_expected is False
+    assert task.adjacency_expected is False
+    assert task.hidden_verifier is None
+    assert task.task_type is None
 
 
 def test_feature_flag_name_stays_core() -> None:

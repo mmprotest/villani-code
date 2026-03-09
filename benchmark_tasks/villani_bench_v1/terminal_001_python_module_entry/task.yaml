@@ -4,8 +4,7 @@ difficulty: easy
 language: python
 max_minutes: 15
 max_files_touched: 3
-expected_artifacts:
-- patch
+expected_artifacts: []
 visible_verification:
 - python -m app --help
 hidden_verification:
@@ -19,4 +18,6 @@ allowlist_paths:
 - src/
 - app/
 - pyproject.toml
+inspect_only: true
+task_type: inspect_and_stop
 benchmark_track: core

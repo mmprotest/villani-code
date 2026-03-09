@@ -19,3 +19,5 @@ success_policy:
 allowlist_paths:
 - src/
 - tests/
+recovery_expected: true
+task_type: verify_and_recover
