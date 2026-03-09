@@ -36,6 +36,9 @@ villani-code = "villani_code.cli:app"
 [tool.setuptools.packages.find]
 include = ["villani_code*"]
 
+[tool.setuptools.package-data]
+villani_code = ["tui/*.tcss", "tui/**/*.tcss"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
