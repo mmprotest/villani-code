@@ -21,7 +21,7 @@ from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.benchmark.health import run_healthcheck, validate_tasks
 from villani_code.benchmark.reporting import diagnostics, load_results, paired_compare, render_summary_table, write_html_report, write_markdown_report
-from villani_code.execution import execution_budget_from_benchmark_config
+from villani_code.execution import ExecutionBudget, execution_budget_from_benchmark_config
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -192,10 +192,13 @@ def run(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
+    execution_budget_json: Optional[str] = typer.Option(None, "--execution-budget-json", hidden=True),
 ) -> None:
     runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json)
-    execution_budget = None
-    if benchmark_runtime_json:
+    execution_budget: ExecutionBudget | None = None
+    if isinstance(execution_budget_json, str) and execution_budget_json.strip():
+        execution_budget = ExecutionBudget(**json.loads(execution_budget_json))
+    elif benchmark_runtime_json:
         benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json)
         execution_budget = execution_budget_from_benchmark_config(benchmark_config)
     result = runner.run(instruction, execution_budget=execution_budget)

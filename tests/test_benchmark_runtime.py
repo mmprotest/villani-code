@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,17 @@ def _benchmark_config() -> BenchmarkRuntimeConfig:
         visible_verification=["pytest -q"],
         hidden_verification=["python -m pytest tests/test_hidden.py -q"],
     )
+
+
+def _init_repo_with_file(tmp_path: Path, path: str, content: str) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
+    file_path = tmp_path / path
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", path], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 
 
 def test_benchmark_write_gating_expected_and_support_paths(tmp_path: Path) -> None:
@@ -156,6 +168,53 @@ def test_benchmark_noop_completion_guard_blocks_then_terminates_incomplete(tmp_p
     assert output["execution"]["completed"] is False
     assert output["execution"]["terminated_reason"] == "benchmark_incomplete_no_patch"
     assert any(e.get("type") == "benchmark_noop_completion_blocked" for e in events)
+
+
+def test_benchmark_planning_text_before_first_tool_does_not_terminate(tmp_path: Path) -> None:
+    cfg = _benchmark_config()
+    events: list[dict] = []
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "app.py").write_text("x=0\n", encoding="utf-8")
+    diff = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x=0\n+x=1\n"
+    client = _Client([
+        {"role": "assistant", "content": [{"type": "text", "text": "I will inspect the repository first."}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Patch", "input": {"unified_diff": diff}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ])
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, benchmark_config=cfg, event_callback=events.append)
+    out = runner.run("fix bug")
+    assert "execution" not in out or out["execution"]["terminated_reason"] != "benchmark_incomplete_no_patch"
+    assert not any(e.get("type") == "benchmark_noop_completion_blocked" for e in events)
+
+
+def test_benchmark_intermediate_text_after_reads_does_not_count_as_completion(tmp_path: Path) -> None:
+    cfg = _benchmark_config()
+    _init_repo_with_file(tmp_path, "src/app.py", "x=0\n")
+    events: list[dict] = []
+    client = _Client([
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Read", "input": {"file_path": "src/app.py"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "I found the likely issue and will patch next."}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=1\n"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "task finished"}]},
+    ])
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, benchmark_config=cfg, event_callback=events.append)
+    out = runner.run("fix bug")
+    blocked_events = [e for e in events if e.get("type") == "benchmark_noop_completion_blocked"]
+    assert blocked_events == []
+    assert "execution" not in out or out["execution"]["terminated_reason"] != "benchmark_incomplete_no_patch"
+
+
+def test_benchmark_post_mutation_completion_can_conclude(tmp_path: Path) -> None:
+    cfg = _benchmark_config()
+    _init_repo_with_file(tmp_path, "src/app.py", "x=0\n")
+    client = _Client([
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=1\n"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ])
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, benchmark_config=cfg)
+    out = runner.run("fix bug")
+    assert "execution" not in out or out["execution"]["terminated_reason"] != "benchmark_incomplete_no_patch"
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "x=1\n"
 
 
 def test_non_benchmark_completion_unaffected(tmp_path: Path) -> None:

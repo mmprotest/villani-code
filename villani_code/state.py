@@ -123,6 +123,7 @@ class Runner:
         self._benchmark_expected_file_read = False
         self._benchmark_expected_reminder_sent = False
         self._benchmark_noop_completion_attempts = 0
+        self._benchmark_has_successful_mutating_tool = False
         self.console = Console()
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
@@ -250,6 +251,9 @@ class Runner:
         previous_attributed = set()
         pending_benchmark_hint = ""
 
+        self._benchmark_noop_completion_attempts = 0
+        self._benchmark_has_successful_mutating_tool = False
+
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
             return sorted(current - baseline_changed)
@@ -271,6 +275,29 @@ class Runner:
                 and self.benchmark_config.is_expected_or_support(path)
             ]
             return bool(meaningful)
+
+        def _is_benchmark_completion_attempt(response: dict[str, Any]) -> bool:
+            if not self.benchmark_config.enabled:
+                return True
+            if self._assistant_text_indicates_completion(response):
+                return True
+            return self._has_any_mutating_tool_activity() and _has_meaningful_benchmark_edit()
+
+        def _handle_benchmark_no_patch_completion_attempt(response: dict[str, Any]) -> dict[str, Any] | bool:
+            if not self.benchmark_config.enabled:
+                return False
+            if not _is_benchmark_completion_attempt(response):
+                return False
+            if _has_meaningful_benchmark_edit():
+                return False
+            self._benchmark_noop_completion_attempts += 1
+            self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
+            if self._benchmark_noop_completion_attempts >= 2:
+                return _finish_bounded(response, "benchmark_incomplete_no_patch", False)
+            reminder = "Benchmark mode requires a real patch in task scope before completion."
+            self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
+            messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+            return True
 
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
@@ -401,14 +428,10 @@ class Runner:
                 empty_turn_retries = 0
             if not tool_uses:
                 if empty:
-                    if self.benchmark_config.enabled and not _has_meaningful_benchmark_edit():
-                        self._benchmark_noop_completion_attempts += 1
-                        self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
-                        if self._benchmark_noop_completion_attempts >= 2:
-                            return _finish_bounded(response, "benchmark_incomplete_no_patch", False)
-                        reminder = "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue."
-                        self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
-                        messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                    benchmark_guard = _handle_benchmark_no_patch_completion_attempt(response)
+                    if isinstance(benchmark_guard, dict):
+                        return benchmark_guard
+                    if benchmark_guard:
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -493,14 +516,10 @@ class Runner:
                             }
                         )
                         continue
-                if self.benchmark_config.enabled and not _has_meaningful_benchmark_edit():
-                    self._benchmark_noop_completion_attempts += 1
-                    self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
-                    if self._benchmark_noop_completion_attempts >= 2:
-                        return _finish_bounded(response, "benchmark_incomplete_no_patch", False)
-                    reminder = "Benchmark mode requires a real patch in task scope before completion."
-                    self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
-                    messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                benchmark_guard = _handle_benchmark_no_patch_completion_attempt(response)
+                if isinstance(benchmark_guard, dict):
+                    return benchmark_guard
+                if benchmark_guard:
                     continue
                 reason = _budget_reason(completed=True)
                 if reason:
@@ -607,6 +626,11 @@ class Runner:
                             "occurrence": failure.occurrence_count,
                         }
                     )
+
+                if not result.get("is_error") and self._is_mutating_tool_call(tool_name, tool_input):
+                    self._benchmark_has_successful_mutating_tool = True
+                    if self.benchmark_config.enabled:
+                        self._benchmark_noop_completion_attempts = 0
 
                 self.hooks.run_event(
                     "PostToolUse",
@@ -729,6 +753,27 @@ class Runner:
             )
             return not command.startswith(readonly_prefixes)
         return False
+
+    def _has_any_mutating_tool_activity(self) -> bool:
+        return self._benchmark_has_successful_mutating_tool
+
+    def _assistant_text_indicates_completion(self, response: dict[str, Any]) -> bool:
+        phrases = (
+            "done",
+            "finished",
+            "complete",
+            "completed",
+            "final answer",
+            "task finished",
+            "i'm done",
+            "i’m done",
+        )
+        texts = [
+            str(block.get("text", "")).lower()
+            for block in response.get("content", [])
+            if block.get("type") == "text"
+        ]
+        return any(any(phrase in text for phrase in phrases) for text in texts)
 
     def _execute_tool_with_policy(
         self,

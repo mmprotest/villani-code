@@ -156,3 +156,4 @@ def test_villani_command_includes_benchmark_runtime_json_when_present() -> None:
         benchmark_config_json='{"enabled":true,"task_id":"t"}',
     )
     assert '--benchmark-runtime-json' in cmd
+    assert '--execution-budget-json' in cmd

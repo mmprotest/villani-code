@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
@@ -51,7 +52,16 @@ class VillaniAgentRunner(AgentRunner):
         if api_key:
             command.extend(["--api-key", api_key])
         if benchmark_config_json:
+            from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
+            from villani_code.execution import execution_budget_from_benchmark_config
+
             command.extend(["--benchmark-runtime-json", benchmark_config_json])
+            benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_config_json)
+            benchmark_budget = execution_budget_from_benchmark_config(benchmark_config)
+            command.extend([
+                "--execution-budget-json",
+                json.dumps(asdict(benchmark_budget)),
+            ])
         return command
 
     def run_agent(
