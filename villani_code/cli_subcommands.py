@@ -70,7 +70,7 @@ def register_benchmark_commands(benchmark_app: typer.Typer, console: Console) ->
             ["villani"],
             "--agent",
             help=(
-                "Benchmark agent(s): villani, aider, opencode. "
+                "Benchmark agent(s): villani, aider, opencode, claude-code. "
                 "Repeat --agent to compare multiple agents."
             ),
         ),

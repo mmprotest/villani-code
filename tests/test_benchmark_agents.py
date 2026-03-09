@@ -4,6 +4,7 @@ from pathlib import Path
 
 from villani_code.benchmark.agents import AGENTS, build_agent_runner
 from villani_code.benchmark.agents.aider import AiderAgentRunner
+from villani_code.benchmark.agents.claude_code import ClaudeCodeAgentRunner
 from villani_code.benchmark.agents.command import CommandAgentRunner
 from villani_code.benchmark.agents.opencode import OpenCodeAgentRunner
 from villani_code.benchmark.agents.villani import VillaniAgentRunner
@@ -14,11 +15,13 @@ def test_registry_contains_supported_agents() -> None:
         "villani": VillaniAgentRunner,
         "aider": AiderAgentRunner,
         "opencode": OpenCodeAgentRunner,
+        "claude-code": ClaudeCodeAgentRunner,
     }
 
 
 def test_dispatcher_builds_named_and_cmd_runners() -> None:
     assert isinstance(build_agent_runner("villani"), VillaniAgentRunner)
+    assert isinstance(build_agent_runner("claude-code"), ClaudeCodeAgentRunner)
     assert isinstance(build_agent_runner("cmd:python -c 'print(1)'"), CommandAgentRunner)
 
 
@@ -60,6 +63,22 @@ def test_opencode_command_and_env_forward_model_and_endpoint() -> None:
     assert cmd == ["opencode", "run", "--model", "openai/qwen-9b", "--prompt", "fix bug"]
     assert env["OPENAI_API_BASE"] == "http://127.0.0.1:1234"
     assert env["OPENAI_API_KEY"] == "sk-test"
+
+def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
+    runner = ClaudeCodeAgentRunner()
+    cmd = runner.build_command(
+        Path("."),
+        "fix bug",
+        model="claude-3-7-sonnet",
+        base_url="http://127.0.0.1:8080",
+        api_key="sk-ant-test",
+        provider="anthropic",
+    )
+    env = runner.build_env(base_url="http://127.0.0.1:8080", api_key="sk-ant-test")
+    assert cmd == ["claude-code", "run", "--model", "claude-3-7-sonnet", "--prompt", "fix bug"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-test"
+
 
 
 def test_villani_defaults_provider_to_openai_with_base_url() -> None:
