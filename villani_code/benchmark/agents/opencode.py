@@ -20,7 +20,7 @@ class OpenCodeAgentRunner(AgentRunner):
     ) -> list[str]:
         if not model:
             raise ValueError("opencode requires --model for fair same-model benchmarking")
-        return ["opencode", "run", "--model", f"openai/{model}", "--prompt", prompt]
+        return ["opencode", "run", "--model", model, "--hostname", base_url, "--command", prompt]
 
     def build_env(self, *, base_url: str | None, api_key: str | None) -> dict[str, str]:
         env = super().build_env(base_url=base_url, api_key=api_key)

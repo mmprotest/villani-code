@@ -20,7 +20,7 @@ class ClaudeCodeAgentRunner(AgentRunner):
     ) -> list[str]:
         if not model:
             raise ValueError("claude-code requires --model for fair same-model benchmarking")
-        return ["claude-code", "run", "--model", model, "--prompt", prompt]
+        return ["claude", "--model", model, "run", prompt]
 
     def build_env(self, *, base_url: str | None, api_key: str | None) -> dict[str, str]:
         env = super().build_env(base_url=base_url, api_key=api_key)
