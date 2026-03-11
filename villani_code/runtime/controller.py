@@ -5,11 +5,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from villani_code.benchmark.models import TaskFamily
 from villani_code.localize.ranker import rank_suspects
 from villani_code.runtime.blackboard import BlackboardStore
 from villani_code.runtime.budgets import select_runtime_budgets, timeout_imminent
-from villani_code.runtime.schemas import Blackboard, BranchRecord, Evidence, StopReason
+from villani_code.runtime.candidate_executor import CandidateExecutor
+from villani_code.runtime.schemas import AttemptRecord, Blackboard, BranchRecord, Evidence, StopReason
 from villani_code.runtime.trace import emit_runtime_event
 from villani_code.search.frontier import BranchFrontier, FrontierBranch
 from villani_code.search.pruning import no_progress_stop, should_prune_branch
@@ -56,6 +56,10 @@ class WeakSearchController:
         no_improve = 0
         best_score = 0.0
         branches_pruned = 0
+        candidates_generated = 0
+        candidates_verified = 0
+        executor = CandidateExecutor(self.runner, self.instruction, budgets.max_patch_lines, budgets.max_files_per_patch)
+        blocked_reason = ""
 
         for cycle in range(1, budgets.max_cycles + 1):
             board.cycle = cycle
@@ -80,14 +84,57 @@ class WeakSearchController:
 
             for branch in frontier.top_active(2):
                 branch.attempts += 1
-                if should_prune_branch(branch, repeated_signature="stale"):
-                    branches_pruned += 1
-                    emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id)
+                branch_rec = next((b for b in board.branches if b.id == branch.id), None)
+                attempt_id = f"att-{len(board.attempts)+1}"
+                hypothesis = next((h for h in board.hypotheses if h.id == branch.hypothesis_id), None)
+                if not hypothesis:
                     continue
-                branch.best_score = max(branch.best_score, 0.3)
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_generated", branch_id=branch.id, hypothesis_id=hypothesis.id)
+                candidates_generated += 1
+                result = executor.evaluate(
+                    suspect=branch.suspect_ref,
+                    hypothesis_id=hypothesis.id,
+                    hypothesis_text=hypothesis.text,
+                    attempt_id=attempt_id,
+                    failed_attempt_summary=list(branch.failure_signatures),
+                )
+                if result.hard_fail:
+                    branch.failure_signatures.append(result.failure_signature or result.rejection_reason)
+                    if branch_rec:
+                        branch_rec.attempts_list.append(attempt_id)
+                    board.attempts.append(AttemptRecord(id=attempt_id, branch_id=branch.id, files_touched=result.changed_files, changed_line_count=result.changed_line_count, hard_fail=True, reason=result.rejection_reason or "candidate_failed", result="rejected", score=0.0, verifier_outputs=result.verification_outputs))
+                    emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_rejected", branch_id=branch.id, reason=result.rejection_reason)
+                    if should_prune_branch(branch, repeated_signature=result.failure_signature or result.rejection_reason):
+                        branches_pruned += 1
+                        if branch_rec:
+                            branch_rec.status = "pruned"
+                        emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id, reason=result.rejection_reason or "repeated_failure")
+                    continue
+
+                candidates_verified += 1
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_applied", branch_id=branch.id, files_touched=result.changed_files, patch_artifact=result.patch_artifact_path)
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_verified", branch_id=branch.id, success=result.success, score=result.score)
+                board.attempts.append(AttemptRecord(id=attempt_id, branch_id=branch.id, files_touched=result.changed_files, changed_line_count=result.changed_line_count, score=result.score, result="passed" if result.success else "failed", verifier_outputs=result.verification_outputs, reason="verification"))
+                if branch_rec:
+                    branch_rec.attempts_list.append(attempt_id)
+                    branch_rec.best_score = max(branch_rec.best_score, result.score)
+                if should_prune_branch(branch, repeated_signature=result.failure_signature if not result.success else None):
+                    branches_pruned += 1
+                    if branch_rec:
+                        branch_rec.status = "pruned"
+                    emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id, reason="pruning_rule")
+                    continue
+                branch.best_score = max(branch.best_score, result.score)
                 if branch.best_score > best_score:
                     best_score = branch.best_score
                     improved = True
+                if result.success:
+                    board.final_result = {"stop_reason": StopReason.SOLVED.value, "best_patch_score": best_score, "attempt_id": attempt_id}
+                    emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_solved", cycle=cycle, branch_id=branch.id, attempt_id=attempt_id)
+                    break
+
+            if board.final_result.get("stop_reason") == StopReason.SOLVED.value:
+                break
 
             no_improve = 0 if improved else no_improve + 1
             if no_progress_stop(no_improve, budgets.max_consecutive_no_improvement_cycles):
@@ -96,19 +143,24 @@ class WeakSearchController:
             store.write(board)
 
         if not board.final_result:
-            board.final_result = {"stop_reason": StopReason.EXHAUSTED_BUDGET.value, "best_patch_score": best_score}
+            if candidates_generated == 0:
+                blocked_reason = "no_candidates_evaluated"
+                board.final_result = {"stop_reason": StopReason.BLOCKED.value, "best_patch_score": best_score, "blocked_reason": blocked_reason}
+            else:
+                board.final_result = {"stop_reason": StopReason.EXHAUSTED_BUDGET.value, "best_patch_score": best_score}
         store.write(board)
         summary = {
             "weak_search_cycles": board.cycle,
             "branches_created": len(board.branches),
             "branches_pruned": branches_pruned,
             "hypotheses_generated": len(board.hypotheses),
-            "candidate_patches_generated": 0,
-            "candidate_patches_verified": 0,
+            "candidate_patches_generated": candidates_generated,
+            "candidate_patches_verified": candidates_verified,
             "scope_expansions": 0,
             "no_progress_stop": board.final_result.get("stop_reason") == StopReason.NO_PROGRESS.value,
             "best_patch_score": best_score,
             "stop_reason": board.final_result.get("stop_reason"),
+            "blocked_reason": blocked_reason,
         }
         store.write_summary(summary)
         emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_stopped", **summary)

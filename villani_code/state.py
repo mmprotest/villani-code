@@ -66,7 +66,7 @@ class Runner:
         villani_mode: bool = False,
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
-        runtime: str = "classic",
+        runtime: str = "weak-search",
     ):
         self.client = client
         self.repo = repo
@@ -186,7 +186,7 @@ class Runner:
             "tool_results": [],
             "streamed_events_count": 0,
         }
-        if self.benchmark_config.enabled and self.runtime == "weak-search":
+        if self.runtime == "weak-search":
             from villani_code.runtime.controller import WeakSearchController
 
             timeout_seconds = 300.0
