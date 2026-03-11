@@ -2,7 +2,7 @@ id: bugfix_014_retry_status_429
 family: bugfix
 difficulty: medium
 language: python
-max_minutes: 15
+max_minutes: 5
 max_files_touched: 4
 expected_artifacts:
 - patch

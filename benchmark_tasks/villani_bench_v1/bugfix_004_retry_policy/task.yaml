@@ -2,7 +2,7 @@ id: bugfix_004_retry_policy
 family: bugfix
 difficulty: medium
 language: python
-max_minutes: 20
+max_minutes: 5
 max_files_touched: 3
 expected_artifacts:
 - patch

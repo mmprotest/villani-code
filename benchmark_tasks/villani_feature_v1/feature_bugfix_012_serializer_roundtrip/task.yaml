@@ -2,7 +2,7 @@ id: feature_bugfix_012_serializer_roundtrip
 family: bugfix
 difficulty: medium
 language: python
-max_minutes: 30
+max_minutes: 5
 max_files_touched: 8
 expected_artifacts:
 - patch

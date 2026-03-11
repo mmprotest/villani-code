@@ -2,7 +2,7 @@ id: repro_005_path_normalization
 family: repro_test
 difficulty: hard
 language: python
-max_minutes: 15
+max_minutes: 5
 max_files_touched: 4
 expected_artifacts:
 - patch

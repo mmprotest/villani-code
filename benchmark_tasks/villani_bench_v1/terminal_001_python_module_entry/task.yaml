@@ -2,7 +2,7 @@ id: terminal_001_python_module_entry
 family: terminal_workflow
 difficulty: easy
 language: python
-max_minutes: 15
+max_minutes: 5
 max_files_touched: 3
 expected_artifacts: []
 visible_verification:

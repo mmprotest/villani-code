@@ -2,7 +2,7 @@ id: feature_localize_006_request_header_drop
 family: localize_patch
 difficulty: hard
 language: python
-max_minutes: 30
+max_minutes: 5
 max_files_touched: 8
 expected_artifacts:
 - patch

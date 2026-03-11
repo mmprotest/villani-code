@@ -2,7 +2,7 @@ id: feature_repro_004_pagination_edge_case
 family: repro_test
 difficulty: hard
 language: python
-max_minutes: 30
+max_minutes: 5
 max_files_touched: 8
 expected_artifacts:
 - patch

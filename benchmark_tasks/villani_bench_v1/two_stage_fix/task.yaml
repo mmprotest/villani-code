@@ -3,7 +3,7 @@ benchmark_track: core
 family: bugfix
 difficulty: hard
 language: python
-max_minutes: 20
+max_minutes: 5
 max_files_touched: 5
 expected_artifacts:
 - patch

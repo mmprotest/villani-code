@@ -2,7 +2,7 @@ id: repro_002_retry_policy
 family: repro_test
 difficulty: medium
 language: python
-max_minutes: 20
+max_minutes: 5
 max_files_touched: 2
 expected_artifacts:
 - test
