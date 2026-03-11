@@ -114,6 +114,15 @@ class BenchmarkRunner:
         retries_after_failure = 0
         verification_seen = False
         verification_failed = False
+        weak_search_cycles = 0
+        branches_created = 0
+        branches_pruned = 0
+        hypotheses_generated = 0
+        candidate_patches_generated = 0
+        candidate_patches_verified = 0
+        scope_expansions = 0
+        no_progress_stop = False
+        best_patch_score: float | None = None
 
         verification_commands = set(visible_commands + hidden_commands)
         for e in events:
@@ -154,6 +163,25 @@ class BenchmarkRunner:
                 read_paths.add(path)
                 if path in expected_files and first_expected_read is None:
                     first_expected_read = max(0.0, ts - started)
+            if event_type == "weak_search_cycle_started":
+                weak_search_cycles += 1
+            if event_type == "hypotheses_generated":
+                kept = int(payload.get("kept", 0))
+                hypotheses_generated += kept
+                branches_created += kept
+            if event_type == "candidate_patch_generated":
+                candidate_patches_generated += 1
+            if event_type == "candidate_patch_verified":
+                candidate_patches_verified += 1
+            if event_type == "branch_pruned":
+                branches_pruned += 1
+            if event_type == "scope_expanded":
+                scope_expansions += 1
+            if event_type == "weak_search_stopped":
+                no_progress_stop = bool(payload.get("no_progress_stop", False))
+                score = payload.get("best_patch_score")
+                if isinstance(score, (int, float)):
+                    best_patch_score = float(score)
             if isinstance(path, str):
                 touched_paths.add(path)
 
@@ -173,6 +201,15 @@ class BenchmarkRunner:
             "test_runs": test_runs if test_runs > 0 else None,
             "number_of_turns": number_of_turns,
             "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
+            "weak_search_cycles": weak_search_cycles if weak_search_cycles > 0 else None,
+            "branches_created": branches_created if branches_created > 0 else None,
+            "branches_pruned": branches_pruned if branches_pruned > 0 else None,
+            "hypotheses_generated": hypotheses_generated if hypotheses_generated > 0 else None,
+            "candidate_patches_generated": candidate_patches_generated if candidate_patches_generated > 0 else None,
+            "candidate_patches_verified": candidate_patches_verified if candidate_patches_verified > 0 else None,
+            "scope_expansions": scope_expansions if scope_expansions > 0 else None,
+            "no_progress_stop": no_progress_stop,
+            "best_patch_score": best_patch_score,
         }
 
     @staticmethod
@@ -570,6 +607,15 @@ class BenchmarkRunner:
                 workspace_preserved=self.workspace.keep_workspace,
                 reproducibility_manifest_path=str(manifest_path),
                 repeat_index=repeat_index,
+                weak_search_cycles=metrics.get("weak_search_cycles") if telemetry_quality.value != "unavailable" else None,
+                branches_created=metrics.get("branches_created") if telemetry_quality.value != "unavailable" else None,
+                branches_pruned=metrics.get("branches_pruned") if telemetry_quality.value != "unavailable" else None,
+                hypotheses_generated=metrics.get("hypotheses_generated") if telemetry_quality.value != "unavailable" else None,
+                candidate_patches_generated=metrics.get("candidate_patches_generated") if telemetry_quality.value != "unavailable" else None,
+                candidate_patches_verified=metrics.get("candidate_patches_verified") if telemetry_quality.value != "unavailable" else None,
+                scope_expansions=metrics.get("scope_expansions") if telemetry_quality.value != "unavailable" else None,
+                no_progress_stop=metrics.get("no_progress_stop") if telemetry_quality.value != "unavailable" else None,
+                best_patch_score=metrics.get("best_patch_score") if telemetry_quality.value != "unavailable" else None,
             )
 
     def _check_required_artifacts(self, task: BenchmarkTask, touched: list[str]) -> tuple[bool, str | None]:

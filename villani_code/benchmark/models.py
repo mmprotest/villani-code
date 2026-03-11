@@ -185,6 +185,15 @@ class ReproducibilityManifest(BaseModel):
     adapter_version: str
     timeout_seconds: int
     repeat_index: int = 0
+    weak_search_cycles: int | None = None
+    branches_created: int | None = None
+    branches_pruned: int | None = None
+    hypotheses_generated: int | None = None
+    candidate_patches_generated: int | None = None
+    candidate_patches_verified: int | None = None
+    scope_expansions: int | None = None
+    no_progress_stop: bool | None = None
+    best_patch_score: float | None = None
     platform: str
     python_version: str
     agent_name: str
@@ -285,6 +294,15 @@ class BenchmarkRunResult(BaseModel):
     workspace_preserved: bool = False
     reproducibility_manifest_path: str | None = None
     repeat_index: int = 0
+    weak_search_cycles: int | None = None
+    branches_created: int | None = None
+    branches_pruned: int | None = None
+    hypotheses_generated: int | None = None
+    candidate_patches_generated: int | None = None
+    candidate_patches_verified: int | None = None
+    scope_expansions: int | None = None
+    no_progress_stop: bool | None = None
+    best_patch_score: float | None = None
 
 
 class BenchmarkSummary(BaseModel):

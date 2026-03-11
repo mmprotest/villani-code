@@ -39,6 +39,10 @@ def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
         "recovery_success_rate": _safe_mean([1.0 if r.recovery_success is True else 0.0 if r.recovery_success is False else None for r in rows]),
         "no_progress_collapse_rate": round(sum(1 for r in rows if r.no_progress_termination) / total, 4) if total else 0.0,
         "self_corrected_after_failed_verify_rate": _safe_mean([1.0 if r.self_corrected_after_failed_verify else 0.0 if r.self_corrected_after_failed_verify is not None else None for r in rows]),
+        "avg_weak_search_cycles": _safe_mean([r.weak_search_cycles for r in rows]),
+        "avg_branches_pruned": _safe_mean([r.branches_pruned for r in rows]),
+        "avg_candidate_patches_verified": _safe_mean([r.candidate_patches_verified for r in rows]),
+        "no_progress_stop_rate": _safe_mean([1.0 if r.no_progress_stop else 0.0 if r.no_progress_stop is not None else None for r in rows]),
     }
 
 

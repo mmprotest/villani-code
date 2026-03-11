@@ -66,6 +66,7 @@ class Runner:
         villani_mode: bool = False,
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
+        runtime: str = "classic",
     ):
         self.client = client
         self.repo = repo
@@ -92,6 +93,7 @@ class Runner:
             enabled=villani_mode, steering_objective=villani_objective
         )
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
+        self.runtime = runtime
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
         self.permissions = PermissionEngine(
@@ -184,6 +186,14 @@ class Runner:
             "tool_results": [],
             "streamed_events_count": 0,
         }
+        if self.benchmark_config.enabled and self.runtime == "weak-search":
+            from villani_code.runtime.controller import WeakSearchController
+
+            timeout_seconds = 300.0
+            if execution_budget:
+                timeout_seconds = float(execution_budget.max_seconds)
+            return WeakSearchController(self, instruction, timeout_seconds=timeout_seconds).run()
+
         if self.benchmark_config.enabled:
             self.event_callback({
                 "type": "benchmark_mode_enabled",
