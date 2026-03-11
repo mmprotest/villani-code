@@ -13,6 +13,7 @@ from villani_code.runtime.schemas import AttemptRecord, Blackboard, BranchRecord
 from villani_code.runtime.trace import emit_runtime_event
 from villani_code.search.frontier import BranchFrontier, FrontierBranch
 from villani_code.search.pruning import no_progress_stop, should_prune_branch
+from villani_code.synthesize.edit_budget import EditBudget
 
 
 class WeakSearchController:
@@ -58,6 +59,10 @@ class WeakSearchController:
         branches_pruned = 0
         candidates_generated = 0
         candidates_verified = 0
+        real_candidate_attempts = 0
+        noop_rejections = 0
+        blocked_attempts = 0
+        verified_attempts = 0
         executor = CandidateExecutor(self.runner, self.instruction, budgets.max_patch_lines, budgets.max_files_per_patch)
         blocked_reason = ""
 
@@ -74,9 +79,11 @@ class WeakSearchController:
             improved = False
             for suspect in board.suspects:
                 from villani_code.hypothesize.generator import generate_hypotheses
-                kept, rejected = generate_hypotheses(suspect, self.instruction, budgets.max_hypotheses_per_suspect)
+
+                kept, rejected, fallback_used = generate_hypotheses(suspect, self.instruction, budgets.max_hypotheses_per_suspect, runner=self.runner)
                 board.hypotheses.extend(kept + rejected)
-                emit_runtime_event(self.repo, self.runner.event_callback, "hypotheses_generated", suspect=suspect.file, kept=len(kept), rejected=len(rejected))
+                board.decision_log.append({"event": "hypotheses_generated", "suspect": suspect.file, "fallback": fallback_used})
+                emit_runtime_event(self.repo, self.runner.event_callback, "hypotheses_generated", suspect=suspect.file, kept=len(kept), rejected=len(rejected), fallback=fallback_used)
                 for hyp in kept[: budgets.max_candidates_per_hypothesis]:
                     branch_id = f"br-{len(board.branches)+1}"
                     frontier.add(FrontierBranch(id=branch_id, suspect_ref=suspect.file, hypothesis_id=hyp.id))
@@ -89,32 +96,96 @@ class WeakSearchController:
                 hypothesis = next((h for h in board.hypotheses if h.id == branch.hypothesis_id), None)
                 if not hypothesis:
                     continue
-                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_generated", branch_id=branch.id, hypothesis_id=hypothesis.id)
+
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_execution_started", branch_id=branch.id, hypothesis_id=hypothesis.id)
                 candidates_generated += 1
-                result = executor.evaluate(
-                    suspect=branch.suspect_ref,
+                constraints = {
+                    "allowlist_paths": config.allowlist_paths,
+                    "forbidden_paths": config.forbidden_paths,
+                    "expected_files": config.expected_files,
+                    "max_files_touched": config.max_files_touched,
+                }
+                result = executor.evaluate_candidate(
+                    repo_path=self.repo,
+                    objective=self.instruction,
+                    suspect_region=branch.suspect_ref,
                     hypothesis_id=hypothesis.id,
-                    hypothesis_text=hypothesis.text,
+                    hypothesis=hypothesis.text,
+                    constraints=constraints,
+                    runtime_profile="benchmark" if config.enabled else "interactive",
+                    benchmark_config=config,
+                    baseline_handle="clean-copy",
+                    edit_budget=EditBudget(max_files=budgets.max_files_per_patch, max_lines=budgets.max_patch_lines),
+                    branch_failure_history=list(branch.failure_signatures),
+                    timeout_budget_seconds=self.timeout_seconds,
                     attempt_id=attempt_id,
-                    failed_attempt_summary=list(branch.failure_signatures),
                 )
+
+                if result.attempt_category in {"rejected_noop", "rejected_diff_guard", "blocked_timeout", "blocked_runtime_error", "blocked_model_failure", "blocked_policy"}:
+                    blocked_attempts += 1
+                    if result.attempt_category == "rejected_noop":
+                        noop_rejections += 1
+                if result.attempt_category in {"applied_and_verified", "verification_failed"}:
+                    real_candidate_attempts += 1
+
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_generated", branch_id=branch.id, hypothesis_id=hypothesis.id)
                 if result.hard_fail:
-                    branch.failure_signatures.append(result.failure_signature or result.rejection_reason)
+                    branch.failure_signatures.append(result.failure_signature or result.blocked_reason)
                     if branch_rec:
                         branch_rec.attempts_list.append(attempt_id)
-                    board.attempts.append(AttemptRecord(id=attempt_id, branch_id=branch.id, files_touched=result.changed_files, changed_line_count=result.changed_line_count, hard_fail=True, reason=result.rejection_reason or "candidate_failed", result="rejected", score=0.0, verifier_outputs=result.verification_outputs))
-                    emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_rejected", branch_id=branch.id, reason=result.rejection_reason)
-                    if should_prune_branch(branch, repeated_signature=result.failure_signature or result.rejection_reason):
+                    board.attempts.append(
+                        AttemptRecord(
+                            id=attempt_id,
+                            branch_id=branch.id,
+                            files_touched=result.changed_files,
+                            changed_line_count=int(result.diff_stats.get("changed_line_count", 0)),
+                            hard_fail=True,
+                            reason=result.attempt_summary or "candidate_failed",
+                            result="rejected",
+                            score=0.0,
+                            verifier_outputs=result.verification_outputs,
+                            attempt_category=result.attempt_category,
+                            blocked_reason=result.blocked_reason,
+                            patch_artifact_path=result.patch_artifact_path,
+                            failure_signature=result.failure_signature,
+                            hypothesis_id=hypothesis.id,
+                            prompt_summary=result.prompt_summary,
+                            hypothesis_source="fallback" if "fallback" in hypothesis.notes else "model",
+                        )
+                    )
+                    emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_rejected", branch_id=branch.id, reason=result.blocked_reason, category=result.attempt_category)
+                    if should_prune_branch(branch, repeated_signature=result.failure_signature or result.blocked_reason):
                         branches_pruned += 1
                         if branch_rec:
                             branch_rec.status = "pruned"
-                        emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id, reason=result.rejection_reason or "repeated_failure")
+                        emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id, reason=result.blocked_reason or "repeated_failure")
                     continue
 
                 candidates_verified += 1
+                verified_attempts += 1
                 emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_applied", branch_id=branch.id, files_touched=result.changed_files, patch_artifact=result.patch_artifact_path)
+                emit_runtime_event(self.repo, self.runner.event_callback, "verification_started", branch_id=branch.id)
+                emit_runtime_event(self.repo, self.runner.event_callback, "verification_finished", branch_id=branch.id)
                 emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_verified", branch_id=branch.id, success=result.success, score=result.score)
-                board.attempts.append(AttemptRecord(id=attempt_id, branch_id=branch.id, files_touched=result.changed_files, changed_line_count=result.changed_line_count, score=result.score, result="passed" if result.success else "failed", verifier_outputs=result.verification_outputs, reason="verification"))
+                board.attempts.append(
+                    AttemptRecord(
+                        id=attempt_id,
+                        branch_id=branch.id,
+                        files_touched=result.changed_files,
+                        changed_line_count=int(result.diff_stats.get("changed_line_count", 0)),
+                        score=result.score,
+                        result="passed" if result.success else "failed",
+                        verifier_outputs=result.verification_outputs,
+                        reason="verification",
+                        attempt_category=result.attempt_category,
+                        blocked_reason=result.blocked_reason,
+                        patch_artifact_path=result.patch_artifact_path,
+                        failure_signature=result.failure_signature,
+                        hypothesis_id=hypothesis.id,
+                        prompt_summary=result.prompt_summary,
+                        hypothesis_source="fallback" if "fallback" in hypothesis.notes else "model",
+                    )
+                )
                 if branch_rec:
                     branch_rec.attempts_list.append(attempt_id)
                     branch_rec.best_score = max(branch_rec.best_score, result.score)
@@ -148,6 +219,20 @@ class WeakSearchController:
                 board.final_result = {"stop_reason": StopReason.BLOCKED.value, "best_patch_score": best_score, "blocked_reason": blocked_reason}
             else:
                 board.final_result = {"stop_reason": StopReason.EXHAUSTED_BUDGET.value, "best_patch_score": best_score}
+
+        if real_candidate_attempts == 0 and blocked_attempts == 0:
+            blocked_reason = "runtime_noop_failure"
+            board.final_result = {"stop_reason": StopReason.BLOCKED.value, "best_patch_score": best_score, "blocked_reason": blocked_reason}
+            emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_runtime_error", reason=blocked_reason)
+
+        board.run_stats = {
+            "real_candidate_attempts": real_candidate_attempts,
+            "noop_rejections": noop_rejections,
+            "blocked_attempts": blocked_attempts,
+            "verified_attempts": verified_attempts,
+            "branches_pruned": branches_pruned,
+            "stop_reason": board.final_result.get("stop_reason"),
+        }
         store.write(board)
         summary = {
             "weak_search_cycles": board.cycle,
@@ -160,7 +245,11 @@ class WeakSearchController:
             "no_progress_stop": board.final_result.get("stop_reason") == StopReason.NO_PROGRESS.value,
             "best_patch_score": best_score,
             "stop_reason": board.final_result.get("stop_reason"),
-            "blocked_reason": blocked_reason,
+            "blocked_reason": board.final_result.get("blocked_reason", blocked_reason),
+            "real_candidate_attempts": real_candidate_attempts,
+            "noop_rejections": noop_rejections,
+            "blocked_attempts": blocked_attempts,
+            "verified_attempts": verified_attempts,
         }
         store.write_summary(summary)
         emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_stopped", **summary)
