@@ -89,7 +89,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     return bool(getattr(settings, "villani_mode", False))
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, runtime: Literal["classic", "weak-search"] = "classic") -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, runtime: Literal["classic", "weak-search"] = "weak-search") -> Runner:
     resolved_repo = repo.resolve()
     try:
         ensure_runtime_dependencies_not_shadowed(resolved_repo)
@@ -111,8 +111,6 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = thinking
     benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json) if benchmark_runtime_json else None
     resolved_runtime: Literal["classic", "weak-search"] = runtime
-    if benchmark_config and benchmark_config.enabled and runtime == "classic":
-        resolved_runtime = "weak-search"
     return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, runtime=resolved_runtime)
 
 
@@ -190,7 +188,7 @@ def run(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
-    runtime: Literal["classic", "weak-search"] = typer.Option("classic", "--runtime"),
+    runtime: Literal["classic", "weak-search"] = typer.Option("weak-search", "--runtime"),
 ) -> None:
     runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, runtime=runtime)
     result = runner.run(instruction)
