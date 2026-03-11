@@ -17,6 +17,8 @@ from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.synthesize.diff_guard import guard_candidate_diff
 from villani_code.synthesize.edit_budget import EditBudget
 from villani_code.tools import tool_specs
+from villani_code.utils import normalize_content_blocks
+from villani_code.verify.runner import run_staged_verifier
 
 
 @dataclass(slots=True)
@@ -24,15 +26,23 @@ class CandidateExecutionResult:
     changed_files: list[str] = field(default_factory=list)
     diff_stats: dict[str, Any] = field(default_factory=dict)
     patch_artifact_path: str = ""
+    diff_text: str = ""
     verification_outputs: dict[str, Any] = field(default_factory=dict)
     hard_fail: bool = False
     score: float = 0.0
+    score_breakdown: dict[str, float] = field(default_factory=dict)
     failure_signature: str = ""
     blocked_reason: str = ""
     attempt_summary: str = ""
     attempt_category: str = "verification_failed"
     success: bool = False
     prompt_summary: str = ""
+    target_verification_passed: bool = False
+    collateral_verification_passed: bool = False
+    static_sanity_passed: bool = False
+    minimality_score: float = 0.0
+    novelty_score: float = 0.0
+    verification_stage: str = "stage_0"
 
 
 class CandidateExecutor:
@@ -57,6 +67,8 @@ class CandidateExecutor:
         branch_failure_history: list[str],
         timeout_budget_seconds: float,
         attempt_id: str,
+        max_candidate_turns: int = 8,
+        max_candidate_tool_calls: int = 24,
     ) -> CandidateExecutionResult:
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="villani-weak-search-") as td:
@@ -71,7 +83,16 @@ class CandidateExecutor:
                 runtime_profile=runtime_profile,
                 baseline_handle=baseline_handle,
             )
-            model_err = self._run_model_edit_pass(workspace, prompt)
+            try:
+                model_err = self._run_model_edit_pass(
+                    workspace,
+                    prompt,
+                    max_candidate_turns=max_candidate_turns,
+                    max_candidate_tool_calls=max_candidate_tool_calls,
+                    timeout_budget_seconds=timeout_budget_seconds,
+                )
+            except TypeError:
+                model_err = self._run_model_edit_pass(workspace, prompt)
             if model_err:
                 return CandidateExecutionResult(
                     hard_fail=True,
@@ -86,14 +107,15 @@ class CandidateExecutor:
             changed_files = sorted([p for p in set(before_map) | set(after_map) if before_map.get(p) != after_map.get(p)])
             changed_lines = sum(self._count_changed_lines(before_map.get(p, ""), after_map.get(p, "")) for p in changed_files)
             diff_stats = {"changed_file_count": len(changed_files), "changed_line_count": changed_lines}
+            diff_text = self._build_unified_diff(before_map, after_map, changed_files)
 
-            if not changed_files:
+            if not changed_files or not diff_text.strip():
                 return CandidateExecutionResult(
                     hard_fail=True,
                     blocked_reason="rejected_noop",
                     attempt_category="rejected_noop",
                     failure_signature="no-op",
-                    attempt_summary="Model produced no file changes.",
+                    attempt_summary="Model produced no meaningful repository changes.",
                     prompt_summary=prompt[:220],
                 )
 
@@ -113,40 +135,32 @@ class CandidateExecutor:
                 benchmark_config=benchmark_config,
                 formatting_only=False,
             )
+            artifact = self._persist_patch_artifact(attempt_id, diff_text)
             if not guard.allowed or policy.violating_paths:
                 reason = "rejected_diff_guard" if not guard.allowed else "blocked_policy"
                 sig = self._fingerprint(reason + "|" + ",".join(policy.violating_paths))
                 return CandidateExecutionResult(
                     changed_files=changed_files,
                     diff_stats=diff_stats,
+                    patch_artifact_path=artifact,
+                    diff_text=diff_text,
                     hard_fail=True,
                     blocked_reason=reason,
                     attempt_category=reason,
                     failure_signature=sig,
                     attempt_summary=guard.reason if not guard.allowed else f"Violating paths: {policy.violating_paths}",
                     prompt_summary=prompt[:220],
+                    verification_stage="stage_0",
                 )
 
-            verification_outputs, success, score = self._run_verification(workspace, changed_files, benchmark_config)
-            diff_text = self._build_unified_diff(before_map, after_map, changed_files)
-            if not diff_text.strip():
-                return CandidateExecutionResult(
-                    hard_fail=True,
-                    blocked_reason="rejected_noop",
-                    attempt_category="rejected_noop",
-                    failure_signature="empty-diff",
-                    attempt_summary="Changes detected but unified diff empty.",
-                    prompt_summary=prompt[:220],
-                )
-            artifact = self._persist_patch_artifact(attempt_id, diff_text)
-            apply_unified_diff(repo_path, diff_text)
-
+            verification_outputs, success, score, score_breakdown = self._run_verification(workspace, changed_files, benchmark_config)
             elapsed = time.monotonic() - started
             if elapsed > timeout_budget_seconds:
                 return CandidateExecutionResult(
                     changed_files=changed_files,
                     diff_stats=diff_stats,
                     patch_artifact_path=artifact,
+                    diff_text=diff_text,
                     verification_outputs=verification_outputs,
                     hard_fail=True,
                     blocked_reason="blocked_timeout",
@@ -154,30 +168,43 @@ class CandidateExecutor:
                     failure_signature=self._fingerprint("timeout" + attempt_id),
                     attempt_summary="Candidate exceeded timeout budget.",
                     prompt_summary=prompt[:220],
+                    verification_stage="timeout",
                 )
 
-            failure_category = self._major_error_category(verification_outputs)
             failure_sig_payload = {
                 "files": changed_files,
                 "verification": verification_outputs.get("summary", ""),
                 "repro_fingerprint": verification_outputs.get("repro_fingerprint", ""),
-                "category": failure_category,
+                "category": self._major_error_category(verification_outputs),
             }
-            attempt_category = "applied_and_verified" if success else "verification_failed"
+            attempt_category = "candidate_verified" if success else "verification_failed"
             return CandidateExecutionResult(
                 changed_files=changed_files,
                 diff_stats=diff_stats,
                 patch_artifact_path=artifact,
+                diff_text=diff_text,
                 verification_outputs=verification_outputs,
                 hard_fail=False,
                 score=score,
+                score_breakdown=score_breakdown,
                 failure_signature=self._fingerprint(json.dumps(failure_sig_payload, sort_keys=True)),
                 blocked_reason="",
-                attempt_summary=f"Applied patch touching {len(changed_files)} file(s).",
+                attempt_summary=f"Evaluated patch touching {len(changed_files)} file(s).",
                 attempt_category=attempt_category,
                 success=success,
                 prompt_summary=prompt[:220],
+                target_verification_passed=bool(verification_outputs.get("target_verification_passed", False)),
+                collateral_verification_passed=bool(verification_outputs.get("collateral_verification_passed", False)),
+                static_sanity_passed=bool(verification_outputs.get("static_sanity_passed", False)),
+                minimality_score=float(score_breakdown.get("minimality", 0.0)),
+                novelty_score=float(score_breakdown.get("novelty", 0.0)),
+                verification_stage=str(verification_outputs.get("verification_stage", "stage_3")),
             )
+
+    def commit_candidate(self, repo_path: Path, candidate_result: CandidateExecutionResult) -> None:
+        if candidate_result.hard_fail or not candidate_result.diff_text.strip():
+            raise ValueError("Only successful evaluated candidates with a patch may be committed")
+        apply_unified_diff(repo_path, candidate_result.diff_text)
 
     def evaluate(self, **kwargs: Any) -> CandidateExecutionResult:
         return self.evaluate_candidate(**kwargs)
@@ -194,53 +221,117 @@ class CandidateExecutor:
             "Apply minimal concrete edits in repository files and stop when done."
         )
 
-    def _run_model_edit_pass(self, workspace: Path, prompt: str) -> str:
+    def _run_model_edit_pass(self, workspace: Path, prompt: str, *, max_candidate_turns: int, max_candidate_tool_calls: int, timeout_budget_seconds: float) -> str:
         original_repo = self.runner.repo
+        start = time.monotonic()
+        turns = 0
+        tool_calls = 0
         try:
             self.runner.repo = workspace
             self.runner._ensure_project_memory_and_plan(prompt)
             messages = build_initial_messages(workspace, prompt)
-            raw = self.runner.client.create_message({
-                "model": self.runner.model,
-                "messages": messages,
-                "system": build_system_blocks(workspace, benchmark_config=self.runner.benchmark_config),
-                "tools": tool_specs(),
-                "max_tokens": self.runner.max_tokens,
-                "stream": False,
-            }, stream=False)
-            response = raw if isinstance(raw, dict) else {"content": []}
-            blocks = [b for b in response.get("content", []) if isinstance(b, dict) and b.get("type") == "tool_use"]
-            if not blocks:
-                return "model returned no tool actions"
-            for block in blocks:
-                self.runner._execute_tool_with_policy(str(block.get("name", "")), dict(block.get("input", {})), str(block.get("id", "cand-tool")), len(messages))
+            system = build_system_blocks(workspace, benchmark_config=self.runner.benchmark_config)
+            while turns < max_candidate_turns and tool_calls < max_candidate_tool_calls:
+                if time.monotonic() - start > timeout_budget_seconds:
+                    return "candidate execution timeout"
+                payload = {
+                    "model": self.runner.model,
+                    "messages": messages,
+                    "system": system,
+                    "tools": tool_specs(),
+                    "max_tokens": self.runner.max_tokens,
+                    "stream": False,
+                }
+                raw = self.runner.client.create_message(payload, stream=False)
+                response = raw if isinstance(raw, dict) else {"content": []}
+                content = normalize_content_blocks(response.get("content", []))
+                messages.append({"role": "assistant", "content": content})
+                turns += 1
+                tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+                if not tool_uses:
+                    return ""
+                tool_results: list[dict[str, Any]] = []
+                for block in tool_uses:
+                    if tool_calls >= max_candidate_tool_calls:
+                        break
+                    tool_calls += 1
+                    tool_name = str(block.get("name", ""))
+                    tool_input = dict(block.get("input", {}))
+                    tool_use_id = str(block.get("id", f"cand-tool-{tool_calls}"))
+                    result = self.runner._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": str(result.get("content", "")),
+                            "is_error": bool(result.get("is_error", False)),
+                        }
+                    )
+                if not tool_results:
+                    return "candidate interaction budget reached before tool execution"
+                messages.append({"role": "user", "content": tool_results})
+            return "candidate interaction budget exceeded"
         except Exception as exc:  # noqa: BLE001
             return str(exc)
         finally:
             self.runner.repo = original_repo
-        return ""
 
-    def _run_verification(self, workspace: Path, changed_files: list[str], benchmark_config: Any) -> tuple[dict[str, Any], bool, float]:
-        outputs: dict[str, Any] = {"commands": []}
-        passed = True
-        commands = list(benchmark_config.visible_verification)
-        if not commands:
-            commands = ["python -m pytest -q"]
+    def _run_verification(self, workspace: Path, changed_files: list[str], benchmark_config: Any) -> tuple[dict[str, Any], bool, float, dict[str, float]]:
+        outputs: dict[str, Any] = {
+            "commands": [],
+            "changed_files": changed_files,
+            "verification_stage": "stage_0",
+        }
+        stage0_patch_sanity = bool(changed_files)
+        stage0_syntax_ok = self._syntax_sanity(workspace, changed_files)
+        outputs["verification_stage"] = "stage_1"
+        stage1_imports_ok = self._import_sanity(workspace, changed_files)
+
+        commands = list(benchmark_config.visible_verification) or ["python -m pytest -q"]
+        target_passed = True
         for cmd in commands:
             proc = subprocess.run(cmd, shell=True, cwd=workspace, text=True, capture_output=True)
             outputs["commands"].append({"command": cmd, "exit_code": proc.returncode, "stdout": proc.stdout[-500:], "stderr": proc.stderr[-500:]})
             if proc.returncode != 0:
-                passed = False
-        outputs["summary"] = "ok" if passed else "verification_failed"
+                target_passed = False
+
+        outputs["verification_stage"] = "stage_3"
+        outputs["target_verification_passed"] = target_passed
+        outputs["collateral_verification_passed"] = target_passed
+        outputs["static_sanity_passed"] = stage0_syntax_ok and stage1_imports_ok
+        outputs["summary"] = "ok" if target_passed and outputs["static_sanity_passed"] else "verification_failed"
+
         if benchmark_config.task_id and "repro" in benchmark_config.task_id:
             outputs["repro_command"] = commands[0]
-            outputs["repro_fingerprint"] = self._fingerprint("\n".join(f"{c['exit_code']}|{c['stderr']}" for c in outputs["commands"]))
-        outputs["changed_files"] = changed_files
-        target_ok = sum(1 for c in outputs["commands"] if c["exit_code"] == 0)
-        collateral_ok = 1.0 if passed else 0.5
+            fingerprint_basis = "\n".join(f"{c['exit_code']}|{c['stderr']}|{c['stdout']}" for c in outputs["commands"])
+            outputs["repro_fingerprint"] = self._fingerprint(fingerprint_basis)
+
         minimality = max(0.0, 1.0 - (len(changed_files) / max(1, self.edit_budget.max_files)))
-        score = round((0.55 * (target_ok / max(1, len(outputs["commands"]))) + 0.15 * collateral_ok + 0.2 * minimality + 0.1), 4)
-        return outputs, passed, score
+        novelty = 1.0 if len(changed_files) <= 1 else 0.7
+        score_inputs = {
+            "patch_applies": stage0_patch_sanity,
+            "syntax_ok": stage0_syntax_ok,
+            "imports_ok": stage1_imports_ok,
+            "forbidden_path": False,
+            "target_verification": 1.0 if target_passed else 0.0,
+            "collateral_verification": 1.0 if target_passed else 0.0,
+            "static_sanity": 1.0 if outputs["static_sanity_passed"] else 0.0,
+            "constraint_consistency": 1.0,
+            "minimality": minimality,
+            "novelty": novelty,
+        }
+        verification = run_staged_verifier(score_inputs)
+        outputs["gate_reason"] = verification.gate.reason
+        score_breakdown = {
+            "target_verification": score_inputs["target_verification"],
+            "collateral_verification": score_inputs["collateral_verification"],
+            "static_sanity": score_inputs["static_sanity"],
+            "constraint_consistency": score_inputs["constraint_consistency"],
+            "minimality": minimality,
+            "novelty": novelty,
+        }
+        success = not verification.gate.hard_fail and target_passed and outputs["static_sanity_passed"]
+        return outputs, success, verification.score, score_breakdown
 
     def _major_error_category(self, verification_outputs: dict[str, Any]) -> str:
         if verification_outputs.get("summary") == "ok":
@@ -281,6 +372,21 @@ class CandidateExecutor:
 
     def _count_changed_lines(self, before: str, after: str) -> int:
         return sum(1 for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("+") or line.startswith("-"))
+
+    def _syntax_sanity(self, workspace: Path, changed_files: list[str]) -> bool:
+        py_files = [f for f in changed_files if f.endswith(".py")]
+        if not py_files:
+            return True
+        proc = subprocess.run(["python", "-m", "py_compile", *py_files], cwd=workspace, capture_output=True, text=True)
+        return proc.returncode == 0
+
+    def _import_sanity(self, workspace: Path, changed_files: list[str]) -> bool:
+        py_files = [f for f in changed_files if f.endswith(".py")]
+        if not py_files:
+            return True
+        snippet = "import pathlib, sys\n" "[compile(pathlib.Path(p).read_text(), p, 'exec') for p in sys.argv[1:]]\n"
+        proc = subprocess.run(["python", "-c", snippet, *py_files], cwd=workspace, capture_output=True, text=True)
+        return proc.returncode == 0
 
     def _fingerprint(self, payload: str) -> str:
         return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:12]

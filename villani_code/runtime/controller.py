@@ -8,7 +8,7 @@ from typing import Any
 from villani_code.localize.ranker import rank_suspects
 from villani_code.runtime.blackboard import BlackboardStore
 from villani_code.runtime.budgets import select_runtime_budgets, timeout_imminent
-from villani_code.runtime.candidate_executor import CandidateExecutor
+from villani_code.runtime.candidate_executor import CandidateExecutionResult, CandidateExecutor
 from villani_code.runtime.schemas import AttemptRecord, Blackboard, BranchRecord, Evidence, StopReason
 from villani_code.runtime.trace import emit_runtime_event
 from villani_code.search.frontier import BranchFrontier, FrontierBranch
@@ -77,6 +77,8 @@ class WeakSearchController:
             board.suspects = rank_suspects(self.repo, board.evidence, candidates)[:2]
             emit_runtime_event(self.repo, self.runner.event_callback, "suspects_ranked", count=len(board.suspects))
             improved = False
+            cycle_best: tuple[FrontierBranch, CandidateExecutionResult, str, Any] | None = None
+
             for suspect in board.suspects:
                 from villani_code.hypothesize.generator import generate_hypotheses
 
@@ -117,43 +119,56 @@ class WeakSearchController:
                     baseline_handle="clean-copy",
                     edit_budget=EditBudget(max_files=budgets.max_files_per_patch, max_lines=budgets.max_patch_lines),
                     branch_failure_history=list(branch.failure_signatures),
-                    timeout_budget_seconds=self.timeout_seconds,
+                    timeout_budget_seconds=max(10.0, self.timeout_seconds - (time.monotonic() - self.started)),
                     attempt_id=attempt_id,
                 )
+
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_generated", branch_id=branch.id, hypothesis_id=hypothesis.id, patch_artifact=result.patch_artifact_path)
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_evaluated", branch_id=branch.id, hard_fail=result.hard_fail, score=result.score)
 
                 if result.attempt_category in {"rejected_noop", "rejected_diff_guard", "blocked_timeout", "blocked_runtime_error", "blocked_model_failure", "blocked_policy"}:
                     blocked_attempts += 1
                     if result.attempt_category == "rejected_noop":
                         noop_rejections += 1
-                if result.attempt_category in {"applied_and_verified", "verification_failed"}:
+                if result.attempt_category in {"candidate_verified", "verification_failed"}:
                     real_candidate_attempts += 1
 
-                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_generated", branch_id=branch.id, hypothesis_id=hypothesis.id)
+                attempt = AttemptRecord(
+                    id=attempt_id,
+                    branch_id=branch.id,
+                    files_touched=result.changed_files,
+                    changed_line_count=int(result.diff_stats.get("changed_line_count", 0)),
+                    hard_fail=result.hard_fail,
+                    reason=result.attempt_summary or "candidate_failed",
+                    result="passed" if result.success else "failed",
+                    score=result.score,
+                    verifier_outputs={
+                        **result.verification_outputs,
+                        "score_breakdown": result.score_breakdown,
+                        "verification_stage": result.verification_stage,
+                        "target_verification_passed": result.target_verification_passed,
+                        "collateral_verification_passed": result.collateral_verification_passed,
+                        "static_sanity_passed": result.static_sanity_passed,
+                        "minimality_score": result.minimality_score,
+                        "novelty_score": result.novelty_score,
+                    },
+                    attempt_category=result.attempt_category,
+                    blocked_reason=result.blocked_reason,
+                    patch_artifact_path=result.patch_artifact_path,
+                    failure_signature=result.failure_signature,
+                    hypothesis_id=hypothesis.id,
+                    prompt_summary=result.prompt_summary,
+                    hypothesis_source="fallback" if "fallback" in hypothesis.notes else "model",
+                )
+                board.attempts.append(attempt)
+                if branch_rec:
+                    branch_rec.attempts_list.append(attempt_id)
+                    branch_rec.best_score = max(branch_rec.best_score, result.score)
+
                 if result.hard_fail:
                     branch.failure_signatures.append(result.failure_signature or result.blocked_reason)
-                    if branch_rec:
-                        branch_rec.attempts_list.append(attempt_id)
-                    board.attempts.append(
-                        AttemptRecord(
-                            id=attempt_id,
-                            branch_id=branch.id,
-                            files_touched=result.changed_files,
-                            changed_line_count=int(result.diff_stats.get("changed_line_count", 0)),
-                            hard_fail=True,
-                            reason=result.attempt_summary or "candidate_failed",
-                            result="rejected",
-                            score=0.0,
-                            verifier_outputs=result.verification_outputs,
-                            attempt_category=result.attempt_category,
-                            blocked_reason=result.blocked_reason,
-                            patch_artifact_path=result.patch_artifact_path,
-                            failure_signature=result.failure_signature,
-                            hypothesis_id=hypothesis.id,
-                            prompt_summary=result.prompt_summary,
-                            hypothesis_source="fallback" if "fallback" in hypothesis.notes else "model",
-                        )
-                    )
                     emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_rejected", branch_id=branch.id, reason=result.blocked_reason, category=result.attempt_category)
+                    emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_discarded", branch_id=branch.id, reason=result.blocked_reason)
                     if should_prune_branch(branch, repeated_signature=result.failure_signature or result.blocked_reason):
                         branches_pruned += 1
                         if branch_rec:
@@ -163,49 +178,43 @@ class WeakSearchController:
 
                 candidates_verified += 1
                 verified_attempts += 1
-                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_applied", branch_id=branch.id, files_touched=result.changed_files, patch_artifact=result.patch_artifact_path)
-                emit_runtime_event(self.repo, self.runner.event_callback, "verification_started", branch_id=branch.id)
-                emit_runtime_event(self.repo, self.runner.event_callback, "verification_finished", branch_id=branch.id)
                 emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_verified", branch_id=branch.id, success=result.success, score=result.score)
-                board.attempts.append(
-                    AttemptRecord(
-                        id=attempt_id,
-                        branch_id=branch.id,
-                        files_touched=result.changed_files,
-                        changed_line_count=int(result.diff_stats.get("changed_line_count", 0)),
-                        score=result.score,
-                        result="passed" if result.success else "failed",
-                        verifier_outputs=result.verification_outputs,
-                        reason="verification",
-                        attempt_category=result.attempt_category,
-                        blocked_reason=result.blocked_reason,
-                        patch_artifact_path=result.patch_artifact_path,
-                        failure_signature=result.failure_signature,
-                        hypothesis_id=hypothesis.id,
-                        prompt_summary=result.prompt_summary,
-                        hypothesis_source="fallback" if "fallback" in hypothesis.notes else "model",
-                    )
-                )
-                if branch_rec:
-                    branch_rec.attempts_list.append(attempt_id)
-                    branch_rec.best_score = max(branch_rec.best_score, result.score)
-                if should_prune_branch(branch, repeated_signature=result.failure_signature if not result.success else None):
+
+                repro_fingerprint = result.verification_outputs.get("repro_fingerprint", "")
+                if repro_fingerprint and branch.failure_signatures and branch.failure_signatures[-1] == repro_fingerprint:
                     branches_pruned += 1
                     if branch_rec:
                         branch_rec.status = "pruned"
-                    emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id, reason="pruning_rule")
+                    emit_runtime_event(self.repo, self.runner.event_callback, "branch_pruned", branch_id=branch.id, reason="repro_fingerprint_repeat")
                     continue
+                if repro_fingerprint:
+                    branch.failure_signatures.append(str(repro_fingerprint))
+
                 branch.best_score = max(branch.best_score, result.score)
                 if branch.best_score > best_score:
                     best_score = branch.best_score
                     improved = True
-                if result.success:
-                    board.final_result = {"stop_reason": StopReason.SOLVED.value, "best_patch_score": best_score, "attempt_id": attempt_id}
-                    emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_solved", cycle=cycle, branch_id=branch.id, attempt_id=attempt_id)
-                    break
+                    emit_runtime_event(self.repo, self.runner.event_callback, "branch_promoted", branch_id=branch.id, score=branch.best_score)
 
-            if board.final_result.get("stop_reason") == StopReason.SOLVED.value:
-                break
+                if cycle_best is None or result.score > cycle_best[1].score:
+                    cycle_best = (branch, result, attempt_id, hypothesis)
+
+            if cycle_best:
+                win_branch, win_result, win_attempt_id, _win_hyp = cycle_best
+                should_commit = bool(win_result.success)
+                if should_commit:
+                    executor.commit_candidate(self.repo, win_result)
+                    emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id=win_branch.id, attempt_id=win_attempt_id, patch_artifact=win_result.patch_artifact_path)
+                    board.decision_log.append({"event": "candidate_committed", "cycle": cycle, "attempt_id": win_attempt_id, "branch_id": win_branch.id})
+                    board.final_result = {
+                        "stop_reason": StopReason.SOLVED.value,
+                        "best_patch_score": best_score,
+                        "attempt_id": win_attempt_id,
+                        "branch_id": win_branch.id,
+                    }
+                    emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_solved", cycle=cycle, branch_id=win_branch.id, attempt_id=win_attempt_id)
+                    break
+                emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_discarded", branch_id=win_branch.id, attempt_id=win_attempt_id, reason="cycle_winner_not_successful")
 
             no_improve = 0 if improved else no_improve + 1
             if no_progress_stop(no_improve, budgets.max_consecutive_no_improvement_cycles):
@@ -253,4 +262,16 @@ class WeakSearchController:
         }
         store.write_summary(summary)
         emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_stopped", **summary)
-        return {"response": {"role": "assistant", "content": [{"type": "text", "text": "Weak-search runtime completed."}]}, "weak_search": summary}
+
+        stop_reason = str(summary.get("stop_reason", ""))
+        if stop_reason == StopReason.SOLVED.value:
+            text = f"Weak-search solved task with score {best_score:.3f}."
+        elif stop_reason == StopReason.BLOCKED.value:
+            text = f"Weak-search blocked: {summary.get('blocked_reason') or 'unknown'}."
+        elif stop_reason == StopReason.NO_PROGRESS.value:
+            text = "Weak-search stopped due to no progress."
+        elif stop_reason == StopReason.TIMEOUT_IMMINENT.value:
+            text = "Weak-search stopped due to imminent timeout."
+        else:
+            text = "Weak-search exhausted budget without a verified winner."
+        return {"response": {"role": "assistant", "content": [{"type": "text", "text": text}]}, "weak_search": summary}
