@@ -57,9 +57,9 @@ def test_controller_calls_shared_candidate_executor(monkeypatch, tmp_path: Path)
 
     def fake_evaluate(self, **kwargs):
         calls.append(kwargs)
-        return CandidateExecutionResult(changed_files=["src/app.py"], changed_line_count=3, success=False, score=0.2, verification_outputs={"commands": []}, failure_signature="sig")
+        return CandidateExecutionResult(changed_files=["src/app.py"], diff_stats={"changed_line_count":3}, success=False, score=0.2, verification_outputs={"commands": []}, failure_signature="sig", attempt_category="verification_failed")
 
-    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate", fake_evaluate)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_evaluate)
 
     class DummyRunner:
         def __init__(self):

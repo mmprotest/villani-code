@@ -151,7 +151,7 @@ def test_benchmark_noop_completion_guard_blocks_then_terminates_incomplete(tmp_p
         {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
         {"role": "assistant", "content": [{"type": "text", "text": "still done"}]},
     ])
-    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, benchmark_config=cfg, event_callback=events.append)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, benchmark_config=cfg, event_callback=events.append, runtime="classic")
     output = runner.run("fix bug")
     assert output["execution"]["completed"] is False
     assert output["execution"]["terminated_reason"] == "benchmark_incomplete_no_patch"

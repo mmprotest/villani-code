@@ -93,6 +93,13 @@ class AttemptRecord(BaseModel):
     hard_fail: bool = False
     result: str = "failed"
     reason: str = ""
+    attempt_category: str = "verification_failed"
+    blocked_reason: str = ""
+    patch_artifact_path: str = ""
+    failure_signature: str = ""
+    hypothesis_id: str = ""
+    prompt_summary: str = ""
+    hypothesis_source: str = "model"
 
 
 class Blackboard(BaseModel):
@@ -110,3 +117,4 @@ class Blackboard(BaseModel):
     attempts: list[AttemptRecord] = Field(default_factory=list)
     decision_log: list[dict[str, object]] = Field(default_factory=list)
     final_result: dict[str, object] = Field(default_factory=dict)
+    run_stats: dict[str, object] = Field(default_factory=dict)

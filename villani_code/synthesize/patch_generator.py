@@ -6,26 +6,22 @@ from villani_code.runtime.schemas import HypothesisRecord
 
 
 @dataclass(slots=True)
-class PatchCandidate:
+class PatchCandidateRequest:
     id: str
     branch_id: str
-    files_touched: list[str]
-    changed_lines: int
-    hunks: int
-    summary: str
+    hypothesis_id: str
+    prompt_summary: str
 
 
-def generate_patch_candidates(hypothesis: HypothesisRecord, branch_id: str, max_candidates: int = 2) -> list[PatchCandidate]:
-    candidates: list[PatchCandidate] = []
+def generate_patch_candidates(hypothesis: HypothesisRecord, branch_id: str, max_candidates: int = 2) -> list[PatchCandidateRequest]:
+    candidates: list[PatchCandidateRequest] = []
     for i in range(1, min(max_candidates, 3) + 1):
         candidates.append(
-            PatchCandidate(
+            PatchCandidateRequest(
                 id=f"cand-{branch_id}-{i}",
                 branch_id=branch_id,
-                files_touched=[hypothesis.suspect_ref],
-                changed_lines=8 + i,
-                hunks=1,
-                summary=f"Tiny edit for {hypothesis.hypothesis_class.value}",
+                hypothesis_id=hypothesis.id,
+                prompt_summary=f"Candidate request for {hypothesis.hypothesis_class.value}: {hypothesis.text[:120]}",
             )
         )
     return candidates
