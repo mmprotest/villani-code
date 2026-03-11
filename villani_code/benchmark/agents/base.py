@@ -64,6 +64,15 @@ class AgentRunner(ABC):
             "tokens_output": FieldQuality.UNAVAILABLE,
             "total_tokens": FieldQuality.UNAVAILABLE,
             "estimated_cost": FieldQuality.UNAVAILABLE,
+            "weak_search_cycles": self.file_event_capture,
+            "branches_created": self.file_event_capture,
+            "branches_pruned": self.file_event_capture,
+            "hypotheses_generated": self.file_event_capture,
+            "candidate_patches_generated": self.file_event_capture,
+            "candidate_patches_verified": self.verify_capture,
+            "scope_expansions": self.file_event_capture,
+            "no_progress_stop": FieldQuality.INFERRED,
+            "best_patch_score": FieldQuality.INFERRED,
         }
 
     def run_agent(
