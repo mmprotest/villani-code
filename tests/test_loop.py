@@ -484,7 +484,7 @@ def test_diagnosis_target_forces_initial_runtime_read(tmp_path: Path) -> None:
     diag = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
     events: list[dict] = []
     client = FakeClientDiagnosisThenReadThenDone(diag)
-    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, event_callback=events.append)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, event_callback=events.append, benchmark_config=BenchmarkRuntimeConfig(enabled=True, task_id="diag-strong", allowlist_paths=["src/"], expected_files=["src/app/config.py"]))
 
     out = runner.run("fix config precedence")
 
@@ -502,13 +502,35 @@ def test_forced_read_still_allows_normal_tool_loop_afterward(tmp_path: Path) -> 
     target.write_text("VALUE=1\n", encoding="utf-8")
     diag = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
     client = FakeClientDiagnosisThenReadThenDone(diag)
-    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, benchmark_config=BenchmarkRuntimeConfig(enabled=True, task_id="diag-strong-2", allowlist_paths=["src/"], expected_files=["src/app/config.py"]))
 
     out = runner.run("fix config precedence")
 
     read_calls = [i for i in out["transcript"]["tool_invocations"] if i["name"] == "Read"]
     assert len(read_calls) >= 2
 
+
+
+
+def test_diagnosis_target_weak_confidence_stays_hint_only(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app" / "config.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE=1\n", encoding="utf-8")
+    diag = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
+    events: list[dict] = []
+    client = FakeClientDiagnosisThenReadThenDone(diag)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, event_callback=events.append)
+
+    out = runner.run("fix config precedence")
+
+    forced_read_events = [e for e in events if e.get("type") == "diagnosis_target_forced_read"]
+    assert forced_read_events
+    assert forced_read_events[-1]["confidence"] == "weak"
+    assert forced_read_events[-1]["enforced"] is False
+    assert any(e.get("type") == "diagnosis_target_hint_only" for e in events)
+    first_invocation = out["transcript"]["tool_invocations"][0]
+    assert first_invocation["name"] == "Read"
+    assert first_invocation.get("forced") is not True
 
 def test_benchmark_prose_only_after_forced_read_terminates_early(tmp_path: Path) -> None:
     target = tmp_path / "src" / "app.py"
@@ -557,5 +579,6 @@ def test_interactive_mode_keeps_recovery_prompts_after_forced_read(tmp_path: Pat
     out = runner.run("fix bug")
 
     assert out["response"]["content"][0]["text"] == "still planning"
-    assert any(e.get("type") == "diagnosis_target_forced_read" and e.get("enforced") is True for e in events)
+    assert any(e.get("type") == "diagnosis_target_forced_read" and e.get("enforced") is False for e in events)
+    assert any(e.get("type") == "diagnosis_target_hint_only" for e in events)
     assert not any(e.get("type") == "benchmark_no_progress_after_forced_read" for e in events)

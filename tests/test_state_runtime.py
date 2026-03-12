@@ -383,3 +383,63 @@ def test_fail_first_localization_handles_unparseable_failure(tmp_path: Path, mon
     assert evidence["first_failing_test"] == ""
     assert evidence["traceback_file"] == ""
     assert any(e.get("type") == "pre_edit_failure_signal_captured" for e in events)
+
+
+def test_fail_first_localization_uses_isolated_workspace(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "marker.txt").write_text("live\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "test_isolated.py").write_text(
+        "from pathlib import Path\n\n"
+        "def test_mutates_marker():\n"
+        "    Path('marker.txt').write_text('isolated', encoding='utf-8')\n"
+        "    assert False\n",
+        encoding="utf-8",
+    )
+    events: list[dict] = []
+    runner = SimpleNamespace(
+        repo=tmp_path,
+        benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], expected_files=[]),
+        _execution_plan=SimpleNamespace(relevant_files=[]),
+        _pending_verification="",
+        event_callback=events.append,
+    )
+
+    evidence = state_runtime.run_pre_edit_failure_localization(runner)
+
+    assert evidence is not None
+    assert evidence["exit_code"] != 0
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "live\n"
+    assert any(e.get("type") == "pre_edit_failure_signal_isolated" for e in events)
+
+
+def test_diagnosis_confidence_strong_with_traceback_match(tmp_path: Path) -> None:
+    runner = SimpleNamespace(
+        benchmark_config=SimpleNamespace(expected_files=[]),
+        _execution_plan=SimpleNamespace(relevant_files=[]),
+    )
+    diagnosis = {
+        "target_file": "src/app/core.py",
+        "bug_class": "logic_error",
+        "fix_intent": "Fix boundary condition.",
+    }
+    confidence = state_runtime.classify_diagnosis_target_confidence(
+        runner,
+        diagnosis,
+        failure_evidence={"traceback_file": "src/app/core.py"},
+    )
+    assert confidence == "strong"
+
+
+def test_diagnosis_confidence_weak_without_file_evidence(tmp_path: Path) -> None:
+    runner = SimpleNamespace(
+        benchmark_config=SimpleNamespace(expected_files=[]),
+        _execution_plan=SimpleNamespace(relevant_files=[]),
+    )
+    diagnosis = {
+        "target_file": "src/app/core.py",
+        "bug_class": "logic_error",
+        "fix_intent": "Try likely core file.",
+    }
+    confidence = state_runtime.classify_diagnosis_target_confidence(runner, diagnosis, failure_evidence=None)
+    assert confidence == "weak"

@@ -184,6 +184,7 @@ class Runner:
         required_initial_read = ""
         initial_read_enforced = False
         pre_edit_failure_evidence = None
+        diagnosis_confidence = "weak"
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
             try:
                 from villani_code import state_runtime
@@ -201,10 +202,16 @@ class Runner:
 
                 state_runtime.inject_diagnosis_hint(messages, diagnosis)
                 diagnosed_target_file = str(diagnosis.get("target_file", "")).strip().replace("\\", "/").lstrip("./")
+                diagnosis_confidence = state_runtime.classify_diagnosis_target_confidence(
+                    self,
+                    diagnosis,
+                    failure_evidence=pre_edit_failure_evidence,
+                )
                 target_path = (self.repo / diagnosed_target_file).resolve() if diagnosed_target_file else None
                 repo_root = self.repo.resolve()
                 if (
-                    diagnosed_target_file
+                    diagnosis_confidence == "strong"
+                    and diagnosed_target_file
                     and target_path is not None
                     and str(target_path).startswith(str(repo_root))
                     and target_path.exists()
@@ -224,9 +231,19 @@ class Runner:
                 "type": "diagnosis_target_forced_read",
                 "target_file": diagnosed_target_file,
                 "target_found": bool(diagnosed_target_file),
+                "confidence": diagnosis_confidence,
                 "enforced": bool(required_initial_read),
             }
         )
+        if diagnosed_target_file:
+            self.event_callback(
+                {
+                    "type": "diagnosis_target_forced" if required_initial_read else "diagnosis_target_hint_only",
+                    "target_file": diagnosed_target_file,
+                    "confidence": diagnosis_confidence,
+                    "enforced": bool(required_initial_read),
+                }
+            )
         if self.benchmark_config.enabled:
             self.event_callback({
                 "type": "benchmark_mode_enabled",

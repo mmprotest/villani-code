@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict
+from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
@@ -145,12 +148,16 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
         }
     )
     try:
-        proc = subprocess.run(
-            ["bash", "-lc", visible_command],
-            cwd=runner.repo,
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="villani-pre-edit-") as temp_root:
+            isolated_repo = Path(temp_root) / "repo"
+            shutil.copytree(runner.repo, isolated_repo)
+            runner.event_callback({"type": "pre_edit_failure_signal_isolated", "isolated": True})
+            proc = subprocess.run(
+                ["bash", "-lc", visible_command],
+                cwd=isolated_repo,
+                capture_output=True,
+                text=True,
+            )
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback(
             {
@@ -185,6 +192,35 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
         }
     )
     return evidence
+
+
+def classify_diagnosis_target_confidence(
+    runner: Any,
+    diagnosis: dict[str, str],
+    failure_evidence: dict[str, Any] | None = None,
+) -> str:
+    target_file = _normalize_repo_path(str(diagnosis.get("target_file", "")))
+    if not target_file:
+        return "weak"
+
+    cfg = getattr(runner, "benchmark_config", None)
+    expected_file = _single_clear_file(list(getattr(cfg, "expected_files", []) if cfg else []))
+    if expected_file and expected_file == target_file:
+        return "strong"
+
+    if failure_evidence:
+        traceback_file = _normalize_repo_path(str(failure_evidence.get("traceback_file", "")))
+        if traceback_file and traceback_file == target_file:
+            return "strong"
+        excerpt_path = _extract_first_path_from_text(str(failure_evidence.get("raw_failure_excerpt", "")))
+        if excerpt_path and excerpt_path == target_file:
+            return "strong"
+
+    plan = getattr(runner, "_execution_plan", None)
+    relevant_file = _single_clear_file(list(getattr(plan, "relevant_files", []) if plan else []))
+    if relevant_file and relevant_file == target_file:
+        return "strong"
+    return "weak"
 
 
 def parse_pre_edit_diagnosis(raw: Any) -> dict[str, str] | None:
