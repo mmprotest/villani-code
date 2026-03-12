@@ -34,7 +34,7 @@ class DummyRunner:
 
 def test_guided_retry_prompt_differs_from_stage1(monkeypatch, tmp_path: Path):
     ex = CandidateExecutor(DummyRunner(tmp_path), "fix bug", 20, 1)
-    prompt1 = ex._build_direct_diff_prompt(
+    prompt1 = ex._build_direct_transform_prompt(
         objective="fix bug",
         target_file="src/app.py",
         target_file_contents="x=1\n",
@@ -44,7 +44,7 @@ def test_guided_retry_prompt_differs_from_stage1(monkeypatch, tmp_path: Path):
         stage_name="stage1",
         retry_hint="",
     )
-    prompt2 = ex._build_direct_diff_prompt(
+    prompt2 = ex._build_direct_transform_prompt(
         objective="fix bug",
         target_file="src/app.py",
         target_file_contents="x=1\n",
@@ -52,12 +52,13 @@ def test_guided_retry_prompt_differs_from_stage1(monkeypatch, tmp_path: Path):
         failing_test_contents="",
         verification_target="pytest -q tests/test_app.py::test_fast",
         stage_name="stage2",
-        retry_hint="previous patch format invalid; return whole file",
+        retry_hint="Stage1 failure type: unusable_output_format. previous patch format invalid; return whole file",
     )
     assert "Stage: stage1" in prompt1
     assert "Stage: stage2" in prompt2
     assert "Retry hint:" in prompt2
     assert "SUPPORTING FAILING TEST" not in prompt2
+    assert "Stage1 failure type:" in prompt2
 
 
 def test_stage2_can_recover_from_stage1_format_failure(monkeypatch, tmp_path: Path):
@@ -82,7 +83,7 @@ def test_stage2_can_recover_from_stage1_format_failure(monkeypatch, tmp_path: Pa
             verification_outputs={"commands": [], "target_verification_passed": True, "static_sanity_passed": True},
             attempt_category="candidate_verified",
             success=True,
-            apply_mode="whole_file",
+            apply_mode="full_file",
             meaningful_patch_produced=True,
         )
 

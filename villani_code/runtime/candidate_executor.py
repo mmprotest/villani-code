@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from villani_code.benchmark.policy import enforce_path_policy
-from villani_code.patch_apply import PatchApplyError, apply_unified_diff, parse_unified_diff
+from villani_code.patch_apply import apply_unified_diff
 from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.runtime.policy import WeakSearchPolicyProfile, is_direct_repair_profile
+from villani_code.runtime.transform_apply import apply_model_transform
 from villani_code.runtime.workspace import cleanup_candidate_workspace, prepare_candidate_workspace
 from villani_code.synthesize.diff_guard import guard_candidate_diff
 from villani_code.synthesize.edit_budget import EditBudget
@@ -63,6 +64,7 @@ class CandidateExecutionResult:
     tool_calls_first_attempt: int = 0
     exploration_block_triggered: bool = False
     apply_mode: str = "none"
+    parse_failure_reason: str = ""
     apply_failure_reason: str = ""
     meaningful_patch_produced: bool = False
 
@@ -137,7 +139,7 @@ class CandidateExecutor:
         handle = prepare_candidate_workspace(repo_path, fast_path=True)
         workspace = handle.workspace
         prompt_started = time.monotonic()
-        prompt = self._build_direct_diff_prompt(
+        prompt = self._build_direct_transform_prompt(
             objective=objective,
             target_file=target_file,
             target_file_contents=target_file_contents,
@@ -151,7 +153,7 @@ class CandidateExecutor:
         prompt_tokens = len(prompt.split())
         model_started = time.monotonic()
         try:
-            diff_text = self._request_patch_output(prompt, stage_name=stage_name)
+            model_output = self._request_patch_output(prompt, stage_name=stage_name)
         except Exception as exc:  # noqa: BLE001
             cleanup_candidate_workspace(handle)
             return CandidateExecutionResult(
@@ -172,21 +174,18 @@ class CandidateExecutor:
             )
         model_execution_seconds = time.monotonic() - model_started
         before_map = self._read_repo_text_map(workspace)
-        apply_mode = "none"
-        apply_failure_reason = ""
-        try:
-            apply_mode, apply_failure_reason = self._apply_patch_pipeline(
-                workspace=workspace,
-                target_file=target_file,
-                target_file_contents=target_file_contents,
-                patch_text=diff_text,
-            )
-        except Exception as exc:  # noqa: BLE001
+        transform = apply_model_transform(
+            workspace=workspace,
+            target_file=target_file,
+            current_content=target_file_contents,
+            model_output=model_output,
+        )
+        if not transform.success:
             cleanup_candidate_workspace(handle)
             return CandidateExecutionResult(
                 hard_fail=True,
                 blocked_reason="blocked_runtime_error",
-                attempt_summary=f"patch_apply_failed:{exc}",
+                attempt_summary=f"transform_apply_failed:{transform.parse_failure_reason or transform.apply_failure_reason}",
                 attempt_category="blocked_runtime_error",
                 verification_stage="stage_0",
                 workspace_prep_seconds=handle.prep_seconds,
@@ -198,9 +197,12 @@ class CandidateExecutor:
                 direct_repair_attempted=True,
                 direct_repair_suspect=target_file,
                 prompt_tokens_first_attempt=prompt_tokens,
-                apply_mode=apply_mode,
-                apply_failure_reason=apply_failure_reason or str(exc),
+                apply_mode="none",
+                parse_failure_reason=transform.parse_failure_reason,
+                apply_failure_reason=transform.apply_failure_reason,
             )
+        diff_text = transform.diff_text
+        apply_mode = transform.apply_mode
         after_map = self._read_repo_text_map(workspace)
         changed_files = sorted([f for f in set(before_map) | set(after_map) if before_map.get(f, "") != after_map.get(f, "")])
         if not changed_files:
@@ -221,6 +223,7 @@ class CandidateExecutor:
                 direct_repair_suspect=target_file,
                 prompt_tokens_first_attempt=prompt_tokens,
                 apply_mode=apply_mode,
+                parse_failure_reason="no_changes_after_apply",
                 apply_failure_reason="no_changes_after_apply",
             )
         diff_stats = {"changed_line_count": sum(self._count_changed_lines(before_map.get(f, ""), after_map.get(f, "")) for f in changed_files)}
@@ -261,7 +264,8 @@ class CandidateExecutor:
             hypothesis_stage_skipped_initially=True,
             prompt_tokens_first_attempt=prompt_tokens,
             apply_mode=apply_mode,
-            apply_failure_reason=apply_failure_reason,
+            parse_failure_reason="",
+            apply_failure_reason="",
             meaningful_patch_produced=True,
         )
 
@@ -274,7 +278,7 @@ class CandidateExecutor:
         payload = {
             "model": self.runner.model,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            "system": [{"type": "text", "text": f"Return only a patch block for {stage_name}."}],
+            "system": [{"type": "text", "text": f"Return only transformation payload for {stage_name}."}],
             "tools": [],
             "max_tokens": self.runner.max_tokens,
             "stream": False,
@@ -284,7 +288,7 @@ class CandidateExecutor:
         content = normalize_content_blocks(response.get("content", []))
         return self._extract_final_assistant_text(content)
 
-    def _build_direct_diff_prompt(
+    def _build_direct_transform_prompt(
         self,
         *,
         objective: str,
@@ -300,21 +304,22 @@ class CandidateExecutor:
             f"Stage: {stage_name}",
             f"Objective: {objective}",
             f"Exact target file: {target_file}",
-            "Edit only this exact file. Do not edit any other file.",
+            "Bounded single-file repair. Edit only this exact file.",
+            "Do not edit any other file.",
             "No repo exploration, planning, hypotheses, or multi-file changes.",
             f"Verification target: {verification_target or 'default configured target verification'}",
             "Verification runs immediately after patch apply.",
             "Return one format only, in this preference order:",
-            "1) Unified diff for this exact file.",
-            "2) Full replacement file content for this exact file.",
-            "3) SNIPPET_REPLACE with exact old/new snippet.",
-            "Do not write explanations before patch block.",
-            "Unified diff example:",
-            f"--- a/{target_file}\n+++ b/{target_file}\n@@ -1 +1 @@\n-old\n+new",
+            "1) Full corrected file contents for this exact file.",
+            "2) SNIPPET_REPLACE with exact old/new snippet.",
+            "3) Strict unified diff for this exact file.",
+            "Do not write explanations before payload.",
             "Full replacement example:",
             f"NEW FILE CONTENT {target_file}\n<entire file contents>",
             "Snippet replacement example:",
             "SNIPPET_REPLACE\nFILE: <target>\nOLD_SNIPPET:\n<exact old>\nNEW_SNIPPET:\n<new>",
+            "Unified diff example:",
+            f"--- a/{target_file}\n+++ b/{target_file}\n@@ -1 +1 @@\n-old\n+new",
             f"--- FILE: {target_file} ---",
             target_file_contents,
         ]
@@ -327,48 +332,8 @@ class CandidateExecutor:
             ])
         return "\n".join(parts)
 
-    def _apply_patch_pipeline(self, *, workspace: Path, target_file: str, target_file_contents: str, patch_text: str) -> tuple[str, str]:
-        text = patch_text.strip()
-        if not text:
-            raise PatchApplyError("empty_patch")
-
-        unified_error = ""
-        if "--- " in text and "+++ " in text:
-            try:
-                parsed = parse_unified_diff(text)
-                if len(parsed) != 1:
-                    raise PatchApplyError("stage1_unified_diff_must_be_single_file")
-                normalized_targets = {p.new_path.removeprefix("b/").removeprefix("a/") for p in parsed}
-                if normalized_targets != {target_file}:
-                    raise PatchApplyError("stage1_unified_diff_target_mismatch")
-                apply_unified_diff(workspace, text)
-                return "unified_diff", ""
-            except Exception as exc:  # noqa: BLE001
-                unified_error = str(exc)
-
-        if "NEW FILE CONTENT" in text:
-            idx = text.find("NEW FILE CONTENT")
-            block = text[idx:]
-            header, _, body = block.partition("\n")
-            maybe_target = header.replace("NEW FILE CONTENT", "").strip()
-            if maybe_target and maybe_target != target_file:
-                raise PatchApplyError("whole_file_target_mismatch")
-            (workspace / target_file).write_text(body, encoding="utf-8")
-            return "whole_file", unified_error
-
-        if "SNIPPET_REPLACE" in text and "OLD_SNIPPET:" in text and "NEW_SNIPPET:" in text:
-            old_block = text.split("OLD_SNIPPET:", 1)[1].split("NEW_SNIPPET:", 1)[0].strip("\n")
-            new_block = text.split("NEW_SNIPPET:", 1)[1].strip("\n")
-            current = (workspace / target_file).read_text(encoding="utf-8")
-            if old_block not in current:
-                raise PatchApplyError("snippet_old_block_not_found")
-            (workspace / target_file).write_text(current.replace(old_block, new_block, 1), encoding="utf-8")
-            return "snippet_replace", unified_error
-
-        if "--- " not in text and "+++ " not in text and "@@" not in text:
-            (workspace / target_file).write_text(text, encoding="utf-8")
-            return "whole_file", unified_error
-        raise PatchApplyError(unified_error or "unrecognized_patch_format")
+    def _build_direct_diff_prompt(self, **kwargs: Any) -> str:
+        return self._build_direct_transform_prompt(**kwargs)
 
     def evaluate_candidate(
         self,

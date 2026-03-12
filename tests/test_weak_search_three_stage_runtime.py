@@ -47,11 +47,11 @@ def test_ambiguity_classifier_prefers_low_for_single_impl_even_when_file_budget_
     assert reasons
 
 
-def test_direct_patch_prompt_is_diff_only_and_compact(tmp_path: Path):
+def test_direct_patch_prompt_prefers_full_file_then_snippet_then_diff(tmp_path: Path):
     cfg = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], visible_verification=["pytest -q tests/test_app.py::test_regression"])
     runner = DummyRunner(tmp_path, cfg)
     ex = CandidateExecutor(runner, "fix bug", 12, 1)
-    prompt = ex._build_direct_diff_prompt(
+    prompt = ex._build_direct_transform_prompt(
         objective="fix bug",
         target_file="src/app.py",
         target_file_contents="x = 1\n",
@@ -60,6 +60,8 @@ def test_direct_patch_prompt_is_diff_only_and_compact(tmp_path: Path):
         verification_target="pytest -q tests/test_app.py::test_regression",
     )
     assert "Return one format only" in prompt
+    assert "Full replacement example:" in prompt
+    assert "Snippet replacement example:" in prompt
     assert "Unified diff example:" in prompt
     assert "--- FILE: src/app.py ---" in prompt
 

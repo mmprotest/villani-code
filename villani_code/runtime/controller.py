@@ -81,8 +81,10 @@ class WeakSearchController:
                 "tool_calls_first_attempt": result.tool_calls_first_attempt,
                 "exploration_block_triggered": result.exploration_block_triggered,
                 "apply_mode": result.apply_mode,
+                "parse_failure_reason": result.parse_failure_reason,
                 "apply_failure_reason": result.apply_failure_reason,
                 "meaningful_patch_produced": result.meaningful_patch_produced,
+                "computed_diff_lines": int(result.diff_stats.get("changed_line_count", 0)),
             },
             attempt_category=result.attempt_category,
             blocked_reason=result.blocked_reason,
@@ -213,13 +215,17 @@ class WeakSearchController:
                     target_contents = ""
         verifier_summary = str(stage1_result.verification_outputs.get("summary", "")) if stage1_result.verification_outputs else ""
         if stage1_result.attempt_category in {"blocked_runtime_error", "blocked_model_failure"}:
-            retry_hint = "previous patch format was invalid, return whole-file content for the exact target file"
+            retry_hint = "Previous output format was not usable. Return full corrected contents for this file only."
+            retry_failure_type = "unusable_output_format"
         elif stage1_result.attempt_category == "rejected_noop":
-            retry_hint = "no meaningful patch was produced; prefer exact snippet replacement for the target file"
+            retry_hint = "Previous correction was a no-op. Return corrected code and change behavior in this file only."
+            retry_failure_type = "no_op"
         else:
-            retry_hint = "previous patch changed the right file but failed verification; correct logic while still editing only this file"
+            retry_hint = "Previous correction failed verification. Keep editing only this file and fix the logic."
+            retry_failure_type = "verification_failure"
         if verifier_summary:
             retry_hint = f"{retry_hint}; verifier={verifier_summary}"
+        retry_hint = f"Stage1 failure type: {retry_failure_type}. {retry_hint}"
         result = executor.evaluate_guided_retry(
             repo_path=self.repo,
             objective=self.instruction,
@@ -364,7 +370,7 @@ class WeakSearchController:
                         break
                     if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop"}:
                         board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
-                        board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_executor_failure"}
+                        board.final_result = {"stop_reason": StopReason.BLOCKED.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_executor_failure"}
                         break
                     if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop"}:
                         board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
@@ -559,11 +565,14 @@ class WeakSearchController:
             "meaningful_diff": board.run_stats.get("meaningful_diff", False),
             "verification_improved": board.run_stats.get("verification_improved", False),
             "stage1_apply_mode": str(stage1_attempt.verifier_outputs.get("apply_mode", "none")) if stage1_attempt else "none",
+            "stage1_parse_failure_reason": str(stage1_attempt.verifier_outputs.get("parse_failure_reason", "")) if stage1_attempt else "",
             "stage1_apply_failure_reason": str(stage1_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage1_attempt else "",
             "stage2_apply_mode": str(stage2_attempt.verifier_outputs.get("apply_mode", "none")) if stage2_attempt else "none",
+            "stage2_parse_failure_reason": str(stage2_attempt.verifier_outputs.get("parse_failure_reason", "")) if stage2_attempt else "",
             "stage2_apply_failure_reason": str(stage2_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage2_attempt else "",
             "executor_failure_type": board.final_result.get("blocked_reason", "") if board.final_result else "",
-            "meaningful_patch_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
+            "meaningful_transformation_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
+            "computed_diff_lines": int((stage2_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage2_attempt else 0) or (stage1_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage1_attempt else 0)),
             "search_escalation_blocked_due_to_executor_failure": board.run_stats.get("search_escalation_blocked_due_to_executor_failure", False),
             "escalated_after_direct_failure": escalation_occurred,
             "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
@@ -628,11 +637,15 @@ class WeakSearchController:
             "meaningful_diff": board.run_stats.get("meaningful_diff", False),
             "verification_improved": board.run_stats.get("verification_improved", False),
             "stage1_apply_mode": str(stage1_attempt.verifier_outputs.get("apply_mode", "none")) if stage1_attempt else "none",
+            "stage1_parse_failure_reason": str(stage1_attempt.verifier_outputs.get("parse_failure_reason", "")) if stage1_attempt else "",
             "stage1_apply_failure_reason": str(stage1_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage1_attempt else "",
             "stage2_apply_mode": str(stage2_attempt.verifier_outputs.get("apply_mode", "none")) if stage2_attempt else "none",
+            "stage2_parse_failure_reason": str(stage2_attempt.verifier_outputs.get("parse_failure_reason", "")) if stage2_attempt else "",
             "stage2_apply_failure_reason": str(stage2_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage2_attempt else "",
             "executor_failure_type": board.final_result.get("blocked_reason", "") if board.final_result else "",
             "meaningful_patch_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
+            "meaningful_transformation_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
+            "computed_diff_lines": int((stage2_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage2_attempt else 0) or (stage1_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage1_attempt else 0)),
             "search_escalation_blocked_due_to_executor_failure": board.run_stats.get("search_escalation_blocked_due_to_executor_failure", False),
             "escalated_after_direct_failure": escalation_occurred,
             "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
