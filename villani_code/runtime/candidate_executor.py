@@ -12,7 +12,7 @@ from typing import Any
 from villani_code.benchmark.policy import enforce_path_policy
 from villani_code.patch_apply import apply_unified_diff
 from villani_code.prompting import build_initial_messages, build_system_blocks
-from villani_code.runtime.policy import WeakSearchPolicyProfile
+from villani_code.runtime.policy import WeakSearchPolicyProfile, is_direct_repair_profile
 from villani_code.runtime.workspace import cleanup_candidate_workspace, prepare_candidate_workspace
 from villani_code.synthesize.diff_guard import guard_candidate_diff
 from villani_code.synthesize.edit_budget import EditBudget
@@ -52,6 +52,21 @@ class CandidateExecutionResult:
     verification_seconds: float = 0.0
     candidate_total_seconds: float = 0.0
     workspace_strategy: str = ""
+    policy_profile: str = ""
+    direct_repair_attempted: bool = False
+    direct_repair_suspect: str = ""
+    session_context_reused: bool = False
+    escalation_occurred: bool = False
+    escalation_reason: str = ""
+
+
+
+
+@dataclass(slots=True)
+class WeakSearchSessionContext:
+    planning_prompt: str
+    planning_initialized: bool = False
+    plan_invalidated: bool = False
 
 
 class CandidateExecutor:
@@ -80,10 +95,13 @@ class CandidateExecutor:
         max_candidate_turns: int = 8,
         max_candidate_tool_calls: int = 24,
         policy_profile: str = WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
+        execution_mode: str = "heavy",
+        session_context: WeakSearchSessionContext | None = None,
     ) -> CandidateExecutionResult:
         started = time.monotonic()
         profile = WeakSearchPolicyProfile(str(policy_profile))
-        handle = prepare_candidate_workspace(repo_path, fast_path=profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE)
+        direct_mode = execution_mode == "direct_repair" or profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
+        handle = prepare_candidate_workspace(repo_path, fast_path=is_direct_repair_profile(profile) or direct_mode)
         workspace = handle.workspace
         try:
             before_map = self._read_repo_text_map(workspace)
@@ -96,6 +114,7 @@ class CandidateExecutor:
                 runtime_profile=runtime_profile,
                 baseline_handle=baseline_handle,
                 policy_profile=profile.value,
+                execution_mode=execution_mode,
             )
             prompt_build_seconds = time.monotonic() - prompt_started
             model_started = time.monotonic()
@@ -106,6 +125,9 @@ class CandidateExecutor:
                     max_candidate_turns=max_candidate_turns,
                     max_candidate_tool_calls=max_candidate_tool_calls,
                     timeout_budget_seconds=timeout_budget_seconds,
+                    execution_mode=execution_mode,
+                    session_context=session_context,
+                    suspect_file=suspect_region,
                 )
             except TypeError:
                 model_err = self._run_model_edit_pass(workspace, prompt)
@@ -124,6 +146,10 @@ class CandidateExecutor:
                     tool_execution_seconds=self._last_tool_execution_seconds,
                     candidate_total_seconds=time.monotonic() - started,
                     workspace_strategy=handle.strategy,
+                    policy_profile=profile.value,
+                    direct_repair_attempted=direct_mode,
+                    direct_repair_suspect=suspect_region if direct_mode else "",
+                    session_context_reused=bool(session_context and session_context.planning_initialized),
                 )
 
             after_map = self._read_repo_text_map(workspace)
@@ -146,6 +172,10 @@ class CandidateExecutor:
                     tool_execution_seconds=self._last_tool_execution_seconds,
                     candidate_total_seconds=time.monotonic() - started,
                     workspace_strategy=handle.strategy,
+                    policy_profile=profile.value,
+                    direct_repair_attempted=direct_mode,
+                    direct_repair_suspect=suspect_region if direct_mode else "",
+                    session_context_reused=bool(session_context and session_context.planning_initialized),
                 )
 
             policy = enforce_path_policy(
@@ -186,6 +216,10 @@ class CandidateExecutor:
                     tool_execution_seconds=self._last_tool_execution_seconds,
                     candidate_total_seconds=time.monotonic() - started,
                     workspace_strategy=handle.strategy,
+                    policy_profile=profile.value,
+                    direct_repair_attempted=direct_mode,
+                    direct_repair_suspect=suspect_region if direct_mode else "",
+                    session_context_reused=bool(session_context and session_context.planning_initialized),
                 )
 
             verification_started = time.monotonic()
@@ -213,6 +247,10 @@ class CandidateExecutor:
                     verification_seconds=verification_seconds,
                     candidate_total_seconds=elapsed,
                     workspace_strategy=handle.strategy,
+                    policy_profile=profile.value,
+                    direct_repair_attempted=direct_mode,
+                    direct_repair_suspect=suspect_region if direct_mode else "",
+                    session_context_reused=bool(session_context and session_context.planning_initialized),
                 )
 
             failure_sig_payload = {
@@ -252,6 +290,10 @@ class CandidateExecutor:
                 verification_seconds=verification_seconds,
                 candidate_total_seconds=elapsed,
                 workspace_strategy=handle.strategy,
+                policy_profile=profile.value,
+                direct_repair_attempted=direct_mode,
+                direct_repair_suspect=suspect_region if direct_mode else "",
+                session_context_reused=bool(session_context and session_context.planning_initialized),
             )
         finally:
             cleanup_candidate_workspace(handle)
@@ -264,20 +306,9 @@ class CandidateExecutor:
     def evaluate(self, **kwargs: Any) -> CandidateExecutionResult:
         return self.evaluate_candidate(**kwargs)
 
-    def _build_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str], runtime_profile: str, baseline_handle: str, policy_profile: str) -> str:
-        if policy_profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE.value:
-            return (
-                f"Objective: {self.instruction}\n"
-                "Profile: fast_path_single_file (bounded fix).\n"
-                f"Suspect file: {suspect}\n"
-                "Edit budget: max one file.\n"
-                "Do not perform unrelated exploration or broad repo scans.\n"
-                "Inspect the target file and relevant tests only, then apply the smallest valid fix.\n"
-                "Stop once the patch is ready.\n"
-                f"Hypothesis: {hypothesis_text}\n"
-                f"Constraints: {json.dumps(constraints)}\n"
-                f"Recent failures: {failed_attempt_summary[-2:]}"
-            )
+    def _build_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str], runtime_profile: str, baseline_handle: str, policy_profile: str, execution_mode: str) -> str:
+        if execution_mode == "direct_repair" or policy_profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value:
+            return self._build_direct_repair_prompt(suspect=suspect, hypothesis_text=hypothesis_text, constraints=constraints, failed_attempt_summary=failed_attempt_summary)
         return (
             f"Objective: {self.instruction}\n"
             f"Runtime profile: {runtime_profile}\n"
@@ -289,7 +320,22 @@ class CandidateExecutor:
             "Apply minimal concrete edits in repository files and stop when done."
         )
 
-    def _run_model_edit_pass(self, workspace: Path, prompt: str, *, max_candidate_turns: int, max_candidate_tool_calls: int, timeout_budget_seconds: float) -> str:
+    def _build_direct_repair_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str]) -> str:
+        return (
+            f"Objective: {self.instruction}\n"
+            "Profile: direct_repair_fast_path (bounded single-file bugfix).\n"
+            f"Primary suspect file: {suspect}\n"
+            "Task constraints: edit exactly one file unless impossible.\n"
+            "Forbidden: broad repository exploration, large plans, refactors, multi-file sweeps.\n"
+            "Required order: inspect suspect file first; inspect the relevant failing test only if suspect is insufficient.\n"
+            "Use top-1 suspect only and produce the smallest valid patch.\n"
+            "Stop immediately once the patch is ready.\n"
+            f"Hypothesis seed: {hypothesis_text}\n"
+            f"Constraints: {json.dumps(constraints)}\n"
+            f"Recent failures: {failed_attempt_summary[-1:]}"
+        )
+
+    def _run_model_edit_pass(self, workspace: Path, prompt: str, *, max_candidate_turns: int, max_candidate_tool_calls: int, timeout_budget_seconds: float, execution_mode: str, session_context: WeakSearchSessionContext | None, suspect_file: str) -> str:
         original_repo = self.runner.repo
         start = time.monotonic()
         turns = 0
@@ -297,9 +343,14 @@ class CandidateExecutor:
         tool_seconds = 0.0
         try:
             self.runner.repo = workspace
-            self.runner._ensure_project_memory_and_plan(prompt)
+            if session_context is not None and (not session_context.planning_initialized or session_context.plan_invalidated):
+                self.runner._ensure_project_memory_and_plan(session_context.planning_prompt)
+                session_context.planning_initialized = True
+                session_context.plan_invalidated = False
             messages = build_initial_messages(workspace, prompt)
             system = build_system_blocks(workspace, benchmark_config=self.runner.benchmark_config)
+            continuation_used = False
+            touched_suspect = False
             while turns < max_candidate_turns and tool_calls < max_candidate_tool_calls:
                 if time.monotonic() - start > timeout_budget_seconds:
                     return "candidate execution timeout"
@@ -319,6 +370,8 @@ class CandidateExecutor:
                 tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
                 if not tool_uses:
                     return ""
+                if execution_mode == "direct_repair" and turns > 1 and continuation_used:
+                    return "direct repair exceeded continuation policy"
                 tool_results: list[dict[str, Any]] = []
                 for block in tool_uses:
                     if tool_calls >= max_candidate_tool_calls:
@@ -328,8 +381,14 @@ class CandidateExecutor:
                     tool_input = dict(block.get("input", {}))
                     tool_use_id = str(block.get("id", f"cand-tool-{tool_calls}"))
                     tool_start = time.monotonic()
+                    if execution_mode == "direct_repair" and tool_name in {"Glob", "Search", "GitLog", "GitBranch", "GitCheckout"}:
+                        return f"direct_repair_thrash:{tool_name}"
                     result = self.runner._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
                     tool_seconds += time.monotonic() - tool_start
+                    if execution_mode == "direct_repair" and tool_name in {"Write", "Patch"}:
+                        target = str(tool_input.get("file_path") or tool_input.get("path") or "")
+                        if suspect_file and suspect_file in target:
+                            touched_suspect = True
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -341,6 +400,13 @@ class CandidateExecutor:
                 if not tool_results:
                     return "candidate interaction budget reached before tool execution"
                 messages.append({"role": "user", "content": tool_results})
+                if execution_mode == "direct_repair":
+                    if continuation_used:
+                        return "direct repair continuation exhausted"
+                    if not touched_suspect:
+                        return "direct repair no progress on suspect file"
+                    continuation_used = True
+                    max_candidate_turns = min(max_candidate_turns, 2)
             return "candidate interaction budget exceeded"
         except Exception as exc:  # noqa: BLE001
             return str(exc)
@@ -368,7 +434,7 @@ class CandidateExecutor:
             outputs["commands"].append({"command": cmd, "exit_code": proc.returncode, "stdout": proc.stdout[-500:], "stderr": proc.stderr[-500:]})
             if proc.returncode != 0:
                 target_passed = False
-                if profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE:
+                if is_direct_repair_profile(profile):
                     break
 
         outputs["verification_stage"] = "stage_3"

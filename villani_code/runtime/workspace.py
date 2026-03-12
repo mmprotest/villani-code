@@ -17,6 +17,12 @@ IGNORE_PATTERNS = (
     ".ruff_cache",
     ".villani_code/runs",
     ".villani_code/benchmark",
+    ".villani_code/artifacts",
+    ".benchmarks",
+    "benchmark_outputs",
+    "artifacts",
+    "tmp",
+    "temp",
     "node_modules",
 )
 
