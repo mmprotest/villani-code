@@ -3,9 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-import shutil
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +12,8 @@ from typing import Any
 from villani_code.benchmark.policy import enforce_path_policy
 from villani_code.patch_apply import apply_unified_diff
 from villani_code.prompting import build_initial_messages, build_system_blocks
+from villani_code.runtime.policy import WeakSearchPolicyProfile
+from villani_code.runtime.workspace import cleanup_candidate_workspace, prepare_candidate_workspace
 from villani_code.synthesize.diff_guard import guard_candidate_diff
 from villani_code.synthesize.edit_budget import EditBudget
 from villani_code.tools import tool_specs
@@ -43,6 +43,15 @@ class CandidateExecutionResult:
     minimality_score: float = 0.0
     novelty_score: float = 0.0
     verification_stage: str = "stage_0"
+    target_exit_codes: list[int] = field(default_factory=list)
+    target_command_count: int = 0
+    workspace_prep_seconds: float = 0.0
+    prompt_build_seconds: float = 0.0
+    model_execution_seconds: float = 0.0
+    tool_execution_seconds: float = 0.0
+    verification_seconds: float = 0.0
+    candidate_total_seconds: float = 0.0
+    workspace_strategy: str = ""
 
 
 class CandidateExecutor:
@@ -50,6 +59,7 @@ class CandidateExecutor:
         self.runner = runner
         self.instruction = instruction
         self.edit_budget = EditBudget(max_files=max_files_per_patch, max_lines=max_patch_lines)
+        self._last_tool_execution_seconds = 0.0
 
     def evaluate_candidate(
         self,
@@ -69,12 +79,15 @@ class CandidateExecutor:
         attempt_id: str,
         max_candidate_turns: int = 8,
         max_candidate_tool_calls: int = 24,
+        policy_profile: str = WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
     ) -> CandidateExecutionResult:
         started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="villani-weak-search-") as td:
-            workspace = Path(td) / "repo"
-            shutil.copytree(repo_path, workspace, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"))
+        profile = WeakSearchPolicyProfile(str(policy_profile))
+        handle = prepare_candidate_workspace(repo_path, fast_path=profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE)
+        workspace = handle.workspace
+        try:
             before_map = self._read_repo_text_map(workspace)
+            prompt_started = time.monotonic()
             prompt = self._build_prompt(
                 suspect=suspect_region,
                 hypothesis_text=hypothesis,
@@ -82,7 +95,10 @@ class CandidateExecutor:
                 failed_attempt_summary=branch_failure_history,
                 runtime_profile=runtime_profile,
                 baseline_handle=baseline_handle,
+                policy_profile=profile.value,
             )
+            prompt_build_seconds = time.monotonic() - prompt_started
+            model_started = time.monotonic()
             try:
                 model_err = self._run_model_edit_pass(
                     workspace,
@@ -93,6 +109,7 @@ class CandidateExecutor:
                 )
             except TypeError:
                 model_err = self._run_model_edit_pass(workspace, prompt)
+            model_execution_seconds = time.monotonic() - model_started
             if model_err:
                 return CandidateExecutionResult(
                     hard_fail=True,
@@ -101,6 +118,12 @@ class CandidateExecutor:
                     failure_signature=self._fingerprint(model_err),
                     attempt_summary=model_err,
                     prompt_summary=prompt[:220],
+                    workspace_prep_seconds=handle.prep_seconds,
+                    prompt_build_seconds=prompt_build_seconds,
+                    model_execution_seconds=model_execution_seconds,
+                    tool_execution_seconds=self._last_tool_execution_seconds,
+                    candidate_total_seconds=time.monotonic() - started,
+                    workspace_strategy=handle.strategy,
                 )
 
             after_map = self._read_repo_text_map(workspace)
@@ -117,6 +140,12 @@ class CandidateExecutor:
                     failure_signature="no-op",
                     attempt_summary="Model produced no meaningful repository changes.",
                     prompt_summary=prompt[:220],
+                    workspace_prep_seconds=handle.prep_seconds,
+                    prompt_build_seconds=prompt_build_seconds,
+                    model_execution_seconds=model_execution_seconds,
+                    tool_execution_seconds=self._last_tool_execution_seconds,
+                    candidate_total_seconds=time.monotonic() - started,
+                    workspace_strategy=handle.strategy,
                 )
 
             policy = enforce_path_policy(
@@ -151,9 +180,17 @@ class CandidateExecutor:
                     attempt_summary=guard.reason if not guard.allowed else f"Violating paths: {policy.violating_paths}",
                     prompt_summary=prompt[:220],
                     verification_stage="stage_0",
+                    workspace_prep_seconds=handle.prep_seconds,
+                    prompt_build_seconds=prompt_build_seconds,
+                    model_execution_seconds=model_execution_seconds,
+                    tool_execution_seconds=self._last_tool_execution_seconds,
+                    candidate_total_seconds=time.monotonic() - started,
+                    workspace_strategy=handle.strategy,
                 )
 
-            verification_outputs, success, score, score_breakdown = self._run_verification(workspace, changed_files, benchmark_config)
+            verification_started = time.monotonic()
+            verification_outputs, success, score, score_breakdown = self._run_verification(workspace, changed_files, benchmark_config, profile)
+            verification_seconds = time.monotonic() - verification_started
             elapsed = time.monotonic() - started
             if elapsed > timeout_budget_seconds:
                 return CandidateExecutionResult(
@@ -169,6 +206,13 @@ class CandidateExecutor:
                     attempt_summary="Candidate exceeded timeout budget.",
                     prompt_summary=prompt[:220],
                     verification_stage="timeout",
+                    workspace_prep_seconds=handle.prep_seconds,
+                    prompt_build_seconds=prompt_build_seconds,
+                    model_execution_seconds=model_execution_seconds,
+                    tool_execution_seconds=self._last_tool_execution_seconds,
+                    verification_seconds=verification_seconds,
+                    candidate_total_seconds=elapsed,
+                    workspace_strategy=handle.strategy,
                 )
 
             failure_sig_payload = {
@@ -199,7 +243,18 @@ class CandidateExecutor:
                 minimality_score=float(score_breakdown.get("minimality", 0.0)),
                 novelty_score=float(score_breakdown.get("novelty", 0.0)),
                 verification_stage=str(verification_outputs.get("verification_stage", "stage_3")),
+                target_exit_codes=list(verification_outputs.get("target_exit_codes", [])),
+                target_command_count=int(verification_outputs.get("target_command_count", 0)),
+                workspace_prep_seconds=handle.prep_seconds,
+                prompt_build_seconds=prompt_build_seconds,
+                model_execution_seconds=model_execution_seconds,
+                tool_execution_seconds=self._last_tool_execution_seconds,
+                verification_seconds=verification_seconds,
+                candidate_total_seconds=elapsed,
+                workspace_strategy=handle.strategy,
             )
+        finally:
+            cleanup_candidate_workspace(handle)
 
     def commit_candidate(self, repo_path: Path, candidate_result: CandidateExecutionResult) -> None:
         if candidate_result.hard_fail or not candidate_result.diff_text.strip():
@@ -209,7 +264,20 @@ class CandidateExecutor:
     def evaluate(self, **kwargs: Any) -> CandidateExecutionResult:
         return self.evaluate_candidate(**kwargs)
 
-    def _build_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str], runtime_profile: str, baseline_handle: str) -> str:
+    def _build_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str], runtime_profile: str, baseline_handle: str, policy_profile: str) -> str:
+        if policy_profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE.value:
+            return (
+                f"Objective: {self.instruction}\n"
+                "Profile: fast_path_single_file (bounded fix).\n"
+                f"Suspect file: {suspect}\n"
+                "Edit budget: max one file.\n"
+                "Do not perform unrelated exploration or broad repo scans.\n"
+                "Inspect the target file and relevant tests only, then apply the smallest valid fix.\n"
+                "Stop once the patch is ready.\n"
+                f"Hypothesis: {hypothesis_text}\n"
+                f"Constraints: {json.dumps(constraints)}\n"
+                f"Recent failures: {failed_attempt_summary[-2:]}"
+            )
         return (
             f"Objective: {self.instruction}\n"
             f"Runtime profile: {runtime_profile}\n"
@@ -226,6 +294,7 @@ class CandidateExecutor:
         start = time.monotonic()
         turns = 0
         tool_calls = 0
+        tool_seconds = 0.0
         try:
             self.runner.repo = workspace
             self.runner._ensure_project_memory_and_plan(prompt)
@@ -258,7 +327,9 @@ class CandidateExecutor:
                     tool_name = str(block.get("name", ""))
                     tool_input = dict(block.get("input", {}))
                     tool_use_id = str(block.get("id", f"cand-tool-{tool_calls}"))
+                    tool_start = time.monotonic()
                     result = self.runner._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
+                    tool_seconds += time.monotonic() - tool_start
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -274,9 +345,10 @@ class CandidateExecutor:
         except Exception as exc:  # noqa: BLE001
             return str(exc)
         finally:
+            self._last_tool_execution_seconds = tool_seconds
             self.runner.repo = original_repo
 
-    def _run_verification(self, workspace: Path, changed_files: list[str], benchmark_config: Any) -> tuple[dict[str, Any], bool, float, dict[str, float]]:
+    def _run_verification(self, workspace: Path, changed_files: list[str], benchmark_config: Any, profile: WeakSearchPolicyProfile) -> tuple[dict[str, Any], bool, float, dict[str, float]]:
         outputs: dict[str, Any] = {
             "commands": [],
             "changed_files": changed_files,
@@ -289,25 +361,36 @@ class CandidateExecutor:
 
         commands = list(benchmark_config.visible_verification) or ["python -m pytest -q"]
         target_passed = True
+        target_exit_codes: list[int] = []
         for cmd in commands:
             proc = subprocess.run(cmd, shell=True, cwd=workspace, text=True, capture_output=True)
+            target_exit_codes.append(proc.returncode)
             outputs["commands"].append({"command": cmd, "exit_code": proc.returncode, "stdout": proc.stdout[-500:], "stderr": proc.stderr[-500:]})
             if proc.returncode != 0:
                 target_passed = False
+                if profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE:
+                    break
 
         outputs["verification_stage"] = "stage_3"
         outputs["target_verification_passed"] = target_passed
         outputs["collateral_verification_passed"] = target_passed
         outputs["static_sanity_passed"] = stage0_syntax_ok and stage1_imports_ok
         outputs["summary"] = "ok" if target_passed and outputs["static_sanity_passed"] else "verification_failed"
+        outputs["target_exit_codes"] = target_exit_codes
+        outputs["target_command_count"] = len(target_exit_codes)
 
         if benchmark_config.task_id and "repro" in benchmark_config.task_id:
             outputs["repro_command"] = commands[0]
             fingerprint_basis = "\n".join(f"{c['exit_code']}|{c['stderr']}|{c['stdout']}" for c in outputs["commands"])
             outputs["repro_fingerprint"] = self._fingerprint(fingerprint_basis)
 
+        unexpected_file_penalty = 0.0
+        if getattr(benchmark_config, "expected_files", None):
+            unexpected = [f for f in changed_files if f not in benchmark_config.expected_files]
+            unexpected_file_penalty = min(1.0, len(unexpected) / max(1, len(changed_files)))
+
         minimality = max(0.0, 1.0 - (len(changed_files) / max(1, self.edit_budget.max_files)))
-        novelty = 1.0 if len(changed_files) <= 1 else 0.7
+        novelty = 1.0 if len(changed_files) <= 1 else 0.5
         score_inputs = {
             "patch_applies": stage0_patch_sanity,
             "syntax_ok": stage0_syntax_ok,
@@ -316,11 +399,13 @@ class CandidateExecutor:
             "target_verification": 1.0 if target_passed else 0.0,
             "collateral_verification": 1.0 if target_passed else 0.0,
             "static_sanity": 1.0 if outputs["static_sanity_passed"] else 0.0,
-            "constraint_consistency": 1.0,
+            "constraint_consistency": max(0.0, 1.0 - unexpected_file_penalty),
             "minimality": minimality,
             "novelty": novelty,
         }
         verification = run_staged_verifier(score_inputs)
+        tool_penalty = min(0.15, self._last_tool_execution_seconds / 60.0)
+        score = max(0.0, verification.score - tool_penalty)
         outputs["gate_reason"] = verification.gate.reason
         score_breakdown = {
             "target_verification": score_inputs["target_verification"],
@@ -329,9 +414,10 @@ class CandidateExecutor:
             "constraint_consistency": score_inputs["constraint_consistency"],
             "minimality": minimality,
             "novelty": novelty,
+            "tool_efficiency_penalty": tool_penalty,
         }
         success = not verification.gate.hard_fail and target_passed and outputs["static_sanity_passed"]
-        return outputs, success, verification.score, score_breakdown
+        return outputs, success, score, score_breakdown
 
     def _major_error_category(self, verification_outputs: dict[str, Any]) -> str:
         if verification_outputs.get("summary") == "ok":

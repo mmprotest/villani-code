@@ -34,6 +34,8 @@ class RuntimeBudgets(BaseModel):
     max_hypotheses_per_suspect: int = 5
     max_candidates_per_hypothesis: int = 2
     max_total_verifier_calls: int = 80
+    max_candidate_turns: int = 8
+    max_candidate_tool_calls: int = 24
     max_patch_lines: int = 20
     max_files_per_patch: int = 1
     max_scope_expansions: int = 2
