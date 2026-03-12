@@ -9,6 +9,34 @@ def test_easy_benchmark_chooses_fast_path_profile():
     assert decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
 
 
+def test_easy_bugfix_benchmark_chooses_fast_path_profile():
+    cfg = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], max_files_touched=1, visible_verification=["pytest -q tests/test_app.py::test_fast"])
+    decision = decide_runtime_policy(benchmark_config=cfg, is_interactive=False, task_family="bugfix", previous_candidate_failed=False, no_progress_cycles=0, has_stacktrace_or_error=False)
+    assert decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
+
+
+def test_repro_task_family_does_not_choose_fast_path_profile():
+    cfg = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], max_files_touched=1, visible_verification=["pytest -q tests/test_app.py"])
+    decision = decide_runtime_policy(benchmark_config=cfg, is_interactive=False, task_family="repro_test", previous_candidate_failed=False, no_progress_cycles=0, has_stacktrace_or_error=False)
+    assert decision.profile != WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
+
+
+def test_multi_file_task_does_not_choose_fast_path_profile():
+    cfg = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py", "src/util.py"], max_files_touched=2, visible_verification=["pytest -q tests/test_app.py"])
+    decision = decide_runtime_policy(benchmark_config=cfg, is_interactive=False, task_family="bugfix", previous_candidate_failed=False, no_progress_cycles=0, has_stacktrace_or_error=False)
+    assert decision.profile != WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
+
+
+def test_runtime_stressing_bugfix_is_not_fast_path_unless_bounded():
+    stressing = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], max_files_touched=1, visible_verification=["python -m pytest -q"])
+    stressing_decision = decide_runtime_policy(benchmark_config=stressing, is_interactive=False, task_family="bugfix", previous_candidate_failed=False, no_progress_cycles=0, has_stacktrace_or_error=False)
+    assert stressing_decision.profile != WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
+
+    bounded = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], max_files_touched=1, visible_verification=["pytest -q tests/test_app.py::test_fast"])
+    bounded_decision = decide_runtime_policy(benchmark_config=bounded, is_interactive=False, task_family="bugfix", previous_candidate_failed=False, no_progress_cycles=0, has_stacktrace_or_error=False)
+    assert bounded_decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH
+
+
 def test_direct_repair_budgets_are_reduced():
     cfg = BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], max_files_touched=1)
     budgets = select_runtime_budgets(cfg, policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH)

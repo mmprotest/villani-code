@@ -75,6 +75,7 @@ class CandidateExecutor:
         self.instruction = instruction
         self.edit_budget = EditBudget(max_files=max_files_per_patch, max_lines=max_patch_lines)
         self._last_tool_execution_seconds = 0.0
+        self._last_assistant_completion_text = ""
 
     def evaluate_candidate(
         self,
@@ -132,7 +133,7 @@ class CandidateExecutor:
             except TypeError:
                 model_err = self._run_model_edit_pass(workspace, prompt)
             model_execution_seconds = time.monotonic() - model_started
-            if model_err:
+            if model_err and not model_err.startswith("final_completion:"):
                 return CandidateExecutionResult(
                     hard_fail=True,
                     blocked_reason="blocked_model_failure",
@@ -351,6 +352,7 @@ class CandidateExecutor:
             system = build_system_blocks(workspace, benchmark_config=self.runner.benchmark_config)
             continuation_used = False
             touched_suspect = False
+            self._last_assistant_completion_text = ""
             while turns < max_candidate_turns and tool_calls < max_candidate_tool_calls:
                 if time.monotonic() - start > timeout_budget_seconds:
                     return "candidate execution timeout"
@@ -369,7 +371,9 @@ class CandidateExecutor:
                 turns += 1
                 tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
                 if not tool_uses:
-                    return ""
+                    final_text = self._extract_final_assistant_text(content)
+                    self._last_assistant_completion_text = final_text
+                    return f"final_completion:{final_text}" if final_text else "empty assistant completion"
                 if execution_mode == "direct_repair" and turns > 1 and continuation_used:
                     return "direct repair exceeded continuation policy"
                 tool_results: list[dict[str, Any]] = []
@@ -413,6 +417,24 @@ class CandidateExecutor:
         finally:
             self._last_tool_execution_seconds = tool_seconds
             self.runner.repo = original_repo
+
+    @staticmethod
+    def _extract_final_assistant_text(content: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type", ""))
+            if block_type == "text":
+                text = str(block.get("text", "")).strip()
+                if text:
+                    parts.append(text)
+                continue
+            if block_type == "output_text":
+                text = str(block.get("content", "")).strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
 
     def _run_verification(self, workspace: Path, changed_files: list[str], benchmark_config: Any, profile: WeakSearchPolicyProfile) -> tuple[dict[str, Any], bool, float, dict[str, float]]:
         outputs: dict[str, Any] = {
