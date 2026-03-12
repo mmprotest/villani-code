@@ -330,3 +330,146 @@ def test_patch_sanity_gate_skips_non_python_changes(tmp_path: Path, monkeypatch)
 
     assert out == "verification-ran"
     assert any(e.get("type") == "patch_sanity_check_skipped" for e in events)
+
+
+def test_first_attempt_locked_target_allows_single_target_edit(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._first_attempt_write_lock_active = True
+    runner._first_attempt_locked_target = "src/a.py"
+
+    result = runner._execute_tool_with_policy(
+        "Write", {"file_path": "src/a.py", "content": "x = 2\n"}, "toolu_1", 0
+    )
+
+    assert result["is_error"] is False
+
+
+def test_first_attempt_locked_target_rejects_extra_file_before_verification(tmp_path: Path) -> None:
+    a = tmp_path / "src" / "a.py"
+    b = tmp_path / "src" / "b.py"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    a.write_text("x = 1\n", encoding="utf-8")
+    b.write_text("y = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    events: list[dict] = []
+    runner.event_callback = events.append
+    runner._first_attempt_write_lock_active = True
+    runner._first_attempt_locked_target = "src/a.py"
+    diff = """diff --git a/src/a.py b/src/a.py
+--- a/src/a.py
++++ b/src/a.py
+@@ -1 +1 @@
+-x = 1
++x = 2
+diff --git a/src/b.py b/src/b.py
+--- a/src/b.py
++++ b/src/b.py
+@@ -1 +1 @@
+-y = 1
++y = 2
+"""
+
+    result = runner._execute_tool_with_policy("Patch", {"unified_diff": diff}, "toolu_2", 0)
+
+    assert result["is_error"] is True
+    assert "first_attempt_scope_violation" in str(result["content"])
+    assert any(e.get("type") == "first_attempt_scope_violation" for e in events)
+
+
+def test_patch_sanity_gate_catches_pytest_collection_failure(tmp_path: Path, monkeypatch) -> None:
+    changed = tmp_path / "pkg" / "mod.py"
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._execution_plan = type("Plan", (), {"validation_steps": ["pytest -q"]})()
+    events: list[dict] = []
+    runner.event_callback = events.append
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["pkg/mod.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if cmd[:3] == [state_runtime.sys.executable, "-m", "pytest"]:
+            P.returncode = 2
+            P.stderr = "ImportError while loading conftest"
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+
+    out = state_runtime.run_post_edit_verification(runner, "Patch execution")
+
+    assert "failure_class: collection_sanity_failed" in out
+    assert any(e.get("type") == "collection_sanity_check_failed" for e in events)
+    assert any("pytest" in " ".join(cmd) and "--collect-only" in cmd for cmd in calls)
+
+
+def test_collection_sanity_failure_retries_once_only(tmp_path: Path, monkeypatch) -> None:
+    changed = tmp_path / "pkg" / "mod.py"
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._execution_plan = type("Plan", (), {"validation_steps": ["pytest -q"]})()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["pkg/mod.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if cmd[:3] == [state_runtime.sys.executable, "-m", "pytest"]:
+            P.returncode = 2
+            P.stderr = "ImportError"
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+
+    first = state_runtime.run_post_edit_verification(runner, "Patch execution")
+    second = state_runtime.run_post_edit_verification(runner, "Patch execution")
+    third = state_runtime.run_post_edit_verification(runner, "Patch execution")
+
+    assert "failure_class: collection_sanity_failed" in first
+    assert second == "verification-ran"
+    assert "failure_class: collection_sanity_failed" in third
+
+
+def test_non_pytest_sanity_skips_collection_check(tmp_path: Path, monkeypatch) -> None:
+    changed = tmp_path / "pkg" / "mod.py"
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._execution_plan = type("Plan", (), {"validation_steps": ["ruff check ."]})()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["pkg/mod.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+
+    out = state_runtime.run_post_edit_verification(runner, "Patch execution")
+
+    assert out == "verification-ran"
+    assert len(calls) == 1
+    assert calls[0][0] == state_runtime.sys.executable

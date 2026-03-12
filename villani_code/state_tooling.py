@@ -49,6 +49,52 @@ def _validate_benchmark_mutation(runner: Any, tool_name: str, tool_input: dict[s
     return None
 
 
+def _validate_first_attempt_locked_target_mutation(
+    runner: Any, tool_name: str, tool_input: dict[str, Any]
+) -> str | None:
+    if tool_name not in {"Write", "Patch"}:
+        return None
+    if not bool(getattr(runner, "_first_attempt_write_lock_active", False)):
+        return None
+    locked_target = str(getattr(runner, "_first_attempt_locked_target", "") or "").replace("\\", "/").lstrip("./")
+    if not locked_target:
+        return None
+    targets = _benchmark_mutation_targets(tool_name, tool_input)
+    normalized = sorted(
+        {
+            str(path or "").replace("\\", "/").lstrip("./")
+            for path in targets
+            if str(path or "").strip()
+        }
+    )
+    extras = [path for path in normalized if path != locked_target]
+    if extras:
+        runner.event_callback(
+            {
+                "type": "first_attempt_scope_violation",
+                "failure_class": "first_attempt_scope_violation",
+                "target_file": locked_target,
+                "changed_files": normalized,
+                "rejected_extra_files": extras,
+            }
+        )
+        runner.event_callback(
+            {
+                "type": "failure_classified",
+                "category": "first_attempt_scope_violation",
+                "summary": f"First-attempt write lock violated; extra files: {extras}",
+                "next_strategy": f"Retry with edits restricted to {locked_target}.",
+                "occurrence": 1,
+                "failed_files": normalized,
+            }
+        )
+        return (
+            f"first_attempt_scope_violation: target_file={locked_target} "
+            f"changed_files={normalized} rejected_extra_files={extras}"
+        )
+    return None
+
+
 def execute_tool_with_policy(
     runner: Any,
     tool_name: str,
@@ -100,6 +146,10 @@ def execute_tool_with_policy(
                 return {"content": "User denied tool execution", "is_error": True}
     elif runner.plan_mode != "off" and tool_name in {"Write", "Patch"}:
         return {"content": "Plan mode: edit not executed", "is_error": False}
+
+    first_attempt_lock_violation = _validate_first_attempt_locked_target_mutation(runner, tool_name, tool_input)
+    if first_attempt_lock_violation:
+        return {"content": first_attempt_lock_violation, "is_error": True}
 
     benchmark_violation = _validate_benchmark_mutation(runner, tool_name, tool_input)
     if benchmark_violation:

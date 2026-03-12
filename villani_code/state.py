@@ -150,6 +150,8 @@ class Runner:
         self._last_verification_artifact_count = 0
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
+        self._first_attempt_write_lock_active = False
+        self._first_attempt_locked_target = ""
         self._context_governance = ContextGovernanceManager(self.repo)
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
@@ -325,6 +327,16 @@ class Runner:
         self._last_verification_intentional = set()
         self._last_verification_artifact_count = 0
         self._scope_expansion_used = False
+        self._first_attempt_write_lock_active = bool(required_initial_read)
+        self._first_attempt_locked_target = required_initial_read
+        if self._first_attempt_write_lock_active:
+            self.event_callback(
+                {
+                    "type": "first_attempt_write_locked",
+                    "active": True,
+                    "target_file": required_initial_read,
+                }
+            )
 
         source_targets = list(getattr(getattr(self, "_execution_plan", None), "relevant_files", []))
         if self.benchmark_config.enabled:

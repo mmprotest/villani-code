@@ -545,13 +545,31 @@ def _collect_changed_python_files(runner: Any) -> list[str]:
     ]
 
 
+def _is_pytest_based_verification(runner: Any) -> bool:
+    cfg = getattr(runner, "benchmark_config", None)
+    visible = list(getattr(cfg, "visible_verification", []) if cfg else [])
+    if any("pytest" in str(cmd).lower() for cmd in visible):
+        return True
+    plan = getattr(runner, "_execution_plan", None)
+    steps = list(getattr(plan, "validation_steps", []) if plan else [])
+    return any("pytest" in str(step).lower() for step in steps)
+
+
 def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
     checked_files = _collect_changed_python_files(runner)
+    telemetry = {
+        "first_attempt_write_lock_active": bool(getattr(runner, "_first_attempt_write_lock_active", False)),
+        "locked_target_file": str(getattr(runner, "_first_attempt_locked_target", "") or ""),
+        "syntax_sanity_ran": bool(checked_files),
+        "collection_sanity_ran": False,
+        "collection_sanity_passed": None,
+    }
     if not checked_files:
         runner.event_callback(
             {
                 "type": "patch_sanity_check_skipped",
                 "reason": "no_relevant_changed_python_files",
+                **telemetry,
             }
         )
         return {
@@ -562,20 +580,57 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
             "reason": "no_relevant_changed_python_files",
             "stdout": "",
             "stderr": "",
+            "command": "",
+            **telemetry,
         }
 
     cmd = [sys.executable, "-m", "py_compile", *checked_files]
     proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
     stdout = proc.stdout.strip()
     stderr = proc.stderr.strip()
-    passed = proc.returncode == 0
-    if passed:
+    if proc.returncode != 0:
+        reason = stderr.splitlines()[0] if stderr else "python compile sanity failed"
         runner.event_callback(
             {
-                "type": "patch_sanity_check_passed",
+                "type": "patch_sanity_check_failed",
                 "checked_files": checked_files,
+                "failure_class": "patch_sanity_failed",
+                "reason": reason,
+                "command": " ".join(cmd),
+                **telemetry,
             }
         )
+        runner.event_callback(
+            {
+                "type": "failure_classified",
+                "category": "patch_sanity_failed",
+                "summary": reason,
+                "next_strategy": "Fix syntax/import structure in edited file(s) and retry once.",
+                "occurrence": 1,
+                "failed_files": checked_files,
+            }
+        )
+        return {
+            "ran": True,
+            "checked_files": checked_files,
+            "passed": False,
+            "failure_class": "patch_sanity_failed",
+            "reason": reason,
+            "stdout": stdout,
+            "stderr": stderr,
+            "command": " ".join(cmd),
+            **telemetry,
+        }
+
+    runner.event_callback(
+        {
+            "type": "patch_sanity_check_passed",
+            "checked_files": checked_files,
+            "command": " ".join(cmd),
+            **telemetry,
+        }
+    )
+    if not _is_pytest_based_verification(runner):
         return {
             "ran": True,
             "checked_files": checked_files,
@@ -584,41 +639,89 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
             "reason": "",
             "stdout": stdout,
             "stderr": stderr,
+            "command": " ".join(cmd),
+            **telemetry,
         }
 
-    reason = stderr.splitlines()[0] if stderr else "python compile sanity failed"
-    runner.event_callback(
-        {
-            "type": "patch_sanity_check_failed",
+    collect_cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q"]
+    collect_proc = subprocess.run(collect_cmd, cwd=runner.repo, capture_output=True, text=True)
+    collect_stdout = collect_proc.stdout.strip()
+    collect_stderr = collect_proc.stderr.strip()
+    telemetry["collection_sanity_ran"] = True
+    telemetry["collection_sanity_passed"] = collect_proc.returncode == 0
+    if collect_proc.returncode != 0:
+        reason = (
+            collect_stderr.splitlines()[0]
+            if collect_stderr
+            else (collect_stdout.splitlines()[0] if collect_stdout else "pytest collection sanity failed")
+        )
+        runner.event_callback(
+            {
+                "type": "collection_sanity_check_failed",
+                "failure_class": "collection_sanity_failed",
+                "checked_files": checked_files,
+                "command": " ".join(collect_cmd),
+                "exit_code": int(collect_proc.returncode),
+                "stdout_excerpt": collect_stdout[:500],
+                "stderr_excerpt": collect_stderr[:500],
+                "reason": reason,
+                **telemetry,
+            }
+        )
+        runner.event_callback(
+            {
+                "type": "failure_classified",
+                "category": "collection_sanity_failed",
+                "summary": reason,
+                "next_strategy": "Fix import/test collection structure in edited file(s) and retry once.",
+                "occurrence": 1,
+                "failed_files": checked_files,
+            }
+        )
+        return {
+            "ran": True,
             "checked_files": checked_files,
-            "failure_class": "patch_sanity_failed",
+            "passed": False,
+            "failure_class": "collection_sanity_failed",
             "reason": reason,
+            "stdout": collect_stdout,
+            "stderr": collect_stderr,
+            "command": " ".join(collect_cmd),
+            "exit_code": int(collect_proc.returncode),
+            **telemetry,
         }
-    )
+
     runner.event_callback(
         {
-            "type": "failure_classified",
-            "category": "patch_sanity_failed",
-            "summary": reason,
-            "next_strategy": "Fix syntax/import structure in edited file(s) and retry once.",
-            "occurrence": 1,
-            "failed_files": checked_files,
+            "type": "collection_sanity_check_passed",
+            "checked_files": checked_files,
+            "command": " ".join(collect_cmd),
+            "exit_code": int(collect_proc.returncode),
+            **telemetry,
         }
     )
     return {
         "ran": True,
         "checked_files": checked_files,
-        "passed": False,
-        "failure_class": "patch_sanity_failed",
-        "reason": reason,
-        "stdout": stdout,
-        "stderr": stderr,
+        "passed": True,
+        "failure_class": "",
+        "reason": "",
+        "stdout": collect_stdout,
+        "stderr": collect_stderr,
+        "command": " ".join(collect_cmd),
+        "exit_code": int(collect_proc.returncode),
+        **telemetry,
     }
 
 
 def _compact_patch_sanity_retry_hint(sanity: dict[str, Any]) -> str:
     files = sanity.get("checked_files", [])
     target = files[0] if files else "the edited file"
+    if sanity.get("failure_class") == "collection_sanity_failed":
+        return (
+            "The previous edit broke import/test collection. "
+            f"Fix structure in {target} while preserving intended behavior."
+        )
     return (
         "Patch sanity gate failed (syntax/import structure). "
         f"Fix structure in {target} while preserving intended behavior."
@@ -636,10 +739,13 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
                     "checked_files": sanity.get("checked_files", []),
                     "retry_attempted": True,
                     "retry_resolved": True,
+                    "retry_reason": "sanity_failure",
                 }
             )
         runner._patch_sanity_retry_pending = False
-        return run_verification(runner, trigger)
+        verification = run_verification(runner, trigger)
+        runner._first_attempt_write_lock_active = False
+        return verification
 
     failed_files = sanity.get("checked_files", [])
     if not runner._patch_sanity_retry_pending:
@@ -651,19 +757,28 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
                 "checked_files": failed_files,
                 "retry_attempted": True,
                 "retry_resolved": False,
+                "retry_reason": "sanity_failure",
             }
         )
+        if sanity.get("failure_class") == "collection_sanity_failed":
+            runner.event_callback(
+                {
+                    "type": "collection_sanity_retry_attempted",
+                    "checked_files": failed_files,
+                    "retry_attempted": True,
+                }
+            )
         return (
             "<verification>\n"
             f"trigger: {trigger}\n"
             "patch_sanity_gate: failed\n"
             f"failure_class: {sanity.get('failure_class', 'patch_sanity_failed')}\n"
             f"checked_files: {json.dumps(failed_files)}\n"
+            f"command: {sanity.get('command', '')}\n"
             f"reason: {sanity.get('reason', '')}\n"
             f"next: {hint}\n"
             "</verification>"
         )
-
 
     runner._patch_sanity_retry_pending = False
     runner.event_callback(
@@ -673,10 +788,12 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
             "retry_attempted": True,
             "retry_resolved": False,
             "final": True,
+            "retry_reason": "sanity_failure",
         }
     )
-    return run_verification(runner, f"{trigger} (after_sanity_retry_failed)")
-
+    verification = run_verification(runner, f"{trigger} (after_sanity_retry_failed)")
+    runner._first_attempt_write_lock_active = False
+    return verification
 
 def run_verification(runner: Any, trigger: str = "edit") -> str:
     current_changed = set(git_changed_files(runner.repo))
