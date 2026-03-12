@@ -80,6 +80,9 @@ class WeakSearchController:
                 "prompt_tokens_first_attempt": result.prompt_tokens_first_attempt,
                 "tool_calls_first_attempt": result.tool_calls_first_attempt,
                 "exploration_block_triggered": result.exploration_block_triggered,
+                "apply_mode": result.apply_mode,
+                "apply_failure_reason": result.apply_failure_reason,
+                "meaningful_patch_produced": result.meaningful_patch_produced,
             },
             attempt_category=result.attempt_category,
             blocked_reason=result.blocked_reason,
@@ -91,7 +94,7 @@ class WeakSearchController:
         )
         board.attempts.append(attempt)
         return attempt
-    def _select_direct_repair_target(self, suspects: list[Any], evidence: Evidence, config: Any) -> tuple[str, str]:
+    def _select_direct_repair_target(self, suspects: list[Any], evidence: Evidence, config: Any) -> tuple[str, str, str]:
         objective = self.instruction
         impl_expected = [str(f) for f in list(config.expected_files) if f and not str(f).startswith("tests/")]
 
@@ -100,38 +103,40 @@ class WeakSearchController:
 
         explicit_impl = _extract_implementation_paths(objective)
         if len(explicit_impl) == 1:
-            return explicit_impl[0], "objective_explicit_implementation_file"
+            return explicit_impl[0], "objective_explicit_implementation_file", "high"
 
         # 2) implementation file in stacktrace/stderr/failure text
         stack = "\n".join([*evidence.stack_traces, *evidence.error_messages, objective])
         stack_impl = _extract_implementation_paths(stack)
         if len(set(stack_impl)) == 1:
-            return stack_impl[0], "stacktrace_or_error_path_match"
+            return stack_impl[0], "stacktrace_or_error_path_match", "high"
 
         # 3) exactly one expected implementation file
         if len(impl_expected) == 1:
-            return impl_expected[0], "expected_single_implementation_file"
+            return impl_expected[0], "expected_single_implementation_file", "high"
 
         # 4) strongest lexical overlap among implementation files
         impl_suspects = [s for s in suspects if s.file and not s.file.startswith("tests/")]
         if impl_suspects:
-            return impl_suspects[0].file, "strongest_lexical_impl_overlap"
+            return impl_suspects[0].file, "strongest_lexical_impl_overlap", "medium"
 
         # 5) broader fallback
         if suspects:
-            return suspects[0].file, "top_ranked_suspect"
-        return "", "no_suspect_available"
+            return suspects[0].file, "top_ranked_suspect", "low"
+        return "", "no_suspect_available", "low"
     def _should_escalate_after_direct_attempt(self, result: CandidateExecutionResult, suspect: str) -> tuple[bool, str]:
         if result.success:
             return False, "solved"
-        meaningful_patch = bool(result.changed_files and result.diff_text.strip())
+        if result.attempt_category in {"blocked_runtime_error", "blocked_model_failure"}:
+            return True, "executor_failure_retry_once"
+        meaningful_patch = bool(result.meaningful_patch_produced or (result.changed_files and result.diff_text.strip()))
         verification_improved = bool(result.target_verification_passed) or bool(result.score > 0.35)
         if result.blocked_reason.startswith("direct_repair_thrash"):
             return True, "exploratory_thrash"
         if meaningful_patch and not result.target_verification_passed:
             return True, "partial_fix"
         if result.attempt_category == "rejected_noop" and suspect:
-            return True, "no_meaningful_edit"
+            return False, "no_meaningful_edit_executor_failure"
         if verification_improved:
             return True, "ambiguous_after_direct_failure"
         return False, "direct_repair_insufficient_signal"
@@ -148,8 +153,8 @@ class WeakSearchController:
         constraints: dict[str, Any],
         config: Any,
     ) -> tuple[CandidateExecutionResult, str, str]:
-        suspect_file, target_reason = self._select_direct_repair_target(suspects, board.evidence, config)
-        board.decision_log.append({"event": "target_selected", "target_file": suspect_file, "target_selection_reason": target_reason})
+        suspect_file, target_reason, target_confidence = self._select_direct_repair_target(suspects, board.evidence, config)
+        board.decision_log.append({"event": "target_selected", "target_file": suspect_file, "target_selection_reason": target_reason, "target_selection_confidence": target_confidence})
         board.decision_log.append({"event": "direct_repair_attempted", "suspect": suspect_file})
         attempt_id = f"att-{len(board.attempts)+1}"
         target_contents = ""
@@ -206,9 +211,15 @@ class WeakSearchController:
                     target_contents = p.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     target_contents = ""
-        retry_hint = "contract_mismatch"
-        if stage1_result.attempt_category == "rejected_noop":
-            retry_hint = "missing_propagation"
+        verifier_summary = str(stage1_result.verification_outputs.get("summary", "")) if stage1_result.verification_outputs else ""
+        if stage1_result.attempt_category in {"blocked_runtime_error", "blocked_model_failure"}:
+            retry_hint = "previous patch format was invalid, return whole-file content for the exact target file"
+        elif stage1_result.attempt_category == "rejected_noop":
+            retry_hint = "no meaningful patch was produced; prefer exact snippet replacement for the target file"
+        else:
+            retry_hint = "previous patch changed the right file but failed verification; correct logic while still editing only this file"
+        if verifier_summary:
+            retry_hint = f"{retry_hint}; verifier={verifier_summary}"
         result = executor.evaluate_guided_retry(
             repo_path=self.repo,
             objective=self.instruction,
@@ -328,6 +339,7 @@ class WeakSearchController:
                 board.decision_log.append({"event": "direct_repair_result", "escalate": should_escalate, "reason": escalate_reason, "direct_attempt_result": direct.attempt_category})
                 board.run_stats["stage1_result"] = direct.attempt_category
                 board.run_stats["meaningful_diff"] = bool(direct.changed_files and direct.diff_text.strip())
+                board.run_stats["meaningful_patch_produced"] = direct.meaningful_patch_produced
                 board.run_stats["verification_improved"] = bool(direct.target_verification_passed) or bool(direct.score > 0.35)
                 if should_escalate and suspect_file:
                     escalation_occurred = True
@@ -350,8 +362,13 @@ class WeakSearchController:
                         best_score = guided.score
                         emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id="candidate-0-guided", attempt_id=guided_attempt_id, patch_artifact=guided.patch_artifact_path)
                         break
-                    if ambiguity_level != AmbiguityLevel.HIGH and guided.attempt_category in {"blocked_model_failure", "rejected_noop"}:
-                        board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_no_progress"}
+                    if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop"}:
+                        board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
+                        board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_executor_failure"}
+                        break
+                    if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop"}:
+                        board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
+                        board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "direct_patch_executor_failure"}
                         break
                     escalation_occurred = True
                     board.run_stats["escalation_reason"] = "guided_retry_incomplete_fix"
@@ -370,11 +387,13 @@ class WeakSearchController:
                     )
                     budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
                 elif not should_escalate:
+                    if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop"}:
+                        board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
                     board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": escalate_reason}
                     break
             elif cycle == 1 and ambiguity_level == AmbiguityLevel.MEDIUM and suspects:
-                suspect_file, target_reason = self._select_direct_repair_target(suspects, board.evidence, config)
-                board.decision_log.append({"event": "target_selected", "target_file": suspect_file, "target_selection_reason": target_reason})
+                suspect_file, target_reason, target_confidence = self._select_direct_repair_target(suspects, board.evidence, config)
+                board.decision_log.append({"event": "target_selected", "target_file": suspect_file, "target_selection_reason": target_reason, "target_selection_confidence": target_confidence})
                 guided, guided_attempt_id = self._run_guided_retry_attempt(
                     board=board,
                     executor=executor,
@@ -393,6 +412,10 @@ class WeakSearchController:
                     board.final_result = {"stop_reason": StopReason.SOLVED.value, "best_patch_score": guided.score, "attempt_id": guided_attempt_id, "branch_id": "candidate-0-guided"}
                     best_score = guided.score
                     emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id="candidate-0-guided", attempt_id=guided_attempt_id, patch_artifact=guided.patch_artifact_path)
+                    break
+                if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop"}:
+                    board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
+                    board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_executor_failure"}
                     break
                 escalation_occurred = True
                 board.run_stats["stage3_search_used"] = True
@@ -500,6 +523,7 @@ class WeakSearchController:
                 board.final_result = {"stop_reason": StopReason.EXHAUSTED_BUDGET.value, "best_patch_score": best_score}
         target_file = next((d.get("target_file") for d in board.decision_log if d.get("event")=="target_selected"), "")
         target_reason = next((d.get("target_selection_reason") for d in board.decision_log if d.get("event")=="target_selected"), "")
+        target_confidence = next((d.get("target_selection_confidence") for d in board.decision_log if d.get("event")=="target_selected"), "")
         stage1_attempt = next((a for a in board.attempts if a.hypothesis_source == "direct"), None)
         stage2_attempt = next((a for a in board.attempts if a.hypothesis_source == "guided"), None)
         stage3_attempt = next((a for a in board.attempts if a.hypothesis_source not in {"direct", "guided"}), None)
@@ -523,6 +547,7 @@ class WeakSearchController:
             "direct_patch_target_file": target_file,
             "target_file": target_file,
             "target_selection_reason": target_reason,
+            "target_selection_confidence": target_confidence,
             "ambiguity_level": ambiguity_level.value,
             "ambiguity_reasons": ambiguity_reasons,
             "strategy_stage_used": board.run_stats.get("strategy_stage_used", "search_runtime" if len(board.hypotheses) else "direct_patch"),
@@ -533,6 +558,13 @@ class WeakSearchController:
             "stage2_result": board.run_stats.get("stage2_result", "not_run"),
             "meaningful_diff": board.run_stats.get("meaningful_diff", False),
             "verification_improved": board.run_stats.get("verification_improved", False),
+            "stage1_apply_mode": str(stage1_attempt.verifier_outputs.get("apply_mode", "none")) if stage1_attempt else "none",
+            "stage1_apply_failure_reason": str(stage1_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage1_attempt else "",
+            "stage2_apply_mode": str(stage2_attempt.verifier_outputs.get("apply_mode", "none")) if stage2_attempt else "none",
+            "stage2_apply_failure_reason": str(stage2_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage2_attempt else "",
+            "executor_failure_type": board.final_result.get("blocked_reason", "") if board.final_result else "",
+            "meaningful_patch_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
+            "search_escalation_blocked_due_to_executor_failure": board.run_stats.get("search_escalation_blocked_due_to_executor_failure", False),
             "escalated_after_direct_failure": escalation_occurred,
             "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
             "direct_attempt_result": next((d.get("direct_attempt_result") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
@@ -584,6 +616,7 @@ class WeakSearchController:
             "direct_patch_target_file": target_file,
             "target_file": target_file,
             "target_selection_reason": target_reason,
+            "target_selection_confidence": target_confidence,
             "ambiguity_level": ambiguity_level.value,
             "ambiguity_reasons": ambiguity_reasons,
             "strategy_stage_used": board.run_stats.get("strategy_stage_used", "search_runtime" if len(board.hypotheses) else "direct_patch"),
@@ -594,6 +627,13 @@ class WeakSearchController:
             "stage2_result": board.run_stats.get("stage2_result", "not_run"),
             "meaningful_diff": board.run_stats.get("meaningful_diff", False),
             "verification_improved": board.run_stats.get("verification_improved", False),
+            "stage1_apply_mode": str(stage1_attempt.verifier_outputs.get("apply_mode", "none")) if stage1_attempt else "none",
+            "stage1_apply_failure_reason": str(stage1_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage1_attempt else "",
+            "stage2_apply_mode": str(stage2_attempt.verifier_outputs.get("apply_mode", "none")) if stage2_attempt else "none",
+            "stage2_apply_failure_reason": str(stage2_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage2_attempt else "",
+            "executor_failure_type": board.final_result.get("blocked_reason", "") if board.final_result else "",
+            "meaningful_patch_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
+            "search_escalation_blocked_due_to_executor_failure": board.run_stats.get("search_escalation_blocked_due_to_executor_failure", False),
             "escalated_after_direct_failure": escalation_occurred,
             "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
             "direct_attempt_result": next((d.get("direct_attempt_result") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),

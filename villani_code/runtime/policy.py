@@ -190,6 +190,9 @@ def classify_task_ambiguity(
     explicit_files = _extract_implementation_paths(objective_text)
     failure_files = _extract_implementation_paths(f"{objective_text}\n{failure_text}".strip())
     bounded_verification = _is_simple_targeted_verification(visible_verification)
+    allowlist_impl = [str(p) for p in list(getattr(benchmark_config, "allowlist_paths", []) or []) if str(p) and not str(p).startswith("tests/")]
+    bugfix_like = "bug" in (objective_text + " " + failure_text).lower() or "bugfix" in ((task_type or "") + " " + (task_family or "")).lower()
+    plausible_target_count = len(set(explicit_files or failure_files or impl_expected or allowlist_impl[:1]))
 
     normalized_task_family = (task_family or "").strip().lower()
     normalized_task_type = (task_type or "").strip().lower()
@@ -198,7 +201,7 @@ def classify_task_ambiguity(
         reasons.append("repro_or_navigation_signal")
     if previous_candidate_failed and no_progress_cycles >= 1:
         reasons.append("repeated_failed_attempts")
-    if len(set(impl_expected)) > 1 and not explicit_files and len(set(failure_files)) != 1:
+    if len(set(impl_expected)) > 1 and not explicit_files and len(set(failure_files)) != 1 and not (bugfix_like and plausible_target_count >= 1):
         reasons.append("multiple_plausible_implementation_files")
 
     if reasons:
@@ -210,6 +213,8 @@ def classify_task_ambiguity(
         return AmbiguityLevel.LOW, ["failure_output_identifies_single_implementation_file"]
     if len(impl_expected) == 1:
         return AmbiguityLevel.LOW, ["exactly_one_expected_implementation_file"]
+    if bugfix_like and plausible_target_count >= 1:
+        return AmbiguityLevel.MEDIUM, ["bugfix_with_plausible_target"]
 
     if len(set(failure_files)) > 1:
         return AmbiguityLevel.MEDIUM, ["small_candidate_neighborhood_from_failure"]
