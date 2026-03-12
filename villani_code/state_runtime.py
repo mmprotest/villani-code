@@ -22,6 +22,110 @@ from villani_code.retrieval import Retriever
 from villani_code.utils import ensure_dir
 
 
+_DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
+
+
+def parse_pre_edit_diagnosis(raw: Any) -> dict[str, str] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    if "{" in text and "}" in text:
+        text = text[text.find("{") : text.rfind("}") + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if set(data.keys()) != set(_DIAGNOSIS_KEYS):
+        return None
+    cleaned: dict[str, str] = {}
+    for key in _DIAGNOSIS_KEYS:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        cleaned[key] = value.strip()
+    return cleaned
+
+
+def run_pre_edit_diagnosis(runner: Any, instruction: str) -> dict[str, str] | None:
+    runner.event_callback({"type": "diagnosis_attempted"})
+    evidence_lines = [f"Objective: {instruction.strip()}"]
+    plan = getattr(runner, "_execution_plan", None)
+    if plan is not None:
+        if getattr(plan, "validation_steps", None):
+            evidence_lines.append(
+                "Verification: " + "; ".join(str(step) for step in plan.validation_steps[:3])
+            )
+        if getattr(plan, "relevant_files", None):
+            evidence_lines.append(
+                "Likely files: " + ", ".join(str(path) for path in plan.relevant_files[:5])
+            )
+    cfg = getattr(runner, "benchmark_config", None)
+    if cfg and cfg.enabled:
+        if cfg.visible_verification:
+            evidence_lines.append("Visible verification: " + "; ".join(cfg.visible_verification[:3]))
+        if cfg.expected_files:
+            evidence_lines.append("Expected files: " + ", ".join(cfg.expected_files[:5]))
+
+    system_prompt = (
+        "Return strict JSON only with exactly these string keys: "
+        'target_file, bug_class, fix_intent. No prose, no markdown, no extra keys.'
+    )
+    user_prompt = (
+        "Produce one cheap pre-edit diagnosis from available evidence only. "
+        "No tool calls, no repository exploration, no long reasoning.\n\n"
+        + "\n".join(f"- {line}" for line in evidence_lines)
+    )
+    payload = {
+        "model": runner.model,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
+        "system": [{"type": "text", "text": system_prompt}],
+        "max_tokens": min(220, int(getattr(runner, "max_tokens", 220))),
+        "stream": False,
+    }
+    try:
+        response = runner.client.create_message(payload, stream=False)
+    except Exception as exc:  # pragma: no cover - defensive path
+        runner.event_callback({"type": "diagnosis_failed", "reason": f"call_error:{exc.__class__.__name__}"})
+        return None
+
+    blocks = response.get("content", []) if isinstance(response, dict) else []
+    text = "\n".join(
+        block.get("text", "")
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    diagnosis = parse_pre_edit_diagnosis(text)
+    if diagnosis is None:
+        runner.event_callback({"type": "diagnosis_failed", "reason": "invalid_json"})
+        return None
+    runner.event_callback({"type": "diagnosis_generated", **diagnosis})
+    return diagnosis
+
+
+def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, str]) -> None:
+    hint = (
+        "Likely diagnosis:\n"
+        f"- Target file: {diagnosis['target_file']}\n"
+        f"- Bug class: {diagnosis['bug_class']}\n"
+        f"- Repair intent: {diagnosis['fix_intent']}\n\n"
+        "Use this to focus your first inspection and first repair attempt. Treat it as a hint, not ground truth."
+    )
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content.insert(0, {"type": "text", "text": hint})
+        return
+    messages.insert(0, {"role": "user", "content": [{"type": "text", "text": hint}]})
+
+
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = [dict(m) for m in messages]
     if runner.small_model:
