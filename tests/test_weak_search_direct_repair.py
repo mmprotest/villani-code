@@ -78,7 +78,7 @@ def test_direct_repair_prompt_is_bounded(tmp_path: Path):
         execution_mode="direct_repair",
     )
     assert "bounded local repair" in prompt
-    assert "Exact target file: src/app.py" in prompt
+    assert "Exact implementation target file: src/app.py" in prompt
     assert "Broad exploration is not allowed" in prompt
 
 
@@ -136,5 +136,31 @@ def test_direct_repair_prompt_profile_is_compact_and_targeted(tmp_path: Path):
         execution_mode="direct_repair",
     )
     assert "bounded local repair" in prompt
-    assert "Inspect the target file first" in prompt
+    assert "Inspect the target implementation file first" in prompt
     assert "smallest valid patch" in prompt
+
+
+def test_direct_repair_prompt_is_materially_smaller_than_general_prompt(tmp_path: Path):
+    runner = DummyRunner(tmp_path)
+    ex = CandidateExecutor(runner, "fix bug", 12, 1)
+    direct_prompt = ex._build_prompt(
+        suspect="src/app.py",
+        hypothesis_text="repair edge case",
+        constraints={"expected_files": ["src/app.py"], "visible_verification": ["pytest -q tests/test_app.py::test_fast"]},
+        failed_attempt_summary=[],
+        runtime_profile="benchmark",
+        baseline_handle="clean-copy",
+        policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+        execution_mode="direct_repair",
+    )
+    heavy_prompt = ex._build_prompt(
+        suspect="src/app.py",
+        hypothesis_text="repair edge case",
+        constraints={"expected_files": ["src/app.py"], "visible_verification": ["pytest -q tests/test_app.py::test_fast"], "allowlist_paths": ["src/"]},
+        failed_attempt_summary=["a", "b", "c"],
+        runtime_profile="benchmark",
+        baseline_handle="clean-copy",
+        policy_profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH.value,
+        execution_mode="heavy",
+    )
+    assert len(direct_prompt) < len(heavy_prompt)

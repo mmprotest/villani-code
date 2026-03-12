@@ -92,19 +92,32 @@ class WeakSearchController:
         board.attempts.append(attempt)
         return attempt
     def _select_direct_repair_target(self, suspects: list[Any], evidence: Evidence, config: Any) -> tuple[str, str]:
-        if len(config.expected_files) == 1:
-            return str(config.expected_files[0]), "expected_single_implementation_file"
-        stack = "\n".join([*evidence.stack_traces, *evidence.error_messages])
-        for suspect in suspects:
-            if not suspect.file:
-                continue
-            if suspect.file.startswith("tests/") and any(not s.file.startswith("tests/") for s in suspects):
-                continue
-            if suspect.file in stack:
-                return suspect.file, "stacktrace_or_error_path_match"
+        objective = self.instruction
+        impl_expected = [str(f) for f in list(config.expected_files) if f and not str(f).startswith("tests/")]
+
+        # 1) explicit implementation file in objective/user request
+        from villani_code.runtime.policy import _extract_implementation_paths
+
+        explicit_impl = _extract_implementation_paths(objective)
+        if len(explicit_impl) == 1:
+            return explicit_impl[0], "objective_explicit_implementation_file"
+
+        # 2) implementation file in stacktrace/stderr/failure text
+        stack = "\n".join([*evidence.stack_traces, *evidence.error_messages, objective])
+        stack_impl = _extract_implementation_paths(stack)
+        if len(set(stack_impl)) == 1:
+            return stack_impl[0], "stacktrace_or_error_path_match"
+
+        # 3) exactly one expected implementation file
+        if len(impl_expected) == 1:
+            return impl_expected[0], "expected_single_implementation_file"
+
+        # 4) strongest lexical overlap among implementation files
         impl_suspects = [s for s in suspects if s.file and not s.file.startswith("tests/")]
         if impl_suspects:
             return impl_suspects[0].file, "strongest_lexical_impl_overlap"
+
+        # 5) broader fallback
         if suspects:
             return suspects[0].file, "top_ranked_suspect"
         return "", "no_suspect_available"
@@ -114,13 +127,13 @@ class WeakSearchController:
         meaningful_patch = bool(result.changed_files and result.diff_text.strip())
         verification_improved = bool(result.target_verification_passed) or bool(result.score > 0.35)
         if result.blocked_reason.startswith("direct_repair_thrash"):
-            return True, "direct_mode_exploration_thrash"
+            return True, "exploratory_thrash"
         if meaningful_patch and not result.target_verification_passed:
-            return True, "meaningful_patch_failed_target_verification"
+            return True, "partial_fix"
         if result.attempt_category == "rejected_noop" and suspect:
-            return True, "noop_after_target_inspection"
+            return True, "no_meaningful_edit"
         if verification_improved:
-            return True, "partial_progress_requires_guided_search"
+            return True, "ambiguous_after_direct_failure"
         return False, "direct_repair_insufficient_signal"
     def _runtime_task_family(self, config: Any) -> str | None:
         return (getattr(config, "task_family", None) or "").strip() or None
@@ -159,7 +172,7 @@ class WeakSearchController:
             max_candidate_tool_calls=4,
             policy_profile=decision.profile.value,
             execution_mode="direct_repair",
-            session_context=session_context,
+            session_context=None,
             hypothesis_stage_skipped_initially=True,
         )
         return result, attempt_id, suspect_file
@@ -173,6 +186,8 @@ class WeakSearchController:
             previous_candidate_failed=False,
             no_progress_cycles=0,
             has_stacktrace_or_error=bool(self.instruction.strip()),
+            objective_text=self.instruction,
+            failure_text=self.instruction,
         )
         budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
         run_id = uuid.uuid4().hex[:12]
@@ -187,7 +202,7 @@ class WeakSearchController:
         )
         store = BlackboardStore(self.repo, run_id)
         store.write(board)
-        board.decision_log.append({"event": "strategy_selected", "strategy_selected": decision.strategy.value, "policy_profile": decision.profile.value, "reason": decision.reason, "direct_repair_first_used": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST, "initial_hypothesis_stage_skipped": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST})
+        board.decision_log.append({"event": "strategy_selected", "strategy_selected": decision.strategy.value, "policy_profile": decision.profile.value, "reason": decision.reason, "low_ambiguity_repair": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST, "direct_repair_first_used": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST, "initial_hypothesis_stage_skipped": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST})
         emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_started", run_id=run_id, task_id=board.task_id, policy_profile=decision.profile.value, strategy_selected=decision.strategy.value)
         frontier = BranchFrontier()
         no_improve = 0
@@ -200,7 +215,7 @@ class WeakSearchController:
         blocked_attempts = 0
         verified_attempts = 0
         executor = CandidateExecutor(self.runner, self.instruction, budgets.max_patch_lines, budgets.max_files_per_patch)
-        session_context = WeakSearchSessionContext(planning_prompt=self.instruction)
+        session_context: WeakSearchSessionContext | None = None
         blocked_reason = ""
         escalation_occurred = False
         fast_path_attempted = decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST
@@ -251,7 +266,7 @@ class WeakSearchController:
                     emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id="candidate-0", attempt_id=attempt_id, patch_artifact=direct.patch_artifact_path)
                     break
                 should_escalate, escalate_reason = self._should_escalate_after_direct_attempt(direct, suspect_file)
-                board.decision_log.append({"event": "direct_repair_result", "escalate": should_escalate, "reason": escalate_reason})
+                board.decision_log.append({"event": "direct_repair_result", "escalate": should_escalate, "reason": escalate_reason, "direct_attempt_result": direct.attempt_category})
                 if not should_escalate:
                     board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": escalate_reason}
                     break
@@ -263,6 +278,8 @@ class WeakSearchController:
                     previous_candidate_failed=True,
                     no_progress_cycles=1,
                     has_stacktrace_or_error=True,
+                    objective_text=self.instruction,
+                    failure_text=self.instruction,
                 )
                 if decision.strategy in {RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE, RuntimeStrategy.FULL_WEAK_SEARCH}:
                     escalation_occurred = True
@@ -270,6 +287,8 @@ class WeakSearchController:
                 else:
                     board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "direct_repair_no_escalation_profile"}
                     break
+            if session_context is None:
+                session_context = WeakSearchSessionContext(planning_prompt=self.instruction)
             for suspect in suspects:
                 from villani_code.hypothesize.generator import generate_hypotheses
                 kept, rejected, fallback_used = generate_hypotheses(suspect, self.instruction, budgets.max_hypotheses_per_suspect, runner=self.runner)
@@ -350,6 +369,8 @@ class WeakSearchController:
                         previous_candidate_failed=True,
                         no_progress_cycles=no_improve,
                         has_stacktrace_or_error=True,
+                        objective_text=self.instruction,
+                        failure_text=self.instruction,
                     )
                     if decision.strategy in {RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE, RuntimeStrategy.FULL_WEAK_SEARCH}:
                         escalation_occurred = True
@@ -374,6 +395,7 @@ class WeakSearchController:
             "stop_reason": board.final_result.get("stop_reason"),
             "policy_profile": decision.profile.value,
             "strategy_selected": decision.strategy.value,
+            "low_ambiguity_repair": fast_path_attempted,
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
@@ -386,6 +408,7 @@ class WeakSearchController:
             "target_selection_reason": next((d.get("target_selection_reason") for d in board.decision_log if d.get("event")=="target_selected"), ""),
             "escalated_after_direct_failure": escalation_occurred,
             "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
+            "direct_attempt_result": next((d.get("direct_attempt_result") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
             "exploration_block_triggered": any(a.verifier_outputs.get("exploration_block_triggered", False) for a in board.attempts),
             "prompt_tokens_first_attempt": next((a.verifier_outputs.get("prompt_tokens_first_attempt", 0) for a in board.attempts), 0),
             "tool_calls_first_attempt": next((a.verifier_outputs.get("tool_calls_first_attempt", 0) for a in board.attempts), 0),
@@ -414,6 +437,7 @@ class WeakSearchController:
             "verified_attempts": verified_attempts,
             "policy_profile": decision.profile.value,
             "strategy_selected": decision.strategy.value,
+            "low_ambiguity_repair": fast_path_attempted,
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
@@ -426,6 +450,7 @@ class WeakSearchController:
             "target_selection_reason": next((d.get("target_selection_reason") for d in board.decision_log if d.get("event")=="target_selected"), ""),
             "escalated_after_direct_failure": escalation_occurred,
             "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
+            "direct_attempt_result": next((d.get("direct_attempt_result") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
             "exploration_block_triggered": any(a.verifier_outputs.get("exploration_block_triggered", False) for a in board.attempts),
             "prompt_tokens_first_attempt": next((a.verifier_outputs.get("prompt_tokens_first_attempt", 0) for a in board.attempts), 0),
             "tool_calls_first_attempt": next((a.verifier_outputs.get("tool_calls_first_attempt", 0) for a in board.attempts), 0),

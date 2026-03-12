@@ -59,3 +59,44 @@ def test_direct_mode_blocks_broad_exploration_before_target_inspection(tmp_path:
     assert result.blocked_reason == "blocked_model_failure"
     assert result.attempt_summary.startswith("direct_repair_thrash:first_tool_not_target_inspection")
     assert result.exploration_block_triggered is True
+
+class ConfigReadClient:
+    def __init__(self):
+        self.calls = 0
+
+    def create_message(self, _payload, stream=False):
+        self.calls += 1
+        if self.calls == 1:
+            return {"content": [{"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "src/app.py"}}]}
+        return {"content": [{"type": "tool_use", "id": "u2", "name": "Read", "input": {"file_path": "pyproject.toml"}}]}
+
+
+def test_direct_mode_blocks_unrelated_config_read_before_patch(tmp_path: Path):
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
+
+    runner = DummyRunner(tmp_path)
+    runner.client = ConfigReadClient()
+    ex = CandidateExecutor(runner, "fix", 12, 1)
+
+    result = ex.evaluate_candidate(
+        repo_path=tmp_path,
+        objective="fix",
+        suspect_region="src/app.py",
+        hypothesis_id="candidate-0",
+        hypothesis="repair local bug",
+        constraints={"visible_verification": ["python -c \"print(1)\""]},
+        runtime_profile="benchmark",
+        benchmark_config=BenchmarkRuntimeConfig(enabled=True, expected_files=["src/app.py"], visible_verification=["python -c \"print(1)\""]),
+        baseline_handle="clean-copy",
+        edit_budget=ex.edit_budget,
+        branch_failure_history=[],
+        timeout_budget_seconds=30.0,
+        attempt_id="att-2",
+        max_candidate_turns=2,
+        max_candidate_tool_calls=4,
+        execution_mode="direct_repair",
+        session_context=WeakSearchSessionContext(planning_prompt="fix"),
+    )
+    assert result.attempt_summary.startswith("direct_repair_thrash:unrelated_config_before_patch")
+    assert result.exploration_block_triggered is True
