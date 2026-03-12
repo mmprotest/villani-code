@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import difflib
+import json
 from dataclasses import dataclass
 from pathlib import Path
-
-from villani_code.patch_apply import PatchApplyError, apply_unified_diff, parse_unified_diff
+from typing import Literal
 
 
 @dataclass(slots=True)
@@ -18,6 +18,16 @@ class TransformApplyResult:
     changed_line_count: int = 0
 
 
+@dataclass(slots=True)
+class PatchProposal:
+    mode: Literal["full_file", "snippet_replace"]
+    file_path: str
+    new_content: str | None = None
+    old_snippet: str | None = None
+    new_snippet: str | None = None
+    rationale: str | None = None
+
+
 def apply_model_transform(
     *,
     workspace: Path,
@@ -26,113 +36,88 @@ def apply_model_transform(
     model_output: str,
     allow_additional_files: set[str] | None = None,
 ) -> TransformApplyResult:
-    text = (model_output or "").strip()
-    if not text:
+    if not (model_output or "").strip():
         return TransformApplyResult(success=False, parse_failure_reason="empty_output")
+    proposal, parse_failure_reason = _parse_patch_proposal(model_output)
+    if proposal is None:
+        return TransformApplyResult(success=False, parse_failure_reason=parse_failure_reason)
 
     allowed = {target_file}
     if allow_additional_files:
         allowed.update({p for p in allow_additional_files if p})
+    if proposal.file_path not in allowed:
+        return TransformApplyResult(success=False, parse_failure_reason="proposal_target_mismatch")
 
-    unified = _try_apply_unified_diff(
+    if proposal.mode == "full_file":
+        return _apply_full_file_proposal(
+            workspace=workspace,
+            target_file=target_file,
+            current_content=current_content,
+            proposal=proposal,
+        )
+    return _apply_snippet_replace_proposal(
         workspace=workspace,
         target_file=target_file,
         current_content=current_content,
-        model_output=text,
-        allowed_files=allowed,
+        proposal=proposal,
     )
-    if unified.success:
-        return unified
-
-    full_file = _try_apply_full_file(
-        workspace=workspace,
-        target_file=target_file,
-        current_content=current_content,
-        model_output=text,
-    )
-    if full_file.success:
-        return full_file
-
-    snippet = _try_apply_snippet_replace(
-        workspace=workspace,
-        target_file=target_file,
-        current_content=current_content,
-        model_output=text,
-    )
-    if snippet.success:
-        return snippet
-
-    parse_reason = snippet.parse_failure_reason or full_file.parse_failure_reason or unified.parse_failure_reason or "unrecognized_output"
-    apply_reason = snippet.apply_failure_reason or full_file.apply_failure_reason or unified.apply_failure_reason
-    return TransformApplyResult(success=False, parse_failure_reason=parse_reason, apply_failure_reason=apply_reason)
 
 
-def _try_apply_unified_diff(*, workspace: Path, target_file: str, current_content: str, model_output: str, allowed_files: set[str]) -> TransformApplyResult:
-    if "--- " not in model_output or "+++ " not in model_output:
-        return TransformApplyResult(success=False, parse_failure_reason="unified_diff_not_detected")
+def _parse_patch_proposal(model_output: str) -> tuple[PatchProposal | None, str]:
+    text = (model_output or "").strip()
     try:
-        parsed = parse_unified_diff(model_output)
-    except Exception as exc:  # noqa: BLE001
-        return TransformApplyResult(success=False, parse_failure_reason="unified_diff_parse_failed", apply_failure_reason=str(exc))
-    if not parsed:
-        return TransformApplyResult(success=False, parse_failure_reason="unified_diff_parse_failed", apply_failure_reason="empty_diff")
-    targets = {p.new_path.removeprefix("a/").removeprefix("b/") for p in parsed}
-    if not targets.issubset(allowed_files):
-        return TransformApplyResult(success=False, parse_failure_reason="unified_diff_target_mismatch")
-    try:
-        apply_unified_diff(workspace, model_output)
-    except Exception as exc:  # noqa: BLE001
-        return TransformApplyResult(success=False, parse_failure_reason="unified_diff_apply_failed", apply_failure_reason=str(exc))
-    new_content = (workspace / target_file).read_text(encoding="utf-8") if (workspace / target_file).exists() else ""
-    diff = _build_single_file_diff(target_file, current_content, new_content)
-    return TransformApplyResult(
-        success=True,
-        apply_mode="unified_diff",
-        new_content=new_content,
-        diff_text=diff,
-        changed_line_count=_count_changed_lines(current_content, new_content),
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None, "proposal_json_decode_failed"
+    if not isinstance(payload, dict):
+        return None, "proposal_not_object"
+
+    mode = payload.get("mode")
+    file_path = payload.get("file_path")
+    if mode not in {"full_file", "snippet_replace"}:
+        return None, "proposal_invalid_mode"
+    if not isinstance(file_path, str) or not file_path.strip():
+        return None, "proposal_missing_file_path"
+
+    proposal = PatchProposal(
+        mode=mode,
+        file_path=file_path.strip(),
+        new_content=payload.get("new_content"),
+        old_snippet=payload.get("old_snippet"),
+        new_snippet=payload.get("new_snippet"),
+        rationale=payload.get("rationale"),
     )
+    if proposal.mode == "full_file":
+        if not isinstance(proposal.new_content, str):
+            return None, "proposal_missing_new_content"
+    if proposal.mode == "snippet_replace":
+        if not isinstance(proposal.old_snippet, str):
+            return None, "proposal_missing_old_snippet"
+        if not isinstance(proposal.new_snippet, str):
+            return None, "proposal_missing_new_snippet"
+    return proposal, ""
 
 
-def _try_apply_full_file(*, workspace: Path, target_file: str, current_content: str, model_output: str) -> TransformApplyResult:
-    body = ""
-    if model_output.startswith("NEW FILE CONTENT"):
-        header, _, rest = model_output.partition("\n")
-        hinted = header.replace("NEW FILE CONTENT", "").strip()
-        if hinted and hinted != target_file:
-            return TransformApplyResult(success=False, parse_failure_reason="full_file_target_mismatch")
-        body = rest
-    elif "--- " not in model_output and "+++ " not in model_output and "SNIPPET_REPLACE" not in model_output:
-        body = model_output
-    else:
-        return TransformApplyResult(success=False, parse_failure_reason="full_file_not_detected")
-
-    (workspace / target_file).write_text(body, encoding="utf-8")
-    diff = _build_single_file_diff(target_file, current_content, body)
+def _apply_full_file_proposal(*, workspace: Path, target_file: str, current_content: str, proposal: PatchProposal) -> TransformApplyResult:
+    assert proposal.new_content is not None
+    (workspace / target_file).write_text(proposal.new_content, encoding="utf-8")
+    diff = _build_single_file_diff(target_file, current_content, proposal.new_content)
     return TransformApplyResult(
         success=True,
         apply_mode="full_file",
-        new_content=body,
+        new_content=proposal.new_content,
         diff_text=diff,
-        changed_line_count=_count_changed_lines(current_content, body),
+        changed_line_count=_count_changed_lines(current_content, proposal.new_content),
     )
 
 
-def _try_apply_snippet_replace(*, workspace: Path, target_file: str, current_content: str, model_output: str) -> TransformApplyResult:
-    if "SNIPPET_REPLACE" not in model_output or "OLD_SNIPPET:" not in model_output or "NEW_SNIPPET:" not in model_output:
-        return TransformApplyResult(success=False, parse_failure_reason="snippet_replace_not_detected")
-
-    file_hint = ""
-    if "FILE:" in model_output:
-        part = model_output.split("FILE:", 1)[1]
-        file_hint = part.splitlines()[0].strip()
-        if file_hint and file_hint != target_file:
-            return TransformApplyResult(success=False, parse_failure_reason="snippet_target_mismatch")
-
-    old_block = model_output.split("OLD_SNIPPET:", 1)[1].split("NEW_SNIPPET:", 1)[0].strip("\n")
-    new_block = model_output.split("NEW_SNIPPET:", 1)[1].strip("\n")
+def _apply_snippet_replace_proposal(*, workspace: Path, target_file: str, current_content: str, proposal: PatchProposal) -> TransformApplyResult:
+    assert proposal.old_snippet is not None
+    assert proposal.new_snippet is not None
+    old_block = proposal.old_snippet
+    new_block = proposal.new_snippet
     if old_block not in current_content:
-        return TransformApplyResult(success=False, parse_failure_reason="snippet_old_block_not_found", apply_failure_reason="snippet_old_block_not_found")
+        return TransformApplyResult(success=False, parse_failure_reason="proposal_old_snippet_not_found", apply_failure_reason="proposal_old_snippet_not_found")
     updated = current_content.replace(old_block, new_block, 1)
     (workspace / target_file).write_text(updated, encoding="utf-8")
     diff = _build_single_file_diff(target_file, current_content, updated)

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
@@ -40,40 +41,28 @@ def _run_direct(ex: CandidateExecutor, repo: Path):
     )
 
 
-def test_stage1_applies_valid_unified_diff(monkeypatch, tmp_path: Path):
+def test_stage1_applies_full_file_proposal(monkeypatch, tmp_path: Path):
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
     ex = CandidateExecutor(DummyRunner(tmp_path), "fix bug", 20, 1)
 
-    monkeypatch.setattr(ex, "_request_patch_output", lambda *_args, **_kwargs: "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x=1\n+x=2")
-    monkeypatch.setattr(ex, "_run_verification", lambda *_args, **_kwargs: ({"target_verification_passed": True, "static_sanity_passed": True, "target_exit_codes": [0], "target_command_count": 1}, True, 0.9, {"minimality": 1.0, "novelty": 1.0}))
-
-    result = _run_direct(ex, tmp_path)
-    assert result.success is True
-    assert result.apply_mode == "unified_diff"
-    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "x=1\n"
-
-
-def test_stage1_applies_whole_file_fallback(monkeypatch, tmp_path: Path):
-    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
-    ex = CandidateExecutor(DummyRunner(tmp_path), "fix bug", 20, 1)
-
-    monkeypatch.setattr(ex, "_request_patch_output", lambda *_args, **_kwargs: "NEW FILE CONTENT src/app.py\nx=2\n")
+    proposal = json.dumps({"mode": "full_file", "file_path": "src/app.py", "new_content": "x=2\n", "old_snippet": None, "new_snippet": None, "rationale": "fix"})
+    monkeypatch.setattr(ex, "_request_patch_proposal", lambda *_args, **_kwargs: proposal)
     monkeypatch.setattr(ex, "_run_verification", lambda *_args, **_kwargs: ({"target_verification_passed": True, "static_sanity_passed": True, "target_exit_codes": [0], "target_command_count": 1}, True, 0.9, {"minimality": 1.0, "novelty": 1.0}))
 
     result = _run_direct(ex, tmp_path)
     assert result.success is True
     assert result.apply_mode == "full_file"
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "x=1\n"
 
 
-def test_stage1_applies_snippet_replace_fallback(monkeypatch, tmp_path: Path):
+def test_stage1_applies_snippet_replace_proposal(monkeypatch, tmp_path: Path):
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
     ex = CandidateExecutor(DummyRunner(tmp_path), "fix bug", 20, 1)
 
-    patch = "SNIPPET_REPLACE\nFILE: src/app.py\nOLD_SNIPPET:\nx=1\nNEW_SNIPPET:\nx=2\n"
-    monkeypatch.setattr(ex, "_request_patch_output", lambda *_args, **_kwargs: patch)
+    proposal = json.dumps({"mode": "snippet_replace", "file_path": "src/app.py", "new_content": None, "old_snippet": "x=1\n", "new_snippet": "x=2\n", "rationale": "fix"})
+    monkeypatch.setattr(ex, "_request_patch_proposal", lambda *_args, **_kwargs: proposal)
     monkeypatch.setattr(ex, "_run_verification", lambda *_args, **_kwargs: ({"target_verification_passed": True, "static_sanity_passed": True, "target_exit_codes": [0], "target_command_count": 1}, True, 0.9, {"minimality": 1.0, "novelty": 1.0}))
 
     result = _run_direct(ex, tmp_path)
@@ -81,12 +70,13 @@ def test_stage1_applies_snippet_replace_fallback(monkeypatch, tmp_path: Path):
     assert result.apply_mode == "snippet_replace"
 
 
-def test_stage1_malformed_patch_returns_blocked_runtime_error(monkeypatch, tmp_path: Path):
+def test_stage1_proposal_target_mismatch_returns_blocked_runtime_error(monkeypatch, tmp_path: Path):
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
     ex = CandidateExecutor(DummyRunner(tmp_path), "fix bug", 20, 1)
 
-    monkeypatch.setattr(ex, "_request_patch_output", lambda *_args, **_kwargs: "--- a/src/other.py\n+++ b/src/other.py\n@@ -1 +1 @@\n-a\n+b")
+    proposal = json.dumps({"mode": "full_file", "file_path": "src/other.py", "new_content": "x=2\n", "old_snippet": None, "new_snippet": None, "rationale": "fix"})
+    monkeypatch.setattr(ex, "_request_patch_proposal", lambda *_args, **_kwargs: proposal)
 
     result = _run_direct(ex, tmp_path)
     assert result.attempt_category == "blocked_runtime_error"
