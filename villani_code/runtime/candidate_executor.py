@@ -59,8 +59,9 @@ class CandidateExecutionResult:
     escalation_occurred: bool = False
     escalation_reason: str = ""
     hypothesis_stage_skipped_initially: bool = False
-
-
+    prompt_tokens_first_attempt: int = 0
+    tool_calls_first_attempt: int = 0
+    exploration_block_triggered: bool = False
 
 
 @dataclass(slots=True)
@@ -77,6 +78,8 @@ class CandidateExecutor:
         self.edit_budget = EditBudget(max_files=max_files_per_patch, max_lines=max_patch_lines)
         self._last_tool_execution_seconds = 0.0
         self._last_assistant_completion_text = ""
+        self._last_tool_calls = 0
+        self._last_exploration_block_triggered = False
 
     def evaluate_candidate(
         self,
@@ -120,6 +123,7 @@ class CandidateExecutor:
                 execution_mode=execution_mode,
             )
             prompt_build_seconds = time.monotonic() - prompt_started
+            prompt_tokens = len(prompt.split())
             model_started = time.monotonic()
             try:
                 model_err = self._run_model_edit_pass(
@@ -154,6 +158,9 @@ class CandidateExecutor:
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
                     hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
+                    prompt_tokens_first_attempt=prompt_tokens,
+                    tool_calls_first_attempt=self._last_tool_calls,
+                    exploration_block_triggered=self._last_exploration_block_triggered,
                 )
 
             after_map = self._read_repo_text_map(workspace)
@@ -181,6 +188,9 @@ class CandidateExecutor:
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
                     hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
+                    prompt_tokens_first_attempt=prompt_tokens,
+                    tool_calls_first_attempt=self._last_tool_calls,
+                    exploration_block_triggered=self._last_exploration_block_triggered,
                 )
 
             policy = enforce_path_policy(
@@ -226,6 +236,9 @@ class CandidateExecutor:
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
                     hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
+                    prompt_tokens_first_attempt=prompt_tokens,
+                    tool_calls_first_attempt=self._last_tool_calls,
+                    exploration_block_triggered=self._last_exploration_block_triggered,
                 )
 
             verification_started = time.monotonic()
@@ -258,6 +271,9 @@ class CandidateExecutor:
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
                     hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
+                    prompt_tokens_first_attempt=prompt_tokens,
+                    tool_calls_first_attempt=self._last_tool_calls,
+                    exploration_block_triggered=self._last_exploration_block_triggered,
                 )
 
             failure_sig_payload = {
@@ -302,6 +318,9 @@ class CandidateExecutor:
                 direct_repair_suspect=suspect_region if direct_mode else "",
                 session_context_reused=bool(session_context and session_context.planning_initialized),
                 hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
+                prompt_tokens_first_attempt=prompt_tokens,
+                tool_calls_first_attempt=self._last_tool_calls,
+                exploration_block_triggered=self._last_exploration_block_triggered,
             )
         finally:
             cleanup_candidate_workspace(handle)
@@ -329,20 +348,22 @@ class CandidateExecutor:
         )
 
     def _build_direct_repair_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str]) -> str:
-        return (
-            f"Objective: {self.instruction}\n"
-            "Profile: direct_repair_fast_path (bounded single-file bugfix).\n"
-            f"Primary suspect file: {suspect}\n"
-            "Task constraints: edit exactly one file unless impossible.\n"
-            "Forbidden: broad repository exploration, large plans, refactors, multi-file sweeps.\n"
-            "Required order: inspect suspect file first; inspect the relevant failing test only if suspect is insufficient.\n"
-            "Use top-1 suspect only and produce the smallest valid patch.\n"
-            "After a meaningful patch, immediately run target verification and stop.\n"
-            "Stop immediately once the patch is ready.\n"
-            f"Hypothesis seed: {hypothesis_text}\n"
-            f"Constraints: {json.dumps(constraints)}\n"
-            f"Recent failures: {failed_attempt_summary[-1:]}"
-        )
+        verification_target = constraints.get("visible_verification") or constraints.get("expected_files") or []
+        lines = [
+            f"Objective: {self.instruction}",
+            "This looks like a bounded local repair.",
+            f"Exact target file: {suspect}",
+            f"Relevant failure evidence: {hypothesis_text}",
+            f"Verification target: {verification_target}",
+            "Inspect the target file first.",
+            "Edit only the target file unless impossible.",
+            "Broad exploration is not allowed on this attempt.",
+            "Inspect one relevant failing test only if necessary.",
+            "Make the smallest valid patch, then verify, then stop.",
+        ]
+        if failed_attempt_summary:
+            lines.append(f"Prior direct failure: {failed_attempt_summary[-1]}")
+        return "\n".join(lines)
 
     def _run_model_edit_pass(self, workspace: Path, prompt: str, *, max_candidate_turns: int, max_candidate_tool_calls: int, timeout_budget_seconds: float, execution_mode: str, session_context: WeakSearchSessionContext | None, suspect_file: str) -> str:
         original_repo = self.runner.repo
@@ -360,7 +381,10 @@ class CandidateExecutor:
             system = build_system_blocks(workspace, benchmark_config=self.runner.benchmark_config)
             continuation_used = False
             touched_suspect = False
+            inspected_suspect = False
             self._last_assistant_completion_text = ""
+            self._last_tool_calls = 0
+            self._last_exploration_block_triggered = False
             while turns < max_candidate_turns and tool_calls < max_candidate_tool_calls:
                 if time.monotonic() - start > timeout_budget_seconds:
                     return "candidate execution timeout"
@@ -389,12 +413,24 @@ class CandidateExecutor:
                     if tool_calls >= max_candidate_tool_calls:
                         break
                     tool_calls += 1
+                    self._last_tool_calls = tool_calls
                     tool_name = str(block.get("name", ""))
                     tool_input = dict(block.get("input", {}))
                     tool_use_id = str(block.get("id", f"cand-tool-{tool_calls}"))
                     tool_start = time.monotonic()
-                    if execution_mode == "direct_repair" and tool_name in {"Glob", "Search", "GitLog", "GitBranch", "GitCheckout"}:
-                        return f"direct_repair_thrash:{tool_name}"
+                    if execution_mode == "direct_repair":
+                        path_hint = str(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("dir") or "")
+                        broad_ls = tool_name == "Ls" and path_hint.strip() in {"", ".", "src", "src/", "tests", "tests/"}
+                        broad_probe = tool_name in {"Glob", "Search", "GitLog", "GitBranch", "GitCheckout"} or broad_ls
+                        inspects_target = tool_name in {"Read", "View", "Cat"} and bool(suspect_file) and suspect_file in path_hint
+                        if tool_calls == 1 and not inspects_target:
+                            self._last_exploration_block_triggered = True
+                            return f"direct_repair_thrash:first_tool_not_target_inspection:{tool_name}"
+                        if broad_probe and not inspected_suspect:
+                            self._last_exploration_block_triggered = True
+                            return f"direct_repair_thrash:{tool_name}"
+                        if inspects_target:
+                            inspected_suspect = True
                     result = self.runner._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
                     tool_seconds += time.monotonic() - tool_start
                     if execution_mode == "direct_repair" and tool_name in {"Write", "Patch"}:
@@ -416,7 +452,11 @@ class CandidateExecutor:
                     if continuation_used:
                         return "direct_repair_continuation_exhausted"
                     if not touched_suspect:
-                        return "direct_repair_no_progress_on_suspect_file"
+                        if not inspected_suspect:
+                            return "direct_repair_no_progress_on_suspect_file"
+                        continuation_used = True
+                        max_candidate_turns = min(max_candidate_turns, 2)
+                        continue
                     continuation_used = True
                     max_candidate_turns = min(max_candidate_turns, 2)
             return "candidate interaction budget exceeded"
@@ -424,6 +464,7 @@ class CandidateExecutor:
             return str(exc)
         finally:
             self._last_tool_execution_seconds = tool_seconds
+            self._last_tool_calls = tool_calls
             self.runner.repo = original_repo
 
     @staticmethod

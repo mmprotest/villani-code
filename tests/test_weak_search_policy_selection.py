@@ -2,7 +2,7 @@ from pathlib import Path
 
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.runtime.controller import WeakSearchController
-from villani_code.runtime.policy import WeakSearchPolicyProfile
+from villani_code.runtime.policy import RuntimeStrategy, WeakSearchPolicyProfile
 
 
 class DummyClient:
@@ -42,7 +42,7 @@ def test_controller_passes_real_task_family_and_type_to_policy(monkeypatch, tmp_
         observed["task_type"] = kwargs.get("task_type")
         from villani_code.runtime.policy import PolicyDecision
 
-        return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="test")
+        return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE, reason="test")
 
     monkeypatch.setattr("villani_code.runtime.controller.decide_runtime_policy", fake_policy)
 

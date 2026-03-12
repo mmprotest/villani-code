@@ -77,9 +77,9 @@ def test_direct_repair_prompt_is_bounded(tmp_path: Path):
         policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
         execution_mode="direct_repair",
     )
-    assert "bounded single-file bugfix" in prompt
-    assert "Forbidden: broad repository exploration" in prompt
-    assert "edit exactly one file" in prompt
+    assert "bounded local repair" in prompt
+    assert "Exact target file: src/app.py" in prompt
+    assert "Broad exploration is not allowed" in prompt
 
 
 def test_direct_repair_uses_expected_file_and_skips_hypothesis_stage(monkeypatch, tmp_path: Path):
@@ -117,6 +117,7 @@ def test_direct_repair_uses_expected_file_and_skips_hypothesis_stage(monkeypatch
 
     out = WeakSearchController(runner, "fix config precedence").run()
     assert out["weak_search"]["direct_patch_attempted"] is True
+    assert out["weak_search"]["strategy_selected"] == "direct_repair_first"
     assert called["suspect"] == "src/app/config.py"
     assert called["hyp"] == 0
 
@@ -134,6 +135,6 @@ def test_direct_repair_prompt_profile_is_compact_and_targeted(tmp_path: Path):
         policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
         execution_mode="direct_repair",
     )
-    assert "bounded single-file bugfix" in prompt
-    assert "broad repository exploration" in prompt
-    assert "immediately run target verification" in prompt
+    assert "bounded local repair" in prompt
+    assert "Inspect the target file first" in prompt
+    assert "smallest valid patch" in prompt

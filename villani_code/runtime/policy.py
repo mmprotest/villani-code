@@ -12,6 +12,12 @@ class WeakSearchPolicyProfile(StrEnum):
     ESCALATED_WEAK_SEARCH = "escalated_weak_search"
 
 
+class RuntimeStrategy(StrEnum):
+    DIRECT_REPAIR_FIRST = "direct_repair_first"
+    GUIDED_SEARCH_AFTER_FAILURE = "guided_search_after_failure"
+    FULL_WEAK_SEARCH = "full_weak_search"
+
+
 def is_direct_repair_profile(profile: str | WeakSearchPolicyProfile) -> bool:
     normalized = WeakSearchPolicyProfile(str(profile))
     return normalized in {WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE}
@@ -20,6 +26,7 @@ def is_direct_repair_profile(profile: str | WeakSearchPolicyProfile) -> bool:
 @dataclass(slots=True)
 class PolicyDecision:
     profile: WeakSearchPolicyProfile
+    strategy: RuntimeStrategy
     reason: str
 
 
@@ -67,13 +74,18 @@ def decide_runtime_policy(
     has_repro = "repro" in task_id.lower() or any("repro" in command.lower() for command in visible_verification)
 
     if previous_candidate_failed and (no_progress_cycles >= 1 or max_files_touched > 1):
-        return PolicyDecision(profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH, reason="failed_fast_path_or_no_progress")
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH,
+            strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE,
+            reason="failed_direct_repair_or_no_progress",
+        )
 
-    if is_interactive:
-        return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="interactive_defaults_to_normal")
-
-    if has_repro:
-        return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="repro_task")
+    if has_repro and not previous_candidate_failed:
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
+            strategy=RuntimeStrategy.FULL_WEAK_SEARCH,
+            reason="repro_signal_requires_broader_diagnosis",
+        )
 
     expected_single_file = len(expected_files) == 1
     normalized_task_family = (task_family or "").strip().lower()
@@ -89,9 +101,35 @@ def decide_runtime_policy(
         and not excludes_direct_path
     )
     if easy_single_file:
-        return PolicyDecision(profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, reason="single_file_benchmark_fast_path")
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH,
+            strategy=RuntimeStrategy.DIRECT_REPAIR_FIRST,
+            reason="low_ambiguity_local_repair",
+        )
+
+    if is_interactive and max_files_touched <= 1 and has_stacktrace_or_error:
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH,
+            strategy=RuntimeStrategy.DIRECT_REPAIR_FIRST,
+            reason="interactive_low_ambiguity_with_local_failure_signal",
+        )
 
     if no_progress_cycles >= 2 and has_stacktrace_or_error:
-        return PolicyDecision(profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH, reason="stalled_with_failure_signal")
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH,
+            strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE,
+            reason="stalled_with_failure_signal",
+        )
 
-    return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="default")
+    if max_files_touched > 1 or normalized_task_family in {"terminal_workflow", "repo_navigation", "repro_test"}:
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
+            strategy=RuntimeStrategy.FULL_WEAK_SEARCH,
+            reason="high_ambiguity_or_multi_file_task",
+        )
+
+    return PolicyDecision(
+        profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
+        strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE,
+        reason="moderate_ambiguity_default",
+    )
