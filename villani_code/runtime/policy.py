@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+
+class WeakSearchPolicyProfile(StrEnum):
+    FAST_PATH_SINGLE_FILE = "fast_path_single_file"
+    NORMAL_WEAK_SEARCH = "normal_weak_search"
+    ESCALATED_WEAK_SEARCH = "escalated_weak_search"
+
+
+@dataclass(slots=True)
+class PolicyDecision:
+    profile: WeakSearchPolicyProfile
+    reason: str
+
+
 
 def allow_scope_expansion(current_level: str, evidence_score: float) -> tuple[bool, str]:
     if evidence_score < 0.65:
@@ -11,3 +28,53 @@ def allow_scope_expansion(current_level: str, evidence_score: float) -> tuple[bo
     if current_level == "adjacent_file":
         return True, "two_files"
     return False, current_level
+
+
+
+def _is_simple_targeted_verification(commands: list[str]) -> bool:
+    if not commands:
+        return False
+    lowered = " ".join(commands).lower()
+    return any(marker in lowered for marker in ("pytest", "python -m", "unittest", "nose", "repro", "-k ", "::"))
+
+
+
+def decide_runtime_policy(
+    *,
+    benchmark_config: Any,
+    is_interactive: bool,
+    task_family: str | None,
+    previous_candidate_failed: bool,
+    no_progress_cycles: int,
+    has_stacktrace_or_error: bool,
+) -> PolicyDecision:
+    expected_files = list(getattr(benchmark_config, "expected_files", []) or [])
+    max_files_touched = int(getattr(benchmark_config, "max_files_touched", 1) or 1)
+    visible_verification = list(getattr(benchmark_config, "visible_verification", []) or [])
+    task_id = str(getattr(benchmark_config, "task_id", "") or "")
+    has_repro = "repro" in task_id.lower() or any("repro" in command.lower() for command in visible_verification)
+
+    if previous_candidate_failed and (no_progress_cycles >= 1 or max_files_touched > 1):
+        return PolicyDecision(profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH, reason="failed_fast_path_or_no_progress")
+
+    if is_interactive:
+        return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="interactive_defaults_to_normal")
+
+    if has_repro:
+        return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="repro_task")
+
+    expected_single_file = len(expected_files) == 1
+    easy_single_file = (
+        bool(getattr(benchmark_config, "enabled", False))
+        and expected_single_file
+        and max_files_touched <= 1
+        and _is_simple_targeted_verification(visible_verification)
+        and (task_family in {None, "", "localize_patch"})
+    )
+    if easy_single_file:
+        return PolicyDecision(profile=WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE, reason="single_file_benchmark_fast_path")
+
+    if no_progress_cycles >= 2 and has_stacktrace_or_error:
+        return PolicyDecision(profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH, reason="stalled_with_failure_signal")
+
+    return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="default")
