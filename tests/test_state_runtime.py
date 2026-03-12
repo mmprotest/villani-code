@@ -214,3 +214,34 @@ def test_verification_reports_locked_scope_without_attributable_diff(tmp_path: P
 
     out = runner._run_verification("edit")
     assert "no intentional diff is currently attributable in locked scope" in out
+
+
+def test_parse_pre_edit_diagnosis_accepts_strict_json() -> None:
+    raw = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
+    parsed = state_runtime.parse_pre_edit_diagnosis(raw)
+    assert parsed == {
+        "target_file": "src/app/config.py",
+        "bug_class": "wrong_precedence",
+        "fix_intent": "Prefer env over file values.",
+    }
+
+
+def test_parse_pre_edit_diagnosis_rejects_invalid_json() -> None:
+    assert state_runtime.parse_pre_edit_diagnosis('not json') is None
+    assert state_runtime.parse_pre_edit_diagnosis('{"target_file":"x"}') is None
+
+
+def test_inject_diagnosis_hint_prepends_user_context() -> None:
+    messages = [{"role": "user", "content": [{"type": "text", "text": "fix bug"}]}]
+    state_runtime.inject_diagnosis_hint(
+        messages,
+        {
+            "target_file": "src/app/config.py",
+            "bug_class": "wrong_precedence",
+            "fix_intent": "Prefer env over file values.",
+        },
+    )
+    first = messages[0]["content"][0]["text"]
+    assert "Likely diagnosis:" in first
+    assert "Target file: src/app/config.py" in first
+    assert "Treat it as a hint, not ground truth." in first

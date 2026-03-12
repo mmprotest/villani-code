@@ -176,6 +176,18 @@ class Runner:
         messages = messages or build_initial_messages(self.repo, instruction)
         self._ensure_project_memory_and_plan(instruction)
         self._task_mode = classify_task_mode(instruction)
+        diagnosis = None
+        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
+            try:
+                from villani_code import state_runtime
+
+                diagnosis = state_runtime.run_pre_edit_diagnosis(self, instruction)
+            except Exception:
+                diagnosis = None
+            if diagnosis:
+                from villani_code import state_runtime
+
+                state_runtime.inject_diagnosis_hint(messages, diagnosis)
         tools = tool_specs()
         transcript: dict[str, Any] = {
             "requests": [],

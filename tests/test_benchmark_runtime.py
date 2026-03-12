@@ -493,3 +493,32 @@ def test_recovery_attempt_semantics() -> None:
     assert BenchmarkRunner._recovery_attempted(1, 1, False, FailureReason.HIDDEN_VERIFICATION_FAILED) is True
     assert BenchmarkRunner._recovery_attempted(0, 1, False, None) is False
     assert BenchmarkRunner._recovery_attempted(0, 2, True, FailureReason.VISIBLE_VERIFICATION_FAILED) is True
+
+
+def test_benchmark_runtime_uses_diagnosis_step_without_new_flags(tmp_path: Path) -> None:
+    cfg = _benchmark_config()
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, _payload, stream):
+            assert stream is False
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '{"target_file":"src/app.py","bug_class":"unknown","fix_intent":"Inspect failing path and patch minimal implementation."}',
+                        }
+                    ],
+                }
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    client = Client()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, benchmark_config=cfg)
+    out = runner.run("fix benchmark bug")
+    assert out["execution"]["terminated_reason"] in {"benchmark_incomplete_no_patch", "completed"}
+    assert client.calls >= 2

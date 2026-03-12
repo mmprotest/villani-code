@@ -354,7 +354,7 @@ def test_small_model_run_injects_task_contract_steering_message(tmp_path: Path):
     client = FakeClientStall()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True)
     runner.run("fix failing test in src/foo.py")
-    first_payload = client.payloads[0]
+    first_payload = client.payloads[1]
     user_texts = [
         b.get("text", "")
         for m in first_payload["messages"]
@@ -379,8 +379,10 @@ def test_constrained_run_injects_task_contract_message(tmp_path: Path):
     class Client:
         def __init__(self):
             self.first_payload = None
+            self.payloads = []
 
         def create_message(self, payload, stream):
+            self.payloads.append(payload)
             if self.first_payload is None:
                 self.first_payload = payload
             return {"id": "1", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
@@ -389,7 +391,8 @@ def test_constrained_run_injects_task_contract_message(tmp_path: Path):
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, plan_mode="off")
     runner.run("fix failing test in src/app.py")
     assert client.first_payload is not None
-    texts = [b.get("text", "") for m in client.first_payload["messages"] for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
+    runtime_payload = client.payloads[1] if hasattr(client, "payloads") else client.first_payload
+    texts = [b.get("text", "") for m in runtime_payload["messages"] for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
     contract_lines = [t for t in texts if "Task contract" in t]
     assert contract_lines
     assert "name likely target file first" in contract_lines[-1]
@@ -405,3 +408,45 @@ def test_constrained_recovery_stages_then_terminates(tmp_path: Path):
     text_msgs = [b.get("text", "") for m in all_msgs for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
     assert any("RECOVERY MODE: State the single target file, the exact verification goal, and make exactly one next tool call." in t for t in text_msgs)
     assert any("RECOVERY MODE: Do not edit yet. In <=5 lines explain the blocker, inspect exactly one relevant file/diff, then either patch the locked target or finish." in t for t in text_msgs)
+
+
+class FakeClientDiagnosisThenDone:
+    def __init__(self, diagnosis_text: str):
+        self.calls = 0
+        self.diagnosis_text = diagnosis_text
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return {"role": "assistant", "content": [{"type": "text", "text": self.diagnosis_text}]}
+        return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+
+def test_run_injects_diagnosis_hint_into_existing_prompt_context(tmp_path: Path):
+    diag = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
+    client = FakeClientDiagnosisThenDone(diag)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True)
+    runner.run("fix failing config precedence")
+    assert len(client.payloads) >= 2
+    first_runtime_payload = client.payloads[1]
+    texts = [
+        b.get("text", "")
+        for m in first_runtime_payload["messages"]
+        if m.get("role") == "user"
+        for b in m.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    assert any("Likely diagnosis:" in t for t in texts)
+    assert any("Bug class: wrong_precedence" in t for t in texts)
+
+
+def test_invalid_diagnosis_falls_back_without_crashing(tmp_path: Path):
+    client = FakeClientDiagnosisThenDone("not-json")
+    events: list[dict] = []
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, event_callback=events.append)
+    out = runner.run("fix bug")
+    assert out["response"]["content"][0]["text"] == "done"
+    assert any(e.get("type") == "diagnosis_attempted" for e in events)
+    assert any(e.get("type") == "diagnosis_failed" for e in events)
