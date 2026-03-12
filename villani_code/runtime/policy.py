@@ -19,6 +19,12 @@ class RuntimeStrategy(StrEnum):
     FULL_WEAK_SEARCH = "full_weak_search"
 
 
+class AmbiguityLevel(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 def is_direct_repair_profile(profile: str | WeakSearchPolicyProfile) -> bool:
     normalized = WeakSearchPolicyProfile(str(profile))
     return normalized in {WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE}
@@ -118,29 +124,7 @@ def decide_runtime_policy(
     objective_text: str = "",
     failure_text: str = "",
 ) -> PolicyDecision:
-    expected_files = list(getattr(benchmark_config, "expected_files", []) or [])
-    max_files_touched = int(getattr(benchmark_config, "max_files_touched", 1) or 1)
-    visible_verification = list(getattr(benchmark_config, "visible_verification", []) or [])
-    task_id = str(getattr(benchmark_config, "task_id", "") or "")
-    has_repro = "repro" in task_id.lower() or any("repro" in command.lower() for command in visible_verification)
-
-    if previous_candidate_failed and (no_progress_cycles >= 1 or max_files_touched > 1):
-        return PolicyDecision(
-            profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH,
-            strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE,
-            reason="failed_direct_repair_or_no_progress",
-        )
-
-    if has_repro and not previous_candidate_failed:
-        return PolicyDecision(
-            profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
-            strategy=RuntimeStrategy.FULL_WEAK_SEARCH,
-            reason="repro_signal_requires_broader_diagnosis",
-        )
-
-    normalized_task_family = (task_family or "").strip().lower()
-    eligible_easy_family = normalized_task_family in {"", "bugfix", "localize_patch"}
-    low_ambiguity, low_ambiguity_reason = is_low_ambiguity_repair(
+    ambiguity_level, ambiguity_reasons = classify_task_ambiguity(
         benchmark_config=benchmark_config,
         is_interactive=is_interactive,
         task_family=task_family,
@@ -148,12 +132,29 @@ def decide_runtime_policy(
         has_stacktrace_or_error=has_stacktrace_or_error,
         objective_text=objective_text,
         failure_text=failure_text,
+        previous_candidate_failed=previous_candidate_failed,
+        no_progress_cycles=no_progress_cycles,
     )
-    if low_ambiguity and eligible_easy_family:
+
+    if previous_candidate_failed and no_progress_cycles >= 1:
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH,
+            strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE,
+            reason="failed_direct_repair_or_no_progress",
+        )
+
+    if ambiguity_level == AmbiguityLevel.HIGH and not previous_candidate_failed:
+        return PolicyDecision(
+            profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
+            strategy=RuntimeStrategy.FULL_WEAK_SEARCH,
+            reason=f"high_ambiguity:{'|'.join(ambiguity_reasons)}",
+        )
+
+    if ambiguity_level == AmbiguityLevel.LOW:
         return PolicyDecision(
             profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH,
             strategy=RuntimeStrategy.DIRECT_REPAIR_FIRST,
-            reason=f"low_ambiguity_local_repair:{low_ambiguity_reason}",
+            reason=f"low_ambiguity_local_repair:{'|'.join(ambiguity_reasons)}",
         )
 
     if no_progress_cycles >= 2 and has_stacktrace_or_error:
@@ -163,15 +164,55 @@ def decide_runtime_policy(
             reason="stalled_with_failure_signal",
         )
 
-    if normalized_task_family in {"terminal_workflow", "repo_navigation", "repro_test"}:
-        return PolicyDecision(
-            profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
-            strategy=RuntimeStrategy.FULL_WEAK_SEARCH,
-            reason="high_ambiguity_or_multi_file_task",
-        )
-
     return PolicyDecision(
-        profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
+        profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH,
         strategy=RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE,
-        reason="moderate_ambiguity_default",
+        reason=f"medium_ambiguity_default:{'|'.join(ambiguity_reasons)}",
     )
+
+
+def classify_task_ambiguity(
+    *,
+    benchmark_config: Any,
+    is_interactive: bool,
+    task_family: str | None,
+    task_type: str | None,
+    has_stacktrace_or_error: bool,
+    objective_text: str = "",
+    failure_text: str = "",
+    previous_candidate_failed: bool = False,
+    no_progress_cycles: int = 0,
+) -> tuple[AmbiguityLevel, list[str]]:
+    reasons: list[str] = []
+    expected_files = [str(f) for f in list(getattr(benchmark_config, "expected_files", []) or [])]
+    visible_verification = list(getattr(benchmark_config, "visible_verification", []) or [])
+    impl_expected = [p for p in expected_files if p and not p.startswith("tests/")]
+    explicit_files = _extract_implementation_paths(objective_text)
+    failure_files = _extract_implementation_paths(f"{objective_text}\n{failure_text}".strip())
+    bounded_verification = _is_simple_targeted_verification(visible_verification)
+
+    normalized_task_family = (task_family or "").strip().lower()
+    normalized_task_type = (task_type or "").strip().lower()
+    task_id = str(getattr(benchmark_config, "task_id", "") or "").lower()
+    if any(token in task_id for token in ("repro", "navigation")) or normalized_task_family in {"repo_navigation", "repro_test", "terminal_workflow"} or normalized_task_type in {"repro", "repo_navigation"}:
+        reasons.append("repro_or_navigation_signal")
+    if previous_candidate_failed and no_progress_cycles >= 1:
+        reasons.append("repeated_failed_attempts")
+    if len(set(impl_expected)) > 1 and not explicit_files and len(set(failure_files)) != 1:
+        reasons.append("multiple_plausible_implementation_files")
+
+    if reasons:
+        return AmbiguityLevel.HIGH, reasons
+
+    if len(explicit_files) == 1:
+        return AmbiguityLevel.LOW, ["objective_identifies_single_implementation_file"]
+    if has_stacktrace_or_error and len(set(failure_files)) == 1:
+        return AmbiguityLevel.LOW, ["failure_output_identifies_single_implementation_file"]
+    if len(impl_expected) == 1:
+        return AmbiguityLevel.LOW, ["exactly_one_expected_implementation_file"]
+
+    if len(set(failure_files)) > 1:
+        return AmbiguityLevel.MEDIUM, ["small_candidate_neighborhood_from_failure"]
+    if not bounded_verification and not is_interactive:
+        return AmbiguityLevel.MEDIUM, ["verification_not_strictly_bounded"]
+    return AmbiguityLevel.MEDIUM, ["partial_localization_evidence"]
