@@ -13,7 +13,8 @@ from villani_code.benchmark.policy import enforce_path_policy
 from villani_code.patch_apply import apply_unified_diff
 from villani_code.prompting import build_initial_messages, build_system_blocks
 from villani_code.runtime.policy import WeakSearchPolicyProfile, is_direct_repair_profile
-from villani_code.runtime.transform_apply import apply_model_transform
+from villani_code.runtime.proposal_apply import apply_proposal_tool_call
+from villani_code.runtime.proposal_tools import extract_structured_proposal, stage1_proposal_tools, stage2_proposal_tools
 from villani_code.runtime.workspace import cleanup_candidate_workspace, prepare_candidate_workspace
 from villani_code.synthesize.diff_guard import guard_candidate_diff
 from villani_code.synthesize.edit_budget import EditBudget
@@ -67,6 +68,14 @@ class CandidateExecutionResult:
     parse_failure_reason: str = ""
     apply_failure_reason: str = ""
     meaningful_patch_produced: bool = False
+    raw_model_content: str = ""
+    raw_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    raw_reasoning_content: str = ""
+    proposal_contract_failure_reason: str = ""
+    proposal_validation_error: str = ""
+    proposal_apply_error: str = ""
+    stage1_proposal_tool_used: str = ""
+    stage2_proposal_tool_used: str = ""
 
 
 @dataclass(slots=True)
@@ -153,7 +162,7 @@ class CandidateExecutor:
         prompt_tokens = len(prompt.split())
         model_started = time.monotonic()
         try:
-            model_output = self._request_patch_proposal(prompt, stage_name=stage_name)
+            proposal_response = self._request_patch_proposal(prompt, stage_name=stage_name)
         except Exception as exc:  # noqa: BLE001
             cleanup_candidate_workspace(handle)
             return CandidateExecutionResult(
@@ -173,20 +182,14 @@ class CandidateExecutor:
                 prompt_tokens_first_attempt=prompt_tokens,
             )
         model_execution_seconds = time.monotonic() - model_started
-        before_map = self._read_repo_text_map(workspace)
-        transform = apply_model_transform(
-            workspace=workspace,
-            target_file=target_file,
-            current_content=target_file_contents,
-            model_output=model_output,
-        )
-        if not transform.success:
+        proposal_contract_failed = proposal_response.get("proposal_contract_failure_reason", "")
+        if proposal_contract_failed:
             cleanup_candidate_workspace(handle)
             return CandidateExecutionResult(
                 hard_fail=True,
-                blocked_reason="blocked_runtime_error",
-                attempt_summary=f"transform_apply_failed:{transform.parse_failure_reason or transform.apply_failure_reason}",
-                attempt_category="blocked_runtime_error",
+                blocked_reason="proposal_contract_failure",
+                attempt_summary=f"proposal_contract_failure:{proposal_contract_failed}",
+                attempt_category="proposal_contract_failure",
                 verification_stage="stage_0",
                 workspace_prep_seconds=handle.prep_seconds,
                 prompt_build_seconds=prompt_build_seconds,
@@ -198,11 +201,53 @@ class CandidateExecutor:
                 direct_repair_suspect=target_file,
                 prompt_tokens_first_attempt=prompt_tokens,
                 apply_mode="none",
-                parse_failure_reason=transform.parse_failure_reason,
-                apply_failure_reason=transform.apply_failure_reason,
+                parse_failure_reason=proposal_contract_failed,
+                proposal_contract_failure_reason=proposal_contract_failed,
+                raw_model_content=str(proposal_response.get("raw_model_content", "")),
+                raw_tool_calls=list(proposal_response.get("raw_tool_calls", [])),
+                raw_reasoning_content=str(proposal_response.get("raw_reasoning_content", "")),
             )
-        diff_text = transform.diff_text
-        apply_mode = transform.apply_mode
+
+        before_map = self._read_repo_text_map(workspace)
+        allowed_files = {target_file}
+        apply_result = apply_proposal_tool_call(
+            workspace=workspace,
+            proposal=proposal_response["proposal"],
+            target_file=target_file,
+            allowed_files=allowed_files,
+        )
+        proposal_tool_used = proposal_response["proposal"].name
+        if not apply_result.success:
+            cleanup_candidate_workspace(handle)
+            return CandidateExecutionResult(
+                hard_fail=True,
+                blocked_reason="proposal_application_failure",
+                attempt_summary=f"transform_apply_failed:{apply_result.validation_error or apply_result.apply_error}",
+                attempt_category="proposal_application_failure",
+                verification_stage="stage_0",
+                workspace_prep_seconds=handle.prep_seconds,
+                prompt_build_seconds=prompt_build_seconds,
+                model_execution_seconds=model_execution_seconds,
+                candidate_total_seconds=time.monotonic() - started,
+                workspace_strategy=handle.strategy,
+                policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+                direct_repair_attempted=True,
+                direct_repair_suspect=target_file,
+                prompt_tokens_first_attempt=prompt_tokens,
+                apply_mode="none",
+                parse_failure_reason=apply_result.validation_error,
+                apply_failure_reason=apply_result.apply_error,
+                proposal_validation_error=apply_result.validation_error,
+                proposal_apply_error=apply_result.apply_error,
+                raw_model_content=str(proposal_response.get("raw_model_content", "")),
+                raw_tool_calls=list(proposal_response.get("raw_tool_calls", [])),
+                raw_reasoning_content=str(proposal_response.get("raw_reasoning_content", "")),
+                stage1_proposal_tool_used=proposal_tool_used if stage_name == "stage1" else "",
+                stage2_proposal_tool_used=proposal_tool_used if stage_name == "stage2" else "",
+            )
+
+        diff_text = apply_result.diff_text
+        apply_mode = apply_result.apply_mode
         after_map = self._read_repo_text_map(workspace)
         changed_files = sorted([f for f in set(before_map) | set(after_map) if before_map.get(f, "") != after_map.get(f, "")])
         if not changed_files:
@@ -225,6 +270,11 @@ class CandidateExecutor:
                 apply_mode=apply_mode,
                 parse_failure_reason="no_changes_after_apply",
                 apply_failure_reason="no_changes_after_apply",
+                raw_model_content=str(proposal_response.get("raw_model_content", "")),
+                raw_tool_calls=list(proposal_response.get("raw_tool_calls", [])),
+                raw_reasoning_content=str(proposal_response.get("raw_reasoning_content", "")),
+                stage1_proposal_tool_used=proposal_tool_used if stage_name == "stage1" else "",
+                stage2_proposal_tool_used=proposal_tool_used if stage_name == "stage2" else "",
             )
         diff_stats = {"changed_line_count": sum(self._count_changed_lines(before_map.get(f, ""), after_map.get(f, "")) for f in changed_files)}
         artifact = self._persist_patch_artifact(attempt_id, diff_text)
@@ -266,7 +316,12 @@ class CandidateExecutor:
             apply_mode=apply_mode,
             parse_failure_reason="",
             apply_failure_reason="",
-            meaningful_patch_produced=True,
+            meaningful_patch_produced=bool(apply_result.meaningful_change),
+            raw_model_content=str(proposal_response.get("raw_model_content", "")),
+            raw_tool_calls=list(proposal_response.get("raw_tool_calls", [])),
+            raw_reasoning_content=str(proposal_response.get("raw_reasoning_content", "")),
+            stage1_proposal_tool_used=proposal_tool_used if stage_name == "stage1" else "",
+            stage2_proposal_tool_used=proposal_tool_used if stage_name == "stage2" else "",
         )
 
     def evaluate_guided_retry(self, *, retry_hint: str = "", **kwargs: Any) -> CandidateExecutionResult:
@@ -274,19 +329,34 @@ class CandidateExecutor:
         kwargs["failing_test_contents"] = ""
         return self._evaluate_patch_attempt(**kwargs, stage_name="stage2", retry_hint=retry_hint)
 
-    def _request_patch_proposal(self, prompt: str, *, stage_name: str) -> str:
+    def _request_patch_proposal(self, prompt: str, *, stage_name: str) -> dict[str, Any]:
+        tools = stage1_proposal_tools() if stage_name == "stage1" else stage2_proposal_tools(allow_adjacent_file_retry=False)
         payload = {
             "model": self.runner.model,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            "system": [{"type": "text", "text": f"Return only a strict JSON PatchProposal object for {stage_name}."}],
-            "tools": [],
+            "system": [{"type": "text", "text": f"Respond by calling exactly one proposal tool for {stage_name}."}],
+            "tools": tools,
             "max_tokens": self.runner.max_tokens,
             "stream": False,
         }
         raw = self.runner.client.create_message(payload, stream=False)
         response = raw if isinstance(raw, dict) else {"content": []}
-        content = normalize_content_blocks(response.get("content", []))
-        return self._extract_final_assistant_text(content)
+        extracted = extract_structured_proposal(response)
+        if extracted.call is None:
+            return {
+                "proposal": None,
+                "proposal_contract_failure_reason": extracted.failure_reason or "invalid_or_missing_tool_call",
+                "raw_model_content": extracted.raw_model_content,
+                "raw_tool_calls": extracted.raw_tool_calls,
+                "raw_reasoning_content": extracted.raw_reasoning_content,
+            }
+        return {
+            "proposal": extracted.call,
+            "proposal_contract_failure_reason": "",
+            "raw_model_content": extracted.raw_model_content,
+            "raw_tool_calls": extracted.raw_tool_calls,
+            "raw_reasoning_content": extracted.raw_reasoning_content,
+        }
 
     def _build_direct_transform_prompt(
         self,
@@ -304,28 +374,21 @@ class CandidateExecutor:
             f"Stage: {stage_name}",
             f"Objective: {objective}",
             f"Exact target file: {target_file}",
-            "Bounded single-file repair. Edit only this exact file.",
-            "Do not edit any other file.",
-            "No repo exploration, planning, hypotheses, or multi-file changes.",
+            "This is a bounded single-file repair.",
+            "No repo exploration, no planning, no hypotheses.",
+            "No multi-file changes and no test edits.",
             f"Verification target: {verification_target or 'default configured target verification'}",
-            "Verification runs immediately after patch apply.",
-            "Return exactly one strict JSON object named PatchProposal.",
-            "PatchProposal schema:",
-            "{\"mode\": \"full_file\"|\"snippet_replace\", \"file_path\": string, \"new_content\": string|null, \"old_snippet\": string|null, \"new_snippet\": string|null, \"rationale\": string|null}",
-            "Rules:",
-            "- mode=full_file requires file_path and new_content.",
-            "- mode=snippet_replace requires file_path, old_snippet, and new_snippet.",
-            "- file_path must equal the exact target file.",
-            "- Do not return markdown fences, prose, or any extra text.",
-            "Example full_file:",
-            f"{{\"mode\":\"full_file\",\"file_path\":\"{target_file}\",\"new_content\":\"<entire file>\",\"old_snippet\":null,\"new_snippet\":null,\"rationale\":\"...\"}}",
-            "Example snippet_replace:",
-            f"{{\"mode\":\"snippet_replace\",\"file_path\":\"{target_file}\",\"new_content\":null,\"old_snippet\":\"<exact old>\",\"new_snippet\":\"<new>\",\"rationale\":\"...\"}}",
+            "Respond only via one structured tool call.",
+            "Allowed tools:",
+            "- propose_full_file_rewrite(file_path, new_content, rationale?)",
+            "- propose_snippet_replace(file_path, old_snippet, new_snippet, rationale?)",
+            "Prefer propose_full_file_rewrite for weak models.",
+            "Do not output prose, JSON blobs, diffs, or markdown.",
             f"--- FILE: {target_file} ---",
             target_file_contents,
         ]
         if retry_hint:
-            parts.append(f"Retry hint: {retry_hint}")
+            parts.append(f"Retry guidance: {retry_hint}")
         if failing_test_file and failing_test_contents:
             parts.extend([
                 f"--- SUPPORTING FAILING TEST: {failing_test_file} ---",

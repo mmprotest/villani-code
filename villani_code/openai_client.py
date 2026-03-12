@@ -164,7 +164,13 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
                 "input": parsed_arguments,
             }
         )
-    return {"role": "assistant", "content": content}
+    return {
+        "role": "assistant",
+        "content": content,
+        "raw_model_content": text if isinstance(text, str) else "",
+        "raw_tool_calls": message.get("tool_calls", []) or [],
+        "raw_reasoning_content": message.get("reasoning_content") or message.get("reasoning") or "",
+    }
 
 
 class OpenAIClient:
@@ -191,4 +197,3 @@ class OpenAIClient:
                     yield from openai_stream_to_anthropic_events(response.iter_lines(), str(payload.get("model", "")))
 
         return gen()
-

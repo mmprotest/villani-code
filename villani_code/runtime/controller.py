@@ -85,6 +85,15 @@ class WeakSearchController:
                 "apply_failure_reason": result.apply_failure_reason,
                 "meaningful_patch_produced": result.meaningful_patch_produced,
                 "computed_diff_lines": int(result.diff_stats.get("changed_line_count", 0)),
+                "stage1_proposal_tool_used": result.stage1_proposal_tool_used,
+                "stage2_proposal_tool_used": result.stage2_proposal_tool_used,
+                "proposal_contract_failure_reason": result.proposal_contract_failure_reason,
+                "proposal_validation_error": result.proposal_validation_error,
+                "proposal_apply_error": result.proposal_apply_error,
+                "executor_failure_type": result.blocked_reason,
+                "raw_model_content": result.raw_model_content,
+                "raw_tool_calls": result.raw_tool_calls,
+                "raw_reasoning_content": result.raw_reasoning_content,
             },
             attempt_category=result.attempt_category,
             blocked_reason=result.blocked_reason,
@@ -129,6 +138,8 @@ class WeakSearchController:
     def _should_escalate_after_direct_attempt(self, result: CandidateExecutionResult, suspect: str) -> tuple[bool, str]:
         if result.success:
             return False, "solved"
+        if result.attempt_category in {"proposal_contract_failure", "proposal_application_failure"}:
+            return True, "structured_proposal_retry_once"
         if result.attempt_category in {"blocked_runtime_error", "blocked_model_failure"}:
             return True, "executor_failure_retry_once"
         meaningful_patch = bool(result.meaningful_patch_produced or (result.changed_files and result.diff_text.strip()))
@@ -214,8 +225,14 @@ class WeakSearchController:
                 except UnicodeDecodeError:
                     target_contents = ""
         verifier_summary = str(stage1_result.verification_outputs.get("summary", "")) if stage1_result.verification_outputs else ""
-        if stage1_result.attempt_category in {"blocked_runtime_error", "blocked_model_failure"}:
-            retry_hint = "Previous output format was not usable. Return full corrected contents for this file only."
+        if stage1_result.attempt_category == "proposal_contract_failure":
+            retry_hint = "Previous response did not contain a valid proposal tool call. Call exactly one allowed proposal tool now; prefer propose_full_file_rewrite."
+            retry_failure_type = "proposal_contract_failure"
+        elif stage1_result.attempt_category == "proposal_application_failure":
+            retry_hint = "Previous proposal failed validation/application. Keep target file path exact and provide valid arguments; prefer propose_full_file_rewrite."
+            retry_failure_type = "proposal_application_failure"
+        elif stage1_result.attempt_category in {"blocked_runtime_error", "blocked_model_failure"}:
+            retry_hint = "Previous output format was not usable. Call exactly one allowed proposal tool and provide a valid patch proposal."
             retry_failure_type = "unusable_output_format"
         elif stage1_result.attempt_category == "rejected_noop":
             retry_hint = "Previous correction was a no-op. Return corrected code and change behavior in this file only."
@@ -368,11 +385,11 @@ class WeakSearchController:
                         best_score = guided.score
                         emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id="candidate-0-guided", attempt_id=guided_attempt_id, patch_artifact=guided.patch_artifact_path)
                         break
-                    if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop"}:
+                    if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop", "proposal_contract_failure", "proposal_application_failure"}:
                         board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
                         board.final_result = {"stop_reason": StopReason.BLOCKED.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_executor_failure"}
                         break
-                    if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop"}:
+                    if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop", "proposal_contract_failure", "proposal_application_failure"}:
                         board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
                         board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "direct_patch_executor_failure"}
                         break
@@ -393,7 +410,7 @@ class WeakSearchController:
                     )
                     budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
                 elif not should_escalate:
-                    if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop"}:
+                    if direct.attempt_category in {"blocked_runtime_error", "blocked_model_failure", "rejected_noop", "proposal_contract_failure", "proposal_application_failure"}:
                         board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
                     board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": escalate_reason}
                     break
@@ -419,7 +436,7 @@ class WeakSearchController:
                     best_score = guided.score
                     emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id="candidate-0-guided", attempt_id=guided_attempt_id, patch_artifact=guided.patch_artifact_path)
                     break
-                if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop"}:
+                if guided.attempt_category in {"blocked_model_failure", "blocked_runtime_error", "rejected_noop", "proposal_contract_failure", "proposal_application_failure"}:
                     board.run_stats["search_escalation_blocked_due_to_executor_failure"] = True
                     board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "guided_retry_executor_failure"}
                     break
@@ -570,7 +587,15 @@ class WeakSearchController:
             "stage2_apply_mode": str(stage2_attempt.verifier_outputs.get("apply_mode", "none")) if stage2_attempt else "none",
             "stage2_parse_failure_reason": str(stage2_attempt.verifier_outputs.get("parse_failure_reason", "")) if stage2_attempt else "",
             "stage2_apply_failure_reason": str(stage2_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage2_attempt else "",
+            "stage1_proposal_tool_used": str(stage1_attempt.verifier_outputs.get("stage1_proposal_tool_used", "")) if stage1_attempt else "",
+            "stage2_proposal_tool_used": str(stage2_attempt.verifier_outputs.get("stage2_proposal_tool_used", "")) if stage2_attempt else "",
+            "proposal_contract_failure_reason": str((stage2_attempt.verifier_outputs.get("proposal_contract_failure_reason", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("proposal_contract_failure_reason", "") if stage1_attempt else "")),
+            "proposal_validation_error": str((stage2_attempt.verifier_outputs.get("proposal_validation_error", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("proposal_validation_error", "") if stage1_attempt else "")),
+            "proposal_apply_error": str((stage2_attempt.verifier_outputs.get("proposal_apply_error", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("proposal_apply_error", "") if stage1_attempt else "")),
             "executor_failure_type": board.final_result.get("blocked_reason", "") if board.final_result else "",
+            "raw_model_content": str((stage2_attempt.verifier_outputs.get("raw_model_content", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("raw_model_content", "") if stage1_attempt else "")),
+            "raw_tool_calls": (stage2_attempt.verifier_outputs.get("raw_tool_calls", []) if stage2_attempt else []) or (stage1_attempt.verifier_outputs.get("raw_tool_calls", []) if stage1_attempt else []),
+            "raw_reasoning_content": str((stage2_attempt.verifier_outputs.get("raw_reasoning_content", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("raw_reasoning_content", "") if stage1_attempt else "")),
             "meaningful_transformation_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
             "computed_diff_lines": int((stage2_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage2_attempt else 0) or (stage1_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage1_attempt else 0)),
             "search_escalation_blocked_due_to_executor_failure": board.run_stats.get("search_escalation_blocked_due_to_executor_failure", False),
@@ -642,7 +667,15 @@ class WeakSearchController:
             "stage2_apply_mode": str(stage2_attempt.verifier_outputs.get("apply_mode", "none")) if stage2_attempt else "none",
             "stage2_parse_failure_reason": str(stage2_attempt.verifier_outputs.get("parse_failure_reason", "")) if stage2_attempt else "",
             "stage2_apply_failure_reason": str(stage2_attempt.verifier_outputs.get("apply_failure_reason", "")) if stage2_attempt else "",
+            "stage1_proposal_tool_used": str(stage1_attempt.verifier_outputs.get("stage1_proposal_tool_used", "")) if stage1_attempt else "",
+            "stage2_proposal_tool_used": str(stage2_attempt.verifier_outputs.get("stage2_proposal_tool_used", "")) if stage2_attempt else "",
+            "proposal_contract_failure_reason": str((stage2_attempt.verifier_outputs.get("proposal_contract_failure_reason", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("proposal_contract_failure_reason", "") if stage1_attempt else "")),
+            "proposal_validation_error": str((stage2_attempt.verifier_outputs.get("proposal_validation_error", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("proposal_validation_error", "") if stage1_attempt else "")),
+            "proposal_apply_error": str((stage2_attempt.verifier_outputs.get("proposal_apply_error", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("proposal_apply_error", "") if stage1_attempt else "")),
             "executor_failure_type": board.final_result.get("blocked_reason", "") if board.final_result else "",
+            "raw_model_content": str((stage2_attempt.verifier_outputs.get("raw_model_content", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("raw_model_content", "") if stage1_attempt else "")),
+            "raw_tool_calls": (stage2_attempt.verifier_outputs.get("raw_tool_calls", []) if stage2_attempt else []) or (stage1_attempt.verifier_outputs.get("raw_tool_calls", []) if stage1_attempt else []),
+            "raw_reasoning_content": str((stage2_attempt.verifier_outputs.get("raw_reasoning_content", "") if stage2_attempt else "") or (stage1_attempt.verifier_outputs.get("raw_reasoning_content", "") if stage1_attempt else "")),
             "meaningful_patch_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
             "meaningful_transformation_produced": bool((stage1_attempt and stage1_attempt.verifier_outputs.get("meaningful_patch_produced")) or (stage2_attempt and stage2_attempt.verifier_outputs.get("meaningful_patch_produced"))),
             "computed_diff_lines": int((stage2_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage2_attempt else 0) or (stage1_attempt.verifier_outputs.get("computed_diff_lines", 0) if stage1_attempt else 0)),

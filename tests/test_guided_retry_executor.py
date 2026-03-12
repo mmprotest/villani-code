@@ -56,7 +56,7 @@ def test_guided_retry_prompt_differs_from_stage1(monkeypatch, tmp_path: Path):
     )
     assert "Stage: stage1" in prompt1
     assert "Stage: stage2" in prompt2
-    assert "Retry hint:" in prompt2
+    assert "Retry guidance:" in prompt2
     assert "SUPPORTING FAILING TEST" not in prompt2
     assert "Stage1 failure type:" in prompt2
 
