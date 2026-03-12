@@ -78,7 +78,9 @@ class WeakSearchController:
                 "workspace_strategy": result.workspace_strategy,
                 "policy_profile": result.policy_profile,
                 "direct_repair_attempted": result.direct_repair_attempted,
-                "direct_repair_suspect": result.direct_repair_suspect,
+                "direct_patch_target_file": result.direct_repair_suspect,
+                "hypothesis_stage_skipped_initially": result.hypothesis_stage_skipped_initially,
+                "escalated_after_direct_failure": result.escalation_occurred,
                 "session_context_reused": result.session_context_reused,
                 "escalation_occurred": result.escalation_occurred,
                 "escalation_reason": result.escalation_reason,
@@ -116,12 +118,56 @@ class WeakSearchController:
             return True, "direct_repair_thrash"
         return False, "direct_repair_insufficient_signal"
 
+    def _runtime_task_family(self, config: Any) -> str | None:
+        return (getattr(config, "task_family", None) or "").strip() or None
+
+    def _runtime_task_type(self, config: Any) -> str | None:
+        return (getattr(config, "task_type", None) or "").strip() or None
+
+    def _run_direct_patch_attempt(
+        self,
+        *,
+        board: Blackboard,
+        executor: CandidateExecutor,
+        decision: Any,
+        suspects: list[Any],
+        constraints: dict[str, Any],
+        config: Any,
+        session_context: WeakSearchSessionContext,
+    ) -> tuple[CandidateExecutionResult, str, str]:
+        suspect_file = self._select_direct_repair_suspect(suspects, board.evidence, config)
+        board.decision_log.append({"event": "direct_repair_attempted", "suspect": suspect_file})
+        attempt_id = f"att-{len(board.attempts)+1}"
+        result = executor.evaluate_candidate(
+            repo_path=self.repo,
+            objective=self.instruction,
+            suspect_region=suspect_file,
+            hypothesis_id="candidate-0",
+            hypothesis="Directly repair the likely root bug in the suspect file.",
+            constraints=constraints,
+            runtime_profile="benchmark" if config.enabled else "interactive",
+            benchmark_config=config,
+            baseline_handle="clean-copy",
+            edit_budget=EditBudget(max_files=1, max_lines=12),
+            branch_failure_history=[],
+            timeout_budget_seconds=max(10.0, self.timeout_seconds - (time.monotonic() - self.started)),
+            attempt_id=attempt_id,
+            max_candidate_turns=2,
+            max_candidate_tool_calls=4,
+            policy_profile=decision.profile.value,
+            execution_mode="direct_repair",
+            session_context=session_context,
+            hypothesis_stage_skipped_initially=True,
+        )
+        return result, attempt_id, suspect_file
+
     def run(self) -> dict[str, Any]:
         config = self.runner.benchmark_config
         decision = decide_runtime_policy(
             benchmark_config=config,
             is_interactive=not config.enabled,
-            task_family="localize_patch" if config.enabled else None,
+            task_family=(config.task_family if config.enabled else None),
+            task_type=(config.task_type if config.enabled else None),
             previous_candidate_failed=False,
             no_progress_cycles=0,
             has_stacktrace_or_error=False,
@@ -187,27 +233,13 @@ class WeakSearchController:
 
             if cycle == 1 and decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH and suspects:
                 candidate0_attempted = True
-                suspect_file = self._select_direct_repair_suspect(suspects, board.evidence, config)
-                board.decision_log.append({"event": "direct_repair_attempted", "suspect": suspect_file})
-                attempt_id = f"att-{len(board.attempts)+1}"
-                direct = executor.evaluate_candidate(
-                    repo_path=self.repo,
-                    objective=self.instruction,
-                    suspect_region=suspect_file,
-                    hypothesis_id="candidate-0",
-                    hypothesis="Directly repair the likely root bug in the suspect file.",
+                direct, attempt_id, suspect_file = self._run_direct_patch_attempt(
+                    board=board,
+                    executor=executor,
+                    decision=decision,
+                    suspects=suspects,
                     constraints=constraints,
-                    runtime_profile="benchmark" if config.enabled else "interactive",
-                    benchmark_config=config,
-                    baseline_handle="clean-copy",
-                    edit_budget=EditBudget(max_files=1, max_lines=12),
-                    branch_failure_history=[],
-                    timeout_budget_seconds=max(10.0, self.timeout_seconds - (time.monotonic() - self.started)),
-                    attempt_id=attempt_id,
-                    max_candidate_turns=1,
-                    max_candidate_tool_calls=4,
-                    policy_profile=decision.profile.value,
-                    execution_mode="direct_repair",
+                    config=config,
                     session_context=session_context,
                 )
                 candidates_generated += 1
@@ -230,7 +262,8 @@ class WeakSearchController:
                 decision = decide_runtime_policy(
                     benchmark_config=config,
                     is_interactive=not config.enabled,
-                    task_family="localize_patch" if config.enabled else None,
+                    task_family=self._runtime_task_family(config) if config.enabled else None,
+                    task_type=self._runtime_task_type(config) if config.enabled else None,
                     previous_candidate_failed=True,
                     no_progress_cycles=1,
                     has_stacktrace_or_error=True,
@@ -238,6 +271,10 @@ class WeakSearchController:
                 if decision.profile == WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH:
                     escalation_occurred = True
                     budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
+                else:
+                    board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "direct_repair_no_escalation_profile"}
+                    break
+                continue
 
             for suspect in suspects:
                 from villani_code.hypothesize.generator import generate_hypotheses
@@ -321,7 +358,8 @@ class WeakSearchController:
                     decision = decide_runtime_policy(
                         benchmark_config=config,
                         is_interactive=not config.enabled,
-                        task_family="localize_patch" if config.enabled else None,
+                        task_family=self._runtime_task_family(config) if config.enabled else None,
+                        task_type=self._runtime_task_type(config) if config.enabled else None,
                         previous_candidate_failed=True,
                         no_progress_cycles=no_improve,
                         has_stacktrace_or_error=True,
@@ -353,7 +391,10 @@ class WeakSearchController:
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
-            "direct_repair_attempted": candidate0_attempted,
+            "direct_patch_attempted": candidate0_attempted,
+            "hypothesis_stage_skipped_initially": candidate0_attempted,
+            "direct_patch_target_file": next((d.get("suspect") for d in board.decision_log if d.get("event")=="direct_repair_attempted"), ""),
+            "escalated_after_direct_failure": escalation_occurred,
             "session_context_reused": True,
         }
         store.write(board)
@@ -377,7 +418,10 @@ class WeakSearchController:
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
-            "direct_repair_attempted": candidate0_attempted,
+            "direct_patch_attempted": candidate0_attempted,
+            "hypothesis_stage_skipped_initially": candidate0_attempted,
+            "direct_patch_target_file": next((d.get("suspect") for d in board.decision_log if d.get("event")=="direct_repair_attempted"), ""),
+            "escalated_after_direct_failure": escalation_occurred,
             "session_context_reused": True,
         }
         store.write_summary(summary)
