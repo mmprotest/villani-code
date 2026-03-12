@@ -98,6 +98,49 @@ class BenchmarkRunner:
             "repeat": repeat,
         }
 
+
+    def _log_weak_search_runtime_debug(self, events: list[object]) -> None:
+        started_payload: dict[str, object] | None = None
+        stopped_payload: dict[str, object] | None = None
+        cycle_count = 0
+        hypotheses_events = 0
+        for e in events:
+            payload = getattr(e, "payload", {}) or {}
+            event_type = str(payload.get("event") or getattr(e, "type", ""))
+            if event_type == "weak_search_started":
+                started_payload = payload
+            elif event_type == "weak_search_cycle_started":
+                cycle_count += 1
+            elif event_type == "hypotheses_generated":
+                hypotheses_events += 1
+            elif event_type == "weak_search_stopped":
+                stopped_payload = payload
+
+        if not started_payload and not stopped_payload:
+            return
+
+        if started_payload:
+            self._log(
+                "runtime weak-search start "
+                f"policy={started_payload.get('policy_profile', '-') } "
+                f"strategy={started_payload.get('strategy_selected', '-') }"
+            )
+
+        if stopped_payload:
+            self._log(
+                "runtime weak-search outcome "
+                f"stage={stopped_payload.get('strategy_stage_used', '-') } "
+                f"ambiguity={stopped_payload.get('ambiguity_level', '-') } "
+                f"target={stopped_payload.get('target_file', '-') } "
+                f"stage1={stopped_payload.get('stage1_result', '-') } "
+                f"stage2={stopped_payload.get('stage2_result', '-') } "
+                f"stop={stopped_payload.get('stop_reason', '-') } "
+                f"score={stopped_payload.get('best_patch_score', '-') } "
+                f"cycles={cycle_count} hypotheses_events={hypotheses_events}"
+            )
+            escalation_reason = stopped_payload.get('escalation_reason')
+            if escalation_reason:
+                self._log(f"runtime weak-search escalation reason={escalation_reason}")
     def _event_metrics(self, events: list[object], started: float, expected_files: list[str], visible_commands: list[str], hidden_commands: list[str]) -> dict[str, object]:
         command_starts = 0
         command_failures = 0
@@ -370,6 +413,7 @@ class BenchmarkRunner:
                     failure_reason = FailureReason.AGENT_CRASH
                     self._log(f"agent crash: {agent_stderr_preview or 'no stderr preview available'}")
 
+                self._log_weak_search_runtime_debug(execution.events)
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
                 if field_quality_map.get("num_shell_commands") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     num_shell_commands = metrics["num_shell_commands"]

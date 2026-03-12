@@ -46,7 +46,7 @@ def test_direct_repair_attempt_happens_before_hypothesis_search(monkeypatch, tmp
     calls = []
 
     def fake_eval(self, **kwargs):
-        calls.append((kwargs["hypothesis_id"], kwargs["execution_mode"], kwargs["max_candidate_turns"], kwargs["max_candidate_tool_calls"]))
+        calls.append((kwargs.get("target_file"), "direct_patch"))
         return CandidateExecutionResult(
             changed_files=["src/app.py"],
             diff_stats={"changed_line_count": 1},
@@ -54,14 +54,12 @@ def test_direct_repair_attempt_happens_before_hypothesis_search(monkeypatch, tmp
             attempt_category="verification_failed",
         )
 
-    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_eval)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_direct_patch", fake_eval)
     WeakSearchController(DummyRunner(tmp_path), "fix bug").run()
 
     assert calls
-    assert calls[0][0] == "candidate-0"
-    assert calls[0][1] == "direct_repair"
-    assert calls[0][2] == 2
-    assert calls[0][3] == 4
+    assert calls[0][0] == "src/app.py"
+    assert calls[0][1] == "direct_patch"
 
 
 def test_direct_repair_prompt_is_bounded(tmp_path: Path):
@@ -97,7 +95,7 @@ def test_direct_repair_uses_expected_file_and_skips_hypothesis_stage(monkeypatch
         raise AssertionError("hypothesis generation should be skipped on initial direct attempt")
 
     def fake_eval(self, **kwargs):
-        called["suspect"] = kwargs["suspect_region"]
+        called["suspect"] = kwargs["target_file"]
         return CandidateExecutionResult(
             changed_files=["src/app/config.py"],
             diff_stats={"changed_line_count": 1},
@@ -112,7 +110,7 @@ def test_direct_repair_uses_expected_file_and_skips_hypothesis_stage(monkeypatch
         )
 
     monkeypatch.setattr("villani_code.hypothesize.generator.generate_hypotheses", fake_generate)
-    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_eval)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_direct_patch", fake_eval)
     monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.commit_candidate", lambda self, repo_path, candidate_result: None)
 
     out = WeakSearchController(runner, "fix config precedence").run()

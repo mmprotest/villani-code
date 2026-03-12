@@ -48,7 +48,7 @@ def test_direct_repair_picks_implementation_target_before_tests(monkeypatch, tmp
     captured = {}
 
     def fake_eval(self, **kwargs):
-        captured["suspect_region"] = kwargs["suspect_region"]
+        captured["suspect_region"] = kwargs["target_file"]
         return CandidateExecutionResult(
             changed_files=["src/app/config.py"],
             diff_text="diff --git a/src/app/config.py b/src/app/config.py\n",
@@ -59,7 +59,7 @@ def test_direct_repair_picks_implementation_target_before_tests(monkeypatch, tmp
             score=0.9,
         )
 
-    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_eval)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_direct_patch", fake_eval)
     monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.commit_candidate", lambda *_args, **_kwargs: None)
 
     out = WeakSearchController(DummyRunner(tmp_path), "Fix precedence bug in src/app/config.py").run()
