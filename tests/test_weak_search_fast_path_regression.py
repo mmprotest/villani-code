@@ -68,6 +68,7 @@ def test_timing_telemetry_fields_recorded(monkeypatch, tmp_path: Path):
             policy_profile="direct_repair_fast_path",
             direct_repair_attempted=True,
             direct_repair_suspect="src/app.py",
+            hypothesis_stage_skipped_initially=True,
             session_context_reused=True,
         )
 
@@ -80,5 +81,5 @@ def test_timing_telemetry_fields_recorded(monkeypatch, tmp_path: Path):
     assert "verification_seconds" in board
     assert "candidate_total_seconds" in board
     assert "policy_profile" in board
-    assert "direct_repair_suspect" in board
+    assert "direct_patch_target_file" in board
     assert "session_context_reused" in board

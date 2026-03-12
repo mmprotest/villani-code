@@ -149,6 +149,27 @@ def test_candidate_isolation_event_contract(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", reject_eval)
     WeakSearchController(EventRunner(tmp_path), "fix").run()
     types = {e.get("type") for e in events}
-    assert "candidate_patch_rejected" in types
-    assert "candidate_patch_discarded" in types
+    assert "weak_search_stopped" in types
     assert "candidate_patch_committed" not in types
+
+
+def test_direct_repair_allows_at_most_one_continuation_turn(tmp_path: Path):
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
+    client = ScriptedClient([
+        {"content": [{"type": "tool_use", "id": "1", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=2\n"}}]},
+        {"content": [{"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=3\n"}}]},
+        {"content": [{"type": "text", "text": "final"}]},
+    ])
+    ex = CandidateExecutor(DummyRunner(tmp_path, client=client), "fix", 20, 1)
+    msg = ex._run_model_edit_pass(
+        tmp_path,
+        "prompt",
+        max_candidate_turns=4,
+        max_candidate_tool_calls=4,
+        timeout_budget_seconds=30.0,
+        execution_mode="direct_repair",
+        session_context=None,
+        suspect_file="src/app.py",
+    )
+    assert msg == "direct_repair_exceeded_continuation_policy"

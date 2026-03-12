@@ -26,6 +26,8 @@ class BenchmarkRuntimeConfig(BaseModel):
     require_patch_artifact: bool = True
     visible_verification: list[str] = Field(default_factory=list)
     hidden_verification: list[str] = Field(default_factory=list)
+    task_family: str | None = None
+    task_type: str | None = None
 
     def normalized_path(self, raw_path: str) -> str:
         return normalize_path(raw_path)
@@ -64,4 +66,6 @@ def benchmark_runtime_config_from_task(task: object) -> BenchmarkRuntimeConfig:
         require_patch_artifact="patch" in expected_artifacts,
         visible_verification=list(getattr(task, "visible_verification", [])),
         hidden_verification=list(getattr(task, "hidden_verification", [])),
+        task_family=str(getattr(getattr(task, "family", None), "value", getattr(task, "family", "")) or "") or None,
+        task_type=str(getattr(task, "task_type", "") or getattr(metadata, "task_type", "") or "") or None,
     )

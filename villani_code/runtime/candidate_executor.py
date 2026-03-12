@@ -58,6 +58,7 @@ class CandidateExecutionResult:
     session_context_reused: bool = False
     escalation_occurred: bool = False
     escalation_reason: str = ""
+    hypothesis_stage_skipped_initially: bool = False
 
 
 
@@ -98,6 +99,7 @@ class CandidateExecutor:
         policy_profile: str = WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH,
         execution_mode: str = "heavy",
         session_context: WeakSearchSessionContext | None = None,
+        hypothesis_stage_skipped_initially: bool = False,
     ) -> CandidateExecutionResult:
         started = time.monotonic()
         profile = WeakSearchPolicyProfile(str(policy_profile))
@@ -151,6 +153,7 @@ class CandidateExecutor:
                     direct_repair_attempted=direct_mode,
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
+                    hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
                 )
 
             after_map = self._read_repo_text_map(workspace)
@@ -177,6 +180,7 @@ class CandidateExecutor:
                     direct_repair_attempted=direct_mode,
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
+                    hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
                 )
 
             policy = enforce_path_policy(
@@ -221,6 +225,7 @@ class CandidateExecutor:
                     direct_repair_attempted=direct_mode,
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
+                    hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
                 )
 
             verification_started = time.monotonic()
@@ -252,6 +257,7 @@ class CandidateExecutor:
                     direct_repair_attempted=direct_mode,
                     direct_repair_suspect=suspect_region if direct_mode else "",
                     session_context_reused=bool(session_context and session_context.planning_initialized),
+                    hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
                 )
 
             failure_sig_payload = {
@@ -295,6 +301,7 @@ class CandidateExecutor:
                 direct_repair_attempted=direct_mode,
                 direct_repair_suspect=suspect_region if direct_mode else "",
                 session_context_reused=bool(session_context and session_context.planning_initialized),
+                hypothesis_stage_skipped_initially=hypothesis_stage_skipped_initially,
             )
         finally:
             cleanup_candidate_workspace(handle)
@@ -330,6 +337,7 @@ class CandidateExecutor:
             "Forbidden: broad repository exploration, large plans, refactors, multi-file sweeps.\n"
             "Required order: inspect suspect file first; inspect the relevant failing test only if suspect is insufficient.\n"
             "Use top-1 suspect only and produce the smallest valid patch.\n"
+            "After a meaningful patch, immediately run target verification and stop.\n"
             "Stop immediately once the patch is ready.\n"
             f"Hypothesis seed: {hypothesis_text}\n"
             f"Constraints: {json.dumps(constraints)}\n"
@@ -375,7 +383,7 @@ class CandidateExecutor:
                     self._last_assistant_completion_text = final_text
                     return f"final_completion:{final_text}" if final_text else "empty assistant completion"
                 if execution_mode == "direct_repair" and turns > 1 and continuation_used:
-                    return "direct repair exceeded continuation policy"
+                    return "direct_repair_exceeded_continuation_policy"
                 tool_results: list[dict[str, Any]] = []
                 for block in tool_uses:
                     if tool_calls >= max_candidate_tool_calls:
@@ -406,9 +414,9 @@ class CandidateExecutor:
                 messages.append({"role": "user", "content": tool_results})
                 if execution_mode == "direct_repair":
                     if continuation_used:
-                        return "direct repair continuation exhausted"
+                        return "direct_repair_continuation_exhausted"
                     if not touched_suspect:
-                        return "direct repair no progress on suspect file"
+                        return "direct_repair_no_progress_on_suspect_file"
                     continuation_used = True
                     max_candidate_turns = min(max_candidate_turns, 2)
             return "candidate interaction budget exceeded"

@@ -60,7 +60,7 @@ def test_direct_repair_attempt_happens_before_hypothesis_search(monkeypatch, tmp
     assert calls
     assert calls[0][0] == "candidate-0"
     assert calls[0][1] == "direct_repair"
-    assert calls[0][2] == 1
+    assert calls[0][2] == 2
     assert calls[0][3] == 4
 
 
@@ -80,3 +80,60 @@ def test_direct_repair_prompt_is_bounded(tmp_path: Path):
     assert "bounded single-file bugfix" in prompt
     assert "Forbidden: broad repository exploration" in prompt
     assert "edit exactly one file" in prompt
+
+
+def test_direct_repair_uses_expected_file_and_skips_hypothesis_stage(monkeypatch, tmp_path: Path):
+    (tmp_path / "src" / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "app" / "config.py").write_text("SETTING=1\n", encoding="utf-8")
+
+    runner = DummyRunner(tmp_path)
+    runner.benchmark_config.expected_files = ["src/app/config.py"]
+    runner.benchmark_config.allowlist_paths = ["tests/", "src/"]
+
+    called = {"hyp": 0, "suspect": ""}
+
+    def fake_generate(*_args, **_kwargs):
+        called["hyp"] += 1
+        raise AssertionError("hypothesis generation should be skipped on initial direct attempt")
+
+    def fake_eval(self, **kwargs):
+        called["suspect"] = kwargs["suspect_region"]
+        return CandidateExecutionResult(
+            changed_files=["src/app/config.py"],
+            diff_stats={"changed_line_count": 1},
+            verification_outputs={"commands": [], "target_exit_codes": [0], "target_command_count": 1, "target_verification_passed": True, "static_sanity_passed": True},
+            attempt_category="candidate_verified",
+            success=True,
+            diff_text="diff --git a/src/app/config.py b/src/app/config.py\n",
+            hypothesis_stage_skipped_initially=True,
+            policy_profile="direct_repair_fast_path",
+            direct_repair_attempted=True,
+            direct_repair_suspect="src/app/config.py",
+        )
+
+    monkeypatch.setattr("villani_code.hypothesize.generator.generate_hypotheses", fake_generate)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_eval)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.commit_candidate", lambda self, repo_path, candidate_result: None)
+
+    out = WeakSearchController(runner, "fix config precedence").run()
+    assert out["weak_search"]["direct_patch_attempted"] is True
+    assert called["suspect"] == "src/app/config.py"
+    assert called["hyp"] == 0
+
+
+def test_direct_repair_prompt_profile_is_compact_and_targeted(tmp_path: Path):
+    runner = DummyRunner(tmp_path)
+    ex = CandidateExecutor(runner, "fix bug", 12, 1)
+    prompt = ex._build_prompt(
+        suspect="src/app/config.py",
+        hypothesis_text="repair precedence",
+        constraints={"expected_files": ["src/app/config.py"]},
+        failed_attempt_summary=[],
+        runtime_profile="benchmark",
+        baseline_handle="clean-copy",
+        policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+        execution_mode="direct_repair",
+    )
+    assert "bounded single-file bugfix" in prompt
+    assert "broad repository exploration" in prompt
+    assert "immediately run target verification" in prompt

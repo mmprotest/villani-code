@@ -55,6 +55,7 @@ def decide_runtime_policy(
     benchmark_config: Any,
     is_interactive: bool,
     task_family: str | None,
+    task_type: str | None = None,
     previous_candidate_failed: bool,
     no_progress_cycles: int,
     has_stacktrace_or_error: bool,
@@ -76,13 +77,16 @@ def decide_runtime_policy(
 
     expected_single_file = len(expected_files) == 1
     normalized_task_family = (task_family or "").strip().lower()
+    normalized_task_type = (task_type or "").strip().lower()
     eligible_easy_family = normalized_task_family in {"", "bugfix", "localize_patch"}
+    excludes_direct_path = normalized_task_family in {"repro_test", "terminal_workflow"} or "repro" in normalized_task_type
     easy_single_file = (
         bool(getattr(benchmark_config, "enabled", False))
         and expected_single_file
         and max_files_touched <= 1
         and _is_simple_targeted_verification(visible_verification)
         and eligible_easy_family
+        and not excludes_direct_path
     )
     if easy_single_file:
         return PolicyDecision(profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, reason="single_file_benchmark_fast_path")
