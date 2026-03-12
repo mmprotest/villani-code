@@ -3,7 +3,7 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from villani_code.benchmark.adapters.base import AdapterRunResult
+from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
 from villani_code.benchmark.models import FieldQuality, TelemetryQuality, VerificationOutcome
 from villani_code.benchmark.policy import (
     filter_meaningful_touched_paths,
@@ -71,7 +71,10 @@ def test_logging_and_stderr_preview_and_filtered_policy(monkeypatch, capsys) -> 
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
@@ -112,6 +115,11 @@ def test_logging_and_stderr_preview_and_filtered_policy(monkeypatch, capsys) -> 
     assert "[benchmark] starting agent process..." in out
     assert "[benchmark] agent exit_code=2" in out
     assert "[benchmark] agent crash:" in out
+    assert "[benchmark] runtime weak-search start" in out
+    assert "[benchmark] runtime weak-search outcome" in out
+    assert "stage=guided_retry" in out
+    assert "ambiguity=low" in out
+    assert "[benchmark] runtime weak-search escalation reason=partial_fix" in out
     assert "[benchmark] result" in out
     assert "[benchmark] complete successes=" in out
 
@@ -164,7 +172,10 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
@@ -216,7 +227,10 @@ def test_solved_task_with_support_file_edit_is_allowed_with_warning(monkeypatch,
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
@@ -269,7 +283,10 @@ def test_solved_task_with_unrelated_edit_still_fails_forbidden_with_detail(monke
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
@@ -338,7 +355,10 @@ def test_solved_task_with_metadata_omission_edit_is_allowed_with_warning(monkeyp
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
@@ -404,7 +424,10 @@ def test_solved_task_with_expected_file_outside_allowlist_still_succeeds(monkeyp
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
@@ -469,7 +492,10 @@ def test_metadata_omission_is_warning_not_failure_for_solved_task(monkeypatch) -
                 runtime_seconds=0.1,
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
-                events=[],
+                events=[
+                    AdapterEvent(type="weak_search_started", timestamp=1.0, payload={"event": "weak_search_started", "policy_profile": "direct_repair_fast_path", "strategy_selected": "direct_repair_first"}),
+                    AdapterEvent(type="weak_search_stopped", timestamp=1.5, payload={"event": "weak_search_stopped", "strategy_stage_used": "guided_retry", "ambiguity_level": "low", "target_file": "src/app.py", "stage1_result": "verification_failed", "stage2_result": "candidate_verified", "stop_reason": "solved", "best_patch_score": 0.8, "escalation_reason": "partial_fix"}),
+                ],
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
