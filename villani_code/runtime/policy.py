@@ -41,7 +41,12 @@ def _is_simple_targeted_verification(commands: list[str]) -> bool:
     if not commands:
         return False
     lowered = " ".join(commands).lower()
-    return any(marker in lowered for marker in ("pytest", "python -m", "unittest", "nose", "repro", "-k ", "::"))
+    targeted_markers = ("::", "-k ", "tests/", "test_", "repro")
+    if any(marker in lowered for marker in targeted_markers):
+        return True
+    if "unittest" in lowered or "nose" in lowered:
+        return True
+    return False
 
 
 
@@ -70,12 +75,14 @@ def decide_runtime_policy(
         return PolicyDecision(profile=WeakSearchPolicyProfile.NORMAL_WEAK_SEARCH, reason="repro_task")
 
     expected_single_file = len(expected_files) == 1
+    normalized_task_family = (task_family or "").strip().lower()
+    eligible_easy_family = normalized_task_family in {"", "bugfix", "localize_patch"}
     easy_single_file = (
         bool(getattr(benchmark_config, "enabled", False))
         and expected_single_file
         and max_files_touched <= 1
         and _is_simple_targeted_verification(visible_verification)
-        and (task_family in {None, "", "localize_patch"})
+        and eligible_easy_family
     )
     if easy_single_file:
         return PolicyDecision(profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, reason="single_file_benchmark_fast_path")

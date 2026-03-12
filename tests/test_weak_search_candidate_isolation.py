@@ -99,6 +99,38 @@ def test_iterative_model_tool_loop_runs_multiple_turns(tmp_path: Path):
     assert any(m.get("role") == "user" and any(b.get("type") == "tool_result" for b in m.get("content", [])) for m in client.payloads[1]["messages"])
 
 
+def test_no_tool_final_completion_text_is_preserved(tmp_path: Path):
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
+    client = ScriptedClient([
+        {"content": [{"type": "text", "text": "Done. The fix is complete."}]},
+    ])
+    ex = CandidateExecutor(DummyRunner(tmp_path, client=client), "fix", 20, 1)
+    msg = ex._run_model_edit_pass(
+        tmp_path,
+        "prompt",
+        max_candidate_turns=1,
+        max_candidate_tool_calls=4,
+        timeout_budget_seconds=30.0,
+        execution_mode="heavy",
+        session_context=None,
+        suspect_file="src/app.py",
+    )
+    assert msg == "final_completion:Done. The fix is complete."
+
+
+def test_direct_repair_with_no_tool_final_completion_is_not_model_failure(tmp_path: Path):
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
+    client = ScriptedClient([
+        {"content": [{"type": "tool_use", "id": "1", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=2\n"}}]},
+        {"content": [{"type": "text", "text": "final"}]},
+    ])
+    ex = CandidateExecutor(DummyRunner(tmp_path, client=client), "fix", 20, 1)
+    result = _eval(ex, tmp_path, "att-no-tool", "python -c \"print(1)\"")
+    assert result.attempt_category == "candidate_verified"
+
+
 def test_candidate_isolation_event_contract(monkeypatch, tmp_path: Path):
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
