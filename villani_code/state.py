@@ -177,6 +177,9 @@ class Runner:
         self._ensure_project_memory_and_plan(instruction)
         self._task_mode = classify_task_mode(instruction)
         diagnosis = None
+        diagnosed_target_file = ""
+        required_initial_read = ""
+        initial_read_enforced = False
         pre_edit_failure_evidence = None
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
             try:
@@ -194,6 +197,17 @@ class Runner:
                 from villani_code import state_runtime
 
                 state_runtime.inject_diagnosis_hint(messages, diagnosis)
+                diagnosed_target_file = str(diagnosis.get("target_file", "")).strip().replace("\\", "/").lstrip("./")
+                target_path = (self.repo / diagnosed_target_file).resolve() if diagnosed_target_file else None
+                repo_root = self.repo.resolve()
+                if (
+                    diagnosed_target_file
+                    and target_path is not None
+                    and str(target_path).startswith(str(repo_root))
+                    and target_path.exists()
+                    and target_path.is_file()
+                ):
+                    required_initial_read = diagnosed_target_file
         tools = tool_specs()
         transcript: dict[str, Any] = {
             "requests": [],
@@ -202,6 +216,14 @@ class Runner:
             "tool_results": [],
             "streamed_events_count": 0,
         }
+        self.event_callback(
+            {
+                "type": "diagnosis_target_forced_read",
+                "target_file": diagnosed_target_file,
+                "target_found": bool(diagnosed_target_file),
+                "enforced": bool(required_initial_read),
+            }
+        )
         if self.benchmark_config.enabled:
             self.event_callback({
                 "type": "benchmark_mode_enabled",
@@ -209,13 +231,88 @@ class Runner:
                 "allowlist_paths": self.benchmark_config.allowlist_paths,
                 "expected_files": self.benchmark_config.expected_files,
             })
+        if required_initial_read:
+            forced_tool_use_id = "forced-initial-read"
+            forced_input = {"file_path": required_initial_read}
+            forced_tool_use = {
+                "type": "tool_use",
+                "id": forced_tool_use_id,
+                "name": "Read",
+                "input": forced_input,
+            }
+            self.event_callback(
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": forced_input,
+                    "tool_use_id": forced_tool_use_id,
+                    "forced": True,
+                }
+            )
+            forced_result = self._execute_tool_with_policy(
+                "Read", forced_input, forced_tool_use_id, len(messages)
+            )
+            if self.small_model:
+                forced_result = self._truncate_tool_result("Read", forced_result)
+            if not forced_result.get("is_error"):
+                self._files_read.add(required_initial_read)
+            self.hooks.run_event(
+                "PostToolUse",
+                {
+                    "event": "PostToolUse",
+                    "tool": "Read",
+                    "input": forced_input,
+                    "result": forced_result,
+                },
+            )
+            self.event_callback(
+                {
+                    "type": "tool_finished",
+                    "name": "Read",
+                    "input": forced_input,
+                    "tool_use_id": forced_tool_use_id,
+                    "is_error": forced_result["is_error"],
+                    "forced": True,
+                }
+            )
+            transcript["tool_invocations"].append(
+                {"name": "Read", "input": forced_input, "id": forced_tool_use_id}
+            )
+            transcript["tool_results"].append(forced_result)
+            self.event_callback(
+                {
+                    "type": "tool_result",
+                    "name": "Read",
+                    "input": forced_input,
+                    "tool_use_id": forced_tool_use_id,
+                    "is_error": forced_result["is_error"],
+                    "forced": True,
+                }
+            )
+            messages.append({"role": "assistant", "content": [forced_tool_use]})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": forced_tool_use_id,
+                            "content": forced_result["content"],
+                            "is_error": forced_result["is_error"],
+                        }
+                    ],
+                }
+            )
+            initial_read_enforced = True
         self._save_session_snapshot(messages)
         empty_turn_retries = 0
         start = time.monotonic()
         turns_used = 0
-        tool_calls_used = 0
+        tool_calls_used = 1 if initial_read_enforced else 0
         consecutive_no_edit_turns = 0
         consecutive_recon_turns = 0
+        benchmark_prose_only_after_forced_read = 0
+        benchmark_forced_read_no_progress_guard_active = initial_read_enforced
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
@@ -433,9 +530,57 @@ class Runner:
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
+            if benchmark_forced_read_no_progress_guard_active and tool_uses:
+                benchmark_forced_read_no_progress_guard_active = False
             if not tool_uses:
+                content_blocks = response.get("content", [])
+                only_textual_response = bool(content_blocks) and all(
+                    isinstance(block, dict) and block.get("type") == "text"
+                    for block in content_blocks
+                )
+                prose_only_non_progress = (
+                    self.benchmark_config.enabled
+                    and benchmark_forced_read_no_progress_guard_active
+                    and not _has_meaningful_benchmark_edit()
+                    and (empty or only_textual_response)
+                )
+                if prose_only_non_progress:
+                    benchmark_prose_only_after_forced_read += 1
+                    self.event_callback(
+                        {
+                            "type": "benchmark_prose_only_after_forced_read",
+                            "task_id": self.benchmark_config.task_id,
+                            "attempt": benchmark_prose_only_after_forced_read,
+                        }
+                    )
+                    if benchmark_prose_only_after_forced_read >= 2:
+                        self.event_callback(
+                            {
+                                "type": "benchmark_no_progress_after_forced_read",
+                                "task_id": self.benchmark_config.task_id,
+                            }
+                        )
+                        return _finish_bounded(
+                            response, "benchmark_no_progress_after_forced_read", False
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Benchmark mode: no prose-only turns. Make exactly one concrete next tool call.",
+                                }
+                            ],
+                        }
+                    )
+                    continue
                 if empty:
-                    if self.benchmark_config.enabled and not _has_meaningful_benchmark_edit():
+                    if (
+                        self.benchmark_config.enabled
+                        and not benchmark_forced_read_no_progress_guard_active
+                        and not _has_meaningful_benchmark_edit()
+                    ):
                         self._benchmark_noop_completion_attempts += 1
                         self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
                         if self._benchmark_noop_completion_attempts >= 2:
@@ -552,7 +697,11 @@ class Runner:
                 else:
                     self._no_progress_cycles = 0
                     self._recovery_count = 0
-                if self.benchmark_config.enabled and not _has_meaningful_benchmark_edit():
+                if (
+                    self.benchmark_config.enabled
+                    and not benchmark_forced_read_no_progress_guard_active
+                    and not _has_meaningful_benchmark_edit()
+                ):
                     self._benchmark_noop_completion_attempts += 1
                     self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
                     if self._benchmark_noop_completion_attempts >= 2:

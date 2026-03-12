@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.state import Runner
 
 
@@ -450,3 +451,111 @@ def test_invalid_diagnosis_falls_back_without_crashing(tmp_path: Path):
     assert out["response"]["content"][0]["text"] == "done"
     assert any(e.get("type") == "diagnosis_attempted" for e in events)
     assert any(e.get("type") == "diagnosis_failed" for e in events)
+
+
+class FakeClientDiagnosisThenReadThenDone:
+    def __init__(self, diagnosis_text: str):
+        self.calls = 0
+        self.diagnosis_text = diagnosis_text
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return {"role": "assistant", "content": [{"type": "text", "text": self.diagnosis_text}]}
+        if self.calls == 2:
+            return {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tool-2", "name": "Read", "input": {"file_path": "src/app/config.py"}}
+                ],
+            }
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+        }
+
+
+def test_diagnosis_target_forces_initial_runtime_read(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app" / "config.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE=1\n", encoding="utf-8")
+    diag = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
+    events: list[dict] = []
+    client = FakeClientDiagnosisThenReadThenDone(diag)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, event_callback=events.append)
+
+    out = runner.run("fix config precedence")
+
+    forced_read_events = [e for e in events if e.get("type") == "diagnosis_target_forced_read"]
+    assert forced_read_events
+    assert forced_read_events[-1]["enforced"] is True
+    assert forced_read_events[-1]["target_file"] == "src/app/config.py"
+    assert out["transcript"]["tool_invocations"][0]["name"] == "Read"
+    assert out["transcript"]["tool_invocations"][0]["input"]["file_path"] == "src/app/config.py"
+
+
+def test_forced_read_still_allows_normal_tool_loop_afterward(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app" / "config.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE=1\n", encoding="utf-8")
+    diag = '{"target_file":"src/app/config.py","bug_class":"wrong_precedence","fix_intent":"Prefer env over file values."}'
+    client = FakeClientDiagnosisThenReadThenDone(diag)
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True)
+
+    out = runner.run("fix config precedence")
+
+    read_calls = [i for i in out["transcript"]["tool_invocations"] if i["name"] == "Read"]
+    assert len(read_calls) >= 2
+
+
+def test_benchmark_prose_only_after_forced_read_terminates_early(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('x')\n", encoding="utf-8")
+    diag = '{"target_file":"src/app.py","bug_class":"logic_error","fix_intent":"Read and patch minimal behavior."}'
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"role": "assistant", "content": [{"type": "text", "text": diag}]}
+            return {"role": "assistant", "content": [{"type": "text", "text": "plan only, no tools"}]}
+
+    events: list[dict] = []
+    cfg = BenchmarkRuntimeConfig(enabled=True, task_id="t1", allowlist_paths=["src/"], expected_files=["src/app.py"])
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, benchmark_config=cfg, event_callback=events.append)
+
+    out = runner.run("fix benchmark bug")
+
+    assert out["execution"]["terminated_reason"] == "benchmark_no_progress_after_forced_read"
+    assert any(e.get("type") == "benchmark_no_progress_after_forced_read" for e in events)
+
+
+def test_interactive_mode_keeps_recovery_prompts_after_forced_read(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('x')\n", encoding="utf-8")
+    diag = '{"target_file":"src/app.py","bug_class":"logic_error","fix_intent":"Read and patch minimal behavior."}'
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"role": "assistant", "content": [{"type": "text", "text": diag}]}
+            return {"role": "assistant", "content": [{"type": "text", "text": "still planning"}]}
+
+    events: list[dict] = []
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, small_model=True, event_callback=events.append)
+    out = runner.run("fix bug")
+
+    assert out["response"]["content"][0]["text"] == "still planning"
+    assert any(e.get("type") == "diagnosis_target_forced_read" and e.get("enforced") is True for e in events)
+    assert not any(e.get("type") == "benchmark_no_progress_after_forced_read" for e in events)
