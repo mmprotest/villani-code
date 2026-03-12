@@ -533,6 +533,151 @@ def git_changed_files(repo: Any) -> list[str]:
     return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+
+
+def _collect_changed_python_files(runner: Any) -> list[str]:
+    current_changed = set(git_changed_files(runner.repo))
+    attributed_changed = sorted(current_changed - runner._verification_baseline_changed)
+    return [
+        path
+        for path in attributed_changed
+        if path.endswith(".py") and not is_ignored_repo_path(path)
+    ]
+
+
+def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
+    checked_files = _collect_changed_python_files(runner)
+    if not checked_files:
+        runner.event_callback(
+            {
+                "type": "patch_sanity_check_skipped",
+                "reason": "no_relevant_changed_python_files",
+            }
+        )
+        return {
+            "ran": False,
+            "checked_files": [],
+            "passed": True,
+            "failure_class": "",
+            "reason": "no_relevant_changed_python_files",
+            "stdout": "",
+            "stderr": "",
+        }
+
+    cmd = [sys.executable, "-m", "py_compile", *checked_files]
+    proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+    passed = proc.returncode == 0
+    if passed:
+        runner.event_callback(
+            {
+                "type": "patch_sanity_check_passed",
+                "checked_files": checked_files,
+            }
+        )
+        return {
+            "ran": True,
+            "checked_files": checked_files,
+            "passed": True,
+            "failure_class": "",
+            "reason": "",
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
+    reason = stderr.splitlines()[0] if stderr else "python compile sanity failed"
+    runner.event_callback(
+        {
+            "type": "patch_sanity_check_failed",
+            "checked_files": checked_files,
+            "failure_class": "patch_sanity_failed",
+            "reason": reason,
+        }
+    )
+    runner.event_callback(
+        {
+            "type": "failure_classified",
+            "category": "patch_sanity_failed",
+            "summary": reason,
+            "next_strategy": "Fix syntax/import structure in edited file(s) and retry once.",
+            "occurrence": 1,
+            "failed_files": checked_files,
+        }
+    )
+    return {
+        "ran": True,
+        "checked_files": checked_files,
+        "passed": False,
+        "failure_class": "patch_sanity_failed",
+        "reason": reason,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _compact_patch_sanity_retry_hint(sanity: dict[str, Any]) -> str:
+    files = sanity.get("checked_files", [])
+    target = files[0] if files else "the edited file"
+    return (
+        "Patch sanity gate failed (syntax/import structure). "
+        f"Fix structure in {target} while preserving intended behavior."
+    )
+
+
+def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
+    had_pending_retry = bool(getattr(runner, "_patch_sanity_retry_pending", False))
+    sanity = _run_patch_sanity_check(runner)
+    if not sanity.get("ran") or sanity.get("passed"):
+        if had_pending_retry:
+            runner.event_callback(
+                {
+                    "type": "patch_sanity_retry_attempted",
+                    "checked_files": sanity.get("checked_files", []),
+                    "retry_attempted": True,
+                    "retry_resolved": True,
+                }
+            )
+        runner._patch_sanity_retry_pending = False
+        return run_verification(runner, trigger)
+
+    failed_files = sanity.get("checked_files", [])
+    if not runner._patch_sanity_retry_pending:
+        runner._patch_sanity_retry_pending = True
+        hint = _compact_patch_sanity_retry_hint(sanity)
+        runner.event_callback(
+            {
+                "type": "patch_sanity_retry_attempted",
+                "checked_files": failed_files,
+                "retry_attempted": True,
+                "retry_resolved": False,
+            }
+        )
+        return (
+            "<verification>\n"
+            f"trigger: {trigger}\n"
+            "patch_sanity_gate: failed\n"
+            f"failure_class: {sanity.get('failure_class', 'patch_sanity_failed')}\n"
+            f"checked_files: {json.dumps(failed_files)}\n"
+            f"reason: {sanity.get('reason', '')}\n"
+            f"next: {hint}\n"
+            "</verification>"
+        )
+
+
+    runner._patch_sanity_retry_pending = False
+    runner.event_callback(
+        {
+            "type": "patch_sanity_retry_attempted",
+            "checked_files": failed_files,
+            "retry_attempted": True,
+            "retry_resolved": False,
+            "final": True,
+        }
+    )
+    return run_verification(runner, f"{trigger} (after_sanity_retry_failed)")
+
+
 def run_verification(runner: Any, trigger: str = "edit") -> str:
     current_changed = set(git_changed_files(runner.repo))
     attributed_changed = sorted(current_changed - runner._verification_baseline_changed)

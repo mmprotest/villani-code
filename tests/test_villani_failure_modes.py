@@ -5,6 +5,7 @@ from pathlib import Path
 from villani_code.autonomy import FailureCategory, FailureClassifier, TaskContract, VerificationEngine
 from villani_code.autonomous import AutonomousTask, VillaniModeController
 from villani_code.state import Runner
+from villani_code import state_runtime
 
 
 class _Client:
@@ -255,3 +256,77 @@ def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Pat
     err = runner._small_model_tool_guard("Patch", {"file_path": "src/a.py", "patch": "x"})
     assert err is None
     assert runner._before_contents["src/a.py"] == "x=0\n"
+
+
+def test_patch_sanity_gate_catches_broken_python_edit(tmp_path: Path, monkeypatch) -> None:
+    broken = tmp_path / "broken.py"
+    broken.write_text("def x(:\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    events: list[dict] = []
+    runner.event_callback = lambda event: events.append(event)
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["broken.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    out = state_runtime.run_post_edit_verification(runner, "Patch execution")
+
+    assert "patch_sanity_gate: failed" in out
+    assert any(e.get("type") == "patch_sanity_check_failed" for e in events)
+    assert any(e.get("category") == "patch_sanity_failed" for e in events)
+
+
+def test_patch_sanity_gate_passes_clean_python_and_runs_verification(tmp_path: Path, monkeypatch) -> None:
+    clean = tmp_path / "ok.py"
+    clean.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["ok.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    out = state_runtime.run_post_edit_verification(runner, "Write execution")
+
+    assert out == "verification-ran"
+
+
+def test_patch_sanity_failure_triggers_one_retry_only(tmp_path: Path, monkeypatch) -> None:
+    broken = tmp_path / "retry.py"
+    broken.write_text("def x(:\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    events: list[dict] = []
+    runner.event_callback = lambda event: events.append(event)
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["retry.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    first = state_runtime.run_post_edit_verification(runner, "Patch execution")
+    second = state_runtime.run_post_edit_verification(runner, "Patch execution")
+
+    assert "patch_sanity_gate: failed" in first
+    assert second == "verification-ran"
+    assert sum(1 for e in events if e.get("type") == "patch_sanity_retry_attempted") == 2
+
+
+def test_patch_sanity_retry_does_not_loop_forever(tmp_path: Path, monkeypatch) -> None:
+    broken = tmp_path / "loop.py"
+    broken.write_text("def x(:\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["loop.py"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    state_runtime.run_post_edit_verification(runner, "Patch execution")
+    state_runtime.run_post_edit_verification(runner, "Patch execution")
+    third = state_runtime.run_post_edit_verification(runner, "Patch execution")
+
+    assert "patch_sanity_gate: failed" in third
+
+
+def test_patch_sanity_gate_skips_non_python_changes(tmp_path: Path, monkeypatch) -> None:
+    note = tmp_path / "README.md"
+    note.write_text("hello\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    events: list[dict] = []
+    runner.event_callback = lambda event: events.append(event)
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["README.md"])
+    monkeypatch.setattr(state_runtime, "run_verification", lambda *_args, **_kwargs: "verification-ran")
+
+    out = state_runtime.run_post_edit_verification(runner, "Write execution")
+
+    assert out == "verification-ran"
+    assert any(e.get("type") == "patch_sanity_check_skipped" for e in events)

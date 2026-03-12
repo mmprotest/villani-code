@@ -149,6 +149,7 @@ class Runner:
         self._last_verification_intentional: set[str] = set()
         self._last_verification_artifact_count = 0
         self._failure_classifier = FailureClassifier()
+        self._patch_sanity_retry_pending = False
         self._context_governance = ContextGovernanceManager(self.repo)
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
@@ -747,10 +748,12 @@ class Runner:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
                         self._files_read.add(str(tool_input.get("file_path", "")))
-                    if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                        self._pending_verification = self._run_verification()
 
-                if tool_name in {"Write", "Patch", "Bash"}:
+                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    self._pending_verification = self._run_post_edit_verification(
+                        trigger=f"{tool_name} execution"
+                    )
+                elif tool_name == "Bash":
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
@@ -943,6 +946,11 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.run_verification(self, trigger)
+
+    def _run_post_edit_verification(self, trigger: str = "edit") -> str:
+        from villani_code import state_runtime
+
+        return state_runtime.run_post_edit_verification(self, trigger)
 
     def _git_changed_files(self) -> list[str]:
         from villani_code import state_runtime
