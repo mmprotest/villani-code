@@ -66,6 +66,8 @@ def test_escalates_to_guided_search_only_after_failed_direct_attempt(monkeypatch
     assert calls[0] == ("candidate-0", "direct_repair")
     assert any(mode == "heavy" for _hid, mode in calls[1:])
     assert out["weak_search"]["escalated_after_direct_failure"] is True
+    assert out["weak_search"]["escalation_reason"] == "partial_fix"
+    assert out["weak_search"]["direct_attempt_result"] == "verification_failed"
 
 
 def test_interactive_and_benchmark_share_strategy_telemetry(monkeypatch, tmp_path: Path):

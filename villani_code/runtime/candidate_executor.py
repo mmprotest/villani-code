@@ -348,21 +348,19 @@ class CandidateExecutor:
         )
 
     def _build_direct_repair_prompt(self, *, suspect: str, hypothesis_text: str, constraints: dict[str, Any], failed_attempt_summary: list[str]) -> str:
-        verification_target = constraints.get("visible_verification") or constraints.get("expected_files") or []
+        has_verification = bool(constraints.get("visible_verification") or constraints.get("expected_files"))
         lines = [
             f"Objective: {self.instruction}",
-            "This looks like a bounded local repair.",
-            f"Exact target file: {suspect}",
-            f"Relevant failure evidence: {hypothesis_text}",
-            f"Verification target: {verification_target}",
-            "Inspect the target file first.",
-            "Edit only the target file unless impossible.",
-            "Broad exploration is not allowed on this attempt.",
-            "Inspect one relevant failing test only if necessary.",
-            "Make the smallest valid patch, then verify, then stop.",
+            f"Exact implementation target file: {suspect}",
+            f"Failure evidence: {hypothesis_text}",
+            f"Verification target: {'provided' if has_verification else 'default'}",
+            "bounded local repair.",
+            "Inspect the target implementation file first.",
+            "Edit only target unless impossible.",
+            "Broad exploration is not allowed.",
+            "Read one failing test only if needed.",
+            "Make the smallest valid patch, verify, and stop.",
         ]
-        if failed_attempt_summary:
-            lines.append(f"Prior direct failure: {failed_attempt_summary[-1]}")
         return "\n".join(lines)
 
     def _run_model_edit_pass(self, workspace: Path, prompt: str, *, max_candidate_turns: int, max_candidate_tool_calls: int, timeout_budget_seconds: float, execution_mode: str, session_context: WeakSearchSessionContext | None, suspect_file: str) -> str:
@@ -382,6 +380,7 @@ class CandidateExecutor:
             continuation_used = False
             touched_suspect = False
             inspected_suspect = False
+            secondary_reads = 0
             self._last_assistant_completion_text = ""
             self._last_tool_calls = 0
             self._last_exploration_block_triggered = False
@@ -406,8 +405,6 @@ class CandidateExecutor:
                     final_text = self._extract_final_assistant_text(content)
                     self._last_assistant_completion_text = final_text
                     return f"final_completion:{final_text}" if final_text else "empty assistant completion"
-                if execution_mode == "direct_repair" and turns > 1 and continuation_used:
-                    return "direct_repair_exceeded_continuation_policy"
                 tool_results: list[dict[str, Any]] = []
                 for block in tool_uses:
                     if tool_calls >= max_candidate_tool_calls:
@@ -421,14 +418,27 @@ class CandidateExecutor:
                     if execution_mode == "direct_repair":
                         path_hint = str(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("dir") or "")
                         broad_ls = tool_name == "Ls" and path_hint.strip() in {"", ".", "src", "src/", "tests", "tests/"}
-                        broad_probe = tool_name in {"Glob", "Search", "GitLog", "GitBranch", "GitCheckout"} or broad_ls
+                        broad_probe = tool_name in {"Glob", "Search", "Grep", "GitLog", "GitBranch", "GitCheckout"} or broad_ls
                         inspects_target = tool_name in {"Read", "View", "Cat"} and bool(suspect_file) and suspect_file in path_hint
+                        is_read = tool_name in {"Read", "View", "Cat"}
+                        unrelated_config_read = is_read and path_hint in {"pyproject.toml", "setup.cfg", "tox.ini", "package.json"}
                         if tool_calls == 1 and not inspects_target:
                             self._last_exploration_block_triggered = True
                             return f"direct_repair_thrash:first_tool_not_target_inspection:{tool_name}"
                         if broad_probe and not inspected_suspect:
                             self._last_exploration_block_triggered = True
                             return f"direct_repair_thrash:{tool_name}"
+                        if unrelated_config_read and not touched_suspect:
+                            self._last_exploration_block_triggered = True
+                            return "direct_repair_thrash:unrelated_config_before_patch"
+                        if is_read and inspected_suspect and (not inspects_target) and (not path_hint.startswith("tests/")) and not touched_suspect:
+                            self._last_exploration_block_triggered = True
+                            return "direct_repair_thrash:unrelated_read_before_patch"
+                        if is_read and path_hint.startswith("tests/") and not touched_suspect:
+                            secondary_reads += 1
+                            if secondary_reads > 1:
+                                self._last_exploration_block_triggered = True
+                                return "direct_repair_thrash:too_many_secondary_reads"
                         if inspects_target:
                             inspected_suspect = True
                     result = self.runner._execute_tool_with_policy(tool_name, tool_input, tool_use_id, len(messages))
@@ -450,7 +460,7 @@ class CandidateExecutor:
                 messages.append({"role": "user", "content": tool_results})
                 if execution_mode == "direct_repair":
                     if continuation_used:
-                        return "direct_repair_continuation_exhausted"
+                        return "direct_repair_exceeded_continuation_policy"
                     if not touched_suspect:
                         if not inspected_suspect:
                             return "direct_repair_no_progress_on_suspect_file"
