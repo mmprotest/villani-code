@@ -81,6 +81,201 @@ class CandidateExecutor:
         self._last_tool_calls = 0
         self._last_exploration_block_triggered = False
 
+
+    def evaluate_direct_patch(
+        self,
+        *,
+        repo_path: Path,
+        objective: str,
+        target_file: str,
+        target_file_contents: str,
+        failing_test_file: str = "",
+        failing_test_contents: str = "",
+        verification_target: str = "",
+        constraints: dict[str, Any],
+        benchmark_config: Any,
+        attempt_id: str,
+        timeout_budget_seconds: float,
+    ) -> CandidateExecutionResult:
+        started = time.monotonic()
+        handle = prepare_candidate_workspace(repo_path, fast_path=True)
+        workspace = handle.workspace
+        prompt_started = time.monotonic()
+        prompt = self._build_direct_diff_prompt(
+            objective=objective,
+            target_file=target_file,
+            target_file_contents=target_file_contents,
+            failing_test_file=failing_test_file,
+            failing_test_contents=failing_test_contents,
+            verification_target=verification_target,
+        )
+        prompt_build_seconds = time.monotonic() - prompt_started
+        prompt_tokens = len(prompt.split())
+        model_started = time.monotonic()
+        try:
+            diff_text = self._request_unified_diff(prompt)
+        except Exception as exc:  # noqa: BLE001
+            cleanup_candidate_workspace(handle)
+            return CandidateExecutionResult(
+                hard_fail=True,
+                blocked_reason="blocked_model_failure",
+                attempt_summary=str(exc),
+                attempt_category="blocked_model_failure",
+                verification_stage="stage_0",
+                workspace_prep_seconds=handle.prep_seconds,
+                prompt_build_seconds=prompt_build_seconds,
+                model_execution_seconds=time.monotonic() - model_started,
+                candidate_total_seconds=time.monotonic() - started,
+                workspace_strategy=handle.strategy,
+                policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+                direct_repair_attempted=True,
+                direct_repair_suspect=target_file,
+                prompt_tokens_first_attempt=prompt_tokens,
+            )
+        model_execution_seconds = time.monotonic() - model_started
+        if not diff_text.strip() or '--- ' not in diff_text or '+++ ' not in diff_text:
+            cleanup_candidate_workspace(handle)
+            return CandidateExecutionResult(
+                hard_fail=True,
+                blocked_reason="blocked_model_failure",
+                attempt_summary="invalid_or_empty_unified_diff",
+                attempt_category="blocked_model_failure",
+                verification_stage="stage_0",
+                workspace_prep_seconds=handle.prep_seconds,
+                prompt_build_seconds=prompt_build_seconds,
+                model_execution_seconds=model_execution_seconds,
+                candidate_total_seconds=time.monotonic() - started,
+                workspace_strategy=handle.strategy,
+                policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+                direct_repair_attempted=True,
+                direct_repair_suspect=target_file,
+                prompt_tokens_first_attempt=prompt_tokens,
+            )
+        before_map = self._read_repo_text_map(workspace)
+        try:
+            apply_unified_diff(workspace, diff_text)
+        except Exception as exc:  # noqa: BLE001
+            cleanup_candidate_workspace(handle)
+            return CandidateExecutionResult(
+                hard_fail=True,
+                blocked_reason="blocked_runtime_error",
+                attempt_summary=f"diff_apply_failed:{exc}",
+                attempt_category="blocked_runtime_error",
+                verification_stage="stage_0",
+                workspace_prep_seconds=handle.prep_seconds,
+                prompt_build_seconds=prompt_build_seconds,
+                model_execution_seconds=model_execution_seconds,
+                candidate_total_seconds=time.monotonic() - started,
+                workspace_strategy=handle.strategy,
+                policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+                direct_repair_attempted=True,
+                direct_repair_suspect=target_file,
+                prompt_tokens_first_attempt=prompt_tokens,
+            )
+        after_map = self._read_repo_text_map(workspace)
+        changed_files = sorted([f for f in set(before_map) | set(after_map) if before_map.get(f, "") != after_map.get(f, "")])
+        if not changed_files:
+            cleanup_candidate_workspace(handle)
+            return CandidateExecutionResult(
+                hard_fail=True,
+                blocked_reason="blocked_model_failure",
+                attempt_summary="no_meaningful_diff",
+                attempt_category="rejected_noop",
+                verification_stage="stage_0",
+                workspace_prep_seconds=handle.prep_seconds,
+                prompt_build_seconds=prompt_build_seconds,
+                model_execution_seconds=model_execution_seconds,
+                candidate_total_seconds=time.monotonic() - started,
+                workspace_strategy=handle.strategy,
+                policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+                direct_repair_attempted=True,
+                direct_repair_suspect=target_file,
+                prompt_tokens_first_attempt=prompt_tokens,
+            )
+        diff_stats = {"changed_line_count": sum(self._count_changed_lines(before_map.get(f, ""), after_map.get(f, "")) for f in changed_files)}
+        artifact = self._persist_patch_artifact(attempt_id, diff_text)
+        verification_started = time.monotonic()
+        verification_outputs, success, score, score_breakdown = self._run_verification(workspace, changed_files, benchmark_config, WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH)
+        verification_seconds = time.monotonic() - verification_started
+        elapsed = time.monotonic() - started
+        cleanup_candidate_workspace(handle)
+        return CandidateExecutionResult(
+            changed_files=changed_files,
+            diff_stats=diff_stats,
+            patch_artifact_path=artifact,
+            diff_text=diff_text,
+            verification_outputs=verification_outputs,
+            score=score,
+            score_breakdown=score_breakdown,
+            attempt_summary=f"Evaluated direct patch touching {len(changed_files)} file(s).",
+            attempt_category="candidate_verified" if success else "verification_failed",
+            success=success,
+            target_verification_passed=bool(verification_outputs.get("target_verification_passed", False)),
+            collateral_verification_passed=bool(verification_outputs.get("collateral_verification_passed", False)),
+            static_sanity_passed=bool(verification_outputs.get("static_sanity_passed", False)),
+            minimality_score=float(score_breakdown.get("minimality", 0.0)),
+            novelty_score=float(score_breakdown.get("novelty", 0.0)),
+            verification_stage=str(verification_outputs.get("verification_stage", "stage_3")),
+            target_exit_codes=list(verification_outputs.get("target_exit_codes", [])),
+            target_command_count=int(verification_outputs.get("target_command_count", 0)),
+            workspace_prep_seconds=handle.prep_seconds,
+            prompt_build_seconds=prompt_build_seconds,
+            model_execution_seconds=model_execution_seconds,
+            verification_seconds=verification_seconds,
+            candidate_total_seconds=elapsed,
+            workspace_strategy=handle.strategy,
+            policy_profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH.value,
+            direct_repair_attempted=True,
+            direct_repair_suspect=target_file,
+            hypothesis_stage_skipped_initially=True,
+            prompt_tokens_first_attempt=prompt_tokens,
+        )
+
+    def evaluate_guided_retry(self, *, retry_hint: str = "", **kwargs: Any) -> CandidateExecutionResult:
+        return self.evaluate_direct_patch(**kwargs)
+
+    def _request_unified_diff(self, prompt: str) -> str:
+        payload = {
+            "model": self.runner.model,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "system": [{"type": "text", "text": "Return only a unified diff."}],
+            "tools": [],
+            "max_tokens": self.runner.max_tokens,
+            "stream": False,
+        }
+        raw = self.runner.client.create_message(payload, stream=False)
+        response = raw if isinstance(raw, dict) else {"content": []}
+        content = normalize_content_blocks(response.get("content", []))
+        return self._extract_final_assistant_text(content)
+
+    def _build_direct_diff_prompt(
+        self,
+        *,
+        objective: str,
+        target_file: str,
+        target_file_contents: str,
+        failing_test_file: str,
+        failing_test_contents: str,
+        verification_target: str,
+    ) -> str:
+        parts = [
+            f"Objective: {objective}",
+            f"Exact target file: {target_file}",
+            "Bounded local repair only.",
+            "Edit only the target file unless impossible.",
+            f"Verification target: {verification_target or 'default configured target verification'}",
+            "Output format: unified diff only.",
+            "Smallest valid patch. No explanations.",
+            f"--- FILE: {target_file} ---",
+            target_file_contents,
+        ]
+        if failing_test_file and failing_test_contents:
+            parts.extend([
+                f"--- SUPPORTING FAILING TEST: {failing_test_file} ---",
+                failing_test_contents,
+            ])
+        return "\n".join(parts)
+
     def evaluate_candidate(
         self,
         *,

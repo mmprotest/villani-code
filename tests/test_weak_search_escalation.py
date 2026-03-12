@@ -38,17 +38,19 @@ def test_escalates_to_guided_search_only_after_failed_direct_attempt(monkeypatch
 
     calls = []
 
-    def fake_eval(self, **kwargs):
-        calls.append((kwargs["hypothesis_id"], kwargs["execution_mode"]))
-        if kwargs["hypothesis_id"] == "candidate-0":
-            return CandidateExecutionResult(
-                changed_files=["src/app.py"],
-                diff_text="diff --git a/src/app.py b/src/app.py\n",
-                diff_stats={"changed_line_count": 1},
-                verification_outputs={"commands": [], "target_verification_passed": False},
-                attempt_category="verification_failed",
-                score=0.4,
-            )
+    def fake_direct(self, **kwargs):
+        calls.append(("stage1", "direct_patch"))
+        return CandidateExecutionResult(
+            changed_files=["src/app.py"],
+            diff_text="diff --git a/src/app.py b/src/app.py\n",
+            diff_stats={"changed_line_count": 1},
+            verification_outputs={"commands": [], "target_verification_passed": False},
+            attempt_category="verification_failed",
+            score=0.4,
+        )
+
+    def fake_guided(self, **kwargs):
+        calls.append(("stage2", "guided_retry"))
         return CandidateExecutionResult(
             changed_files=["src/app.py"],
             diff_text="diff --git a/src/app.py b/src/app.py\n",
@@ -59,12 +61,13 @@ def test_escalates_to_guided_search_only_after_failed_direct_attempt(monkeypatch
             score=0.8,
         )
 
-    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_eval)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_direct_patch", fake_direct)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_guided_retry", fake_guided)
     monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.commit_candidate", lambda self, repo_path, candidate_result: None)
 
     out = WeakSearchController(DummyRunner(tmp_path), "fix config precedence").run()
-    assert calls[0] == ("candidate-0", "direct_repair")
-    assert any(mode == "heavy" for _hid, mode in calls[1:])
+    assert calls[0] == ("stage1", "direct_patch")
+    assert calls[1] == ("stage2", "guided_retry")
     assert out["weak_search"]["escalated_after_direct_failure"] is True
     assert out["weak_search"]["escalation_reason"] == "partial_fix"
     assert out["weak_search"]["direct_attempt_result"] == "verification_failed"
@@ -87,7 +90,7 @@ def test_interactive_and_benchmark_share_strategy_telemetry(monkeypatch, tmp_pat
             tool_calls_first_attempt=2,
         )
 
-    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_candidate", fake_eval)
+    monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.evaluate_direct_patch", fake_eval)
     monkeypatch.setattr("villani_code.runtime.candidate_executor.CandidateExecutor.commit_candidate", lambda self, repo_path, candidate_result: None)
 
     bench_out = WeakSearchController(DummyRunner(tmp_path, enabled=True), "fix bug").run()
