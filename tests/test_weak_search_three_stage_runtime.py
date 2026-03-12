@@ -59,8 +59,8 @@ def test_direct_patch_prompt_is_diff_only_and_compact(tmp_path: Path):
         failing_test_contents="def test_regression():\n    assert False\n",
         verification_target="pytest -q tests/test_app.py::test_regression",
     )
-    assert "Output format: unified diff only." in prompt
-    assert "Smallest valid patch" in prompt
+    assert "Return one format only" in prompt
+    assert "Unified diff example:" in prompt
     assert "--- FILE: src/app.py ---" in prompt
 
 
