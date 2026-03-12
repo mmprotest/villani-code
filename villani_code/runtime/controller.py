@@ -8,8 +8,8 @@ from typing import Any
 from villani_code.localize.ranker import rank_suspects
 from villani_code.runtime.blackboard import BlackboardStore
 from villani_code.runtime.budgets import select_runtime_budgets, timeout_imminent
-from villani_code.runtime.candidate_executor import CandidateExecutionResult, CandidateExecutor
-from villani_code.runtime.policy import WeakSearchPolicyProfile, decide_runtime_policy
+from villani_code.runtime.candidate_executor import CandidateExecutionResult, CandidateExecutor, WeakSearchSessionContext
+from villani_code.runtime.policy import WeakSearchPolicyProfile, decide_runtime_policy, is_direct_repair_profile
 from villani_code.runtime.schemas import AttemptRecord, Blackboard, BranchRecord, Evidence, StopReason
 from villani_code.runtime.trace import emit_runtime_event
 from villani_code.search.frontier import BranchFrontier, FrontierBranch
@@ -76,6 +76,12 @@ class WeakSearchController:
                 "verification_seconds": result.verification_seconds,
                 "candidate_total_seconds": result.candidate_total_seconds,
                 "workspace_strategy": result.workspace_strategy,
+                "policy_profile": result.policy_profile,
+                "direct_repair_attempted": result.direct_repair_attempted,
+                "direct_repair_suspect": result.direct_repair_suspect,
+                "session_context_reused": result.session_context_reused,
+                "escalation_occurred": result.escalation_occurred,
+                "escalation_reason": result.escalation_reason,
             },
             attempt_category=result.attempt_category,
             blocked_reason=result.blocked_reason,
@@ -87,6 +93,28 @@ class WeakSearchController:
         )
         board.attempts.append(attempt)
         return attempt
+
+
+    def _select_direct_repair_suspect(self, suspects: list[Any], evidence: Evidence, config: Any) -> str:
+        if len(config.expected_files) == 1:
+            return str(config.expected_files[0])
+        stack = "\n".join(evidence.stack_traces + evidence.error_messages)
+        for suspect in suspects:
+            if suspect.file and suspect.file in stack:
+                return suspect.file
+        return suspects[0].file if suspects else ""
+
+    def _should_escalate_after_direct_attempt(self, result: CandidateExecutionResult, suspect: str) -> tuple[bool, str]:
+        if result.success:
+            return False, "solved"
+        meaningful_diff = bool(result.diff_text.strip() and result.changed_files)
+        if meaningful_diff and not result.target_verification_passed:
+            return True, "meaningful_diff_failed_target_verification"
+        if result.attempt_category == "rejected_noop" and suspect:
+            return True, "noop_after_suspect_inspection"
+        if result.blocked_reason.startswith("direct_repair_thrash"):
+            return True, "direct_repair_thrash"
+        return False, "direct_repair_insufficient_signal"
 
     def run(self) -> dict[str, Any]:
         config = self.runner.benchmark_config
@@ -124,9 +152,13 @@ class WeakSearchController:
         blocked_attempts = 0
         verified_attempts = 0
         executor = CandidateExecutor(self.runner, self.instruction, budgets.max_patch_lines, budgets.max_files_per_patch)
+        session_context = WeakSearchSessionContext(planning_prompt=self.instruction)
+        if hasattr(self.runner, "_ensure_project_memory_and_plan"):
+            self.runner._ensure_project_memory_and_plan(session_context.planning_prompt)
+            session_context.planning_initialized = True
         blocked_reason = ""
         escalation_occurred = False
-        fast_path_attempted = decision.profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE
+        fast_path_attempted = is_direct_repair_profile(decision.profile)
         candidate0_attempted = False
 
         for cycle in range(1, budgets.max_cycles + 1):
@@ -137,7 +169,7 @@ class WeakSearchController:
                 break
 
             suspects = rank_suspects(self.repo, board.evidence, self._candidate_pool(config))
-            if decision.profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE:
+            if is_direct_repair_profile(decision.profile):
                 suspects = suspects[:1]
             else:
                 suspects = suspects[:2]
@@ -153,27 +185,30 @@ class WeakSearchController:
                 "max_files_touched": config.max_files_touched,
             }
 
-            if cycle == 1 and decision.profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE and suspects:
+            if cycle == 1 and decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH and suspects:
                 candidate0_attempted = True
-                suspect = suspects[0]
+                suspect_file = self._select_direct_repair_suspect(suspects, board.evidence, config)
+                board.decision_log.append({"event": "direct_repair_attempted", "suspect": suspect_file})
                 attempt_id = f"att-{len(board.attempts)+1}"
                 direct = executor.evaluate_candidate(
                     repo_path=self.repo,
                     objective=self.instruction,
-                    suspect_region=suspect.file,
+                    suspect_region=suspect_file,
                     hypothesis_id="candidate-0",
                     hypothesis="Directly repair the likely root bug in the suspect file.",
                     constraints=constraints,
                     runtime_profile="benchmark" if config.enabled else "interactive",
                     benchmark_config=config,
                     baseline_handle="clean-copy",
-                    edit_budget=EditBudget(max_files=budgets.max_files_per_patch, max_lines=budgets.max_patch_lines),
+                    edit_budget=EditBudget(max_files=1, max_lines=12),
                     branch_failure_history=[],
                     timeout_budget_seconds=max(10.0, self.timeout_seconds - (time.monotonic() - self.started)),
                     attempt_id=attempt_id,
-                    max_candidate_turns=budgets.max_candidate_turns,
-                    max_candidate_tool_calls=budgets.max_candidate_tool_calls,
+                    max_candidate_turns=1,
+                    max_candidate_tool_calls=4,
                     policy_profile=decision.profile.value,
+                    execution_mode="direct_repair",
+                    session_context=session_context,
                 )
                 candidates_generated += 1
                 self._record_attempt(board, "candidate-0", attempt_id, "candidate-0", direct, "direct")
@@ -187,12 +222,17 @@ class WeakSearchController:
                     best_score = direct.score
                     emit_runtime_event(self.repo, self.runner.event_callback, "candidate_patch_committed", branch_id="candidate-0", attempt_id=attempt_id, patch_artifact=direct.patch_artifact_path)
                     break
+                should_escalate, escalate_reason = self._should_escalate_after_direct_attempt(direct, suspect_file)
+                board.decision_log.append({"event": "direct_repair_result", "escalate": should_escalate, "reason": escalate_reason})
+                if not should_escalate:
+                    board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": escalate_reason}
+                    break
                 decision = decide_runtime_policy(
                     benchmark_config=config,
                     is_interactive=not config.enabled,
                     task_family="localize_patch" if config.enabled else None,
                     previous_candidate_failed=True,
-                    no_progress_cycles=no_improve,
+                    no_progress_cycles=1,
                     has_stacktrace_or_error=True,
                 )
                 if decision.profile == WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH:
@@ -236,6 +276,8 @@ class WeakSearchController:
                     max_candidate_turns=budgets.max_candidate_turns,
                     max_candidate_tool_calls=budgets.max_candidate_tool_calls,
                     policy_profile=decision.profile.value,
+                    execution_mode="heavy",
+                    session_context=session_context,
                 )
                 attempt = self._record_attempt(board, branch.id, attempt_id, hypothesis.id, result, "fallback" if "fallback" in hypothesis.notes else "model")
                 if branch_rec:
@@ -275,7 +317,7 @@ class WeakSearchController:
 
             no_improve = 0 if improved else no_improve + 1
             if no_progress_stop(no_improve, budgets.max_consecutive_no_improvement_cycles):
-                if decision.profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE:
+                if decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH:
                     decision = decide_runtime_policy(
                         benchmark_config=config,
                         is_interactive=not config.enabled,
@@ -311,6 +353,8 @@ class WeakSearchController:
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
+            "direct_repair_attempted": candidate0_attempted,
+            "session_context_reused": True,
         }
         store.write(board)
         summary = {
@@ -333,6 +377,8 @@ class WeakSearchController:
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
+            "direct_repair_attempted": candidate0_attempted,
+            "session_context_reused": True,
         }
         store.write_summary(summary)
         emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_stopped", **summary)

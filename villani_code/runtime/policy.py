@@ -6,9 +6,15 @@ from typing import Any
 
 
 class WeakSearchPolicyProfile(StrEnum):
+    DIRECT_REPAIR_FAST_PATH = "direct_repair_fast_path"
     FAST_PATH_SINGLE_FILE = "fast_path_single_file"
     NORMAL_WEAK_SEARCH = "normal_weak_search"
     ESCALATED_WEAK_SEARCH = "escalated_weak_search"
+
+
+def is_direct_repair_profile(profile: str | WeakSearchPolicyProfile) -> bool:
+    normalized = WeakSearchPolicyProfile(str(profile))
+    return normalized in {WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE}
 
 
 @dataclass(slots=True)
@@ -72,7 +78,7 @@ def decide_runtime_policy(
         and (task_family in {None, "", "localize_patch"})
     )
     if easy_single_file:
-        return PolicyDecision(profile=WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE, reason="single_file_benchmark_fast_path")
+        return PolicyDecision(profile=WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH, reason="single_file_benchmark_fast_path")
 
     if no_progress_cycles >= 2 and has_stacktrace_or_error:
         return PolicyDecision(profile=WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH, reason="stalled_with_failure_signal")

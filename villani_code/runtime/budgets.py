@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from villani_code.benchmark.models import TaskFamily
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
-from villani_code.runtime.policy import WeakSearchPolicyProfile
+from villani_code.runtime.policy import WeakSearchPolicyProfile, is_direct_repair_profile
 from villani_code.runtime.schemas import RuntimeBudgets
 
 
@@ -15,13 +15,23 @@ def select_runtime_budgets(
     budgets = RuntimeBudgets()
     profile = WeakSearchPolicyProfile(str(policy_profile))
 
-    if profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE:
+    if profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH:
+        budgets.max_cycles = 1
+        budgets.max_active_branches = 1
+        budgets.max_hypotheses_per_suspect = 1
+        budgets.max_candidates_per_hypothesis = 1
+        budgets.max_candidate_turns = 1
+        budgets.max_candidate_tool_calls = 4
+        budgets.max_patch_lines = 12
+        budgets.max_files_per_patch = 1
+        budgets.max_consecutive_no_improvement_cycles = 1
+    elif profile == WeakSearchPolicyProfile.FAST_PATH_SINGLE_FILE:
         budgets.max_cycles = 2
         budgets.max_active_branches = 2
         budgets.max_hypotheses_per_suspect = 2
         budgets.max_candidates_per_hypothesis = 1
-        budgets.max_candidate_turns = 3
-        budgets.max_candidate_tool_calls = 8
+        budgets.max_candidate_turns = 2
+        budgets.max_candidate_tool_calls = 6
         budgets.max_patch_lines = 16
         budgets.max_files_per_patch = 1
         budgets.max_consecutive_no_improvement_cycles = 1
@@ -45,7 +55,7 @@ def select_runtime_budgets(
     is_multi_file = max_files_touched > 1
     if task_family == TaskFamily.LOCALIZE_PATCH.value and max_files_touched > 1:
         is_multi_file = True
-    if is_multi_file:
+    if is_multi_file and not is_direct_repair_profile(profile):
         budgets.max_patch_lines = max(budgets.max_patch_lines, 40)
         budgets.max_files_per_patch = max(budgets.max_files_per_patch, 2)
 
