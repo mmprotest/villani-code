@@ -1,22 +1,18 @@
 from __future__ import annotations
-
 import time
 import uuid
 from pathlib import Path
 from typing import Any
-
 from villani_code.localize.ranker import rank_suspects
 from villani_code.runtime.blackboard import BlackboardStore
 from villani_code.runtime.budgets import select_runtime_budgets, timeout_imminent
 from villani_code.runtime.candidate_executor import CandidateExecutionResult, CandidateExecutor, WeakSearchSessionContext
-from villani_code.runtime.policy import WeakSearchPolicyProfile, decide_runtime_policy, is_direct_repair_profile
+from villani_code.runtime.policy import RuntimeStrategy, WeakSearchPolicyProfile, decide_runtime_policy, is_direct_repair_profile
 from villani_code.runtime.schemas import AttemptRecord, Blackboard, BranchRecord, Evidence, StopReason
 from villani_code.runtime.trace import emit_runtime_event
 from villani_code.search.frontier import BranchFrontier, FrontierBranch
 from villani_code.search.pruning import no_progress_stop, should_prune_branch
 from villani_code.synthesize.edit_budget import EditBudget
-
-
 class WeakSearchController:
     def __init__(self, runner: Any, instruction: str, timeout_seconds: float = 300.0) -> None:
         self.runner = runner
@@ -24,7 +20,6 @@ class WeakSearchController:
         self.instruction = instruction
         self.timeout_seconds = timeout_seconds
         self.started = time.monotonic()
-
     def _collect_evidence(self) -> Evidence:
         config = self.runner.benchmark_config
         evidence = Evidence(
@@ -38,7 +33,6 @@ class WeakSearchController:
         if config.task_id and "repro" in config.task_id:
             evidence.repro_commands = list(config.visible_verification)
         return evidence
-
     def _candidate_pool(self, config: Any) -> list[str]:
         if config.enabled:
             return list(dict.fromkeys(config.expected_files + config.allowlist_paths))[:12]
@@ -47,7 +41,6 @@ class WeakSearchController:
             return hinted[:12]
         repo_files = [p.relative_to(self.repo).as_posix() for p in self.repo.rglob("*") if p.is_file() and ".git/" not in p.as_posix()]
         return repo_files[:20]
-
     def _record_attempt(self, board: Blackboard, branch_id: str, attempt_id: str, hypothesis_id: str, result: CandidateExecutionResult, hypothesis_source: str) -> AttemptRecord:
         attempt = AttemptRecord(
             id=attempt_id,
@@ -84,6 +77,9 @@ class WeakSearchController:
                 "session_context_reused": result.session_context_reused,
                 "escalation_occurred": result.escalation_occurred,
                 "escalation_reason": result.escalation_reason,
+                "prompt_tokens_first_attempt": result.prompt_tokens_first_attempt,
+                "tool_calls_first_attempt": result.tool_calls_first_attempt,
+                "exploration_block_triggered": result.exploration_block_triggered,
             },
             attempt_category=result.attempt_category,
             blocked_reason=result.blocked_reason,
@@ -95,35 +91,41 @@ class WeakSearchController:
         )
         board.attempts.append(attempt)
         return attempt
-
-
-    def _select_direct_repair_suspect(self, suspects: list[Any], evidence: Evidence, config: Any) -> str:
+    def _select_direct_repair_target(self, suspects: list[Any], evidence: Evidence, config: Any) -> tuple[str, str]:
         if len(config.expected_files) == 1:
-            return str(config.expected_files[0])
-        stack = "\n".join(evidence.stack_traces + evidence.error_messages)
+            return str(config.expected_files[0]), "expected_single_implementation_file"
+        stack = "\n".join([*evidence.stack_traces, *evidence.error_messages])
         for suspect in suspects:
-            if suspect.file and suspect.file in stack:
-                return suspect.file
-        return suspects[0].file if suspects else ""
-
+            if not suspect.file:
+                continue
+            if suspect.file.startswith("tests/") and any(not s.file.startswith("tests/") for s in suspects):
+                continue
+            if suspect.file in stack:
+                return suspect.file, "stacktrace_or_error_path_match"
+        impl_suspects = [s for s in suspects if s.file and not s.file.startswith("tests/")]
+        if impl_suspects:
+            return impl_suspects[0].file, "strongest_lexical_impl_overlap"
+        if suspects:
+            return suspects[0].file, "top_ranked_suspect"
+        return "", "no_suspect_available"
     def _should_escalate_after_direct_attempt(self, result: CandidateExecutionResult, suspect: str) -> tuple[bool, str]:
         if result.success:
             return False, "solved"
-        meaningful_diff = bool(result.diff_text.strip() and result.changed_files)
-        if meaningful_diff and not result.target_verification_passed:
-            return True, "meaningful_diff_failed_target_verification"
-        if result.attempt_category == "rejected_noop" and suspect:
-            return True, "noop_after_suspect_inspection"
+        meaningful_patch = bool(result.changed_files and result.diff_text.strip())
+        verification_improved = bool(result.target_verification_passed) or bool(result.score > 0.35)
         if result.blocked_reason.startswith("direct_repair_thrash"):
-            return True, "direct_repair_thrash"
+            return True, "direct_mode_exploration_thrash"
+        if meaningful_patch and not result.target_verification_passed:
+            return True, "meaningful_patch_failed_target_verification"
+        if result.attempt_category == "rejected_noop" and suspect:
+            return True, "noop_after_target_inspection"
+        if verification_improved:
+            return True, "partial_progress_requires_guided_search"
         return False, "direct_repair_insufficient_signal"
-
     def _runtime_task_family(self, config: Any) -> str | None:
         return (getattr(config, "task_family", None) or "").strip() or None
-
     def _runtime_task_type(self, config: Any) -> str | None:
         return (getattr(config, "task_type", None) or "").strip() or None
-
     def _run_direct_patch_attempt(
         self,
         *,
@@ -135,7 +137,8 @@ class WeakSearchController:
         config: Any,
         session_context: WeakSearchSessionContext,
     ) -> tuple[CandidateExecutionResult, str, str]:
-        suspect_file = self._select_direct_repair_suspect(suspects, board.evidence, config)
+        suspect_file, target_reason = self._select_direct_repair_target(suspects, board.evidence, config)
+        board.decision_log.append({"event": "target_selected", "target_file": suspect_file, "target_selection_reason": target_reason})
         board.decision_log.append({"event": "direct_repair_attempted", "suspect": suspect_file})
         attempt_id = f"att-{len(board.attempts)+1}"
         result = executor.evaluate_candidate(
@@ -160,7 +163,6 @@ class WeakSearchController:
             hypothesis_stage_skipped_initially=True,
         )
         return result, attempt_id, suspect_file
-
     def run(self) -> dict[str, Any]:
         config = self.runner.benchmark_config
         decision = decide_runtime_policy(
@@ -170,7 +172,7 @@ class WeakSearchController:
             task_type=(config.task_type if config.enabled else None),
             previous_candidate_failed=False,
             no_progress_cycles=0,
-            has_stacktrace_or_error=False,
+            has_stacktrace_or_error=bool(self.instruction.strip()),
         )
         budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
         run_id = uuid.uuid4().hex[:12]
@@ -181,12 +183,12 @@ class WeakSearchController:
             repo_root=str(self.repo),
             budgets=budgets,
             evidence=self._collect_evidence(),
-            constraints={"max_minutes": getattr(config, "max_minutes", None), "policy_profile": decision.profile.value},
+            constraints={"max_minutes": getattr(config, "max_minutes", None), "policy_profile": decision.profile.value, "strategy_selected": decision.strategy.value},
         )
         store = BlackboardStore(self.repo, run_id)
         store.write(board)
-        emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_started", run_id=run_id, task_id=board.task_id, policy_profile=decision.profile.value)
-
+        board.decision_log.append({"event": "strategy_selected", "strategy_selected": decision.strategy.value, "policy_profile": decision.profile.value, "reason": decision.reason, "direct_repair_first_used": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST, "initial_hypothesis_stage_skipped": decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST})
+        emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_started", run_id=run_id, task_id=board.task_id, policy_profile=decision.profile.value, strategy_selected=decision.strategy.value)
         frontier = BranchFrontier()
         no_improve = 0
         best_score = 0.0
@@ -199,21 +201,16 @@ class WeakSearchController:
         verified_attempts = 0
         executor = CandidateExecutor(self.runner, self.instruction, budgets.max_patch_lines, budgets.max_files_per_patch)
         session_context = WeakSearchSessionContext(planning_prompt=self.instruction)
-        if hasattr(self.runner, "_ensure_project_memory_and_plan"):
-            self.runner._ensure_project_memory_and_plan(session_context.planning_prompt)
-            session_context.planning_initialized = True
         blocked_reason = ""
         escalation_occurred = False
-        fast_path_attempted = is_direct_repair_profile(decision.profile)
+        fast_path_attempted = decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST
         candidate0_attempted = False
-
         for cycle in range(1, budgets.max_cycles + 1):
             board.cycle = cycle
             emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_cycle_started", cycle=cycle, policy_profile=decision.profile.value)
             if timeout_imminent(self.started, time.monotonic(), self.timeout_seconds, avg_cycle_seconds=8.0):
                 board.final_result = {"stop_reason": StopReason.TIMEOUT_IMMINENT.value, "best_patch_score": best_score}
                 break
-
             suspects = rank_suspects(self.repo, board.evidence, self._candidate_pool(config))
             if is_direct_repair_profile(decision.profile):
                 suspects = suspects[:1]
@@ -223,15 +220,14 @@ class WeakSearchController:
             emit_runtime_event(self.repo, self.runner.event_callback, "suspects_ranked", count=len(board.suspects))
             improved = False
             cycle_best: tuple[FrontierBranch, CandidateExecutionResult, str, Any] | None = None
-
             constraints = {
                 "allowlist_paths": config.allowlist_paths,
                 "forbidden_paths": config.forbidden_paths,
                 "expected_files": config.expected_files,
                 "max_files_touched": config.max_files_touched,
+                "visible_verification": list(config.visible_verification),
             }
-
-            if cycle == 1 and decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH and suspects:
+            if cycle == 1 and decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST and suspects:
                 candidate0_attempted = True
                 direct, attempt_id, suspect_file = self._run_direct_patch_attempt(
                     board=board,
@@ -268,17 +264,14 @@ class WeakSearchController:
                     no_progress_cycles=1,
                     has_stacktrace_or_error=True,
                 )
-                if decision.profile == WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH:
+                if decision.strategy in {RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE, RuntimeStrategy.FULL_WEAK_SEARCH}:
                     escalation_occurred = True
                     budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
                 else:
                     board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score, "blocked_reason": "direct_repair_no_escalation_profile"}
                     break
-                continue
-
             for suspect in suspects:
                 from villani_code.hypothesize.generator import generate_hypotheses
-
                 kept, rejected, fallback_used = generate_hypotheses(suspect, self.instruction, budgets.max_hypotheses_per_suspect, runner=self.runner)
                 board.hypotheses.extend(kept + rejected)
                 board.decision_log.append({"event": "hypotheses_generated", "suspect": suspect.file, "fallback": fallback_used})
@@ -287,7 +280,6 @@ class WeakSearchController:
                     branch_id = f"br-{len(board.branches)+1}"
                     frontier.add(FrontierBranch(id=branch_id, suspect_ref=suspect.file, hypothesis_id=hyp.id))
                     board.branches.append(BranchRecord(id=branch_id, suspect_ref=suspect.file, hypothesis_id=hyp.id))
-
             for branch in frontier.top_active(budgets.max_active_branches):
                 branch.attempts += 1
                 branch_rec = next((b for b in board.branches if b.id == branch.id), None)
@@ -320,14 +312,12 @@ class WeakSearchController:
                 if branch_rec:
                     branch_rec.attempts_list.append(attempt.id)
                     branch_rec.best_score = max(branch_rec.best_score, result.score)
-
                 if result.attempt_category in {"rejected_noop", "rejected_diff_guard", "blocked_timeout", "blocked_runtime_error", "blocked_model_failure", "blocked_policy"}:
                     blocked_attempts += 1
                     if result.attempt_category == "rejected_noop":
                         noop_rejections += 1
                 if result.attempt_category in {"candidate_verified", "verification_failed"}:
                     real_candidate_attempts += 1
-
                 if result.hard_fail:
                     branch.failure_signatures.append(result.failure_signature or result.blocked_reason)
                     if should_prune_branch(branch, repeated_signature=result.failure_signature or result.blocked_reason):
@@ -335,7 +325,6 @@ class WeakSearchController:
                         if branch_rec:
                             branch_rec.status = "pruned"
                     continue
-
                 candidates_verified += 1
                 verified_attempts += 1
                 branch.best_score = max(branch.best_score, result.score)
@@ -344,17 +333,15 @@ class WeakSearchController:
                     improved = True
                 if cycle_best is None or result.score > cycle_best[1].score:
                     cycle_best = (branch, result, attempt_id, hypothesis)
-
             if cycle_best:
                 win_branch, win_result, win_attempt_id, _win_hyp = cycle_best
                 if win_result.success:
                     executor.commit_candidate(self.repo, win_result)
                     board.final_result = {"stop_reason": StopReason.SOLVED.value, "best_patch_score": best_score, "attempt_id": win_attempt_id, "branch_id": win_branch.id}
                     break
-
             no_improve = 0 if improved else no_improve + 1
             if no_progress_stop(no_improve, budgets.max_consecutive_no_improvement_cycles):
-                if decision.profile == WeakSearchPolicyProfile.DIRECT_REPAIR_FAST_PATH:
+                if decision.strategy == RuntimeStrategy.DIRECT_REPAIR_FIRST:
                     decision = decide_runtime_policy(
                         benchmark_config=config,
                         is_interactive=not config.enabled,
@@ -364,7 +351,7 @@ class WeakSearchController:
                         no_progress_cycles=no_improve,
                         has_stacktrace_or_error=True,
                     )
-                    if decision.profile == WeakSearchPolicyProfile.ESCALATED_WEAK_SEARCH:
+                    if decision.strategy in {RuntimeStrategy.GUIDED_SEARCH_AFTER_FAILURE, RuntimeStrategy.FULL_WEAK_SEARCH}:
                         escalation_occurred = True
                         budgets = select_runtime_budgets(config, max_files_touched=config.max_files_touched, policy_profile=decision.profile)
                         no_improve = 0
@@ -372,14 +359,12 @@ class WeakSearchController:
                 board.final_result = {"stop_reason": StopReason.NO_PROGRESS.value, "best_patch_score": best_score}
                 break
             store.write(board)
-
         if not board.final_result:
             if candidates_generated == 0:
                 blocked_reason = "no_candidates_evaluated"
                 board.final_result = {"stop_reason": StopReason.BLOCKED.value, "best_patch_score": best_score, "blocked_reason": blocked_reason}
             else:
                 board.final_result = {"stop_reason": StopReason.EXHAUSTED_BUDGET.value, "best_patch_score": best_score}
-
         board.run_stats = {
             "real_candidate_attempts": real_candidate_attempts,
             "noop_rejections": noop_rejections,
@@ -388,13 +373,26 @@ class WeakSearchController:
             "branches_pruned": branches_pruned,
             "stop_reason": board.final_result.get("stop_reason"),
             "policy_profile": decision.profile.value,
+            "strategy_selected": decision.strategy.value,
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
             "direct_patch_attempted": candidate0_attempted,
+            "direct_repair_first_used": fast_path_attempted,
             "hypothesis_stage_skipped_initially": candidate0_attempted,
-            "direct_patch_target_file": next((d.get("suspect") for d in board.decision_log if d.get("event")=="direct_repair_attempted"), ""),
+            "initial_hypothesis_stage_skipped": candidate0_attempted,
+            "direct_patch_target_file": next((d.get("target_file") for d in board.decision_log if d.get("event")=="target_selected"), ""),
+            "target_file": next((d.get("target_file") for d in board.decision_log if d.get("event")=="target_selected"), ""),
+            "target_selection_reason": next((d.get("target_selection_reason") for d in board.decision_log if d.get("event")=="target_selected"), ""),
             "escalated_after_direct_failure": escalation_occurred,
+            "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
+            "exploration_block_triggered": any(a.verifier_outputs.get("exploration_block_triggered", False) for a in board.attempts),
+            "prompt_tokens_first_attempt": next((a.verifier_outputs.get("prompt_tokens_first_attempt", 0) for a in board.attempts), 0),
+            "tool_calls_first_attempt": next((a.verifier_outputs.get("tool_calls_first_attempt", 0) for a in board.attempts), 0),
+            "workspace_prep_seconds": next((a.verifier_outputs.get("workspace_prep_seconds", 0.0) for a in board.attempts), 0.0),
+            "model_execution_seconds": next((a.verifier_outputs.get("model_execution_seconds", 0.0) for a in board.attempts), 0.0),
+            "verification_seconds": next((a.verifier_outputs.get("verification_seconds", 0.0) for a in board.attempts), 0.0),
+            "candidate_total_seconds": next((a.verifier_outputs.get("candidate_total_seconds", 0.0) for a in board.attempts), 0.0),
             "session_context_reused": True,
         }
         store.write(board)
@@ -415,18 +413,30 @@ class WeakSearchController:
             "blocked_attempts": blocked_attempts,
             "verified_attempts": verified_attempts,
             "policy_profile": decision.profile.value,
+            "strategy_selected": decision.strategy.value,
             "fast_path_attempted": fast_path_attempted,
             "candidate_0_attempted": candidate0_attempted,
             "escalation_occurred": escalation_occurred,
             "direct_patch_attempted": candidate0_attempted,
+            "direct_repair_first_used": fast_path_attempted,
             "hypothesis_stage_skipped_initially": candidate0_attempted,
-            "direct_patch_target_file": next((d.get("suspect") for d in board.decision_log if d.get("event")=="direct_repair_attempted"), ""),
+            "initial_hypothesis_stage_skipped": candidate0_attempted,
+            "direct_patch_target_file": next((d.get("target_file") for d in board.decision_log if d.get("event")=="target_selected"), ""),
+            "target_file": next((d.get("target_file") for d in board.decision_log if d.get("event")=="target_selected"), ""),
+            "target_selection_reason": next((d.get("target_selection_reason") for d in board.decision_log if d.get("event")=="target_selected"), ""),
             "escalated_after_direct_failure": escalation_occurred,
+            "escalation_reason": next((d.get("reason") for d in board.decision_log if d.get("event")=="direct_repair_result"), ""),
+            "exploration_block_triggered": any(a.verifier_outputs.get("exploration_block_triggered", False) for a in board.attempts),
+            "prompt_tokens_first_attempt": next((a.verifier_outputs.get("prompt_tokens_first_attempt", 0) for a in board.attempts), 0),
+            "tool_calls_first_attempt": next((a.verifier_outputs.get("tool_calls_first_attempt", 0) for a in board.attempts), 0),
+            "workspace_prep_seconds": next((a.verifier_outputs.get("workspace_prep_seconds", 0.0) for a in board.attempts), 0.0),
+            "model_execution_seconds": next((a.verifier_outputs.get("model_execution_seconds", 0.0) for a in board.attempts), 0.0),
+            "verification_seconds": next((a.verifier_outputs.get("verification_seconds", 0.0) for a in board.attempts), 0.0),
+            "candidate_total_seconds": next((a.verifier_outputs.get("candidate_total_seconds", 0.0) for a in board.attempts), 0.0),
             "session_context_reused": True,
         }
         store.write_summary(summary)
         emit_runtime_event(self.repo, self.runner.event_callback, "weak_search_stopped", **summary)
-
         stop_reason = str(summary.get("stop_reason", ""))
         text = "Weak-search exhausted budget without a verified winner."
         if stop_reason == StopReason.SOLVED.value:

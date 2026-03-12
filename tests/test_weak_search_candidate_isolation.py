@@ -157,9 +157,9 @@ def test_direct_repair_allows_at_most_one_continuation_turn(tmp_path: Path):
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
     client = ScriptedClient([
-        {"content": [{"type": "tool_use", "id": "1", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=2\n"}}]},
-        {"content": [{"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=3\n"}}]},
-        {"content": [{"type": "text", "text": "final"}]},
+        {"content": [{"type": "tool_use", "id": "1", "name": "Read", "input": {"file_path": "src/app.py"}}]},
+        {"content": [{"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=2\n"}}]},
+        {"content": [{"type": "tool_use", "id": "3", "name": "Write", "input": {"file_path": "src/app.py", "content": "x=3\n"}}]},
     ])
     ex = CandidateExecutor(DummyRunner(tmp_path, client=client), "fix", 20, 1)
     msg = ex._run_model_edit_pass(
