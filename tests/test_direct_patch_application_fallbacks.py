@@ -64,7 +64,7 @@ def test_stage1_applies_whole_file_fallback(monkeypatch, tmp_path: Path):
 
     result = _run_direct(ex, tmp_path)
     assert result.success is True
-    assert result.apply_mode == "whole_file"
+    assert result.apply_mode == "full_file"
 
 
 def test_stage1_applies_snippet_replace_fallback(monkeypatch, tmp_path: Path):
