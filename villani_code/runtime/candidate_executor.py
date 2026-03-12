@@ -153,7 +153,7 @@ class CandidateExecutor:
         prompt_tokens = len(prompt.split())
         model_started = time.monotonic()
         try:
-            model_output = self._request_patch_output(prompt, stage_name=stage_name)
+            model_output = self._request_patch_proposal(prompt, stage_name=stage_name)
         except Exception as exc:  # noqa: BLE001
             cleanup_candidate_workspace(handle)
             return CandidateExecutionResult(
@@ -274,11 +274,11 @@ class CandidateExecutor:
         kwargs["failing_test_contents"] = ""
         return self._evaluate_patch_attempt(**kwargs, stage_name="stage2", retry_hint=retry_hint)
 
-    def _request_patch_output(self, prompt: str, *, stage_name: str) -> str:
+    def _request_patch_proposal(self, prompt: str, *, stage_name: str) -> str:
         payload = {
             "model": self.runner.model,
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            "system": [{"type": "text", "text": f"Return only transformation payload for {stage_name}."}],
+            "system": [{"type": "text", "text": f"Return only a strict JSON PatchProposal object for {stage_name}."}],
             "tools": [],
             "max_tokens": self.runner.max_tokens,
             "stream": False,
@@ -309,17 +309,18 @@ class CandidateExecutor:
             "No repo exploration, planning, hypotheses, or multi-file changes.",
             f"Verification target: {verification_target or 'default configured target verification'}",
             "Verification runs immediately after patch apply.",
-            "Return one format only, in this preference order:",
-            "1) Full corrected file contents for this exact file.",
-            "2) SNIPPET_REPLACE with exact old/new snippet.",
-            "3) Strict unified diff for this exact file.",
-            "Do not write explanations before payload.",
-            "Full replacement example:",
-            f"NEW FILE CONTENT {target_file}\n<entire file contents>",
-            "Snippet replacement example:",
-            "SNIPPET_REPLACE\nFILE: <target>\nOLD_SNIPPET:\n<exact old>\nNEW_SNIPPET:\n<new>",
-            "Unified diff example:",
-            f"--- a/{target_file}\n+++ b/{target_file}\n@@ -1 +1 @@\n-old\n+new",
+            "Return exactly one strict JSON object named PatchProposal.",
+            "PatchProposal schema:",
+            "{\"mode\": \"full_file\"|\"snippet_replace\", \"file_path\": string, \"new_content\": string|null, \"old_snippet\": string|null, \"new_snippet\": string|null, \"rationale\": string|null}",
+            "Rules:",
+            "- mode=full_file requires file_path and new_content.",
+            "- mode=snippet_replace requires file_path, old_snippet, and new_snippet.",
+            "- file_path must equal the exact target file.",
+            "- Do not return markdown fences, prose, or any extra text.",
+            "Example full_file:",
+            f"{{\"mode\":\"full_file\",\"file_path\":\"{target_file}\",\"new_content\":\"<entire file>\",\"old_snippet\":null,\"new_snippet\":null,\"rationale\":\"...\"}}",
+            "Example snippet_replace:",
+            f"{{\"mode\":\"snippet_replace\",\"file_path\":\"{target_file}\",\"new_content\":null,\"old_snippet\":\"<exact old>\",\"new_snippet\":\"<new>\",\"rationale\":\"...\"}}",
             f"--- FILE: {target_file} ---",
             target_file_contents,
         ]
