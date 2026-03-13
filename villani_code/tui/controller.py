@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import shlex
 import threading
 import traceback
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from villani_code.plan_session import PlanAnswer, PlanSessionResult
+from villani_code.context_budget import ContextBudget
 from villani_code.runtime_events import RuntimeEvent
 from villani_code.tui.messages import ApprovalRequest, LogAppend, SpinnerState, StatusUpdate
 
@@ -30,6 +32,8 @@ class RunnerController:
         self._approval_scopes: set[str] = set()
         self._assistant_stream_saw_text = False
         self._suppress_assistant_stream_text = False
+        self._session_messages: list[dict[str, Any]] | None = None
+        self._session_context_budget = ContextBudget(max_chars=120_000, keep_last_turns=8)
 
         self.runner.print_stream = False
         self.runner.approval_callback = self.request_approval
@@ -53,6 +57,20 @@ class RunnerController:
     def run_villani_mode(self) -> None:
         threading.Thread(target=self._run_villani_mode_worker, daemon=True).start()
 
+
+    def reset_session_context(self) -> None:
+        self._session_messages = None
+
+    def fork_session_context(self) -> list[dict[str, Any]] | None:
+        """Return a deep copy for future /fork session creation."""
+        return copy.deepcopy(self._session_messages) if self._session_messages is not None else None
+
+    def _messages_for_prompt(self, text: str) -> list[dict[str, Any]] | None:
+        if self._session_messages is None:
+            return None
+        next_messages = copy.deepcopy(self._session_messages)
+        next_messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+        return self._session_context_budget.compact_session_messages(next_messages)
 
     def _ui_call(self, callback: Any, *args: Any, **kwargs: Any) -> Any:
         call_from_thread = getattr(self.app, "call_from_thread", None)
@@ -84,7 +102,11 @@ class RunnerController:
         self.app.post_message(SpinnerState(True, None))
         self.app.post_message(StatusUpdate("Thinking"))
         self._assistant_stream_saw_text = False
-        result = self.runner.run(text)
+        run_messages = self._messages_for_prompt(text)
+        result = self.runner.run(text, messages=run_messages)
+        result_messages = result.get("messages")
+        if isinstance(result_messages, list) and result_messages:
+            self._session_messages = result_messages
         content = result.get("response", {}).get("content", [])
         response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
         if response_text and not self._assistant_stream_saw_text:
