@@ -316,6 +316,11 @@ class VillaniTUI(App[None]):
             self._set_question_mode(False)
             self.controller.run_execute_plan()
             return
+        if trigger == "/fork":
+            _ = self.controller.fork_session_context()
+            self.controller.reset_session_context()
+            self._log_local_meta("Started a fresh session context. (/fork groundwork: old context is cloneable for future forked panes.)")
+            return
         self._log_local_meta(f"{trigger} is not implemented yet in this build.")
 
     def _start_plan(self, prompt: str) -> None:
