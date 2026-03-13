@@ -1,23 +1,121 @@
 # Villani Code
 
-Villani Code is a terminal-first coding agent for local repositories. It focuses on bounded execution, explicit permissions, and auditable output rather than autonomous behavior by default.
+**The coding agent built for small local models.**
 
-## What it does
+Villani Code is a terminal-first coding agent optimized for 7B to 14B local models on real codebases.
 
-- Reads and edits files in a repository.
-- Runs shell commands under a configurable permission policy.
-- Streams model output and tool activity in the terminal.
-- Supports interactive and one-shot workflows.
-- Includes benchmark tooling for repeatable task-based evaluation.
+Most coding agents are built for strong hosted models and only incidentally support local ones. Villani Code is built for the opposite case: weak models, limited budgets, explicit permissions, and real repo work.
 
-## What it does **not** guarantee
+## Why
 
-- It can still make incorrect code changes.
-- Passing a command or test step is not proof of overall correctness.
-- Safety controls reduce risk, but do not eliminate it.
-- Results depend on model quality, prompt quality, and repository state.
+Small local models are cheap, private, and practical.
 
-Use version control, review diffs, and verify changes before merging.
+They are also easy to waste.
+
+On weaker models, runtime design matters more:
+- context selection
+- task decomposition
+- tool discipline
+- validation loops
+- token efficiency
+- recovery from bad intermediate steps
+
+Villani Code is designed to make small local models materially more useful for coding, not just demo-friendly.
+
+## What Villani Code optimizes for
+
+- **Small-model performance**  
+  Built for local 7B to 14B models, not just adapted to them.
+
+- **Useful diffs**  
+  The goal is accepted changes, not impressive-looking agent runs.
+
+- **Test-guided iteration**  
+  Use tests and feedback loops to steer weak models toward correct patches.
+
+- **Tight context control**  
+  Avoid wasting limited model capacity on irrelevant repo state.
+
+- **Explicit permissions**  
+  Keep actions bounded, inspectable, and predictable.
+
+- **Reproducible evaluation**  
+  Measure outcomes under matched conditions instead of relying on anecdotes.
+
+## What it is not
+
+Villani Code is not trying to pretend a small local model is a frontier model.
+
+It is not a general autonomous software engineer.
+It is not a vague agent platform.
+It is not built for flashy open-ended demos.
+
+The goal is narrower:
+
+**make small local models better at real repo tasks.**
+
+## Where it should win
+
+Villani Code is built for workflows where runtime quality matters enough to overcome weaker model capability:
+
+- constrained bug fixes
+- test-guided changes
+- small refactors
+- repo navigation and diagnosis
+- privacy-sensitive local work
+- cost-constrained coding workflows
+
+The focus is not “best model.”
+The focus is **best use of a small model.**
+
+## Benchmark philosophy
+
+Villani Code is built around a simple thesis:
+
+**On small local models, a better runtime can beat more general-purpose coding-agent workflows.**
+
+That should be proven under matched conditions:
+- same model
+- same task set
+- same budget
+- same repo constraints
+- same evaluation rules
+
+Key metrics:
+- task success rate
+- accepted diff rate
+- token efficiency
+- time to first useful diff
+- unnecessary edit rate
+- safety and permission behavior
+
+## Design principles
+
+### Built for weak models
+Weak models need tighter prompts, narrower actions, better decomposition, and stronger validation.
+
+### Terminal-first
+Villani Code works in real repositories with files, tests, commands, and constraints.
+
+### Safe by default
+The agent should not get more trust than it earns.
+
+### Measured by outcomes
+The only thing that matters is whether the patch is useful, correct, and efficient.
+
+## Status
+
+Villani Code is early, opinionated, and focused.
+
+It is for people who want:
+- local-first coding workflows
+- more value from small models
+- explicit control over agent behavior
+- serious evaluation on real tasks
+
+## Thesis
+
+**Small local models do not need hype. They need a runtime that wastes less of their capability.**
 
 ## Installation
 
