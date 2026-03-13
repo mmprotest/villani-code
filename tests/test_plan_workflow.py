@@ -172,23 +172,58 @@ def test_runner_plan_summary_does_not_include_planning_boilerplate(tmp_path: Pat
     assert "Do not edit files" not in result.task_summary
 
 
-def test_runner_plan_for_repo_review_has_repo_specific_steps(tmp_path: Path) -> None:
+def test_runner_plan_for_repo_review_has_concrete_steps_without_generic_questions(tmp_path: Path) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
     result = runner.plan("Look through the repo and find improvements I can make")
     assert result.candidate_files
-    assert any("Inspect" in step for step in result.recommended_steps)
-    assert any("villani_code" in ",".join(result.candidate_files) or "repo map" in step.lower() for step in result.recommended_steps)
+    assert any("Survey high-signal areas" in step for step in result.recommended_steps)
+    assert result.open_questions == []
 
 
-def test_plan_mode_routes_prompt_to_plan_controller(tmp_path: Path) -> None:
+def test_plan_inline_prompt_starts_planning_immediately(tmp_path: Path) -> None:
     app = VillaniTUI(DummyRunnerForApp(), tmp_path)
     app.controller = ControllerSpy()
-    app.plan_mode_enabled = True
+    app.on_input_submitted(Input.Submitted(Input(id="input"), "/plan Find improvements in command flow"))
+    assert app.controller.calls == ["plan:Find improvements in command flow"]
+
+
+def test_bare_plan_enters_prompt_awaiting_mode(tmp_path: Path) -> None:
+    app = VillaniTUI(DummyRunnerForApp(), tmp_path)
+    app.controller = ControllerSpy()
+    app.on_input_submitted(Input.Submitted(Input(id="input"), "/plan"))
+    assert app.awaiting_plan_prompt is True
+    assert app.controller.calls == []
+
+
+
+
+def test_ready_plan_does_not_hijack_future_normal_prompts(tmp_path: Path) -> None:
+    app = VillaniTUI(DummyRunnerForApp(), tmp_path)
+    app.controller = ControllerSpy()
+    app.current_plan_result = PlanSessionResult(instruction="task", task_summary="task", ready_to_execute=True)
     app.plan_session_active = True
-    app.on_input_submitted(Input.Submitted(Input(id="input"), "do work"))
-    assert app.controller.calls == ["plan:do work"]
+    app.plan_mode_enabled = True
+    app.on_input_submitted(Input.Submitted(Input(id="input"), "normal prompt"))
+    assert app.controller.calls == ["run:normal prompt"]
 
 
+def test_clarification_only_for_real_design_uncertainty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+
+    class FakePlan:
+        task_goal = "task"
+        relevant_files = ["a.py"]
+        candidate_targets = [{"target": "a.py"}]
+        assumptions = ["a"]
+        risk_level = type("Risk", (), {"value": "medium"})()
+        confidence_score = 0.2
+        action_classes = ["code_edit", "config_edit"]
+        requires_validation_phase = True
+
+    monkeypatch.setattr("villani_code.state.generate_execution_plan", lambda *_a, **_k: FakePlan())
+    result = runner.plan("Implement feature with ambiguous architecture")
+    assert len(result.open_questions) == 1
+    assert result.open_questions[0].id == "implementation_path"
 def test_run_with_plan_uses_approved_plan_payload(tmp_path: Path) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
     seen: dict[str, str] = {}
@@ -233,6 +268,14 @@ def test_controller_uses_call_from_thread_for_plan_ui_mutation() -> None:
     assert "apply_plan_result" in app.calls
 
 
+
+
+def test_execute_runs_last_ready_plan(tmp_path: Path) -> None:
+    app = VillaniTUI(DummyRunnerForApp(), tmp_path)
+    app.controller = ControllerSpy()
+    app.current_plan_result = PlanSessionResult(instruction="a", task_summary="b", ready_to_execute=True)
+    app._execute_command_item(type("I", (), {"trigger": "/execute"})())
+    assert app.controller.calls == ["execute"]
 def test_execute_fails_cleanly_when_plan_unresolved(tmp_path: Path) -> None:
     app = VillaniTUI(DummyRunnerForApp(), tmp_path)
     app.controller = ControllerSpy()

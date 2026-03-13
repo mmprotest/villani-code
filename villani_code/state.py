@@ -69,64 +69,61 @@ def _candidate_files_from_repo_map(plan: Any, repo_map: dict[str, Any]) -> list[
 
 
 def _repo_specific_steps(instruction: str, candidate_files: list[str], validation_steps: list[str], plan: Any) -> list[str]:
-    top_targets = ", ".join(candidate_files[:3]) if candidate_files else "highest-signal source files from repo map"
-    steps = [
-        f"Inspect {top_targets} to ground the task: {instruction}.",
-        "Map the smallest safe implementation scope and record assumptions before editing.",
-    ]
-    if getattr(plan, "requires_write_phase", False):
-        steps.append("Implement scoped changes in the selected target files only.")
+    lowered = instruction.lower()
+    review_mode = any(token in lowered for token in ("review", "improvement", "improve", "audit", "look through"))
+    top_targets = ", ".join(candidate_files[:5]) if candidate_files else "high-signal files from the repo map"
+
+    if review_mode:
+        steps = [
+            f"Survey high-signal areas first: {top_targets}.",
+            "Audit command routing, runner orchestration, and state transitions for correctness and UX consistency.",
+            "Identify concrete improvement candidates, ranked by user impact and implementation risk.",
+            "For each candidate, capture expected code touch points and verification strategy before execution.",
+        ]
     else:
-        steps.append("Keep work read-only and provide prioritized recommendations.")
+        steps = [
+            f"Inspect likely target files/subsystems: {top_targets}.",
+            "Trace current behavior to locate the smallest viable implementation change.",
+            "Draft concrete code changes in dependency order and note cross-file impacts.",
+        ]
+
     if getattr(plan, "requires_validation_phase", False):
-        checks = ", ".join(validation_steps[:3]) if validation_steps else "targeted validation for touched areas"
-        steps.append(f"Validate with {checks} and expand only if failures require broader checks.")
+        checks = ", ".join(validation_steps[:3]) if validation_steps else "targeted validation commands"
+        steps.append(f"Validate with {checks}, then broaden validation only when failures indicate wider impact.")
+    else:
+        steps.append("No mutation in planning: finalize assumptions and execution constraints for /execute.")
     return steps
 
 
 def _clarification_questions_from_plan(instruction: str, plan: Any, repo_map: dict[str, Any], answers: list[PlanAnswer]) -> list[PlanQuestion]:
+    _ = repo_map
     if answers:
         return []
-    questions: list[PlanQuestion] = []
+
+    lowered = instruction.lower()
+    broad_review = any(token in lowered for token in ("look through", "review", "improvements", "improve repo", "audit"))
+    if broad_review:
+        return []
 
     confidence = float(getattr(plan, "confidence_score", 0.0))
-    broad_review = any(token in instruction.lower() for token in ("look through", "review", "improvements", "improve repo"))
-    package_roots = [str(root) for root in repo_map.get("package_roots", [])][:3]
-    if broad_review and package_roots:
-        qid = "review_priority"
-        options = [
-            _option(qid, f"root_{idx}", root, f"Prioritize improvements in {root} first.")
-            for idx, root in enumerate(package_roots, start=1)
-        ]
-        while len(options) < 3:
-            options.append(_option(qid, f"scope_{len(options)+1}", "Cross-cutting quality", "Focus on repo-wide reliability and DX improvements."))
-        options = options[:3] + [_option(qid, "other", "Other", "Provide a custom focus area.", is_other=True)]
-        questions.append(
-            PlanQuestion(
-                id=qid,
-                question="Which area should this improvement review prioritize first?",
-                rationale="The prompt is intentionally broad; choosing a focus area improves plan quality.",
-                options=options,
-            )
-        )
+    actions = set(str(value) for value in getattr(plan, "action_classes", []))
+    has_architecture_fork = "code_edit" in actions and "config_edit" in actions and confidence < 0.45
+    if not has_architecture_fork:
+        return []
 
-    if confidence < 0.55 and not broad_review:
-        qid = "scope_preference"
-        questions.append(
-            PlanQuestion(
-                id=qid,
-                question="What implementation scope should the first pass target?",
-                rationale="Low confidence indicates multiple plausible scopes.",
-                options=[
-                    _option(qid, "single", "Single-file", "Constrain initial work to one high-signal file."),
-                    _option(qid, "narrow", "Narrow multi-file", "Allow a small set of related files."),
-                    _option(qid, "broad", "Broad implementation", "Allow wider refactor if evidence supports it."),
-                    _option(qid, "other", "Other", "Provide a custom scope preference.", is_other=True),
-                ],
-            )
-        )
-
-    return questions[:3]
+    qid = "implementation_path"
+    question = PlanQuestion(
+        id=qid,
+        question="Which implementation path should be prioritized first?",
+        rationale="Both code-level and configuration-level paths look plausible and would change execution order.",
+        options=[
+            _option(qid, "code_first", "Code-path first", "Prioritize source-level behavior changes before config adjustments."),
+            _option(qid, "config_first", "Config-path first", "Prioritize configuration/runtime wiring changes before source edits."),
+            _option(qid, "parallel", "Parallel split", "Plan concurrent updates across code and config with tighter validation gates."),
+            _option(qid, "other", "Other", "Provide a different implementation path preference.", is_other=True),
+        ],
+    )
+    return [question]
 
 
 def _format_answer(plan_answer: PlanAnswer) -> str:

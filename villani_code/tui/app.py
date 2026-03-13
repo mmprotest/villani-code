@@ -92,6 +92,7 @@ class VillaniTUI(App[None]):
 
         self.plan_mode_enabled = False
         self.plan_session_active = False
+        self.awaiting_plan_prompt = False
         self.pending_plan_instruction = ""
         self.current_plan_result: PlanSessionResult | None = None
         self.pending_questions: list[PlanQuestion] = []
@@ -131,6 +132,9 @@ class VillaniTUI(App[None]):
 
     def apply_plan_result(self, result: PlanSessionResult, reset_answers: bool) -> None:
         self.current_plan_result = result
+        self.plan_session_active = True
+        self.awaiting_plan_prompt = False
+        self.plan_mode_enabled = True
         self.pending_questions = list(result.open_questions)
         self.question_cursor = len(self.captured_answers)
         if reset_answers:
@@ -151,6 +155,7 @@ class VillaniTUI(App[None]):
         ]
         self._log_local_meta("\n".join(plan_lines))
         self._show_current_question_or_finalize()
+        self.query_one(StatusBarWidget).set_plan_mode(True)
 
     def _set_question_mode(self, enabled: bool) -> None:
         input_widget = self.query_one(Input)
@@ -168,12 +173,14 @@ class VillaniTUI(App[None]):
                 *[f"[{idx}] {option.label}" for idx, option in enumerate(question.options, start=1)],
             ]
             self._log_local_meta("\n".join(lines))
+            self.query_one(StatusBarWidget).set_status("Awaiting clarification")
             widget.show_question(question)
             self.call_after_refresh(lambda: widget.scroll_visible(animate=False))
             return
         widget.hide_question()
         self._set_question_mode(False)
         if self.current_plan_result and self.current_plan_result.ready_to_execute:
+            self.query_one(StatusBarWidget).set_status("Plan ready")
             self._log_local_meta("Plan is ready. Run /execute to start implementation.")
 
     def record_plan_answer(self, answer: PlanAnswer) -> None:
@@ -255,15 +262,17 @@ class VillaniTUI(App[None]):
             self._show_help()
             return
         if trigger == "/plan":
+            self.awaiting_plan_prompt = True
             self.plan_mode_enabled = True
-            self.plan_session_active = True
-            self._log_local_meta("Planning mode enabled. Next prompts stay in planning flow until /execute or /cancelplan.")
+            self.plan_session_active = False
+            self._log_local_meta("Enter a planning prompt.")
             status = self.query_one(StatusBarWidget)
-            status.set_status("Plan mode active")
+            status.set_status("Awaiting plan prompt")
             status.set_plan_mode(True)
             return
         if trigger == "/cancelplan":
             self.plan_session_active = False
+            self.awaiting_plan_prompt = False
             self.pending_plan_instruction = ""
             self.current_plan_result = None
             self.pending_questions = []
@@ -284,6 +293,7 @@ class VillaniTUI(App[None]):
             if self.current_plan_result and not self.current_plan_result.ready_to_execute:
                 self._log_local_meta("Cannot execute: unresolved clarifications. Finish answers or use /replan.")
                 return
+            self.awaiting_plan_prompt = False
             self.plan_mode_enabled = False
             self.plan_session_active = False
             self.query_one(StatusBarWidget).set_plan_mode(False)
@@ -292,6 +302,17 @@ class VillaniTUI(App[None]):
             self.controller.run_execute_plan()
             return
         self._log_local_meta(f"{trigger} is not implemented yet in this build.")
+
+    def _start_plan(self, prompt: str) -> None:
+        self.awaiting_plan_prompt = False
+        self.plan_mode_enabled = True
+        self.plan_session_active = True
+        self.pending_plan_instruction = prompt
+        self._log_local_meta("Creating read-only implementation plan...")
+        status = self.query_one(StatusBarWidget)
+        status.set_status("Planning")
+        status.set_plan_mode(True)
+        self.controller.run_plan_prompt(prompt)
 
     def _show_help(self) -> None:
         lines = ["Available slash commands:"]
@@ -302,10 +323,14 @@ class VillaniTUI(App[None]):
     def _handle_slash_command(self, text: str) -> bool:
         if not text.startswith("/"):
             return False
-        command = text.split()[0].lower()
-        item = self.command_palette.command_by_trigger(command)
+        command, _, remainder = text.partition(" ")
+        normalized = command.lower()
+        if normalized == "/plan" and remainder.strip():
+            self._start_plan(remainder.strip())
+            return True
+        item = self.command_palette.command_by_trigger(normalized)
         if item is None:
-            self._log_local_meta(f"Unknown command: {command}. Type /help for commands.")
+            self._log_local_meta(f"Unknown command: {normalized}. Type /help for commands.")
             return True
         self._execute_command_item(item)
         return True
@@ -329,10 +354,8 @@ class VillaniTUI(App[None]):
                 self.query_one(Input).focus()
             return
         self._interrupts.reset_interrupt_state()
-        if self.plan_mode_enabled and self.plan_session_active:
-            if not self.pending_plan_instruction:
-                self.pending_plan_instruction = text
-            self.controller.run_plan_prompt(text if not self.current_plan_result else self.pending_plan_instruction)
+        if self.awaiting_plan_prompt:
+            self._start_plan(text)
             return
         self.controller.run_prompt(text)
 

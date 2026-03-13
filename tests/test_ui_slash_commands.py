@@ -137,7 +137,7 @@ def test_slash_popup_keyboard_controls(tmp_path: Path) -> None:
             await pilot.pause()
             assert app.controller.calls == []
             assert not popup.visible
-            assert "not implemented yet in this build" in app._log_plain_text
+            assert "Enter a planning prompt." in app._log_plain_text
 
             input_widget.value = "/"
             await pilot.pause()
