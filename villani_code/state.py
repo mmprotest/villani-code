@@ -22,7 +22,7 @@ from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
 from villani_code.plan_session import PlanAnswer, PlanOption, PlanQuestion, PlanSessionResult
-from villani_code.prompting import build_execution_instruction_from_plan, build_initial_messages, build_solution_planning_messages, build_system_blocks
+from villani_code.prompting import build_execution_instruction_from_plan, build_initial_messages, build_planning_instruction, build_system_blocks
 from villani_code.planning import TaskMode, classify_task_mode, generate_execution_plan
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
@@ -438,6 +438,7 @@ class Runner:
         self._first_attempt_locked_target = ""
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
+        self._runtime_mode: Literal["execution", "planning"] = "execution"
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
@@ -457,42 +458,18 @@ class Runner:
         evidence_paths = [row["path"] for row in evidence_rows]
 
         self._planning_read_only = True
+        self._runtime_mode = "planning"
         try:
             try:
-                repo_summary = {
-                    "source_roots": repo_map.get("source_roots", []),
-                    "test_roots": repo_map.get("test_roots", []),
-                    "package_roots": repo_map.get("package_roots", []),
-                    "validation_steps": validation_steps,
-                }
-                answer_rows = [
-                    {
-                        "question_id": answer.question_id,
-                        "selected_option_id": answer.selected_option_id,
-                        "other_text": answer.other_text,
-                    }
-                    for answer in resolved_answers
-                ]
-                system_blocks, messages = build_solution_planning_messages(
+                planning_prompt = build_planning_instruction(
                     instruction,
-                    repo_summary,
                     evidence_rows,
-                    answers=answer_rows,
+                    validation_steps,
+                    resolved_answers,
                 )
-                payload = {
-                    "model": self.model,
-                    "messages": messages,
-                    "system": system_blocks,
-                    "max_tokens": min(1600, int(self.max_tokens)),
-                    "stream": False,
-                }
-                raw = self.client.create_message(payload, stream=False)
-                content = raw.get("content", []) if isinstance(raw, dict) else []
-                text = "\n".join(
-                    block.get("text", "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
+                runtime_result = self.run(planning_prompt, messages=build_initial_messages(self.repo, planning_prompt))
+                content = runtime_result.get("response", {}).get("content", [])
+                text = "\n".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
                 parsed = _parse_planning_response(text)
                 if parsed is not None:
                     plan_result = _build_plan_result_from_payload(instruction, parsed, resolved_answers, evidence_paths)
@@ -539,6 +516,7 @@ class Runner:
             )
         finally:
             self._planning_read_only = False
+            self._runtime_mode = "execution"
 
     def run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]:
         if not plan.ready_to_execute:
@@ -565,8 +543,11 @@ class Runner:
         execution_budget: ExecutionBudget | None = None,
     ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
-        self._ensure_project_memory_and_plan(instruction)
-        self._task_mode = classify_task_mode(instruction)
+        if self._runtime_mode == "planning":
+            self._task_mode = TaskMode.INSPECT_AND_PLAN
+        else:
+            self._ensure_project_memory_and_plan(instruction)
+            self._task_mode = classify_task_mode(instruction)
         diagnosis = None
         diagnosed_target_file = ""
         required_initial_read = ""
@@ -850,7 +831,9 @@ class Runner:
             )
             transcript["execution"] = execution.to_dict()
             transcript["final_assistant_content"] = response.get("content", [])
-            transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+            transcript_path = None
+            if not self._planning_read_only:
+                transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
             post = self._run_post_execution_validation(_change_summary()[2])
             if post:
                 response.setdefault("content", []).append({"type": "text", "text": post})
@@ -858,7 +841,7 @@ class Runner:
             return {
                 "response": response,
                 "messages": messages,
-                "transcript_path": str(transcript_path),
+                "transcript_path": str(transcript_path) if transcript_path is not None else "",
                 "transcript": transcript,
                 "execution": execution.to_dict(),
             }
@@ -1132,14 +1115,16 @@ class Runner:
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
-                transcript_path = save_transcript(
-                    self.repo, transcript, redact=self.redact
-                )
-                self._save_session_snapshot(messages)
+                transcript_path = None
+                if not self._planning_read_only:
+                    transcript_path = save_transcript(
+                        self.repo, transcript, redact=self.redact
+                    )
+                    self._save_session_snapshot(messages)
                 return {
                     "response": response,
                     "messages": messages,
-                    "transcript_path": str(transcript_path),
+                    "transcript_path": str(transcript_path) if transcript_path is not None else "",
                     "transcript": transcript,
                 }
 

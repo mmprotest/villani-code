@@ -1017,6 +1017,8 @@ def is_no_progress_response(response: dict[str, Any]) -> bool:
 
 
 def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
+    if getattr(runner, "_planning_read_only", False):
+        return
     root = runner.repo / ".villani_code" / "sessions"
     ensure_dir(root)
     (root / "last.json").write_text(
@@ -1081,6 +1083,8 @@ def _build_session_state_from_plan(instruction: str, plan: Any) -> SessionState:
 
 
 def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
+    if getattr(runner, "_planning_read_only", False):
+        return
     ensure_project_memory(runner.repo)
     runner.event_callback({"type": "init_started"})
     runner.event_callback({"type": "init_completed", "path": str(runner.repo / ".villani")})
@@ -1153,6 +1157,8 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
 
 
 def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
+    if getattr(runner, "_planning_read_only", False):
+        return ""
     if not changed_files:
         return ""
     plan = getattr(runner, "_execution_plan", None)
