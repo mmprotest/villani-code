@@ -134,7 +134,7 @@ class VillaniTUI(App[None]):
         self.current_plan_result = result
         self.plan_session_active = True
         self.awaiting_plan_prompt = False
-        self.plan_mode_enabled = True
+        self.plan_mode_enabled = bool(result.open_questions)
         self.pending_questions = list(result.open_questions)
         self.question_cursor = len(self.captured_answers)
         if reset_answers:
@@ -155,7 +155,7 @@ class VillaniTUI(App[None]):
         ]
         self._log_local_meta("\n".join(plan_lines))
         self._show_current_question_or_finalize()
-        self.query_one(StatusBarWidget).set_plan_mode(True)
+        self.query_one(StatusBarWidget).set_plan_mode(bool(result.open_questions))
 
     def _set_question_mode(self, enabled: bool) -> None:
         input_widget = self.query_one(Input)
@@ -173,15 +173,18 @@ class VillaniTUI(App[None]):
                 *[f"[{idx}] {option.label}" for idx, option in enumerate(question.options, start=1)],
             ]
             self._log_local_meta("\n".join(lines))
-            self.query_one(StatusBarWidget).set_status("Awaiting clarification")
+            self.query_one(StatusBarWidget).set_status("Plan awaiting clarification")
             widget.show_question(question)
             self.call_after_refresh(lambda: widget.scroll_visible(animate=False))
             return
         widget.hide_question()
         self._set_question_mode(False)
         if self.current_plan_result and self.current_plan_result.ready_to_execute:
+            self.plan_mode_enabled = False
+            self.plan_session_active = False
             self.query_one(StatusBarWidget).set_status("Plan ready")
-            self._log_local_meta("Plan is ready. Run /execute to start implementation.")
+            self.query_one(StatusBarWidget).set_plan_mode(False)
+            self._log_local_meta("Plan ready. Run /execute to implement.")
 
     def record_plan_answer(self, answer: PlanAnswer) -> None:
         self.captured_answers.append(answer)
@@ -265,7 +268,7 @@ class VillaniTUI(App[None]):
             self.awaiting_plan_prompt = True
             self.plan_mode_enabled = True
             self.plan_session_active = False
-            self._log_local_meta("Enter a planning prompt.")
+            self._log_local_meta("Enter a planning prompt for read-only plan generation.")
             status = self.query_one(StatusBarWidget)
             status.set_status("Awaiting plan prompt")
             status.set_plan_mode(True)

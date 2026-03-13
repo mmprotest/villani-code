@@ -330,7 +330,7 @@ def test_final_answer_submission_triggers_replan(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause()
             assert app.runner.plan_calls[-1][1]
-            assert "Plan is ready. Run /execute" in app._log_plain_text
+            assert "Plan ready. Run /execute to implement." in app._log_plain_text
 
     asyncio.run(run())
 
@@ -364,3 +364,54 @@ def test_clarification_options_are_logged_to_transcript(tmp_path: Path) -> None:
             assert "[4] Other" in app._log_plain_text
 
     asyncio.run(run())
+
+
+def test_plan_payload_dicts_are_normalized_for_clean_rendering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+
+    fake_payload = {
+        "task_summary": "Improve planning workflow",
+        "candidate_files": [{"path": "villani_code/state.py", "improvement_focus": "planning control flow"}],
+        "assumptions": [{"risk": "moderate", "mitigation": "targeted tests"}],
+        "recommended_steps": [{"priority": "P1", "action": "Fix /plan routing"}],
+        "risks": [{"risk": "regression in slash routing", "mitigation": "slash command tests"}],
+        "validation_approach": [{"check": "pytest tests/test_plan_workflow.py"}],
+        "open_questions": [],
+        "risk_level": "medium",
+        "confidence_score": 0.7,
+    }
+
+    monkeypatch.setattr("villani_code.state._collect_planning_evidence", lambda *_a, **_k: [{"path": "villani_code/state.py", "excerpt": "def plan"}])
+    monkeypatch.setattr("villani_code.state.build_solution_planning_messages", lambda *_a, **_k: ([{"type": "text", "text": "s"}], [{"role": "user", "content": [{"type": "text", "text": "u"}]}]))
+    monkeypatch.setattr(
+        runner.client,
+        "create_message",
+        lambda *_a, **_k: {"content": [{"type": "text", "text": __import__("json").dumps(fake_payload)}]},
+    )
+
+    result = runner.plan("Find ways to improve this repo")
+    assert result.ready_to_execute is True
+    assert all("{" not in entry and "}" not in entry for entry in result.candidate_files)
+    assert all("{" not in entry and "}" not in entry for entry in result.recommended_steps)
+    assert any(item.startswith("Evidence inspected: ") for item in result.assumptions)
+
+
+def test_repo_review_prompt_defaults_to_ready_plan_without_clarification(tmp_path: Path) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+    result = runner.plan("Find ways to improve this repo")
+    assert result.open_questions == []
+    assert result.ready_to_execute is True
+
+
+def test_runner_plan_inspects_real_repo_files_not_only_repo_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+    touched: list[str] = []
+
+    def fake_collect(repo: Path, instruction: str, repo_map: dict):
+        _ = (instruction, repo_map)
+        touched.append(str(repo / "villani_code/state.py"))
+        return [{"path": "villani_code/state.py", "excerpt": "def plan"}]
+
+    monkeypatch.setattr("villani_code.state._collect_planning_evidence", fake_collect)
+    runner.plan("Find ways to improve this repo")
+    assert touched

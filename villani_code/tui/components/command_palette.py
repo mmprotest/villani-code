@@ -29,7 +29,7 @@ class CommandPalette:
     def _default_items(self) -> list[PaletteItem]:
         data = [
             ("/help", "full command reference", "command", "help"),
-            ("/plan", "start sticky planning mode", "command", "plan"),
+            ("/plan", "create a read-only plan for a prompt", "command", "plan"),
             ("/replan", "rerun planning with current answers", "command", "replan"),
             ("/execute", "execute last ready plan", "command", "execute"),
             ("/cancelplan", "cancel active planning session", "command", "cancelplan"),

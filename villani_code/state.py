@@ -130,6 +130,46 @@ def _parse_planning_response(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _normalize_plan_text_item(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        preferred_keys = [
+            "action",
+            "step",
+            "path",
+            "target",
+            "focus",
+            "improvement_focus",
+            "risk",
+            "mitigation",
+            "validation",
+            "check",
+            "reason",
+            "summary",
+            "label",
+        ]
+        values: list[str] = []
+        for key in preferred_keys:
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                values.append(text)
+        return " — ".join(values)
+    if isinstance(item, (list, tuple)):
+        return "; ".join(str(value).strip() for value in item if str(value).strip())
+    return str(item).strip()
+
+
+def _normalize_plan_text_list(items: Any, limit: int = 16) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    normalized = [_normalize_plan_text_item(item) for item in items]
+    return _dedupe_preserve([item for item in normalized if item])[:limit]
+
+
 def _build_plan_result_from_payload(
     instruction: str,
     payload: dict[str, Any],
@@ -137,11 +177,11 @@ def _build_plan_result_from_payload(
     evidence_paths: list[str],
 ) -> PlanSessionResult | None:
     task_summary = str(payload.get("task_summary", "")).strip() or instruction.strip()
-    candidate_files = _dedupe_preserve([str(v) for v in payload.get("candidate_files", []) if str(v).strip()])[:16]
-    assumptions = _dedupe_preserve([str(v) for v in payload.get("assumptions", []) if str(v).strip()])
-    recommended_steps = _dedupe_preserve([str(v) for v in payload.get("recommended_steps", []) if str(v).strip()])
-    risks = _dedupe_preserve([str(v) for v in payload.get("risks", []) if str(v).strip()])
-    validation = _dedupe_preserve([str(v) for v in payload.get("validation_approach", []) if str(v).strip()])
+    candidate_files = _normalize_plan_text_list(payload.get("candidate_files", []), limit=16)
+    assumptions = _normalize_plan_text_list(payload.get("assumptions", []), limit=24)
+    recommended_steps = _normalize_plan_text_list(payload.get("recommended_steps", []), limit=24)
+    risks = _normalize_plan_text_list(payload.get("risks", []), limit=12)
+    validation = _normalize_plan_text_list(payload.get("validation_approach", []), limit=16)
 
     if not recommended_steps:
         return None
@@ -182,7 +222,9 @@ def _build_plan_result_from_payload(
 
     assumptions.extend([f"Evidence inspected: {path}" for path in evidence_paths[:8]])
     assumptions.extend(_format_answer(answer) for answer in resolved_answers)
-    assumptions = _dedupe_preserve(assumptions + [*(f"Risk: {risk}" for risk in risks), *(f"Validation: {step}" for step in validation)])
+    assumptions.extend([f"Risk: {risk}" for risk in risks])
+    assumptions.extend([f"Validation: {step}" for step in validation])
+    assumptions = _dedupe_preserve(assumptions)
 
     ready = not open_questions
     brief = "\n".join([task_summary, *recommended_steps])
@@ -209,23 +251,34 @@ def _candidate_files_from_repo_map(plan: Any, repo_map: dict[str, Any]) -> list[
     return _dedupe_preserve(seeds)[:12]
 
 
-def _fallback_fallback_repo_specific_steps(instruction: str, candidate_files: list[str], validation_steps: list[str], plan: Any) -> list[str]:
+def _fallback_repo_specific_steps(instruction: str, candidate_files: list[str], validation_steps: list[str], plan: Any) -> list[str]:
     lowered = instruction.lower()
-    review_mode = any(token in lowered for token in ("review", "improvement", "improve", "audit", "look through"))
-    top_targets = ", ".join(candidate_files[:5]) if candidate_files else "high-signal files from the repo map"
+    review_mode = any(token in lowered for token in ("review", "improvement", "improve", "audit", "look through", "this repo"))
+    top_targets = candidate_files[:6]
 
     if review_mode:
+        first_slice = ", ".join(top_targets[:3])
+        second_slice = ", ".join(top_targets[3:6])
         steps = [
-            f"Survey high-signal areas first: {top_targets}.",
-            "Audit command routing, runner orchestration, and state transitions for correctness and UX consistency.",
-            "Identify concrete improvement candidates, ranked by user impact and implementation risk.",
-            "For each candidate, capture expected code touch points and verification strategy before execution.",
+            (
+                f"Inspect architecture and workflow behavior in {first_slice} and record where planning, routing, and execution flow diverges from expected /plan semantics."
+                if first_slice
+                else "Inspect architecture and workflow behavior in high-signal modules and record where planning, routing, and execution flow diverges from expected /plan semantics."
+            ),
+            (
+                f"Review rendering and session-state handling in {second_slice} to identify malformed output formatting, clarification thresholds, and readiness semantics."
+                if second_slice
+                else "Review rendering and session-state handling to identify malformed output formatting, clarification thresholds, and readiness semantics."
+            ),
+            "Prioritize findings by user impact first, then by regression risk, and map each issue to specific implementation touch points.",
+            "Prepare execution order that applies control-flow fixes before prompt/schema tuning, then add regression tests for slash command behavior, clarification thresholding, and plan output formatting.",
         ]
     else:
+        target_text = ", ".join(top_targets) if top_targets else "the most relevant implementation modules"
         steps = [
-            f"Inspect likely target files/subsystems: {top_targets}.",
-            "Trace current behavior to locate the smallest viable implementation change.",
-            "Draft concrete code changes in dependency order and note cross-file impacts.",
+            f"Read {target_text} to confirm current behavior and exact failure points.",
+            "Design the smallest dependency-ordered change set that corrects root-cause behavior before secondary cleanup.",
+            "Define validation in targeted-first order, then broaden only when failures indicate wider impact.",
         ]
 
     if getattr(plan, "requires_validation_phase", False):
@@ -236,7 +289,7 @@ def _fallback_fallback_repo_specific_steps(instruction: str, candidate_files: li
     return steps
 
 
-def _fallback_fallback_clarification_questions_from_plan(instruction: str, plan: Any, repo_map: dict[str, Any], answers: list[PlanAnswer]) -> list[PlanQuestion]:
+def _fallback_clarification_questions_from_plan(instruction: str, plan: Any, repo_map: dict[str, Any], answers: list[PlanAnswer]) -> list[PlanQuestion]:
     _ = repo_map
     if answers:
         return []

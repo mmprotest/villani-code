@@ -124,8 +124,10 @@ def build_solution_planning_messages(
             "type": "text",
             "text": (
                 "You are planning work in strict read-only mode. "
-                "Inspect evidence and produce a concrete, repo-specific solution plan. "
-                "Avoid generic scaffolding. Ask clarification questions only when ambiguity materially changes design. "
+                "Fully think through and finalize the best likely execution plan before stopping. "
+                "Inspect repository evidence and produce a concrete, repo-specific solution plan. "
+                "Avoid generic scaffolding and pre-plans. "
+                "Use sensible defaults for broad tasks and ask clarification questions only when ambiguity materially changes design. "
                 "Return strict JSON with keys: "
                 "task_summary, candidate_files, assumptions, recommended_steps, risks, validation_approach, open_questions. "
                 "open_questions must contain at most 3 questions; each has exactly 4 options with exactly one labeled 'Other'."
