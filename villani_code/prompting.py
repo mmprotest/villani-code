@@ -79,15 +79,37 @@ def build_initial_messages(repo: Path, user_instruction: str, autonomous_objecti
     return [{"role": "user", "content": [{"type": "text", "text": r} for r in reminders] + [{"type": "text", "text": f"{objective_tag}{user_instruction}</autonomous-objective>" if autonomous_objective else user_instruction}]}]
 
 
-def build_planning_instruction(user_instruction: str) -> str:
+def build_planning_instruction(
+    user_instruction: str,
+    evidence: list[dict[str, str]] | None = None,
+    validation_steps: list[str] | None = None,
+    answers: list[Any] | None = None,
+) -> str:
+    evidence = evidence or []
+    validation_steps = validation_steps or []
+    answers = answers or []
+    payload = {
+        "instruction": user_instruction,
+        "evidence": evidence[:12],
+        "validation_steps": validation_steps[:8],
+        "resolved_answers": [
+            {
+                "question_id": getattr(answer, "question_id", ""),
+                "selected_option_id": getattr(answer, "selected_option_id", ""),
+                "other_text": getattr(answer, "other_text", ""),
+            }
+            for answer in answers
+        ],
+    }
     return "\n".join(
         [
             "Create an implementation plan in read-only inspection mode.",
-            "Do not edit files, do not run mutating commands, and do not propose immediate execution.",
-            "Ask at most 3 high-value clarification questions only when necessary.",
-            "Each clarification question must include exactly 4 options: 3 concrete fixed options and one option labeled exactly 'Other'.",
-            "For minor ambiguity, make a default assumption and record it.",
-            f"Task instruction: {user_instruction}",
+            "Use the normal runtime loop: inspect files, search, reason, and iterate until the plan is concrete.",
+            "Do not edit files, do not run mutating commands, and do not perform git mutations.",
+            "Ask clarifying questions only when needed. Each question must include exactly 4 options with exactly one option labeled Other.",
+            "Return strict JSON with keys: task_summary, candidate_files, assumptions, recommended_steps, risks, validation_approach, open_questions, risk_level, confidence_score.",
+            "Planning context JSON:",
+            json.dumps(payload, indent=2),
         ]
     )
 

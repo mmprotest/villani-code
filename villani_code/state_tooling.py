@@ -114,9 +114,19 @@ def execute_tool_with_policy(
             return {"content": "Planning mode is read-only: file mutation tools are blocked", "is_error": True}
         if tool_name == "Bash":
             command = str(tool_input.get("command", "")).strip().lower()
-            readonly_prefixes = ("pwd", "ls", "cat", "rg", "grep", "find", "head", "tail", "wc", "git status", "git diff", "git log", "git show", "git branch")
-            if not any(command.startswith(prefix) for prefix in readonly_prefixes):
+            readonly_prefixes = (
+                "pwd", "ls", "cat", "rg", "grep", "find", "head", "tail", "wc",
+                "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "git ls-files",
+                "pytest", "python -m pytest", "uv run pytest", "poetry run pytest",
+            )
+            mutating_markers = (
+                " >", " >>", "| tee", "sed -i", " mv ", " cp ", " rm ", " chmod ", " chown ", " touch ", " mkdir ",
+                "git add", "git commit", "git push", "git pull", "git merge", "git rebase", "git checkout", "git switch", "git restore", "git reset", "git clean", "git tag", "git cherry-pick",
+            )
+            if any(marker in f" {command} " for marker in mutating_markers):
                 return {"content": "Planning mode is read-only: mutating shell command blocked", "is_error": True}
+            if not any(command.startswith(prefix) for prefix in readonly_prefixes):
+                return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
     if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
         policy_error = runner._small_model_tool_guard(tool_name, tool_input)

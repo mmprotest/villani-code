@@ -63,8 +63,11 @@ def test_plan_payload_dict_is_rendered_cleanly(tmp_path, monkeypatch) -> None:
     }
 
     monkeypatch.setattr("villani_code.state._collect_planning_evidence", lambda *_a, **_k: [{"path": "villani_code/state.py", "excerpt": "def plan"}])
-    monkeypatch.setattr("villani_code.state.build_solution_planning_messages", lambda *_a, **_k: ([{"type": "text", "text": "s"}], [{"role": "user", "content": [{"type": "text", "text": "u"}]}]))
-    monkeypatch.setattr(runner.client, "create_message", lambda *_a, **_k: {"content": [{"type": "text", "text": json.dumps(payload)}]})
+    monkeypatch.setattr(
+        runner,
+        "run",
+        lambda *_a, **_k: {"response": {"content": [{"type": "text", "text": json.dumps(payload)}]}},
+    )
 
     result = runner.plan("Find ways to improve this repo")
     assert all("{" not in line and "}" not in line for line in result.candidate_files)

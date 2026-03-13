@@ -197,6 +197,120 @@ def test_runner_plan_records_real_file_evidence(tmp_path: Path) -> None:
     result = runner.plan("Find improvements for this repo")
     assert any(item.startswith("Evidence inspected: ") for item in result.assumptions)
 
+
+
+def test_plan_uses_runtime_loop_before_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+    seen: dict[str, str] = {}
+
+    def fake_run(instruction: str, messages=None, execution_budget=None):
+        _ = (messages, execution_budget)
+        seen["instruction"] = instruction
+        payload = {
+            "task_summary": "Runtime-derived summary",
+            "candidate_files": ["villani_code/state.py"],
+            "assumptions": ["a"],
+            "recommended_steps": ["read file", "propose ordered edits"],
+            "risks": ["regression"],
+            "validation_approach": ["pytest tests/test_plan_workflow.py"],
+            "open_questions": [],
+            "risk_level": "medium",
+            "confidence_score": 0.9,
+        }
+        return {"response": {"content": [{"type": "text", "text": __import__("json").dumps(payload)}]}}
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    result = runner.plan("Find ways to improve this repo")
+    assert "Create an implementation plan in read-only inspection mode" in seen["instruction"]
+    assert result.task_summary == "Runtime-derived summary"
+    assert result.ready_to_execute is True
+
+
+def test_plan_runtime_prompt_contains_multi_file_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+    monkeypatch.setattr(
+        "villani_code.state._collect_planning_evidence",
+        lambda *_a, **_k: [
+            {"path": "villani_code/state.py", "excerpt": "def plan"},
+            {"path": "villani_code/state_tooling.py", "excerpt": "def execute_tool_with_policy"},
+        ],
+    )
+
+    def fake_run(instruction: str, messages=None, execution_budget=None):
+        _ = (messages, execution_budget)
+        assert "villani_code/state.py" in instruction
+        assert "villani_code/state_tooling.py" in instruction
+        payload = {
+            "task_summary": "summary",
+            "candidate_files": ["villani_code/state.py", "villani_code/state_tooling.py"],
+            "assumptions": ["a"],
+            "recommended_steps": ["read both files", "sequence changes"],
+            "risks": ["regression"],
+            "validation_approach": ["pytest"],
+            "open_questions": [],
+        }
+        return {"response": {"content": [{"type": "text", "text": __import__("json").dumps(payload)}]}}
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    result = runner.plan("Find ways to improve this repo")
+    assert len(result.candidate_files) >= 2
+
+
+def test_planning_read_only_blocks_mutating_git_bash(tmp_path: Path) -> None:
+    runner = MinimalRunner(tmp_path)
+    blocked = execute_tool_with_policy(runner, "Bash", {"command": "git commit -m 'x'"}, "1", 0)
+    assert blocked["is_error"] is True
+    assert "read-only" in blocked["content"].lower()
+
+
+def test_planning_can_continue_after_clarification_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(DummyClient(), tmp_path, model="demo")
+    calls = {"count": 0}
+
+    def fake_run(instruction: str, messages=None, execution_budget=None):
+        _ = (instruction, messages, execution_budget)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            payload = {
+                "task_summary": "summary",
+                "candidate_files": ["villani_code/state.py"],
+                "assumptions": ["a"],
+                "recommended_steps": ["step"],
+                "risks": ["risk"],
+                "validation_approach": ["pytest"],
+                "open_questions": [
+                    {
+                        "id": "q1",
+                        "question": "Pick mode",
+                        "rationale": "Need decision",
+                        "options": [
+                            {"id": "a", "label": "A", "description": "A"},
+                            {"id": "b", "label": "B", "description": "B"},
+                            {"id": "c", "label": "C", "description": "C"},
+                            {"id": "o", "label": "Other", "description": "O", "is_other": True},
+                        ],
+                    }
+                ],
+            }
+        else:
+            payload = {
+                "task_summary": "summary",
+                "candidate_files": ["villani_code/state.py"],
+                "assumptions": ["a", "q1: a"],
+                "recommended_steps": ["step", "step2"],
+                "risks": ["risk"],
+                "validation_approach": ["pytest"],
+                "open_questions": [],
+            }
+        return {"response": {"content": [{"type": "text", "text": __import__("json").dumps(payload)}]}}
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    first = runner.plan("Find ways to improve this repo")
+    assert first.ready_to_execute is False
+    second = runner.plan("Find ways to improve this repo", answers=[PlanAnswer("q1", "a")])
+    assert second.ready_to_execute is True
+    assert calls["count"] == 2
+
 def test_plan_inline_prompt_starts_planning_immediately(tmp_path: Path) -> None:
     app = VillaniTUI(DummyRunnerForApp(), tmp_path)
     app.controller = ControllerSpy()
@@ -382,11 +496,10 @@ def test_plan_payload_dicts_are_normalized_for_clean_rendering(tmp_path: Path, m
     }
 
     monkeypatch.setattr("villani_code.state._collect_planning_evidence", lambda *_a, **_k: [{"path": "villani_code/state.py", "excerpt": "def plan"}])
-    monkeypatch.setattr("villani_code.state.build_solution_planning_messages", lambda *_a, **_k: ([{"type": "text", "text": "s"}], [{"role": "user", "content": [{"type": "text", "text": "u"}]}]))
     monkeypatch.setattr(
-        runner.client,
-        "create_message",
-        lambda *_a, **_k: {"content": [{"type": "text", "text": __import__("json").dumps(fake_payload)}]},
+        runner,
+        "run",
+        lambda *_a, **_k: {"response": {"content": [{"type": "text", "text": __import__("json").dumps(fake_payload)}]}},
     )
 
     result = runner.plan("Find ways to improve this repo")
