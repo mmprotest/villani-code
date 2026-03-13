@@ -109,6 +109,11 @@ def execute_tool_with_policy(
     if not hook_pre.allow:
         return {"content": f"Blocked by hook: {hook_pre.reason}", "is_error": True}
 
+    if tool_name == "SubmitPlan":
+        if not getattr(runner, "_planning_read_only", False):
+            return {"content": "SubmitPlan is available only in planning mode", "is_error": True}
+        return {"content": "Plan artifact accepted", "is_error": False}
+
     if getattr(runner, "_planning_read_only", False):
         if tool_name in {"Write", "Patch", "Edit"}:
             return {"content": "Planning mode is read-only: file mutation tools are blocked", "is_error": True}

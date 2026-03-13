@@ -44,10 +44,6 @@ from villani_code.utils import (
 )
 
 
-def _option(question_id: str, suffix: str, label: str, description: str, is_other: bool = False) -> PlanOption:
-    return PlanOption(id=f"{question_id}_{suffix}", label=label, description=description, is_other=is_other)
-
-
 def _dedupe_preserve(items: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -117,75 +113,6 @@ def _collect_planning_evidence(repo: Path, instruction: str, repo_map: dict[str,
     return evidence
 
 
-def _parse_planning_response(text: str) -> dict[str, Any] | None:
-    stripped = text.strip()
-    if not stripped:
-        return None
-
-    decoder = json.JSONDecoder()
-
-    def _try_decode(candidate: str) -> dict[str, Any] | None:
-        fragment = candidate.strip()
-        if not fragment:
-            return None
-        try:
-            payload = json.loads(fragment)
-        except json.JSONDecodeError:
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    candidates: list[str] = []
-
-    direct = _try_decode(stripped)
-    if direct is not None:
-        return direct
-
-    lines = stripped.splitlines()
-    inside_fence = False
-    fence_lang = ""
-    fence_buf: list[str] = []
-    for line in lines:
-        marker = line.strip()
-        if marker.startswith("```"):
-            if inside_fence:
-                block = "\n".join(fence_buf).strip()
-                if fence_lang in {"", "json", "application/json"} and block:
-                    candidates.append(block)
-                inside_fence = False
-                fence_lang = ""
-                fence_buf = []
-                continue
-            inside_fence = True
-            fence_lang = marker[3:].strip().lower()
-            fence_buf = []
-            continue
-        if inside_fence:
-            fence_buf.append(line)
-
-    text_len = len(stripped)
-    for idx, char in enumerate(stripped):
-        if char != "{":
-            continue
-        try:
-            obj, end = decoder.raw_decode(stripped[idx:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            candidates.append(stripped[idx : idx + end])
-            if idx + end >= text_len:
-                break
-
-    best_payload: dict[str, Any] | None = None
-    best_size = -1
-    for candidate in candidates:
-        payload = _try_decode(candidate)
-        if payload is None:
-            continue
-        size = len(candidate)
-        if size > best_size:
-            best_payload = payload
-            best_size = size
-    return best_payload
 
 
 def _normalize_plan_text_item(item: Any) -> str:
@@ -227,61 +154,83 @@ def _normalize_plan_text_list(items: Any, limit: int = 16) -> list[str]:
     normalized = [_normalize_plan_text_item(item) for item in items]
     return _dedupe_preserve([item for item in normalized if item])[:limit]
 
+def _normalize_open_questions(raw_questions: Any) -> list[PlanQuestion]:
+    open_questions: list[PlanQuestion] = []
+    if not isinstance(raw_questions, list):
+        return open_questions
+    for idx, item in enumerate(raw_questions[:3], start=1):
+        if not isinstance(item, dict):
+            continue
+        options_raw = item.get("options", [])
+        if not isinstance(options_raw, list):
+            continue
+        options: list[PlanOption] = []
+        for opt in options_raw[:4]:
+            if not isinstance(opt, dict):
+                continue
+            options.append(
+                PlanOption(
+                    id=str(opt.get("id", "")).strip() or f"q{idx}_opt{len(options)+1}",
+                    label=str(opt.get("label", "")).strip() or f"Option {len(options)+1}",
+                    description=str(opt.get("description", "")).strip(),
+                    is_other=bool(opt.get("is_other", False)),
+                )
+            )
+        if len(options) != 4:
+            continue
+        try:
+            open_questions.append(
+                PlanQuestion(
+                    id=str(item.get("id", "")).strip() or f"q{idx}",
+                    question=str(item.get("question", "")).strip(),
+                    rationale=str(item.get("rationale", "")).strip(),
+                    options=options,
+                )
+            )
+        except ValueError:
+            continue
+    return open_questions
 
-def _build_plan_result_from_payload(
+
+def _plan_is_concrete_enough(candidate_files: list[str], recommended_steps: list[str]) -> bool:
+    if len(candidate_files) < 2:
+        return False
+    lowered_steps = [step.lower() for step in recommended_steps if step.strip()]
+    if len(lowered_steps) < 3:
+        return False
+    generic_markers = (
+        "inspect architecture",
+        "review rendering",
+        "prioritize findings",
+        "prepare execution order",
+        "inspect the repo",
+    )
+    concrete_hits = 0
+    for step in lowered_steps:
+        has_path = any("/" in token or token.endswith(".py") or token.endswith(".md") for token in step.split())
+        if has_path:
+            concrete_hits += 1
+        if any(marker in step for marker in generic_markers) and not has_path:
+            return False
+    return concrete_hits >= 2
+
+
+def _build_plan_result_from_artifact(
     instruction: str,
-    payload: dict[str, Any],
+    artifact: dict[str, Any],
     resolved_answers: list[PlanAnswer],
     evidence_paths: list[str],
 ) -> PlanSessionResult | None:
-    task_summary = str(payload.get("task_summary", "")).strip() or instruction.strip()
-    candidate_files = _normalize_plan_text_list(payload.get("candidate_files", []), limit=16)
-    assumptions = _normalize_plan_text_list(payload.get("assumptions", []), limit=24)
-    recommended_steps = _normalize_plan_text_list(payload.get("recommended_steps", []), limit=24)
-    risks = _normalize_plan_text_list(payload.get("risks", []), limit=12)
-    validation = _normalize_plan_text_list(payload.get("validation_approach", []), limit=16)
-
-    if not recommended_steps:
+    task_summary = str(artifact.get("task_summary", "")).strip() or instruction.strip()
+    candidate_files = _normalize_plan_text_list(artifact.get("candidate_files", []), limit=16)
+    assumptions = _normalize_plan_text_list(artifact.get("assumptions", []), limit=24)
+    recommended_steps = _normalize_plan_text_list(artifact.get("recommended_steps", []), limit=24)
+    if not _plan_is_concrete_enough(candidate_files, recommended_steps):
         return None
 
-    open_questions: list[PlanQuestion] = []
-    raw_questions = payload.get("open_questions", [])
-    if isinstance(raw_questions, list):
-        for idx, item in enumerate(raw_questions[:3], start=1):
-            if not isinstance(item, dict):
-                continue
-            options_raw = item.get("options", [])
-            if not isinstance(options_raw, list):
-                continue
-            options: list[PlanOption] = []
-            for opt in options_raw[:4]:
-                if not isinstance(opt, dict):
-                    continue
-                options.append(
-                    PlanOption(
-                        id=str(opt.get("id", "")).strip() or f"q{idx}_opt{len(options)+1}",
-                        label=str(opt.get("label", "")).strip() or f"Option {len(options)+1}",
-                        description=str(opt.get("description", "")).strip(),
-                        is_other=bool(opt.get("is_other", False)),
-                    )
-                )
-            if len(options) == 4:
-                try:
-                    open_questions.append(
-                        PlanQuestion(
-                            id=str(item.get("id", "")).strip() or f"q{idx}",
-                            question=str(item.get("question", "")).strip(),
-                            rationale=str(item.get("rationale", "")).strip(),
-                            options=options,
-                        )
-                    )
-                except ValueError:
-                    continue
-
+    open_questions = _normalize_open_questions(artifact.get("open_questions", []))
     assumptions.extend([f"Evidence inspected: {path}" for path in evidence_paths[:8]])
     assumptions.extend(_format_answer(answer) for answer in resolved_answers)
-    assumptions.extend([f"Risk: {risk}" for risk in risks])
-    assumptions.extend([f"Validation: {step}" for step in validation])
     assumptions = _dedupe_preserve(assumptions)
 
     ready = not open_questions
@@ -296,86 +245,44 @@ def _build_plan_result_from_payload(
         resolved_answers=resolved_answers,
         ready_to_execute=ready,
         execution_brief=brief,
-        risk_level=str(payload.get("risk_level", "medium")),
-        confidence_score=float(payload.get("confidence_score", 0.65) or 0.65),
+        risk_level=str(artifact.get("risk_level", "medium")),
+        confidence_score=float(artifact.get("confidence_score", 0.65) or 0.65),
     )
 
-def _candidate_files_from_repo_map(plan: Any, repo_map: dict[str, Any]) -> list[str]:
-    seeds = [
-        *list(getattr(plan, "relevant_files", [])),
-        *[str(target.get("target", "")) for target in getattr(plan, "candidate_targets", []) if isinstance(target, dict)],
-        *[str(path) for path in repo_map.get("likely_entrypoints", [])],
+
+def _build_emergency_plan_result(
+    instruction: str,
+    self_repo: Path,
+    repo_map: dict[str, Any],
+    validation_steps: list[str],
+    evidence_paths: list[str],
+    resolved_answers: list[PlanAnswer],
+) -> PlanSessionResult:
+    execution_plan = generate_execution_plan(instruction, self_repo, repo_map, validation_steps)
+    candidate_files = _dedupe_preserve([str(path) for path in repo_map.get("likely_entrypoints", [])])[:8]
+    steps = [
+        "Inspect the highest-signal failing path first and confirm the exact defect with Read/Grep.",
+        "Draft the smallest ordered edit list with exact files and expected behavior changes.",
+        "Define targeted validation commands and escalation criteria before /execute.",
     ]
-    return _dedupe_preserve(seeds)[:12]
-
-
-def _fallback_repo_specific_steps(instruction: str, candidate_files: list[str], validation_steps: list[str], plan: Any) -> list[str]:
-    lowered = instruction.lower()
-    review_mode = any(token in lowered for token in ("review", "improvement", "improve", "audit", "look through", "this repo"))
-    top_targets = candidate_files[:6]
-
-    if review_mode:
-        first_slice = ", ".join(top_targets[:3])
-        second_slice = ", ".join(top_targets[3:6])
-        steps = [
-            (
-                f"Inspect architecture and workflow behavior in {first_slice} and record where planning, routing, and execution flow diverges from expected /plan semantics."
-                if first_slice
-                else "Inspect architecture and workflow behavior in high-signal modules and record where planning, routing, and execution flow diverges from expected /plan semantics."
-            ),
-            (
-                f"Review rendering and session-state handling in {second_slice} to identify malformed output formatting, clarification thresholds, and readiness semantics."
-                if second_slice
-                else "Review rendering and session-state handling to identify malformed output formatting, clarification thresholds, and readiness semantics."
-            ),
-            "Prioritize findings by user impact first, then by regression risk, and map each issue to specific implementation touch points.",
-            "Prepare execution order that applies control-flow fixes before prompt/schema tuning, then add regression tests for slash command behavior, clarification thresholding, and plan output formatting.",
-        ]
-    else:
-        target_text = ", ".join(top_targets) if top_targets else "the most relevant implementation modules"
-        steps = [
-            f"Read {target_text} to confirm current behavior and exact failure points.",
-            "Design the smallest dependency-ordered change set that corrects root-cause behavior before secondary cleanup.",
-            "Define validation in targeted-first order, then broaden only when failures indicate wider impact.",
-        ]
-
-    if getattr(plan, "requires_validation_phase", False):
-        checks = ", ".join(validation_steps[:3]) if validation_steps else "targeted validation commands"
-        steps.append(f"Validate with {checks}, then broaden validation only when failures indicate wider impact.")
-    else:
-        steps.append("No mutation in planning: finalize assumptions and execution constraints for /execute.")
-    return steps
-
-
-def _fallback_clarification_questions_from_plan(instruction: str, plan: Any, repo_map: dict[str, Any], answers: list[PlanAnswer]) -> list[PlanQuestion]:
-    _ = repo_map
-    if answers:
-        return []
-
-    lowered = instruction.lower()
-    broad_review = any(token in lowered for token in ("look through", "review", "improvements", "improve repo", "audit"))
-    if broad_review:
-        return []
-
-    confidence = float(getattr(plan, "confidence_score", 0.0))
-    actions = set(str(value) for value in getattr(plan, "action_classes", []))
-    has_architecture_fork = "code_edit" in actions and "config_edit" in actions and confidence < 0.45
-    if not has_architecture_fork:
-        return []
-
-    qid = "implementation_path"
-    question = PlanQuestion(
-        id=qid,
-        question="Which implementation path should be prioritized first?",
-        rationale="Both code-level and configuration-level paths look plausible and would change execution order.",
-        options=[
-            _option(qid, "code_first", "Code-path first", "Prioritize source-level behavior changes before config adjustments."),
-            _option(qid, "config_first", "Config-path first", "Prioritize configuration/runtime wiring changes before source edits."),
-            _option(qid, "parallel", "Parallel split", "Plan concurrent updates across code and config with tighter validation gates."),
-            _option(qid, "other", "Other", "Provide a different implementation path preference.", is_other=True),
-        ],
+    assumptions = _dedupe_preserve([
+        "Planning mode remained read-only.",
+        *[f"Evidence inspected: {path}" for path in evidence_paths[:8]],
+        *[_format_answer(answer) for answer in resolved_answers],
+    ])
+    return PlanSessionResult(
+        instruction=instruction,
+        task_summary=instruction.strip() or execution_plan.task_goal,
+        candidate_files=candidate_files,
+        assumptions=assumptions,
+        recommended_steps=steps,
+        open_questions=[],
+        resolved_answers=resolved_answers,
+        ready_to_execute=True,
+        execution_brief="\n".join([instruction.strip(), *steps]),
+        risk_level=execution_plan.risk_level.value,
+        confidence_score=0.35,
     )
-    return [question]
 
 
 def _format_answer(plan_answer: PlanAnswer) -> str:
@@ -453,6 +360,7 @@ class Runner:
                     "GitBranch(*)",
                     "GitCheckout(*)",
                     "GitCommit(*)",
+                    "SubmitPlan(*)",
                 ],
             ),
             repo=self.repo,
@@ -497,6 +405,7 @@ class Runner:
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
+        self._finalized_plan_artifact: dict[str, Any] | None = None
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
@@ -517,64 +426,32 @@ class Runner:
 
         self._planning_read_only = True
         self._runtime_mode = "planning"
+        self._finalized_plan_artifact = None
         try:
-            try:
-                planning_prompt = build_planning_instruction(
-                    instruction,
-                    evidence_rows,
-                    validation_steps,
-                    resolved_answers,
-                )
-                runtime_result = self.run(planning_prompt, messages=build_initial_messages(self.repo, planning_prompt))
-                content = runtime_result.get("response", {}).get("content", [])
-                text = "\n".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
-                parsed = _parse_planning_response(text)
-                if parsed is not None:
-                    plan_result = _build_plan_result_from_payload(instruction, parsed, resolved_answers, evidence_paths)
-                    if plan_result is not None:
-                        return plan_result
-            except Exception:
-                pass
-
-            # Fallback path only when model-driven planning output is unavailable.
-            execution_plan = generate_execution_plan(instruction, self.repo, repo_map, validation_steps)
-            candidate_files = _candidate_files_from_repo_map(execution_plan, repo_map)
-            recommended_steps = _fallback_repo_specific_steps(instruction, candidate_files, validation_steps, execution_plan)
-            assumptions = [
-                "Planning phase is read-only until /execute.",
-                f"Risk level estimated as {execution_plan.risk_level.value}.",
-                *[
-                    item
-                    for item in execution_plan.assumptions
-                    if "repo_map" not in item.lower() and "validation" not in item.lower()
-                ],
-                *[f"Evidence inspected: {path}" for path in evidence_paths[:8]],
-            ]
-            assumptions = _dedupe_preserve(assumptions)
-            if resolved_answers:
-                assumptions.extend(_format_answer(answer) for answer in resolved_answers)
-                assumptions.append("Clarification decisions are locked for execution.")
-
-            questions = _fallback_clarification_questions_from_plan(instruction, execution_plan, repo_map, resolved_answers)
-            ready = not questions
-            task_summary = instruction.strip() or execution_plan.task_goal
-            execution_brief = "\n".join([task_summary, *recommended_steps])
-            return PlanSessionResult(
-                instruction=instruction,
-                task_summary=task_summary,
-                candidate_files=candidate_files,
-                assumptions=assumptions,
-                recommended_steps=recommended_steps,
-                open_questions=questions,
-                resolved_answers=resolved_answers,
-                ready_to_execute=ready,
-                execution_brief=execution_brief,
-                risk_level=execution_plan.risk_level.value,
-                confidence_score=execution_plan.confidence_score,
+            planning_prompt = build_planning_instruction(
+                instruction,
+                evidence_rows,
+                validation_steps,
+                resolved_answers,
+            )
+            self.run(planning_prompt, messages=build_initial_messages(self.repo, planning_prompt))
+            artifact = copy.deepcopy(getattr(self, "_finalized_plan_artifact", None))
+            if isinstance(artifact, dict):
+                plan_result = _build_plan_result_from_artifact(instruction, artifact, resolved_answers, evidence_paths)
+                if plan_result is not None:
+                    return plan_result
+            return _build_emergency_plan_result(
+                instruction,
+                self.repo,
+                repo_map,
+                validation_steps,
+                evidence_paths,
+                resolved_answers,
             )
         finally:
             self._planning_read_only = False
             self._runtime_mode = "execution"
+            self._finalized_plan_artifact = None
 
     def run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]:
         if not plan.ready_to_execute:
@@ -1199,6 +1076,26 @@ class Runner:
                         "tool_use_id": tool_use_id,
                     }
                 )
+
+                if self._runtime_mode == "planning" and tool_name == "SubmitPlan":
+                    self._finalized_plan_artifact = copy.deepcopy(tool_input)
+                    self.event_callback({"type": "plan_artifact_submitted"})
+                    response = {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Plan finalized.",
+                            }
+                        ],
+                    }
+                    transcript["responses"].append(response)
+                    return {
+                        "response": response,
+                        "messages": messages,
+                        "transcript_path": "",
+                        "transcript": transcript,
+                    }
 
                 result = self._execute_tool_with_policy(
                     tool_name, tool_input, tool_use_id, len(messages)
