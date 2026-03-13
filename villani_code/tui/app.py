@@ -132,7 +132,7 @@ class VillaniTUI(App[None]):
             with Vertical(id="input-area"):
                 yield SlashCommandPopup()
                 with Horizontal(id="input-row"):
-                    yield Static("🤖 Villani Code >", id="input-prompt")
+                    yield Static("Villani Code >", id="input-prompt")
                     yield Input(id="input")
 
     def on_mount(self) -> None:

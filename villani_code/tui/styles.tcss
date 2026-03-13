@@ -89,8 +89,9 @@
 }
 
 #input-prompt {
-  width: 20;
-  border: solid #000000;
+  width: 17;
+  border: solid #121212;
+  content-align: right middle;
 }
 
 #input {

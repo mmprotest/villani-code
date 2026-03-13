@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .villani_code/
+artifacts/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
