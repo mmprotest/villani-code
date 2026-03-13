@@ -77,6 +77,17 @@ class GitSimpleInput(BaseModel):
     args: list[str] = Field(default_factory=list)
 
 
+class SubmitPlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_summary: str
+    candidate_files: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    recommended_steps: list[str]
+    open_questions: list[dict[str, Any]] = Field(default_factory=list)
+    risk_level: str = "medium"
+    confidence_score: float = 0.5
+
+
 TOOL_MODELS: dict[str, type[BaseModel]] = {
     "Ls": LsInput,
     "Read": ReadInput,
@@ -93,6 +104,7 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
     "GitBranch": GitSimpleInput,
     "GitCheckout": GitSimpleInput,
     "GitCommit": GitSimpleInput,
+    "SubmitPlan": SubmitPlanInput,
 }
 
 DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
@@ -149,6 +161,8 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
             return _ok(_run_git(name, parsed, repo))
+        if name == "SubmitPlan":
+            return _ok("Plan artifact submitted")
     except Exception as exc:
         return _error(str(exc))
     return _error("Unhandled tool")

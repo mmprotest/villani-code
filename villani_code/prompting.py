@@ -106,8 +106,10 @@ def build_planning_instruction(
             "Create an implementation plan in read-only inspection mode.",
             "Use the normal runtime loop: inspect files, search, reason, and iterate until the plan is concrete.",
             "Do not edit files, do not run mutating commands, and do not perform git mutations.",
-            "Ask clarifying questions only when needed. Each question must include exactly 4 options with exactly one option labeled Other.",
-            "Return strict JSON with keys: task_summary, candidate_files, assumptions, recommended_steps, risks, validation_approach, open_questions, risk_level, confidence_score.",
+            "When the plan is concrete, finalize by calling the SubmitPlan tool.",
+            "SubmitPlan input must include: task_summary, candidate_files, assumptions, recommended_steps, open_questions, risk_level, confidence_score.",
+            "Clarifying questions are allowed only for true design forks. Each question must include exactly 4 options with exactly one option labeled Other.",
+            "Do not return planning JSON in assistant prose; use SubmitPlan for finalization.",
             "Planning context JSON:",
             json.dumps(payload, indent=2),
         ]
