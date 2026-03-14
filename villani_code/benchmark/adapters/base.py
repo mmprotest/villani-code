@@ -40,13 +40,13 @@ class AgentAdapter:
 
     name: str
     fairness_classification: FairnessClassification = FairnessClassification.COARSE_WRAPPER_ONLY
-    fairness_notes = "Deprecated compatibility adapter."
+    fairness_notes = "Shared benchmark contract and harness-only scoring are used, but this adapter remains a coarse CLI wrapper with limited telemetry."
 
 
 class VillaniAdapter(AgentAdapter):
     name = "villani"
-    fairness_classification = FairnessClassification.EXACT_COMPARABLE
-    fairness_notes = "Villani adapter exposes structured runtime events and is directly comparable across Villani model variants."
+    fairness_classification = FairnessClassification.APPROXIMATELY_COMPARABLE
+    fairness_notes = "Shared benchmark contract and harness-only scoring improve comparability, but telemetry richness still differs across adapters."
 
 
 class ClaudeCodeAdapter(AgentAdapter):

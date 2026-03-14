@@ -13,6 +13,7 @@ from villani_code.benchmark.models import (
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.reporting import aggregate_results
+from villani_code.benchmark.prompt_contract import extract_shared_contract_section, render_benchmark_prompt
 from villani_code.patch_apply import extract_unified_diff_targets
 from villani_code.prompting import build_system_blocks
 from villani_code.state import Runner
@@ -866,3 +867,115 @@ def test_benchmark_scoring_does_not_depend_on_villani_runtime_events(tmp_path: P
     assert baseline.success == with_denial.success
     assert with_denial.policy_warning == "benchmark_mutation_denials"
 
+
+
+def test_prompt_artifacts_written_for_villani_and_claude(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "task" / "repo"
+    repo.mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("x=0\n", encoding="utf-8")
+
+    task = BenchmarkTask(
+        id="task_prompt_artifacts",
+        benchmark_track=BenchmarkTrack.CORE,
+        family=TaskFamily.BUGFIX,
+        difficulty=TaskDifficulty.EASY,
+        language="python",
+        max_minutes=1,
+        max_files_touched=2,
+        visible_verification=["python -c 'print(1)'"],
+        hidden_verification=["python -c 'print(1)'"],
+        success_policy=SuccessPolicy(),
+        allowlist_paths=["src/"],
+        forbidden_paths=[".git/"],
+        task_dir=tmp_path / "task",
+        prompt="fix",
+    )
+
+    class FakeAgent:
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = "approximately_comparable"
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def run_agent(self, **_kwargs):
+            from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+            from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[AdapterEvent(type="command_started", timestamp=0.0, payload={})],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda name: FakeAgent(name))
+
+    villani_result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+    claude_result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="claude-code",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    for result in (villani_result, claude_result):
+        assert result.prompt_artifact_path
+        assert result.contract_artifact_path
+        assert result.scoring_inputs_mode == "harness_only"
+        prompt_path = Path(result.prompt_artifact_path)
+        contract_path = Path(result.contract_artifact_path)
+        assert prompt_path.name == "rendered_launch_prompt.txt"
+        assert contract_path.name == "rendered_prompt.txt"
+        assert prompt_path.exists()
+        assert contract_path.exists()
+        assert "Benchmark task contract (shared across all agents):" in contract_path.read_text(encoding="utf-8")
+        meta = contract_path.parent / "rendered_prompt_meta.json"
+        assert meta.exists()
+
+
+def test_shared_contract_section_matches_villani_and_claude(tmp_path: Path) -> None:
+    (tmp_path / "task" / "repo").mkdir(parents=True)
+    task = BenchmarkTask(
+        id="task_parity",
+        benchmark_track=BenchmarkTrack.CORE,
+        family=TaskFamily.BUGFIX,
+        difficulty=TaskDifficulty.EASY,
+        language="python",
+        max_minutes=1,
+        max_files_touched=2,
+        visible_verification=["python -c 'print(1)'"],
+        hidden_verification=["python -c 'print(1)'"],
+        success_policy=SuccessPolicy(),
+        allowlist_paths=["src/"],
+        forbidden_paths=[".git/"],
+        task_dir=tmp_path / "task",
+        prompt="fix parity",
+    )
+    repo_v = tmp_path / "repo_v"
+    repo_c = tmp_path / "repo_c"
+    repo_v.mkdir(parents=True)
+    repo_c.mkdir(parents=True)
+
+    villani_prompt = render_benchmark_prompt(task, repo_v)
+    claude_prompt = render_benchmark_prompt(task, repo_c)
+
+    assert extract_shared_contract_section(villani_prompt).replace(str(repo_v), "<repo>") == extract_shared_contract_section(claude_prompt).replace(str(repo_c), "<repo>")

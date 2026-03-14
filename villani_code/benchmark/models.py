@@ -290,6 +290,9 @@ class BenchmarkRunResult(BaseModel):
     telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
     workspace_preserved: bool = False
     reproducibility_manifest_path: str | None = None
+    prompt_artifact_path: str | None = None
+    contract_artifact_path: str | None = None
+    scoring_inputs_mode: str = "harness_only"
     repeat_index: int = 0
 
 

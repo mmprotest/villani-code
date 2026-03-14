@@ -76,3 +76,10 @@ def render_benchmark_prompt(task: BenchmarkTask, repo_root: Path) -> str:
         "Do not assume hidden checks; solve robustly.",
     ]
     return "\n".join(parts)
+
+
+def extract_shared_contract_section(rendered_prompt: str) -> str:
+    """Return the shared benchmark contract section from a rendered benchmark prompt."""
+    marker = "Benchmark task contract (shared across all agents):"
+    idx = rendered_prompt.find(marker)
+    return rendered_prompt[idx:].strip() if idx >= 0 else rendered_prompt.strip()

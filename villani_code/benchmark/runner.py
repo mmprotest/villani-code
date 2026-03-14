@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -28,7 +29,7 @@ from villani_code.benchmark.policy import (
     enforce_path_policy,
     filter_meaningful_touched_paths,
 )
-from villani_code.benchmark.prompt_contract import render_benchmark_prompt
+from villani_code.benchmark.prompt_contract import benchmark_contract_from_task, render_benchmark_prompt
 from villani_code.benchmark.reporting import render_summary_table, summarize, write_markdown_report, write_results
 from villani_code.benchmark.task_loader import load_tasks
 from villani_code.benchmark.verifier import run_commands
@@ -381,6 +382,8 @@ class BenchmarkRunner:
         agent_exit_code: int | None = None
         agent_stderr_preview: str | None = None
         denied_summary_detail = ""
+        prompt_artifact_path: str | None = None
+        contract_artifact_path: str | None = None
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -421,6 +424,33 @@ class BenchmarkRunner:
                 # and do not provide Villani-only benchmark runtime controls.
                 benchmark_prompt = render_benchmark_prompt(task, workspace_repo)
                 task_debug_dir = self.output_dir / "agent_debug" / f"{task.id}__r{repeat_index}"
+                task_debug_dir.mkdir(parents=True, exist_ok=True)
+                contract_artifact = task_debug_dir / "rendered_prompt.txt"
+                contract_artifact.write_text(benchmark_prompt, encoding="utf-8")
+                contract_artifact_path = str(contract_artifact)
+
+                render_launch_prompt = getattr(adapter, "render_launch_prompt", lambda value: value)
+                launch_prompt = render_launch_prompt(benchmark_prompt)
+                launch_artifact = task_debug_dir / "rendered_launch_prompt.txt"
+                launch_artifact.write_text(launch_prompt, encoding="utf-8")
+                prompt_artifact_path = str(launch_artifact)
+
+                contract = benchmark_contract_from_task(task, workspace_repo)
+                prompt_meta = {
+                    "task_id": task.id,
+                    "agent": agent,
+                    "contract_prompt_path": contract_artifact_path,
+                    "launch_prompt_path": prompt_artifact_path,
+                    "launch_prompt_differs": launch_prompt != benchmark_prompt,
+                    "contract_marker": "Benchmark task contract (shared across all agents):",
+                    "contract": contract.model_dump(),
+                    "scoring_inputs_mode": "harness_only",
+                }
+                (task_debug_dir / "rendered_prompt_meta.json").write_text(
+                    json.dumps(prompt_meta, indent=2),
+                    encoding="utf-8",
+                )
+
                 execution = adapter.run_agent(
                     repo_path=workspace_repo,
                     prompt=benchmark_prompt,
@@ -611,8 +641,8 @@ class BenchmarkRunner:
                     error = artifact_failure_detail
 
             no_op_patch_attempt = self._is_noop_patch_attempt(
-                file_writes=file_writes,
-                patch_attempts=patch_attempts,
+                file_writes=None,
+                patch_attempts=None,
                 meaningful_changed_files=touched,
             )
             if (
@@ -775,6 +805,9 @@ class BenchmarkRunner:
                 telemetry_field_quality_map=field_quality_map,
                 workspace_preserved=self.workspace.keep_workspace,
                 reproducibility_manifest_path=str(manifest_path),
+                prompt_artifact_path=prompt_artifact_path,
+                contract_artifact_path=contract_artifact_path,
+                scoring_inputs_mode="harness_only",
                 repeat_index=repeat_index,
             )
 
