@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import stat
+import sys
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AdapterRunResult
@@ -673,3 +675,74 @@ def test_meaningful_patch_attempt_keeps_visible_verification_failed(monkeypatch)
     row = load_results(Path(data["results_path"]))[0]
     assert row.success == 0
     assert row.failure_reason == FailureReason.VISIBLE_VERIFICATION_FAILED
+
+
+def test_noop_run_writes_debug_artifacts_with_redaction(monkeypatch, tmp_path: Path, capsys) -> None:
+    from villani_code.benchmark.agents.base import AgentRunner
+    from villani_code.benchmark.models import FailureReason, FairnessClassification
+    from villani_code.benchmark.reporting import load_results
+
+    class FakeRunner(AgentRunner):
+        name = "claude-code"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def build_command(self, repo_path, prompt, model, base_url, api_key, provider, benchmark_config_json=None):
+            return [sys.executable, "-c", "import sys; print('stdout hello'); print('stderr hello', file=sys.stderr)"]
+
+        def build_env(self, *, base_url, api_key):
+            env = super().build_env(base_url=base_url, api_key=api_key)
+            env["ANTHROPIC_API_KEY"] = api_key or "sk-ant-secret"
+            env["ANTHROPIC_BASE_URL"] = base_url or "http://example.invalid"
+            return env
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: [])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (0, 0))
+
+    def _failing_verify(repo, commands, timeout_seconds, **_kwargs):
+        return False, [
+            VerificationOutcome(
+                command="pytest -q",
+                passed=False,
+                exit_code=1,
+                stdout="",
+                stderr="assert failed",
+                started_at=1.0,
+                finished_at=2.0,
+            )
+        ], 1.0, 2.0, False
+
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", _failing_verify)
+
+    runner = BenchmarkRunner(output_dir=tmp_path / "benchmark-output")
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="bugfix_001_datetime_cli",
+        agent="claude-code",
+        model="tiny-model",
+        base_url="http://127.0.0.1:8080",
+        api_key="sk-ant-secret",
+    )
+
+    out = capsys.readouterr().out
+    assert "agent debug artifacts stdout=" in out
+    assert "no-op output preview stdout=stdout hello" in out
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.failure_reason == FailureReason.BENCHMARK_NO_PATCH_ATTEMPT
+
+    debug_dir = tmp_path / "benchmark-output" / "agent_debug" / "bugfix_001_datetime_cli__r0"
+    assert (debug_dir / "agent_command.txt").exists()
+    assert (debug_dir / "agent_stdout.txt").exists()
+    assert (debug_dir / "agent_stderr.txt").exists()
+    meta_path = debug_dir / "agent_run_meta.json"
+    assert meta_path.exists()
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["env"]["ANTHROPIC_API_KEY"] == "[REDACTED]"
+    assert meta["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
