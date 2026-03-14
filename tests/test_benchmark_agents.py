@@ -49,11 +49,11 @@ def test_aider_command_forwards_model_and_endpoint() -> None:
     ]
 
 
-def test_opencode_command_and_env_forward_model_and_endpoint(monkeypatch) -> None:
+def test_opencode_command_shape_non_windows_with_base_url(monkeypatch) -> None:
     runner = OpenCodeAgentRunner()
     monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode")
     cmd = runner.build_command(
-        Path("."),
+        Path("/tmp/repo"),
         "fix bug",
         model="qwen-9b",
         base_url="http://127.0.0.1:1234",
@@ -61,9 +61,71 @@ def test_opencode_command_and_env_forward_model_and_endpoint(monkeypatch) -> Non
         provider="openai",
     )
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd == ["opencode", "run", "--model", "qwen-9b", "--hostname", "http://127.0.0.1:1234", "--command", "fix bug"]
+    assert cmd == [
+        "opencode",
+        "run",
+        "--model",
+        "qwen-9b",
+        "--dir",
+        "/tmp/repo",
+        "--attach",
+        "http://127.0.0.1:1234",
+        "fix bug",
+    ]
     assert env["OPENAI_API_BASE"] == "http://127.0.0.1:1234"
     assert env["OPENAI_API_KEY"] == "sk-test"
+
+
+def test_opencode_command_shape_windows_with_base_url(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode.cmd")
+    cmd = runner.build_command(
+        Path("C:/repo"),
+        "fix bug",
+        model="qwen-9b",
+        base_url="http://127.0.0.1:1234",
+        api_key="sk-test",
+        provider="openai",
+    )
+    assert cmd == [
+        "opencode.cmd",
+        "run",
+        "--model",
+        "qwen-9b",
+        "--dir",
+        "C:/repo",
+        "--attach",
+        "http://127.0.0.1:1234",
+        "fix bug",
+    ]
+
+
+def test_opencode_command_shape_without_base_url(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode")
+    cmd = runner.build_command(
+        Path("/tmp/repo"),
+        "fix bug",
+        model="qwen-9b",
+        base_url=None,
+        api_key=None,
+        provider="openai",
+    )
+    assert cmd == ["opencode", "run", "--model", "qwen-9b", "--dir", "/tmp/repo", "fix bug"]
+
+
+def test_opencode_command_never_uses_unsupported_hostname_flag(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode")
+    cmd = runner.build_command(
+        Path("/tmp/repo"),
+        "fix bug",
+        model="qwen-9b",
+        base_url="http://127.0.0.1:1234",
+        api_key=None,
+        provider="openai",
+    )
+    assert "--hostname" not in cmd
 
 
 def test_opencode_resolves_cmd_on_windows(monkeypatch) -> None:

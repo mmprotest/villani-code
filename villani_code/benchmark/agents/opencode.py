@@ -34,7 +34,11 @@ class OpenCodeAgentRunner(AgentRunner):
         if not model:
             raise ValueError("opencode requires --model for fair same-model benchmarking")
         executable = self._resolve_executable_name()
-        return [executable, "run", "--model", model, "--hostname", base_url, "--command", prompt]
+        command = [executable, "run", "--model", model, "--dir", str(repo_path)]
+        if base_url:
+            command.extend(["--attach", base_url])
+        command.append(prompt)
+        return command
 
     def build_env(self, *, base_url: str | None, api_key: str | None) -> dict[str, str]:
         env = super().build_env(base_url=base_url, api_key=api_key)
