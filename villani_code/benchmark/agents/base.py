@@ -17,11 +17,15 @@ class AgentRunner(ABC):
     capability = "cli_wrapper"
     telemetry_capability = "coarse_process_only"
     fairness_classification: FairnessClassification = FairnessClassification.COARSE_WRAPPER_ONLY
-    fairness_notes = "External CLI wrapper without benchmark-native event capture; process telemetry is coarse and only approximately comparable."
+    fairness_notes = "Shared benchmark contract and harness-only scoring are used, but this adapter remains a coarse CLI wrapper with limited telemetry."
     command_capture: FieldQuality = FieldQuality.UNAVAILABLE
     file_event_capture: FieldQuality = FieldQuality.UNAVAILABLE
     verify_capture: FieldQuality = FieldQuality.INFERRED
     supports_model_override: bool = True
+
+    def render_launch_prompt(self, benchmark_prompt: str) -> str:
+        """Return the exact prompt text passed to the agent CLI/runtime."""
+        return benchmark_prompt
 
     @abstractmethod
     def build_command(
@@ -135,7 +139,8 @@ class AgentRunner(ABC):
         debug_dir: Path | None = None,
     ) -> AdapterRunResult:
         started = time.monotonic()
-        command = self.build_command(repo_path, prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
+        launch_prompt = self.render_launch_prompt(prompt)
+        command = self.build_command(repo_path, launch_prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]
         proc = subprocess.Popen(command, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)

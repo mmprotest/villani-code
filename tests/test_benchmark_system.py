@@ -75,8 +75,12 @@ def test_run_emits_honest_telemetry() -> None:
 
 
 def test_adapter_fairness_declarations() -> None:
-    assert VillaniAdapter().fairness_classification.value == "exact_comparable"
-    assert ClaudeCodeAdapter().fairness_classification.value == "coarse_wrapper_only"
+    villani = VillaniAdapter()
+    claude = ClaudeCodeAdapter()
+    assert villani.fairness_classification.value == "approximately_comparable"
+    assert claude.fairness_classification.value == "coarse_wrapper_only"
+    assert "telemetry richness still differs" in villani.fairness_notes
+    assert "coarse CLI wrapper" in claude.fairness_notes
 
 
 def test_summary_generation_and_stats() -> None:
