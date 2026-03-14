@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -42,12 +43,13 @@ def run_commands(
     *,
     stage: str = "verification",
     logger: Callable[[str], None] | None = None,
+    artifact_dir: Path | None = None,
 ) -> tuple[bool, list[VerificationOutcome], float | None, float | None, bool]:
     outcomes: list[VerificationOutcome] = []
     first_verify: float | None = None
     last_verify: float | None = None
     launch_failed = False
-    for command in commands:
+    for idx, command in enumerate(commands, start=1):
         started = time.monotonic()
         if first_verify is None:
             first_verify = started
@@ -86,15 +88,49 @@ def run_commands(
                 logger(f"{stage} verify launch-failed={exc}")
         finished = time.monotonic()
         last_verify = finished
+        stdout_artifact: str | None = None
+        stderr_artifact: str | None = None
+        metadata_artifact: str | None = None
+        if artifact_dir is not None:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            stage_slug = stage.lower().replace("(", "_").replace(")", "").replace(" ", "_").replace("-", "_")
+            stdout_path = artifact_dir / f"{stage_slug}_verify_{idx}_stdout.txt"
+            stderr_path = artifact_dir / f"{stage_slug}_verify_{idx}_stderr.txt"
+            metadata_path = artifact_dir / f"{stage_slug}_verify_{idx}_meta.json"
+            stdout_path.write_text(stdout, encoding="utf-8")
+            stderr_path.write_text(stderr, encoding="utf-8")
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "stage": stage,
+                        "index": idx,
+                        "command": command,
+                        "normalized_command": normalized_display,
+                        "exit_code": exit_code,
+                        "runtime_seconds": round(finished - started, 6),
+                        "passed": passed,
+                    },
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            stdout_artifact = str(stdout_path)
+            stderr_artifact = str(stderr_path)
+            metadata_artifact = str(metadata_path)
+
         outcomes.append(
             VerificationOutcome(
                 command=command,
+                normalized_command=normalized_display,
                 passed=passed,
                 exit_code=exit_code,
                 stdout=stdout,
                 stderr=stderr,
                 started_at=started,
                 finished_at=finished,
+                stdout_artifact=stdout_artifact,
+                stderr_artifact=stderr_artifact,
+                metadata_artifact=metadata_artifact,
             )
         )
         if not passed:

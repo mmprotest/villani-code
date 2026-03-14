@@ -167,12 +167,16 @@ class BenchmarkTask(BaseModel):
 
 class VerificationOutcome(BaseModel):
     command: str
+    normalized_command: str | None = None
     passed: bool
     exit_code: int | None
     stdout: str
     stderr: str
     started_at: float
     finished_at: float
+    stdout_artifact: str | None = None
+    stderr_artifact: str | None = None
+    metadata_artifact: str | None = None
 
 
 class ReproducibilityManifest(BaseModel):
