@@ -177,7 +177,7 @@ def test_normal_system_prompt_has_no_benchmark_text(tmp_path: Path) -> None:
     assert "bounded benchmark task" not in prompt_text
 
 
-def test_benchmark_runner_passes_runtime_config_to_native_agent(tmp_path: Path, monkeypatch) -> None:
+def test_benchmark_runner_uses_shared_prompt_contract_for_all_agents(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "task" / "repo"
     repo.mkdir(parents=True)
     (repo / "src").mkdir()
@@ -197,23 +197,27 @@ def test_benchmark_runner_passes_runtime_config_to_native_agent(tmp_path: Path, 
         allowlist_paths=["src/"],
         forbidden_paths=[".git/"],
         task_dir=tmp_path / "task",
-        prompt="fix",
+        prompt="fix bug in app",
     )
     task.metadata.expected_files = ["src/app.py"]
 
-    captured: dict[str, str | None] = {}
+    captured: dict[str, dict[str, str | None]] = {}
 
     class FakeAgent:
-        name = "villani"
-        version = "1"
-        capability = "x"
-        telemetry_capability = "x"
-        fairness_classification = "exact_comparable"
-        fairness_notes = "x"
-        supports_model_override = True
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.version = "1"
+            self.capability = "x"
+            self.telemetry_capability = "x"
+            self.fairness_classification = "exact_comparable"
+            self.fairness_notes = "x"
+            self.supports_model_override = True
 
         def run_agent(self, **kwargs):
-            captured["payload"] = kwargs.get("benchmark_config_json")
+            captured[self.name] = {
+                "payload": kwargs.get("benchmark_config_json"),
+                "prompt": kwargs.get("prompt"),
+            }
             from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
             from villani_code.benchmark.models import FieldQuality, TelemetryQuality
 
@@ -228,12 +232,25 @@ def test_benchmark_runner_passes_runtime_config_to_native_agent(tmp_path: Path, 
                 events=[AdapterEvent(type="command_started", timestamp=0.0, payload={})],
             )
 
-    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    def _builder(agent_name: str):
+        return FakeAgent(agent_name)
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", _builder)
     runner = BenchmarkRunner(output_dir=tmp_path / "out")
-    result = runner._run_task(task, agent="villani", model="m", base_url="http://x", api_key="k", provider="openai")
-    assert result.task_id == "task_1"
-    assert captured["payload"] is not None
-    assert '"task_id":"task_1"' in str(captured["payload"])
+    villani_result = runner._run_task(task, agent="villani", model="m", base_url="http://x", api_key="k", provider="openai")
+    claude_result = runner._run_task(task, agent="claude-code", model="m", base_url="http://x", api_key="k", provider="openai")
+
+    assert villani_result.task_id == "task_1"
+    assert claude_result.task_id == "task_1"
+    assert captured["villani"]["payload"] is None
+    assert captured["claude-code"]["payload"] is None
+    villani_prompt = str(captured["villani"]["prompt"] or "")
+    claude_prompt = str(captured["claude-code"]["prompt"] or "")
+    villani_lines = [line for line in villani_prompt.splitlines() if not line.startswith("Repository root:")]
+    claude_lines = [line for line in claude_prompt.splitlines() if not line.startswith("Repository root:")]
+    assert villani_lines == claude_lines
+    assert "Benchmark task contract (shared across all agents):" in villani_prompt
+    assert "Objective: fix bug in app" in villani_prompt
 
 
 def test_benchmark_scope_expansion_allowlisted_second_target_permitted(tmp_path: Path) -> None:
@@ -768,3 +785,84 @@ def test_benchmark_write_strips_fenced_python_wrapper_for_code_files(tmp_path: P
 
     assert result["is_error"] is False
     assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "def ok():\n    return 7\n"
+
+
+def test_benchmark_scoring_does_not_depend_on_villani_runtime_events(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "task" / "repo"
+    repo.mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("x=0\n", encoding="utf-8")
+
+    task = BenchmarkTask(
+        id="task_events",
+        benchmark_track=BenchmarkTrack.CORE,
+        family=TaskFamily.BUGFIX,
+        difficulty=TaskDifficulty.EASY,
+        language="python",
+        max_minutes=1,
+        max_files_touched=2,
+        visible_verification=["python -c 'print(1)'"],
+        hidden_verification=["python -c 'print(1)'"],
+        success_policy=SuccessPolicy(),
+        allowlist_paths=["src/"],
+        forbidden_paths=[".git/"],
+        task_dir=tmp_path / "task",
+        prompt="fix",
+    )
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = "exact_comparable"
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def __init__(self, include_denial: bool) -> None:
+            self.include_denial = include_denial
+
+        def run_agent(self, **_kwargs):
+            from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+            from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+            events = [AdapterEvent(type="command_started", timestamp=0.0, payload={})]
+            if self.include_denial:
+                events.append(
+                    AdapterEvent(type="benchmark_write_blocked", timestamp=0.0, payload={"paths": ["docs/readme.md"], "reason": "outside_allowlist"})
+                )
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=events,
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent(include_denial=False))
+    baseline = BenchmarkRunner(output_dir=tmp_path / "out0")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url="http://x",
+        api_key="k",
+        provider="openai",
+    )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent(include_denial=True))
+    with_denial = BenchmarkRunner(output_dir=tmp_path / "out1")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url="http://x",
+        api_key="k",
+        provider="openai",
+    )
+
+    assert baseline.failure_reason == with_denial.failure_reason
+    assert baseline.success == with_denial.success
+    assert with_denial.policy_warning == "benchmark_mutation_denials"
+
