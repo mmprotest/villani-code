@@ -32,6 +32,7 @@ class AdapterRunResult(BaseModel):
     telemetry_quality: TelemetryQuality
     telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
     events: list[AdapterEvent] = Field(default_factory=list)
+    debug_artifacts: dict[str, str] = Field(default_factory=dict)
 
 
 class AgentAdapter:

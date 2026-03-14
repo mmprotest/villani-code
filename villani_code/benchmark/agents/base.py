@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -66,6 +67,61 @@ class AgentRunner(ABC):
             "estimated_cost": FieldQuality.UNAVAILABLE,
         }
 
+    @staticmethod
+    def _is_sensitive_env_key(key: str) -> bool:
+        normalized = key.upper()
+        return any(token in normalized for token in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+
+    def _write_debug_artifacts(
+        self,
+        debug_dir: Path,
+        *,
+        command: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        stdout: str,
+        stderr: str,
+        exit_code: int | None,
+        timeout_hit: bool,
+        runtime_seconds: float,
+    ) -> dict[str, str]:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        command_path = debug_dir / "agent_command.txt"
+        stdout_path = debug_dir / "agent_stdout.txt"
+        stderr_path = debug_dir / "agent_stderr.txt"
+        meta_path = debug_dir / "agent_run_meta.json"
+
+        command_path.write_text(" ".join(command) + "\n", encoding="utf-8")
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text(stderr, encoding="utf-8")
+
+        selected_env = {
+            key: ("[REDACTED]" if self._is_sensitive_env_key(key) else value)
+            for key, value in env.items()
+            if key.startswith(("ANTHROPIC_", "OPENAI_", "VILLANI_", "AIDER_", "CODEX_"))
+        }
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "command": command,
+                    "cwd": str(cwd),
+                    "env": selected_env,
+                    "exit_code": exit_code,
+                    "timeout": timeout_hit,
+                    "runtime_seconds": runtime_seconds,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        return {
+            "agent_command": str(command_path),
+            "agent_stdout": str(stdout_path),
+            "agent_stderr": str(stderr_path),
+            "agent_run_meta": str(meta_path),
+        }
+
     def run_agent(
         self,
         repo_path: Path,
@@ -76,6 +132,7 @@ class AgentRunner(ABC):
         provider: str | None,
         timeout: int,
         benchmark_config_json: str | None = None,
+        debug_dir: Path | None = None,
     ) -> AdapterRunResult:
         started = time.monotonic()
         command = self.build_command(repo_path, prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
@@ -89,14 +146,30 @@ class AgentRunner(ABC):
             proc.kill()
             stdout, stderr = proc.communicate()
             timeout_hit = True
-        events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": proc.returncode if not timeout_hit else None}))
+        runtime_seconds = time.monotonic() - started
+        exit_code = proc.returncode if not timeout_hit else None
+        events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": exit_code}))
+        debug_artifacts: dict[str, str] = {}
+        if debug_dir is not None:
+            debug_artifacts = self._write_debug_artifacts(
+                debug_dir,
+                command=command,
+                cwd=repo_path,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+                timeout_hit=timeout_hit,
+                runtime_seconds=runtime_seconds,
+            )
         return AdapterRunResult(
             stdout=stdout,
             stderr=stderr,
-            exit_code=proc.returncode if not timeout_hit else None,
+            exit_code=exit_code,
             timeout=timeout_hit,
-            runtime_seconds=time.monotonic() - started,
+            runtime_seconds=runtime_seconds,
             telemetry_quality=TelemetryQuality.INFERRED,
             telemetry_field_quality_map=self._field_quality(),
             events=events,
+            debug_artifacts=debug_artifacts,
         )

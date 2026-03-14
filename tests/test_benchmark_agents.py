@@ -75,9 +75,50 @@ def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
         provider="anthropic",
     )
     env = runner.build_env(base_url="http://127.0.0.1:8080", api_key="sk-ant-test")
-    assert cmd == ["claude-code", "run", "--model", "claude-3-7-sonnet", "--prompt", "fix bug"]
+    assert cmd == [
+        "claude",
+        "--model",
+        "claude-3-7-sonnet",
+        "--print",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "bypassPermissions",
+        "fix bug",
+    ]
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-test"
+
+
+def test_claude_code_command_requires_model() -> None:
+    runner = ClaudeCodeAgentRunner()
+    try:
+        runner.build_command(
+            Path("."),
+            "fix bug",
+            model=None,
+            base_url=None,
+            api_key=None,
+            provider="anthropic",
+        )
+    except ValueError as exc:
+        assert "requires --model" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when model is missing")
+
+
+def test_claude_code_prompt_is_final_positional_argument() -> None:
+    runner = ClaudeCodeAgentRunner()
+    prompt = "edit src/main.py"
+    cmd = runner.build_command(
+        Path("."),
+        prompt,
+        model="claude-3-7-sonnet",
+        base_url=None,
+        api_key=None,
+        provider="anthropic",
+    )
+    assert cmd[-1] == prompt
 
 
 
@@ -133,7 +174,7 @@ def test_villani_run_agent_missing_runtime_events_file_is_best_effort(monkeypatc
     from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
     from villani_code.benchmark.models import FieldQuality, TelemetryQuality
 
-    def fake_run_agent(self, repo_path, prompt, model, base_url, api_key, provider, timeout, benchmark_config_json=None):
+    def fake_run_agent(self, repo_path, prompt, model, base_url, api_key, provider, timeout, benchmark_config_json=None, debug_dir=None):
         return AdapterRunResult(
             stdout='ok',
             stderr='',

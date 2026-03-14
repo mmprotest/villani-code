@@ -64,8 +64,19 @@ class VillaniAgentRunner(AgentRunner):
         provider: str | None,
         timeout: int,
         benchmark_config_json: str | None = None,
+        debug_dir: Path | None = None,
     ) -> AdapterRunResult:
-        base = super().run_agent(repo_path, prompt, model, base_url, api_key, provider, timeout, benchmark_config_json=benchmark_config_json)
+        base = super().run_agent(
+            repo_path,
+            prompt,
+            model,
+            base_url,
+            api_key,
+            provider,
+            timeout,
+            benchmark_config_json=benchmark_config_json,
+            debug_dir=debug_dir,
+        )
         events_file = repo_path / ".villani_code" / "runtime_events.jsonl"
         events: list[AdapterEvent] = []
         if events_file.exists():

@@ -362,6 +362,7 @@ class BenchmarkRunner:
             try:
                 self._log("starting agent process...")
                 benchmark_config_json = benchmark_runtime_config_from_task(task).model_dump_json() if adapter.name == "villani" else None
+                task_debug_dir = self.output_dir / "agent_debug" / f"{task.id}__r{repeat_index}"
                 execution = adapter.run_agent(
                     repo_path=workspace_repo,
                     prompt=task.prompt,
@@ -371,6 +372,7 @@ class BenchmarkRunner:
                     provider=provider,
                     timeout=timeout_seconds,
                     benchmark_config_json=benchmark_config_json,
+                    debug_dir=task_debug_dir,
                 )
                 timeout = execution.timeout
                 telemetry_quality = execution.telemetry_quality
@@ -380,6 +382,12 @@ class BenchmarkRunner:
                 self._log(
                     f"agent exit_code={execution.exit_code} runtime={execution.runtime_seconds:.1f}s, running verification..."
                 )
+                if execution.debug_artifacts:
+                    self._log(
+                        "agent debug artifacts "
+                        f"stdout={execution.debug_artifacts.get('agent_stdout', '-')} "
+                        f"stderr={execution.debug_artifacts.get('agent_stderr', '-')}"
+                    )
 
                 if not execution.timeout and execution.exit_code not in {None, 0}:
                     error = f"agent process exited with code {execution.exit_code}"
@@ -421,6 +429,14 @@ class BenchmarkRunner:
                 self._log(f"no_op_candidate={int(noop_candidate)}")
                 if noop_candidate:
                     self._log("no-op detected: no meaningful patch attempt")
+                    if execution.stdout.strip() or execution.stderr.strip():
+                        stdout_preview = self._stderr_snippet(execution.stdout, max_len=180) if execution.stdout.strip() else ""
+                        stderr_preview = self._stderr_snippet(execution.stderr, max_len=180) if execution.stderr.strip() else ""
+                        self._log(
+                            "no-op output preview "
+                            f"stdout={stdout_preview or '-'} "
+                            f"stderr={stderr_preview or '-'}"
+                        )
 
                 if error is None:
                     self._log(f"running visible verification commands ({len(task.visible_verification)})")
