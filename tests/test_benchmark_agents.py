@@ -52,52 +52,44 @@ def test_aider_command_forwards_model_and_endpoint() -> None:
 def test_opencode_command_shape_non_windows_with_base_url(monkeypatch) -> None:
     runner = OpenCodeAgentRunner()
     monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode")
-    cmd = runner.build_command(
-        Path("/tmp/repo"),
-        "fix bug",
-        model="qwen-9b",
-        base_url="http://127.0.0.1:1234",
-        api_key="sk-test",
-        provider="openai",
-    )
+    try:
+        runner.build_command(
+            Path("/tmp/repo"),
+            "fix bug",
+            model="qwen-9b",
+            base_url="http://127.0.0.1:1234",
+            api_key="sk-test",
+            provider="openai",
+        )
+    except ValueError as exc:
+        message = str(exc)
+        assert "provider selection" in message
+        assert "base_url passthrough" in message
+        assert "model configuration" in message
+    else:
+        raise AssertionError("expected ValueError when passing unsupported OpenCode provider/base_url/model fields")
+
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd == [
-        "opencode",
-        "run",
-        "--model",
-        "qwen-9b",
-        "--dir",
-        "/tmp/repo",
-        "--attach",
-        "http://127.0.0.1:1234",
-        "fix bug",
-    ]
-    assert env["OPENAI_API_BASE"] == "http://127.0.0.1:1234"
-    assert env["OPENAI_API_KEY"] == "sk-test"
+    assert "OPENAI_API_BASE" not in env
+    assert "OPENAI_API_KEY" not in env
 
 
 def test_opencode_command_shape_windows_with_base_url(monkeypatch) -> None:
     runner = OpenCodeAgentRunner()
     monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode.cmd")
-    cmd = runner.build_command(
-        Path("C:/repo"),
-        "fix bug",
-        model="qwen-9b",
-        base_url="http://127.0.0.1:1234",
-        api_key="sk-test",
-        provider="openai",
-    )
-    assert cmd == [
-        "opencode.cmd",
-        "run",
-        "--model",
-        "qwen-9b",
-        "--dir",
-        "C:/repo",
-        "--attach",
-        "http://127.0.0.1:1234",
-        "fix bug",
-    ]
+    try:
+        runner.build_command(
+            Path("C:/repo"),
+            "fix bug",
+            model="qwen-9b",
+            base_url="http://127.0.0.1:1234",
+            api_key="sk-test",
+            provider="openai",
+        )
+    except ValueError as exc:
+        assert "base_url passthrough" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unsupported base_url passthrough")
 
 
 def test_opencode_command_shape_without_base_url(monkeypatch) -> None:
@@ -106,12 +98,12 @@ def test_opencode_command_shape_without_base_url(monkeypatch) -> None:
     cmd = runner.build_command(
         Path("/tmp/repo"),
         "fix bug",
-        model="qwen-9b",
+        model=None,
         base_url=None,
         api_key=None,
-        provider="openai",
+        provider=None,
     )
-    assert cmd == ["opencode", "run", "--model", "qwen-9b", "--dir", "/tmp/repo", "fix bug"]
+    assert cmd == ["opencode", "run", "--dir", "/tmp/repo", "fix bug"]
 
 
 def test_opencode_command_never_uses_unsupported_hostname_flag(monkeypatch) -> None:
@@ -120,12 +112,27 @@ def test_opencode_command_never_uses_unsupported_hostname_flag(monkeypatch) -> N
     cmd = runner.build_command(
         Path("/tmp/repo"),
         "fix bug",
-        model="qwen-9b",
-        base_url="http://127.0.0.1:1234",
+        model=None,
+        base_url=None,
         api_key=None,
-        provider="openai",
+        provider=None,
     )
     assert "--hostname" not in cmd
+    assert "--attach" not in cmd
+
+
+def test_opencode_startup_failure_message_for_session_not_found() -> None:
+    runner = OpenCodeAgentRunner()
+    message = runner._startup_failure_message(stderr="Session not found", stdout="")
+    assert message is not None
+    assert "Session not found" in message
+
+
+def test_opencode_startup_failure_message_for_usage_output() -> None:
+    runner = OpenCodeAgentRunner()
+    message = runner._startup_failure_message(stderr="Usage: opencode run [options]", stdout="")
+    assert message is not None
+    assert "usage/help output" in message
 
 
 def test_opencode_resolves_cmd_on_windows(monkeypatch) -> None:
