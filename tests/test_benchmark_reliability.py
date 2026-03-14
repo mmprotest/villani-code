@@ -746,3 +746,65 @@ def test_noop_run_writes_debug_artifacts_with_redaction(monkeypatch, tmp_path: P
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["env"]["ANTHROPIC_API_KEY"] == "[REDACTED]"
     assert meta["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
+
+
+
+def test_mutation_denial_summary_logged_and_surfaced(monkeypatch, capsys) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent
+    from villani_code.benchmark.models import FairnessClassification
+
+    class FakeRunner:
+        name = 'villani'
+        version = '1'
+        capability = 'cli_wrapper'
+        telemetry_capability = 'coarse_process_only'
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = 'fake'
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout='',
+                stderr='',
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={'num_shell_commands': FieldQuality.INFERRED},
+                events=[
+                    AdapterEvent(
+                        type='benchmark_patch_blocked',
+                        timestamp=1.0,
+                        payload={
+                            'type': 'benchmark_patch_blocked',
+                            'paths': ['docs/readme.md'],
+                            'reason': 'benchmark_policy_denied: task_id=t1 reason=outside_allowlist path=docs/readme.md',
+                        },
+                    )
+                ],
+            )
+
+    monkeypatch.setattr('villani_code.benchmark.runner.build_agent_runner', lambda agent: FakeRunner())
+    monkeypatch.setattr('villani_code.benchmark.runner.list_touched_files', lambda repo: [])
+    monkeypatch.setattr('villani_code.benchmark.runner.line_stats', lambda repo: (0, 0))
+    monkeypatch.setattr('villani_code.benchmark.runner.run_commands', lambda repo, commands, timeout_seconds, **_kwargs: (False, [], 1.0, 2.0, False))
+
+    runner = BenchmarkRunner(output_dir=Path('artifacts/benchmark-test'))
+    data = runner.run(
+        suite_dir=Path('benchmark_tasks/villani_bench_v1'),
+        task_id='bugfix_001_datetime_cli',
+        agent='villani',
+        model='tiny-model',
+        base_url=None,
+        api_key=None,
+    )
+
+    out = capsys.readouterr().out
+    assert 'benchmark mutation denials count=1 first_path=docs/readme.md' in out
+
+    from villani_code.benchmark.reporting import load_results
+
+    row = load_results(Path(data['results_path']))[0]
+    assert row.policy_warning == 'benchmark_mutation_denials'
+    assert row.policy_warning_detail is not None
+    assert 'count=1' in row.policy_warning_detail

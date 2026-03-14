@@ -70,19 +70,33 @@ class BenchmarkRunner:
             f"file_reads={metrics.get('file_reads') or 0} "
             f"file_writes={metrics.get('file_writes') or 0} "
             f"patches={metrics.get('patch_attempts') or 0} "
+            f"denied_mutations={metrics.get('benchmark_mutation_denials') or 0} "
             f"test_runs={metrics.get('test_runs') or 0} "
             f"turns={metrics.get('number_of_turns') or 0}"
         )
 
     @staticmethod
     def _extract_termination_reason(events: list[object]) -> str | None:
+        known_event_reasons = {
+            "autonomous_completed",
+            "villani_stop_decision",
+            "benchmark_incomplete_no_patch",
+            "benchmark_no_progress_after_forced_read",
+            "benchmark_repeated_mutation_denials",
+        }
         for event in reversed(events):
             payload = getattr(event, "payload", {})
-            if not isinstance(payload, dict):
-                continue
-            reason = payload.get("termination_reason") or payload.get("terminated_reason") or payload.get("stop_reason")
-            if isinstance(reason, str) and reason.strip():
-                return reason.strip()
+            etype = str(getattr(event, "type", "") or "").strip()
+            if isinstance(payload, dict):
+                for key in ("termination_reason", "terminated_reason", "stop_reason", "done_reason", "reason"):
+                    reason = payload.get(key)
+                    if isinstance(reason, str) and reason.strip():
+                        return reason.strip()
+                payload_type = str(payload.get("type") or payload.get("event") or "").strip()
+                if payload_type in known_event_reasons:
+                    return payload_type
+            if etype in known_event_reasons:
+                return etype
         return None
 
     @staticmethod
@@ -159,7 +173,6 @@ class BenchmarkRunner:
         first_edit: float | None = None
         first_expected_read: float | None = None
         read_paths: set[str] = set()
-        touched_paths: set[str] = set()
         tool_calls_total = 0
         file_reads = 0
         file_writes = 0
@@ -169,11 +182,19 @@ class BenchmarkRunner:
         retries_after_failure = 0
         verification_seen = False
         verification_failed = False
+        benchmark_mutation_denials = 0
+        benchmark_write_denials = 0
+        benchmark_patch_denials = 0
+        first_denied_path: str | None = None
+        first_denied_reason: str | None = None
 
         verification_commands = set(visible_commands + hidden_commands)
         for e in events:
-            etype = getattr(e, "type", "")
+            etype = str(getattr(e, "type", "") or "")
             payload = getattr(e, "payload", {})
+            if not isinstance(payload, dict):
+                payload = {}
+
             if etype == "command_started":
                 command_starts += 1
                 command = str(payload.get("command", ""))
@@ -190,27 +211,52 @@ class BenchmarkRunner:
                     retries_after_failure += 1
                     verification_failed = False
 
-            event_type = str(payload.get("event") or etype)
+            payload_type = str(payload.get("type") or "").strip()
+            payload_event = str(payload.get("event") or "").strip()
+            event_type = payload_type or payload_event or etype or "runtime_event"
+            tool_name = str(payload.get("name") or "").strip()
             ts = float(payload.get("ts", getattr(e, "timestamp", 0.0)))
             path = payload.get("path")
 
-            if event_type in {"tool_call", "tool_invocation", "tool_result", "tool_use"}:
+            if event_type in {"tool_call", "tool_invocation", "tool_result", "tool_use", "tool_started", "tool_finished"}:
                 tool_calls_total += 1
-            if event_type in {"model_message", "assistant_message", "turn_started", "turn_completed"}:
+            if event_type in {"model_message", "assistant_message", "turn_started", "turn_completed", "model_request_started", "first_text_delta"}:
                 number_of_turns += 1
-            if event_type in {"file_edit", "apply_patch", "write_file"}:
+            if event_type in {"file_edit", "apply_patch", "write_file", "Write", "Patch"} or (
+                event_type in {"tool_started", "tool_finished", "tool_result"} and tool_name in {"Write", "Patch"}
+            ):
                 file_writes += 1
-                if event_type == "apply_patch":
+                if event_type in {"apply_patch", "Patch"}:
                     patch_attempts += 1
                 if first_edit is None:
                     first_edit = max(0.0, ts - started)
-            if event_type in {"file_read", "read_file", "open_file"} and isinstance(path, str):
+            if (
+                event_type in {"file_read", "read_file", "open_file", "Read"}
+                or (event_type in {"tool_started", "tool_finished", "tool_result"} and tool_name == "Read")
+            ) and isinstance(path, str):
                 file_reads += 1
                 read_paths.add(path)
                 if path in expected_files and first_expected_read is None:
                     first_expected_read = max(0.0, ts - started)
-            if isinstance(path, str):
-                touched_paths.add(path)
+
+            if event_type == "benchmark_write_blocked":
+                benchmark_mutation_denials += 1
+                benchmark_write_denials += 1
+            elif event_type == "benchmark_patch_blocked":
+                benchmark_mutation_denials += 1
+                benchmark_patch_denials += 1
+
+            if event_type in {"benchmark_write_blocked", "benchmark_patch_blocked"}:
+                paths = payload.get("paths")
+                if first_denied_path is None and isinstance(paths, list):
+                    for candidate in paths:
+                        if isinstance(candidate, str) and candidate.strip():
+                            first_denied_path = candidate.strip()
+                            break
+                if first_denied_reason is None:
+                    reason = payload.get("reason")
+                    if isinstance(reason, str) and reason.strip():
+                        first_denied_reason = reason.strip()
 
         if number_of_turns == 0:
             number_of_turns = None
@@ -228,6 +274,11 @@ class BenchmarkRunner:
             "test_runs": test_runs if test_runs > 0 else None,
             "number_of_turns": number_of_turns,
             "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
+            "benchmark_mutation_denials": benchmark_mutation_denials if benchmark_mutation_denials > 0 else None,
+            "benchmark_write_denials": benchmark_write_denials if benchmark_write_denials > 0 else None,
+            "benchmark_patch_denials": benchmark_patch_denials if benchmark_patch_denials > 0 else None,
+            "first_denied_path": first_denied_path,
+            "first_denied_reason": first_denied_reason,
         }
 
     @staticmethod
@@ -325,6 +376,7 @@ class BenchmarkRunner:
         retries_after_failure: int | None = None
         agent_exit_code: int | None = None
         agent_stderr_preview: str | None = None
+        denied_summary_detail = ""
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -398,6 +450,15 @@ class BenchmarkRunner:
 
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
                 self._log_event_metrics_summary(metrics)
+                denied_count = int(metrics.get("benchmark_mutation_denials") or 0)
+                denied_first_path = metrics.get("first_denied_path")
+                denied_first_reason = metrics.get("first_denied_reason")
+                denied_summary_detail = ""
+                if denied_count > 0:
+                    denied_summary_detail = (
+                        f"count={denied_count} first_path={denied_first_path or '-'} first_reason={denied_first_reason or '-'}"
+                    )
+                    self._log(f"benchmark mutation denials {denied_summary_detail}")
                 if field_quality_map.get("num_shell_commands") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     num_shell_commands = metrics["num_shell_commands"]
                     num_failed_commands = metrics["num_failed_commands"]
@@ -608,6 +669,14 @@ class BenchmarkRunner:
                     detail = f" detail={policy_result.forbidden_reason_detail}"
             elif success and policy_warning_detail:
                 detail = f" warning={policy_warning} detail={policy_warning_detail}"
+            if denied_summary_detail:
+                if policy_warning is None:
+                    policy_warning = "benchmark_mutation_denials"
+                    policy_warning_detail = denied_summary_detail
+                elif policy_warning_detail:
+                    policy_warning_detail = f"{policy_warning_detail}; {denied_summary_detail}"
+                else:
+                    policy_warning_detail = denied_summary_detail
             self._log(
                 f"result success={success} visible={int(visible_pass)} hidden={int(hidden_pass)} reason={(None if success else failure_reason.value if failure_reason else 'unknown')}{detail}"
             )

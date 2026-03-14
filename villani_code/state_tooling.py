@@ -49,6 +49,33 @@ def _validate_benchmark_mutation(runner: Any, tool_name: str, tool_input: dict[s
     return None
 
 
+def _parse_benchmark_denial_message(message: str) -> tuple[str, str | None]:
+    reason = "policy_denied"
+    path: str | None = None
+    for part in message.split():
+        if part.startswith("reason="):
+            reason = part.split("=", 1)[1]
+        if part.startswith("path="):
+            path = part.split("=", 1)[1]
+    return reason, path
+
+
+def _benchmark_denial_feedback(runner: Any, denial_message: str, paths: list[str]) -> str:
+    reason, parsed_path = _parse_benchmark_denial_message(denial_message)
+    denied_path = (parsed_path or (paths[0] if paths else "")).strip() or "unknown"
+    expected = [str(p) for p in runner.benchmark_config.expected_files[:3] if str(p).strip()]
+    support = [str(p) for p in runner.benchmark_config.allowed_support_files[:3] if str(p).strip()]
+    allowed_targets = expected + [p for p in support if p not in expected]
+    allowed_preview = ", ".join(allowed_targets[:4]) if allowed_targets else "none listed"
+    return (
+        "Benchmark policy blocked this mutation. "
+        f"Denied path: {denied_path}. "
+        f"Reason: {reason}. "
+        f"Allowed expected/support targets: {allowed_preview}. "
+        "Retry with a single in-scope patch to one allowed target file."
+    )
+
+
 def _validate_first_attempt_locked_target_mutation(
     runner: Any, tool_name: str, tool_input: dict[str, Any]
 ) -> str | None:
@@ -177,6 +204,9 @@ def execute_tool_with_policy(
 
     benchmark_violation = _validate_benchmark_mutation(runner, tool_name, tool_input)
     if benchmark_violation:
+        paths = _benchmark_mutation_targets(tool_name, tool_input)
+        reason_code, denied_path = _parse_benchmark_denial_message(benchmark_violation)
+        correction = _benchmark_denial_feedback(runner, benchmark_violation, paths)
         event_type = "benchmark_write_blocked" if tool_name == "Write" else "benchmark_patch_blocked"
         runner.event_callback(
             {
@@ -185,10 +215,15 @@ def execute_tool_with_policy(
                 "tool": tool_name,
                 "input": tool_input,
                 "reason": benchmark_violation,
-                "paths": _benchmark_mutation_targets(tool_name, tool_input),
+                "reason_code": reason_code,
+                "denied_path": denied_path,
+                "paths": paths,
+                "allowed_expected_files": list(runner.benchmark_config.expected_files),
+                "allowed_support_files": list(runner.benchmark_config.allowed_support_files),
+                "feedback": correction,
             }
         )
-        return {"content": benchmark_violation, "is_error": True}
+        return {"content": correction, "is_error": True}
 
     if runner.villani_mode and tool_name in {"Write", "Patch"}:
         target = str(tool_input.get("file_path", ""))

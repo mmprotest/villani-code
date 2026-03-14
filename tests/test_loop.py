@@ -582,3 +582,42 @@ def test_interactive_mode_keeps_recovery_prompts_after_forced_read(tmp_path: Pat
     assert any(e.get("type") == "diagnosis_target_forced_read" and e.get("enforced") is False for e in events)
     assert any(e.get("type") == "diagnosis_target_hint_only" for e in events)
     assert not any(e.get("type") == "benchmark_no_progress_after_forced_read" for e in events)
+
+
+
+def test_benchmark_repeated_mutation_denials_fast_fail(tmp_path: Path) -> None:
+    class DenialClient:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            return {
+                'role': 'assistant',
+                'content': [
+                    {
+                        'type': 'tool_use',
+                        'id': f'tool-{self.calls}',
+                        'name': 'Write',
+                        'input': {'file_path': 'docs/readme.md', 'content': 'x'},
+                    }
+                ],
+            }
+
+    (tmp_path / 'src').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'src' / 'app.py').write_text('x=1\n', encoding='utf-8')
+    events: list[dict] = []
+    cfg = BenchmarkRuntimeConfig(
+        enabled=True,
+        task_id='t1',
+        allowlist_paths=['src/', 'tests/'],
+        expected_files=['src/app.py'],
+        allowed_support_files=['tests/test_app.py'],
+        max_files_touched=1,
+    )
+    runner = Runner(client=DenialClient(), repo=tmp_path, model='m', stream=False, benchmark_config=cfg, event_callback=events.append)
+
+    out = runner.run('fix benchmark bug')
+
+    assert out['execution']['terminated_reason'] == 'benchmark_repeated_mutation_denials'
+    assert any(e.get('type') == 'benchmark_repeated_mutation_denials' for e in events)

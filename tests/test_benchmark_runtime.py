@@ -580,3 +580,100 @@ def test_test_failure_stays_visible_verification_failed(tmp_path: Path, monkeypa
     task = _minimal_task(tmp_path)
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.failure_reason == FailureReason.VISIBLE_VERIFICATION_FAILED
+
+
+
+def test_event_metrics_recognize_villani_native_runtime_events(tmp_path: Path) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent
+
+    runner = BenchmarkRunner(output_dir=tmp_path / 'out')
+    started = 100.0
+    events = [
+        AdapterEvent(type='tool_started', timestamp=101.0, payload={'type': 'tool_started', 'name': 'Read'}),
+        AdapterEvent(type='tool_finished', timestamp=101.2, payload={'type': 'tool_finished', 'name': 'Read', 'is_error': False}),
+        AdapterEvent(type='tool_result', timestamp=101.3, payload={'type': 'tool_result', 'name': 'Read', 'path': 'src/app.py', 'is_error': False}),
+        AdapterEvent(type='tool_started', timestamp=102.0, payload={'type': 'tool_started', 'name': 'Write', 'path': 'src/app.py'}),
+        AdapterEvent(type='benchmark_patch_blocked', timestamp=102.5, payload={'type': 'benchmark_patch_blocked', 'reason': 'benchmark_policy_denied: reason=outside_allowlist path=docs/x.md', 'paths': ['docs/x.md']}),
+        AdapterEvent(type='model_request_started', timestamp=103.0, payload={'type': 'model_request_started'}),
+    ]
+    metrics = runner._event_metrics(
+        events,
+        started,
+        expected_files=['src/app.py'],
+        visible_commands=['pytest -q'],
+        hidden_commands=[],
+    )
+
+    assert metrics['tool_calls_total']
+    assert metrics['file_reads']
+    assert metrics['file_writes']
+    assert metrics['number_of_turns']
+    assert metrics['benchmark_mutation_denials'] == 1
+    assert metrics['first_denied_path'] == 'docs/x.md'
+
+
+def test_extract_termination_reason_reads_villani_native_signals(tmp_path: Path) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent
+
+    events = [
+        AdapterEvent(type='tool_result', timestamp=1.0, payload={'type': 'tool_result'}),
+        AdapterEvent(type='villani_stop_decision', timestamp=2.0, payload={'type': 'villani_stop_decision', 'done_reason': 'benchmark_incomplete_no_patch'}),
+    ]
+    assert BenchmarkRunner._extract_termination_reason(events) == 'benchmark_incomplete_no_patch'
+
+
+def test_event_metrics_extract_denial_summary_fields(tmp_path: Path) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent
+
+    runner = BenchmarkRunner(output_dir=tmp_path / 'out')
+    metrics = runner._event_metrics(
+        [
+            AdapterEvent(
+                type='benchmark_write_blocked',
+                timestamp=1.0,
+                payload={
+                    'type': 'benchmark_write_blocked',
+                    'reason': 'benchmark_policy_denied: task_id=t1 reason=not_expected_or_support path=tests/tmp.py',
+                    'paths': ['tests/tmp.py'],
+                },
+            )
+        ],
+        started=0.0,
+        expected_files=[],
+        visible_commands=[],
+        hidden_commands=[],
+    )
+
+    assert metrics['benchmark_mutation_denials'] == 1
+    assert metrics['first_denied_path'] == 'tests/tmp.py'
+    assert 'not_expected_or_support' in str(metrics['first_denied_reason'])
+
+
+
+def test_benchmark_denial_feedback_is_actionable(tmp_path: Path) -> None:
+    events: list[dict] = []
+    runner = _runner(tmp_path, _benchmark_config())
+    runner.event_callback = events.append
+
+    denied = execute_tool_with_policy(
+        runner,
+        'Write',
+        {'file_path': 'docs/readme.md', 'content': 'x'},
+        '1',
+        0,
+    )
+
+    assert denied['is_error'] is True
+    assert 'Denied path: docs/readme.md' in denied['content']
+    assert 'Reason: outside_allowlist' in denied['content']
+    assert 'Allowed expected/support targets:' in denied['content']
+    assert any(e.get('type') == 'benchmark_write_blocked' and e.get('feedback') for e in events)
+
+
+def test_benchmark_system_prompt_repro_emphasizes_regression_artifact(tmp_path: Path) -> None:
+    cfg = _benchmark_config()
+    cfg.require_patch_artifact = False
+    blocks = build_system_blocks(tmp_path, benchmark_config=cfg)
+    prompt_text = "\n".join(block["text"] for block in blocks)
+    assert 'Repro-task emphasis' in prompt_text
+    assert 'required regression test file' in prompt_text

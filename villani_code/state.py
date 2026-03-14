@@ -637,6 +637,9 @@ class Runner:
         consecutive_recon_turns = 0
         benchmark_prose_only_after_forced_read = 0
         benchmark_forced_read_no_progress_guard_active = initial_read_enforced
+        # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
+        benchmark_mutation_denials = 0
+        benchmark_denial_limit = 3
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
@@ -1116,8 +1119,33 @@ class Runner:
                     )
 
                 if result.get("is_error"):
+                    result_text = str(result.get("content", ""))
+                    if (
+                        self.benchmark_config.enabled
+                        and tool_name in {"Write", "Patch"}
+                        and "Benchmark policy blocked this mutation" in result_text
+                    ):
+                        benchmark_mutation_denials += 1
+                        self.event_callback(
+                            {
+                                "type": "benchmark_mutation_denial_observed",
+                                "task_id": self.benchmark_config.task_id,
+                                "count": benchmark_mutation_denials,
+                                "limit": benchmark_denial_limit,
+                            }
+                        )
+                        if benchmark_mutation_denials >= benchmark_denial_limit and not _has_meaningful_benchmark_edit():
+                            self.event_callback(
+                                {
+                                    "type": "benchmark_repeated_mutation_denials",
+                                    "task_id": self.benchmark_config.task_id,
+                                    "count": benchmark_mutation_denials,
+                                    "limit": benchmark_denial_limit,
+                                }
+                            )
+                            return _finish_bounded(response, "benchmark_repeated_mutation_denials", False)
                     failure = self._failure_classifier.classify(
-                        f"{tool_name} failed", str(result.get("content", ""))
+                        f"{tool_name} failed", result_text
                     )
                     self.event_callback(
                         {
@@ -1193,6 +1221,7 @@ class Runner:
                 consecutive_no_edit_turns = 0
                 if self.benchmark_config.enabled and _has_meaningful_benchmark_edit():
                     self._benchmark_noop_completion_attempts = 0
+                    benchmark_mutation_denials = 0
             else:
                 consecutive_no_edit_turns += 1
 

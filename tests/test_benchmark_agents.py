@@ -216,3 +216,42 @@ def test_villani_command_includes_benchmark_runtime_json_when_present() -> None:
         benchmark_config_json='{"enabled":true,"task_id":"t"}',
     )
     assert '--benchmark-runtime-json' in cmd
+
+
+def test_villani_run_agent_preserves_runtime_event_type(monkeypatch, tmp_path: Path) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+    def fake_run_agent(self, repo_path, prompt, model, base_url, api_key, provider, timeout, benchmark_config_json=None, debug_dir=None):
+        return AdapterRunResult(
+            stdout='ok',
+            stderr='',
+            exit_code=0,
+            timeout=False,
+            runtime_seconds=0.1,
+            telemetry_quality=TelemetryQuality.INFERRED,
+            telemetry_field_quality_map={'num_shell_commands': FieldQuality.INFERRED},
+            events=[AdapterEvent(type='command_started', timestamp=1.0, payload={})],
+        )
+
+    monkeypatch.setattr('villani_code.benchmark.agents.base.AgentRunner.run_agent', fake_run_agent)
+
+    events_dir = tmp_path / '.villani_code'
+    events_dir.mkdir(parents=True)
+    (events_dir / 'runtime_events.jsonl').write_text(
+        '{"ts": 10.0, "type": "tool_started", "name": "Read"}\n',
+        encoding='utf-8',
+    )
+
+    runner = VillaniAgentRunner()
+    result = runner.run_agent(
+        repo_path=tmp_path,
+        prompt='fix bug',
+        model='qwen-9b',
+        base_url=None,
+        api_key=None,
+        provider='anthropic',
+        timeout=10,
+    )
+
+    assert any(event.type == 'tool_started' for event in result.events)

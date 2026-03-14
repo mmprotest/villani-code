@@ -84,7 +84,12 @@ class VillaniAgentRunner(AgentRunner):
                 if not raw.strip():
                     continue
                 payload = json.loads(raw)
-                events.append(AdapterEvent(type=str(payload.get("event", "model_message")), timestamp=float(payload.get("ts", time.time())), payload=payload))
+                runtime_type = str(payload.get("type") or "").strip()
+                if not runtime_type:
+                    runtime_type = str(payload.get("event") or "").strip()
+                if not runtime_type:
+                    runtime_type = "runtime_event"
+                events.append(AdapterEvent(type=runtime_type, timestamp=float(payload.get("ts", time.time())), payload=payload))
         return AdapterRunResult(
             **base.model_dump(exclude={"events", "telemetry_quality", "telemetry_field_quality_map"}),
             events=base.events + events,
