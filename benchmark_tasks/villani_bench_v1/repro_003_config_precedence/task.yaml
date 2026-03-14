@@ -3,7 +3,7 @@ family: repro_test
 difficulty: hard
 language: python
 max_minutes: 5
-max_files_touched: 4
+max_files_touched: 3
 expected_artifacts:
 - patch
 visible_verification:

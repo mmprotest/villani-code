@@ -2,7 +2,7 @@ id: repro_006_header_mutation
 family: repro_test
 difficulty: hard
 language: python
-max_minutes: 5
+max_minutes: 3
 max_files_touched: 4
 expected_artifacts:
 - patch
