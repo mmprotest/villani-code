@@ -59,6 +59,10 @@ class BenchmarkRunner:
             cls._log(
                 f"{stage} verify [{status}] code={outcome.exit_code} runtime={runtime:.2f}s cmd={outcome.command}{detail}"
             )
+            if not outcome.passed and (outcome.stdout_artifact or outcome.stderr_artifact or outcome.metadata_artifact):
+                cls._log(
+                    f"{stage} verify artifacts stdout={outcome.stdout_artifact or '-'} stderr={outcome.stderr_artifact or '-'} meta={outcome.metadata_artifact or '-'}"
+                )
 
     @classmethod
     def _log_event_metrics_summary(cls, metrics: dict[str, object]) -> None:
@@ -507,6 +511,7 @@ class BenchmarkRunner:
                         timeout_seconds,
                         stage="visible",
                         logger=self._log,
+                        artifact_dir=task_debug_dir,
                     )
                     self._log_verification_outcomes("visible", visible_outcomes)
                     if first_verify:
@@ -535,6 +540,7 @@ class BenchmarkRunner:
                             timeout_seconds,
                             stage="hidden",
                             logger=self._log,
+                            artifact_dir=task_debug_dir,
                         )
                         self._log_verification_outcomes("hidden", hidden_outcomes)
                         verifications.extend(item.command for item in hidden_outcomes)
