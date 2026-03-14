@@ -49,8 +49,9 @@ def test_aider_command_forwards_model_and_endpoint() -> None:
     ]
 
 
-def test_opencode_command_and_env_forward_model_and_endpoint() -> None:
+def test_opencode_command_and_env_forward_model_and_endpoint(monkeypatch) -> None:
     runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode")
     cmd = runner.build_command(
         Path("."),
         "fix bug",
@@ -60,9 +61,34 @@ def test_opencode_command_and_env_forward_model_and_endpoint() -> None:
         provider="openai",
     )
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd == ["opencode", "run", "--model", "openai/qwen-9b", "--prompt", "fix bug"]
+    assert cmd == ["opencode", "run", "--model", "qwen-9b", "--hostname", "http://127.0.0.1:1234", "--command", "fix bug"]
     assert env["OPENAI_API_BASE"] == "http://127.0.0.1:1234"
     assert env["OPENAI_API_KEY"] == "sk-test"
+
+
+def test_opencode_resolves_cmd_on_windows(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr("villani_code.benchmark.agents.opencode.shutil.which", lambda exe: "C:/npm/opencode.cmd" if exe == "opencode.cmd" else None)
+    assert runner._resolve_executable_name(is_windows=True) == "opencode.cmd"
+
+
+def test_opencode_resolves_plain_binary_on_non_windows(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr("villani_code.benchmark.agents.opencode.shutil.which", lambda exe: "/usr/bin/opencode" if exe == "opencode" else None)
+    assert runner._resolve_executable_name(is_windows=False) == "opencode"
+
+
+def test_opencode_missing_executable_raises_actionable_error(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr("villani_code.benchmark.agents.opencode.shutil.which", lambda exe: None)
+    try:
+        runner._resolve_executable_name(is_windows=True)
+    except FileNotFoundError as exc:
+        message = str(exc)
+        assert "opencode.cmd" in message
+        assert "Install opencode" in message
+    else:
+        raise AssertionError("expected FileNotFoundError when opencode executable is missing")
 
 def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
     runner = ClaudeCodeAgentRunner()
