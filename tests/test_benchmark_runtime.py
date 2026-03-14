@@ -677,3 +677,94 @@ def test_benchmark_system_prompt_repro_emphasizes_regression_artifact(tmp_path: 
     prompt_text = "\n".join(block["text"] for block in blocks)
     assert 'Repro-task emphasis' in prompt_text
     assert 'required regression test file' in prompt_text
+
+
+def test_benchmark_post_write_python_validation_rejects_malformed_python(tmp_path: Path) -> None:
+    events: list[dict] = []
+    runner = _runner(tmp_path, _benchmark_config())
+    runner.event_callback = events.append
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "src/app.py", "content": "def broken(:\n    pass\n"},
+        "1",
+        0,
+    )
+
+    assert result["is_error"] is True
+    assert "Benchmark post-write validation failed" in str(result["content"])
+    assert any(e.get("type") == "benchmark_post_write_validation_failed" for e in events)
+
+
+def test_benchmark_post_write_python_validation_accepts_valid_python(tmp_path: Path) -> None:
+    events: list[dict] = []
+    runner = _runner(tmp_path, _benchmark_config())
+    runner.event_callback = events.append
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "src/app.py", "content": "def ok() -> int:\n    return 1\n"},
+        "1",
+        0,
+    )
+
+    assert result["is_error"] is False
+    assert not any(e.get("type") == "benchmark_post_write_validation_failed" for e in events)
+
+
+def test_benchmark_post_write_validation_failure_surfaces_actionable_repair_context(tmp_path: Path) -> None:
+    events: list[dict] = []
+    runner = _runner(tmp_path, _benchmark_config())
+    runner.event_callback = events.append
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "src/app.py", "content": "# prose\nthis is not python !!!\n"},
+        "1",
+        0,
+    )
+
+    assert result["is_error"] is True
+    text = str(result["content"])
+    assert "Repair only this file with a minimal follow-up patch" in text
+    assert "error=" in text
+
+
+def test_benchmark_post_write_validation_failure_event_has_required_fields(tmp_path: Path) -> None:
+    events: list[dict] = []
+    runner = _runner(tmp_path, _benchmark_config())
+    runner.event_callback = events.append
+
+    _ = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "src/app.py", "content": "def nope(\n"},
+        "1",
+        0,
+    )
+
+    failure_events = [e for e in events if e.get("type") == "benchmark_post_write_validation_failed"]
+    assert failure_events
+    event = failure_events[0]
+    assert event["file_path"] == "src/app.py"
+    assert event["validator"] == "py_compile"
+    assert event["exception_type"]
+    assert event["message"]
+
+
+def test_benchmark_write_strips_fenced_python_wrapper_for_code_files(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, _benchmark_config())
+    payload = "Here is fix:\n```python\ndef ok():\n    return 7\n```\n"
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "src/app.py", "content": payload},
+        "1",
+        0,
+    )
+
+    assert result["is_error"] is False
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "def ok():\n    return 7\n"

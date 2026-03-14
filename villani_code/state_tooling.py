@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import py_compile
+import re
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +9,16 @@ from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targe
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.tools import execute_tool
+
+
+_FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
+
+
+def _extract_fenced_code(text: str) -> str | None:
+    match = _FENCED_BLOCK_RE.search(text)
+    if not match:
+        return None
+    return match.group(1).strip("\n")
 
 
 def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
@@ -21,6 +33,81 @@ def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> l
         except PatchApplyError:
             return [default_path] if default_path else []
     return []
+
+
+def _normalize_mutation_payload_for_code_files(tool_name: str, tool_input: dict[str, Any]) -> None:
+    if tool_name == "Write":
+        file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if not file_path.endswith(".py"):
+            return
+        content = str(tool_input.get("content", ""))
+        extracted = _extract_fenced_code(content)
+        if extracted is not None:
+            tool_input["content"] = extracted + ("\n" if not extracted.endswith("\n") else "")
+        return
+    if tool_name == "Patch":
+        diff = str(tool_input.get("unified_diff", ""))
+        extracted = _extract_fenced_code(diff)
+        if extracted is not None and "--- " in extracted and "+++ " in extracted:
+            tool_input["unified_diff"] = extracted + ("\n" if not extracted.endswith("\n") else "")
+
+
+def _benchmark_post_write_python_validation(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if result.get("is_error"):
+        return result
+    if not runner.benchmark_config.enabled or tool_name not in {"Write", "Patch"}:
+        return result
+
+    targets = _benchmark_mutation_targets(tool_name, tool_input)
+    py_targets = []
+    for target in targets:
+        normalized = str(target or "").replace("\\", "/").lstrip("./")
+        if not normalized.endswith(".py"):
+            continue
+        abs_target = (runner.repo / normalized).resolve()
+        if abs_target.exists() and abs_target.is_file():
+            py_targets.append((normalized, abs_target))
+
+    if not py_targets:
+        return result
+
+    for rel, abs_path in py_targets:
+        try:
+            py_compile.compile(str(abs_path), doraise=True)
+        except py_compile.PyCompileError as exc:
+            message = str(getattr(exc, "msg", "") or str(exc)).strip()
+            event_payload = {
+                "type": "benchmark_post_write_validation_failed",
+                "file_path": rel,
+                "validator": "py_compile",
+                "exception_type": exc.__class__.__name__,
+                "message": message,
+            }
+            runner.event_callback(event_payload)
+            runner.event_callback(
+                {
+                    "type": "failure_classified",
+                    "category": "benchmark_post_write_validation_failed",
+                    "summary": message,
+                    "next_strategy": f"Repair Python syntax in {rel} and retry a minimal patch.",
+                    "occurrence": 1,
+                    "failed_files": [rel],
+                }
+            )
+            return {
+                "is_error": True,
+                "content": (
+                    "Benchmark post-write validation failed. "
+                    f"file={rel} validator=py_compile error_type={exc.__class__.__name__} error={message}. "
+                    "Repair only this file with a minimal follow-up patch."
+                ),
+            }
+    return result
 
 
 def _validate_benchmark_mutation(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
@@ -166,6 +253,8 @@ def execute_tool_with_policy(
             return {"content": policy_error, "is_error": True}
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
+    if runner.benchmark_config.enabled and tool_name in {"Write", "Patch"}:
+        _normalize_mutation_payload_for_code_files(tool_name, tool_input)
 
     policy = runner.permissions.evaluate_with_reason(
         tool_name,
@@ -264,4 +353,5 @@ def execute_tool_with_policy(
             "tool_use_id": tool_use_id,
         }
     )
-    return execute_tool(tool_name, tool_input, runner.repo, unsafe=runner.unsafe)
+    result = execute_tool(tool_name, tool_input, runner.repo, unsafe=runner.unsafe)
+    return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)

@@ -37,7 +37,7 @@ def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = Fal
         )
     if benchmark_enabled:
         text = (
-            f"{text} In benchmark mode, do not create exploratory helper files unless explicitly allowlisted; prefer the real task file over scratch files."
+            f"{text} In benchmark mode, do not create exploratory helper files unless explicitly allowlisted; prefer the real task file over scratch files. Favor narrow, localized edits over broad rewrites unless required by failing evidence."
         )
         if benchmark_config is not None and not benchmark_config.require_patch_artifact:
             text = (
