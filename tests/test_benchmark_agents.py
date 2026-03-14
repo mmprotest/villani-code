@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+import subprocess
+
 from villani_code.benchmark.agents import AGENTS, build_agent_runner
 from villani_code.benchmark.agents.aider import AiderAgentRunner
 from villani_code.benchmark.agents.claude_code import ClaudeCodeAgentRunner
@@ -103,7 +106,7 @@ def test_opencode_command_shape_without_base_url(monkeypatch) -> None:
         api_key=None,
         provider=None,
     )
-    assert cmd == ["opencode", "run", "--dir", "/tmp/repo", "fix bug"]
+    assert cmd == ["opencode", "run", "--dir", "/tmp/repo"]
 
 
 def test_opencode_command_never_uses_unsupported_hostname_flag(monkeypatch) -> None:
@@ -119,6 +122,99 @@ def test_opencode_command_never_uses_unsupported_hostname_flag(monkeypatch) -> N
     )
     assert "--hostname" not in cmd
     assert "--attach" not in cmd
+
+
+
+
+def test_opencode_model_provider_overrides_are_rejected_explicitly(monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda: "opencode")
+
+    try:
+        runner.build_command(
+            Path("/tmp/repo"),
+            "fix bug",
+            model="qwen-9b",
+            base_url="http://127.0.0.1:1234",
+            api_key="sk-test",
+            provider="openai",
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        assert "cannot prove backend equivalence" in msg
+        assert "api_key passthrough" in msg
+    else:
+        raise AssertionError("expected ValueError for unsupported backend overrides")
+
+
+def test_opencode_run_agent_delivers_multiline_prompt_over_stdin_and_writes_artifacts(monkeypatch, tmp_path: Path) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda **kwargs: "opencode.cmd")
+    monkeypatch.setattr(runner, "_validate_cli_startup", lambda executable, repo_path: None)
+
+    payload = {}
+
+    class DummyProc:
+        returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            payload["stdin"] = input
+            payload["timeout"] = timeout
+            return ("Active model: local/test-model\nstdout", "stderr")
+
+        def kill(self):
+            payload["killed"] = True
+
+    def fake_popen(command, cwd, stdout, stderr, stdin, text, env):
+        payload["command"] = command
+        payload["cwd"] = str(cwd)
+        payload["text"] = text
+        payload["stdin_pipe"] = stdin
+        return DummyProc()
+
+    monkeypatch.setattr("villani_code.benchmark.agents.opencode.subprocess.Popen", fake_popen)
+
+    prompt = """Benchmark task contract (shared across all agents):
+
+Paragraph one with bullets:
+- item 1
+- item 2
+
+Paragraph two with Windows path C:\\repo\\file.py
+"""
+    debug_dir = tmp_path / "debug"
+    result = runner.run_agent(
+        repo_path=tmp_path,
+        prompt=prompt,
+        model=None,
+        base_url=None,
+        api_key=None,
+        provider=None,
+        timeout=17,
+        debug_dir=debug_dir,
+    )
+
+    assert result.exit_code == 0
+    assert payload["command"] == ["opencode.cmd", "run", "--dir", str(tmp_path)]
+    assert payload["stdin"] == prompt
+    assert payload["timeout"] == 17
+    assert payload["stdin_pipe"] == subprocess.PIPE
+
+    prompt_artifact = Path(result.debug_artifacts["opencode_prompt"])
+    assert prompt_artifact.name == "opencode_prompt.txt"
+    assert prompt_artifact.read_text(encoding="utf-8") == prompt
+
+    meta_artifact = Path(result.debug_artifacts["opencode_invocation_meta"])
+    meta = json.loads(meta_artifact.read_text(encoding="utf-8"))
+    assert meta["delivery_mode"] == "stdin"
+    assert meta["executable"] == "opencode.cmd"
+    assert meta["argv"] == ["opencode.cmd", "run", "--dir", str(tmp_path)]
+    assert meta["reported_active_model"] == "local/test-model"
+
+
+def test_opencode_prompt_artifact_filenames_are_stable() -> None:
+    assert OpenCodeAgentRunner.PROMPT_ARTIFACT_FILENAME == "opencode_prompt.txt"
+    assert OpenCodeAgentRunner.INVOCATION_META_FILENAME == "opencode_invocation_meta.json"
 
 
 def test_opencode_startup_failure_message_for_session_not_found() -> None:
@@ -158,6 +254,7 @@ def test_opencode_missing_executable_raises_actionable_error(monkeypatch) -> Non
         assert "Install opencode" in message
     else:
         raise AssertionError("expected FileNotFoundError when opencode executable is missing")
+
 
 def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
     runner = ClaudeCodeAgentRunner()
