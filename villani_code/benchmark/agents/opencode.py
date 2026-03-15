@@ -152,26 +152,15 @@ class OpenCodeAgentRunner(AgentRunner):
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]
 
-        proc = subprocess.Popen(
-            command,
+        stdout, stderr, timeout_hit, exit_code = self._run_subprocess_with_timeout(
+            command=command,
             cwd=repo_path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
             env=env,
-            **self._text_process_kwargs(),
+            timeout=timeout,
+            stdin_input=launch_prompt,
+            capture_stdin=True,
         )
-        try:
-            stdout, stderr = proc.communicate(input=launch_prompt, timeout=timeout)
-            timeout_hit = False
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            timeout_hit = True
-        stdout = self._normalize_process_output(stdout)
-        stderr = self._normalize_process_output(stderr)
         runtime_seconds = time.monotonic() - started
-        exit_code = proc.returncode if not timeout_hit else None
         events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": exit_code}))
 
         debug_artifacts: dict[str, str] = {}
