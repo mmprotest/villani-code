@@ -8,7 +8,7 @@ Villani Code is built for the opposite case: constrained local models, real repo
 
 On a matched Qwen3.5 9B benchmark, excluding the broken repro track, Villani Code reached **75.0%** task success versus **32.1%** for Claude Code.
 
-![Qwen3.5 9B benchmark comparison](villani_vs_claude_qwen35_9b.png)
+![Qwen3.5 9B benchmark comparison](villani_vs_claude_vs_opencode_qwen35_9b_clean)
 
 ## What Villani Code is
 
