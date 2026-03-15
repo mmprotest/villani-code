@@ -99,7 +99,7 @@ class OpenCodeAgentRunner(AgentRunner):
             cwd=repo_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **self._text_process_kwargs(),
             timeout=10,
             check=False,
         )
@@ -158,8 +158,8 @@ class OpenCodeAgentRunner(AgentRunner):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE,
-            text=True,
             env=env,
+            **self._text_process_kwargs(),
         )
         try:
             stdout, stderr = proc.communicate(input=launch_prompt, timeout=timeout)
@@ -168,6 +168,8 @@ class OpenCodeAgentRunner(AgentRunner):
             proc.kill()
             stdout, stderr = proc.communicate()
             timeout_hit = True
+        stdout = self._normalize_process_output(stdout)
+        stderr = self._normalize_process_output(stderr)
         runtime_seconds = time.monotonic() - started
         exit_code = proc.returncode if not timeout_hit else None
         events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": exit_code}))

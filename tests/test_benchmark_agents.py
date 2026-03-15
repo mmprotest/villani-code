@@ -165,10 +165,12 @@ def test_opencode_run_agent_delivers_multiline_prompt_over_stdin_and_writes_arti
         def kill(self):
             payload["killed"] = True
 
-    def fake_popen(command, cwd, stdout, stderr, stdin, text, env):
+    def fake_popen(command, cwd, stdout, stderr, stdin, env, text, encoding, errors):
         payload["command"] = command
         payload["cwd"] = str(cwd)
         payload["text"] = text
+        payload["encoding"] = encoding
+        payload["errors"] = errors
         payload["stdin_pipe"] = stdin
         return DummyProc()
 
@@ -199,6 +201,8 @@ Paragraph two with Windows path C:\\repo\\file.py
     assert payload["stdin"] == prompt
     assert payload["timeout"] == 17
     assert payload["stdin_pipe"] == subprocess.PIPE
+    assert payload["encoding"] == "utf-8"
+    assert payload["errors"] == "replace"
 
     prompt_artifact = Path(result.debug_artifacts["opencode_prompt"])
     assert prompt_artifact.name == "opencode_prompt.txt"
@@ -447,3 +451,78 @@ def test_villani_run_agent_preserves_runtime_event_type(monkeypatch, tmp_path: P
     )
 
     assert any(event.type == 'tool_started' for event in result.events)
+
+
+def test_agent_runner_uses_utf8_replace_text_mode(monkeypatch, tmp_path: Path) -> None:
+    runner = CommandAgentRunner("python -c 'print(1)'")
+    payload = {}
+
+    class DummyProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            payload["timeout"] = timeout
+            # Simulate bytes that cannot be decoded under cp1252.
+            return (b"prefix\x81suffix", b"err\x81")
+
+        def kill(self):
+            payload["killed"] = True
+
+    def fake_popen(command, cwd, stdout, stderr, env, text, encoding, errors):
+        payload["kwargs"] = {
+            "text": text,
+            "encoding": encoding,
+            "errors": errors,
+        }
+        return DummyProc()
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
+
+    result = runner.run_agent(
+        repo_path=tmp_path,
+        prompt="fix bug",
+        model=None,
+        base_url=None,
+        api_key=None,
+        provider=None,
+        timeout=5,
+    )
+
+    assert payload["kwargs"] == {"text": True, "encoding": "utf-8", "errors": "replace"}
+    assert result.stdout == "prefix�suffix"
+    assert result.stderr == "err�"
+    assert isinstance(result.stdout, str)
+    assert isinstance(result.stderr, str)
+
+
+def test_agent_runner_normalizes_none_stdout_stderr(monkeypatch, tmp_path: Path) -> None:
+    runner = CommandAgentRunner("python -c 'print(1)'")
+
+    class DummyProc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return (None, None)
+
+        def kill(self):
+            pass
+
+    def fake_popen(command, cwd, stdout, stderr, env, text, encoding, errors):
+        return DummyProc()
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
+
+    result = runner.run_agent(
+        repo_path=tmp_path,
+        prompt="fix bug",
+        model=None,
+        base_url=None,
+        api_key=None,
+        provider=None,
+        timeout=5,
+    )
+
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert isinstance(result.stdout, str)
+    assert isinstance(result.stderr, str)

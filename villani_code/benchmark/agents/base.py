@@ -72,6 +72,22 @@ class AgentRunner(ABC):
         }
 
     @staticmethod
+    def _text_process_kwargs() -> dict[str, str | bool]:
+        return {
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+
+    @staticmethod
+    def _normalize_process_output(output: str | bytes | None) -> str:
+        if output is None:
+            return ""
+        if isinstance(output, bytes):
+            return output.decode("utf-8", errors="replace")
+        return output
+
+    @staticmethod
     def _is_sensitive_env_key(key: str) -> bool:
         normalized = key.upper()
         return any(token in normalized for token in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
@@ -143,7 +159,14 @@ class AgentRunner(ABC):
         command = self.build_command(repo_path, launch_prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]
-        proc = subprocess.Popen(command, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        proc = subprocess.Popen(
+            command,
+            cwd=repo_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            **self._text_process_kwargs(),
+        )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
             timeout_hit = False
@@ -151,6 +174,8 @@ class AgentRunner(ABC):
             proc.kill()
             stdout, stderr = proc.communicate()
             timeout_hit = True
+        stdout = self._normalize_process_output(stdout)
+        stderr = self._normalize_process_output(stderr)
         runtime_seconds = time.monotonic() - started
         exit_code = proc.returncode if not timeout_hit else None
         events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": exit_code}))
