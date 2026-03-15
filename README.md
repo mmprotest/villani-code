@@ -6,9 +6,36 @@ Most coding agents are built around strong hosted models and large context budge
 
 Villani Code is built for the opposite case: constrained local models, real repositories, explicit control, and work that has to survive contact with tests.
 
-On a matched Qwen3.5 9B benchmark, excluding the broken repro track, Villani Code reached **75.0%** task success versus **32.1%** for Claude Code.
+On a matched Qwen3.5 9B benchmark, Villani Code substantially outperformed Claude Code and OpenCode on the task families that matter most for bounded repo work.
 
-![Qwen3.5 9B benchmark comparison](villani_vs_claude_vs_opencode_qwen35_9b_clean)
+![Qwen3.5 9B benchmark comparison](villani_vs_claude_vs_opencode_qwen35_9b_clean.png)
+
+## Benchmark snapshot
+
+On the current Qwen3.5 9B benchmark comparison:
+
+- **Villani Code:** **75.0%**
+- **OpenCode:** **35.7%**
+- **Claude Code:** **32.1%**
+
+By task family:
+
+- **Bugfix**
+  - Villani Code: **70.6%**
+  - OpenCode: **41.2%**
+  - Claude Code: **41.2%**
+
+- **Localize patch**
+  - Villani Code: **83.3%**
+  - OpenCode: **33.3%**
+  - Claude Code: **0.0%**
+
+- **Terminal workflow**
+  - Villani Code: **80.0%**
+  - OpenCode: **20.0%**
+  - Claude Code: **40.0%**
+
+The strongest signal is localize-patch performance. That is where weak models usually drift, touch the wrong files, or fail to land the fix. Villani is materially better there.
 
 ## What Villani Code is
 
@@ -76,11 +103,11 @@ Villani Code is a better fit for privacy-sensitive and budget-sensitive environm
 
 ## What the benchmark result actually means
 
-The strongest current result is not “Villani beats everything everywhere.”
+The strongest current claim is not “Villani beats everything everywhere.”
 
 The stronger and more honest claim is narrower:
 
-**Villani Code can get materially better coding performance out of smaller local models than general-purpose coding-agent workflows on the kinds of bounded repo tasks that matter in practice.**
+**Villani Code gets materially better coding performance out of smaller local models than general-purpose coding-agent workflows on the kinds of bounded repo tasks that matter in practice.**
 
 That is the interesting thing.
 
