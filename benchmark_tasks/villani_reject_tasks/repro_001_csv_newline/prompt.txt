@@ -1,0 +1,1 @@
+Add a regression test that reproduces the bug where a quoted newline inside a CSV field is parsed incorrectly, IMPORTANT: Your job is to create exactly one regression test file at the required target path for this task.
