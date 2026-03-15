@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from villani_code.benchmark.health import run_healthcheck, validate_tasks
+from villani_code.benchmark.rebuild import rebuild_results_from_directory
 from villani_code.benchmark.reporting import (
     diagnostics,
     load_results,
@@ -123,6 +124,23 @@ def register_benchmark_commands(benchmark_app: typer.Typer, console: Console) ->
         console.print_json(
             json.dumps(results_by_agent if len(agent) > 1 else results_by_agent[agent[0]])
         )
+
+
+    @benchmark_app.command("rebuild-results")
+    def benchmark_rebuild_results_cmd(
+        dir: Path = typer.Option(..., "--dir"),
+        suite: Path = typer.Option(Path("benchmark_tasks/villani_bench_v1"), "--suite"),
+    ) -> None:
+        summary = rebuild_results_from_directory(dir.resolve(), task_suite_roots=[suite.resolve()])
+        quality = "exact" if summary.partial_count == 0 else "partial"
+        console.print(
+            f"rebuilt {summary.rebuilt_count} results in {summary.output_dir} "
+            f"(exact={summary.exact_count}, partial={summary.partial_count}, quality={quality})"
+        )
+        if summary.missing_common_fields:
+            console.print("common missing fields: " + ", ".join(summary.missing_common_fields))
+        if summary.warnings:
+            console.print(f"warnings: {len(summary.warnings)} (see rebuild_meta.json)")
 
     @benchmark_app.command("summary")
     def benchmark_summary_cmd(results: Path = typer.Option(..., "--results")) -> None:
