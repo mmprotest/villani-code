@@ -2,7 +2,7 @@
 
 **The coding agent built for small local models.**
 
-Villani Code is a terminal-first coding agent optimized for 7B to 14B local models on real codebases.
+Villani Code is a terminal-first coding agent optimized for 7B to 35B local models on real codebases.
 
 Most coding agents are built for strong hosted models and only incidentally support local ones. Villani Code is built for the opposite case: weak models, limited budgets, explicit permissions, and real repo work.
 
@@ -25,7 +25,7 @@ Villani Code is designed to make small local models materially more useful for c
 ## What Villani Code optimizes for
 
 - **Small-model performance**  
-  Built for local 7B to 14B models, not just adapted to them.
+  Built for local 7B to 35B models, not just adapted to them.
 
 - **Useful diffs**  
   The goal is accepted changes, not impressive-looking agent runs.
