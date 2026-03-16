@@ -39,6 +39,8 @@ The strongest signal is localize-patch performance. That is where weak models us
 
 ## What Villani Code is
 
+![Villani Code demo](code_review.gif)
+
 Villani Code is a terminal-first coding agent runtime designed for private, local-first, cost-sensitive development workflows.
 
 It is built for the cases where model capability is limited and runtime quality matters more:
