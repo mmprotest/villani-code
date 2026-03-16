@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -88,6 +89,102 @@ class AgentRunner(ABC):
         return output
 
     @staticmethod
+    def _process_group_popen_kwargs() -> dict[str, object]:
+        if os.name == "nt":
+            return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+        return {"start_new_session": True}
+
+    @staticmethod
+    def _append_stderr_note(stderr: str, note: str) -> str:
+        return f"{stderr}\n{note}" if stderr else note
+
+    def _terminate_process_tree(self, proc: subprocess.Popen[str | bytes], cleanup_timeout: int) -> None:
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=cleanup_timeout,
+                    check=False,
+                )
+                return
+            except Exception:
+                pass
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                return
+            except Exception:
+                pass
+
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    def _run_subprocess_with_timeout(
+        self,
+        *,
+        command: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        timeout: int,
+        stdin_input: str | None = None,
+        capture_stdin: bool = False,
+        cleanup_timeout: int = 2,
+    ) -> tuple[str, str, bool, int | None]:
+        popen_kwargs: dict[str, object] = {
+            "cwd": cwd,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": env,
+            **self._text_process_kwargs(),
+            **self._process_group_popen_kwargs(),
+        }
+        if capture_stdin:
+            popen_kwargs["stdin"] = subprocess.PIPE
+
+        proc = subprocess.Popen(command, **popen_kwargs)
+        try:
+            if stdin_input is None:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            else:
+                stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
+            timeout_hit = False
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired as timeout_error:
+            timeout_hit = True
+            stdout = timeout_error.output
+            stderr = timeout_error.stderr
+            self._terminate_process_tree(proc, cleanup_timeout=cleanup_timeout)
+            try:
+                drain_stdout, drain_stderr = proc.communicate(timeout=cleanup_timeout)
+                if stdout is None:
+                    stdout = drain_stdout
+                if stderr is None:
+                    stderr = drain_stderr
+            except subprocess.TimeoutExpired as drain_timeout:
+                if stdout is None:
+                    stdout = drain_timeout.output
+                if stderr is None:
+                    stderr = drain_timeout.stderr
+                stderr = self._append_stderr_note(
+                    self._normalize_process_output(stderr),
+                    "[benchmark timeout cleanup] bounded drain expired; output may be truncated.",
+                )
+            except Exception:
+                stderr = self._append_stderr_note(
+                    self._normalize_process_output(stderr),
+                    "[benchmark timeout cleanup] final output drain failed; output may be truncated.",
+                )
+            exit_code = None
+
+        stdout_text = self._normalize_process_output(stdout)
+        stderr_text = self._normalize_process_output(stderr)
+        return stdout_text, stderr_text, timeout_hit, exit_code
+
+    @staticmethod
     def _is_sensitive_env_key(key: str) -> bool:
         normalized = key.upper()
         return any(token in normalized for token in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
@@ -159,25 +256,13 @@ class AgentRunner(ABC):
         command = self.build_command(repo_path, launch_prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]
-        proc = subprocess.Popen(
-            command,
+        stdout, stderr, timeout_hit, exit_code = self._run_subprocess_with_timeout(
+            command=command,
             cwd=repo_path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             env=env,
-            **self._text_process_kwargs(),
+            timeout=timeout,
         )
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            timeout_hit = False
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            timeout_hit = True
-        stdout = self._normalize_process_output(stdout)
-        stderr = self._normalize_process_output(stderr)
         runtime_seconds = time.monotonic() - started
-        exit_code = proc.returncode if not timeout_hit else None
         events.append(AdapterEvent(type="command_finished", timestamp=time.monotonic(), payload={"exit_code": exit_code}))
         debug_artifacts: dict[str, str] = {}
         if debug_dir is not None:

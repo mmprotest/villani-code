@@ -13,6 +13,12 @@ from villani_code.benchmark.agents.opencode import OpenCodeAgentRunner
 from villani_code.benchmark.agents.villani import VillaniAgentRunner
 
 
+def _expected_process_group_kwargs() -> set[tuple[str, object]]:
+    if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        return {("start_new_session", True), ("creationflags", 0), ("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)}
+    return {("start_new_session", True), ("creationflags", 0)}
+
+
 def test_registry_contains_supported_agents() -> None:
     assert AGENTS == {
         "villani": VillaniAgentRunner,
@@ -155,6 +161,7 @@ def test_opencode_run_agent_delivers_multiline_prompt_over_stdin_and_writes_arti
     payload = {}
 
     class DummyProc:
+        pid = 111
         returncode = 0
 
         def communicate(self, input=None, timeout=None):
@@ -165,13 +172,14 @@ def test_opencode_run_agent_delivers_multiline_prompt_over_stdin_and_writes_arti
         def kill(self):
             payload["killed"] = True
 
-    def fake_popen(command, cwd, stdout, stderr, stdin, env, text, encoding, errors):
+    def fake_popen(command, cwd, stdout, stderr, stdin, env, text, encoding, errors, **kwargs):
         payload["command"] = command
         payload["cwd"] = str(cwd)
         payload["text"] = text
         payload["encoding"] = encoding
         payload["errors"] = errors
         payload["stdin_pipe"] = stdin
+        payload["popen_extra"] = kwargs
         return DummyProc()
 
     monkeypatch.setattr("villani_code.benchmark.agents.opencode.subprocess.Popen", fake_popen)
@@ -203,6 +211,7 @@ Paragraph two with Windows path C:\\repo\\file.py
     assert payload["stdin_pipe"] == subprocess.PIPE
     assert payload["encoding"] == "utf-8"
     assert payload["errors"] == "replace"
+    assert tuple(payload["popen_extra"].items())[0] in _expected_process_group_kwargs()
 
     prompt_artifact = Path(result.debug_artifacts["opencode_prompt"])
     assert prompt_artifact.name == "opencode_prompt.txt"
@@ -458,6 +467,7 @@ def test_agent_runner_uses_utf8_replace_text_mode(monkeypatch, tmp_path: Path) -
     payload = {}
 
     class DummyProc:
+        pid = 222
         returncode = 0
 
         def communicate(self, timeout=None):
@@ -468,12 +478,13 @@ def test_agent_runner_uses_utf8_replace_text_mode(monkeypatch, tmp_path: Path) -
         def kill(self):
             payload["killed"] = True
 
-    def fake_popen(command, cwd, stdout, stderr, env, text, encoding, errors):
+    def fake_popen(command, cwd, stdout, stderr, env, text, encoding, errors, **kwargs):
         payload["kwargs"] = {
             "text": text,
             "encoding": encoding,
             "errors": errors,
         }
+        payload["popen_extra"] = kwargs
         return DummyProc()
 
     monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
@@ -489,6 +500,7 @@ def test_agent_runner_uses_utf8_replace_text_mode(monkeypatch, tmp_path: Path) -
     )
 
     assert payload["kwargs"] == {"text": True, "encoding": "utf-8", "errors": "replace"}
+    assert tuple(payload["popen_extra"].items())[0] in _expected_process_group_kwargs()
     assert result.stdout == "prefix�suffix"
     assert result.stderr == "err�"
     assert isinstance(result.stdout, str)
@@ -499,6 +511,7 @@ def test_agent_runner_normalizes_none_stdout_stderr(monkeypatch, tmp_path: Path)
     runner = CommandAgentRunner("python -c 'print(1)'")
 
     class DummyProc:
+        pid = 333
         returncode = 0
 
         def communicate(self, timeout=None):
@@ -507,7 +520,7 @@ def test_agent_runner_normalizes_none_stdout_stderr(monkeypatch, tmp_path: Path)
         def kill(self):
             pass
 
-    def fake_popen(command, cwd, stdout, stderr, env, text, encoding, errors):
+    def fake_popen(command, cwd, stdout, stderr, env, text, encoding, errors, **kwargs):
         return DummyProc()
 
     monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
@@ -526,3 +539,128 @@ def test_agent_runner_normalizes_none_stdout_stderr(monkeypatch, tmp_path: Path)
     assert result.stderr == ""
     assert isinstance(result.stdout, str)
     assert isinstance(result.stderr, str)
+
+
+def test_agent_runner_timeout_cleanup_uses_bounded_drain(monkeypatch, tmp_path: Path) -> None:
+    runner = CommandAgentRunner("python -c 'print(1)'")
+    payload = {"communicate_calls": []}
+
+    class DummyProc:
+        pid = 444
+        returncode = -9
+
+        def communicate(self, input=None, timeout=None):
+            payload["communicate_calls"].append(timeout)
+            if len(payload["communicate_calls"]) == 1:
+                raise subprocess.TimeoutExpired(cmd="cmd", timeout=timeout)
+            if timeout is None:
+                raise AssertionError("cleanup communicate must be bounded")
+            raise subprocess.TimeoutExpired(cmd="cmd", timeout=timeout, output="partial-out", stderr="partial-err")
+
+        def kill(self):
+            payload["kill_called"] = True
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.killpg", lambda pgid, sig: payload.setdefault("killpg", []).append((pgid, sig)))
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.name", "posix")
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", lambda *args, **kwargs: DummyProc())
+
+    result = runner.run_agent(
+        repo_path=tmp_path,
+        prompt="fix bug",
+        model=None,
+        base_url=None,
+        api_key=None,
+        provider=None,
+        timeout=5,
+    )
+
+    assert result.timeout is True
+    assert result.exit_code is None
+    assert payload["communicate_calls"] == [5, 2]
+    assert "bounded drain expired" in result.stderr
+
+
+def test_opencode_timeout_cleanup_uses_safe_shared_path(monkeypatch, tmp_path: Path) -> None:
+    runner = OpenCodeAgentRunner()
+    monkeypatch.setattr(runner, "_resolve_executable_name", lambda **kwargs: "opencode")
+    monkeypatch.setattr(runner, "_validate_cli_startup", lambda executable, repo_path: None)
+    payload = {}
+
+    class DummyProc:
+        pid = 555
+        returncode = -9
+
+        def communicate(self, input=None, timeout=None):
+            payload.setdefault("calls", []).append({"input": input, "timeout": timeout})
+            if len(payload["calls"]) == 1:
+                raise subprocess.TimeoutExpired(cmd="opencode", timeout=timeout)
+            return ("", "")
+
+        def kill(self):
+            payload["kill_called"] = True
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.killpg", lambda pgid, sig: None)
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.name", "posix")
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", lambda *args, **kwargs: DummyProc())
+
+    result = runner.run_agent(
+        repo_path=tmp_path,
+        prompt="hello\nworld",
+        model=None,
+        base_url=None,
+        api_key=None,
+        provider=None,
+        timeout=9,
+    )
+
+    assert result.timeout is True
+    assert result.exit_code is None
+    assert payload["calls"][0] == {"input": "hello\nworld", "timeout": 9}
+    assert payload["calls"][1]["timeout"] == 2
+
+
+def test_timeout_on_windows_uses_taskkill_tree(monkeypatch) -> None:
+    runner = CommandAgentRunner("python -c 'print(1)'")
+    payload = {}
+
+    class DummyProc:
+        pid = 666
+        returncode = -9
+
+        def communicate(self, input=None, timeout=None):
+            if timeout == 1:
+                raise subprocess.TimeoutExpired(cmd="cmd", timeout=timeout)
+            return ("", "")
+
+        def kill(self):
+            payload["kill_called"] = True
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.name", "nt")
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.run", lambda args, **kwargs: payload.setdefault("taskkill", args))
+
+    runner._terminate_process_tree(DummyProc(), cleanup_timeout=2)
+
+    assert payload["taskkill"] == ["taskkill", "/PID", "666", "/T", "/F"]
+    assert "kill_called" not in payload
+
+
+def test_timeout_on_posix_uses_process_group_kill(monkeypatch) -> None:
+    runner = CommandAgentRunner("python -c 'print(1)'")
+    payload = {}
+
+    class DummyProc:
+        pid = 777
+
+        def kill(self):
+            payload["kill_called"] = True
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.name", "posix")
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.getpgid", lambda pid: pid + 1)
+    monkeypatch.setattr("villani_code.benchmark.agents.base.os.killpg", lambda pgid, sig: payload.setdefault("killpg", (pgid, sig)))
+
+    runner._terminate_process_tree(DummyProc(), cleanup_timeout=2)
+
+    assert payload["killpg"][0] == 778
+    assert "kill_called" not in payload
