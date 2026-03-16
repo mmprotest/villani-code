@@ -2,8 +2,6 @@
 
 **A coding agent runtime built to get useful repo work out of smaller local models.**
 
-![Villani Code demo](code_review.gif)
-
 Most coding agents are tuned for the easiest version of the problem: strong hosted models, large context windows, and plenty of slack.
 
 Villani Code is built for the harder version: constrained local models, bounded repository tasks, explicit control, and work that has to survive verification.
