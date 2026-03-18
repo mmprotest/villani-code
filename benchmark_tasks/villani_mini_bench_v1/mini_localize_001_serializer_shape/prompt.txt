@@ -1,0 +1,1 @@
+An API payload is flattening a list field somewhere in the serialization path. Find the issue and make the minimal correct fix.

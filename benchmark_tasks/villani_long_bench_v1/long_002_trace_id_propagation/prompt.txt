@@ -1,0 +1,1 @@
+Propagate a single trace ID through the request path and include it in logs and error responses.

@@ -1,0 +1,1 @@
+Refactor the duplicated normalization logic into a shared utility without changing behavior.

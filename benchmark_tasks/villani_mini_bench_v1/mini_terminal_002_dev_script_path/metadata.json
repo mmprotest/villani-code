@@ -1,0 +1,29 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "dev.py"
+  ],
+  "reference_patch_size_lines": 1,
+  "primary_skill": "terminal-debugging",
+  "secondary_skills": [
+    "path-handling"
+  ],
+  "task_type": "terminal_script_path_fix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_command",
+    "read_files",
+    "edit_files",
+    "run_command"
+  ],
+  "evaluation_focus": [
+    "terminal-workflow",
+    "path-correctness"
+  ],
+  "benchmark_bucket": "baseline",
+  "name": "mini_terminal_002_dev_script_path",
+  "difficulty": "hard"
+}

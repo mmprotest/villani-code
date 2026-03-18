@@ -18,7 +18,6 @@ from villani_code.project_memory import SessionState, ensure_project_memory, loa
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
 from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
-from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
@@ -486,6 +485,23 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             path = (runner.repo / fp).resolve()
             if is_ignored_repo_path(fp) or classify_repo_path(fp) != "authoritative":
                 return f"Small-model mode policy: target path is not authoritative: {fp}."
+            repair_locked_targets = {
+                str(item).replace("\\", "/").lstrip("./")
+                for item in getattr(runner, "_repair_locked_targets", set())
+                if str(item).strip()
+            }
+            if getattr(runner, "_repair_scope_lock_active", False) and fp not in repair_locked_targets:
+                runner.event_callback(
+                    {
+                        "type": "repair_scope_blocked",
+                        "file_path": fp,
+                        "locked_targets": sorted(repair_locked_targets),
+                    }
+                )
+                return (
+                    f"Repair scope lock: blocked mutation to {fp}. "
+                    f"Locked targets: {sorted(repair_locked_targets)}."
+                )
             if tool_name == "Patch" and not path.exists():
                 return f"Read-before-edit policy: cannot patch missing file {fp}. Use Write to create it first."
             if tool_name == "Write" and not path.exists():
@@ -852,9 +868,6 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     task_mode = getattr(runner, "_task_mode", TaskMode.GENERAL)
     if touched_tests:
         commands.append(["pytest", "-q", *touched_tests])
-    elif touched_sources:
-        family = shell_family_for_platform(sys.platform)
-        commands.append(["bash", "-lc", baseline_import_validation_command(family)])
     elif task_mode in {TaskMode.DOCS_UPDATE_SAFE, TaskMode.INSPECT_AND_PLAN}:
         pass
 
@@ -882,6 +895,14 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             lines.append(f"stdout:\n{stdout}")
         if stderr_lines:
             lines.append(f"key stderr:\n{stderr_lines}")
+
+    if touched_sources and not touched_tests:
+        validation_cmd_results, validation_lines = _run_targeted_validation_for_verification(
+            runner,
+            touched_sources,
+        )
+        cmd_results.extend(validation_cmd_results)
+        lines.extend(validation_lines)
 
     verification_artifacts = [
         r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
@@ -974,6 +995,70 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             }
         )
     return "\n".join(lines)
+
+
+def _run_targeted_validation_for_verification(
+    runner: Any,
+    changed_files: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    plan = getattr(runner, "_execution_plan", None)
+    plan_impact = getattr(plan, "change_impact", None)
+    plan_actions = list(getattr(plan, "action_classes", [])) if plan else []
+    repo_map = load_repo_map(runner.repo)
+    raw_task_mode = getattr(plan, "task_mode", getattr(runner, "_task_mode", TaskMode.GENERAL))
+    task_mode = getattr(raw_task_mode, "value", raw_task_mode) or TaskMode.GENERAL.value
+
+    result = run_validation(
+        runner.repo,
+        changed_files,
+        event_callback=runner.event_callback,
+        repo_map=repo_map,
+        change_impact=plan_impact,
+        action_classes=plan_actions,
+        task_mode=str(task_mode),
+    )
+
+    lines = [
+        f"validation_selected_steps: {json.dumps([step.step.name for step in result.plan.selected_steps])}",
+    ]
+    cmd_results: list[dict[str, Any]] = []
+    for step_result in result.steps:
+        stderr_lines = "\n".join([ln for ln in step_result.stderr.splitlines() if ln][:5])
+        stdout = step_result.stdout[:1500]
+        command_label = f"validation:{step_result.step.name}: {step_result.command}"
+        cmd_results.append(
+            {
+                "command": command_label,
+                "exit": step_result.exit_code,
+                "stdout": stdout,
+                "stderr": stderr_lines,
+            }
+        )
+        lines.append(f"validation_step: {step_result.step.name}")
+        lines.append(f"validation_exit: {step_result.exit_code}")
+        if stdout:
+            lines.append(f"validation_stdout:\n{stdout}")
+        if stderr_lines:
+            lines.append(f"validation_stderr:\n{stderr_lines}")
+
+    if result.passed:
+        lines.append("validation_status: passed")
+    else:
+        lines.append("validation_status: failed")
+        if result.structured_failure:
+            lines.append(f"validation_failure_step: {result.structured_failure.step_name}")
+            lines.append(
+                f"validation_failure_summary: {result.structured_failure.concise_summary[:400]}"
+            )
+            if result.structured_failure.compact_output:
+                lines.append(
+                    "validation_failure_output:\n"
+                    f"{result.structured_failure.compact_output[:800]}"
+                )
+        elif result.failure_summary:
+            lines.append(f"validation_failure_summary: {result.failure_summary[:400]}")
+
+    return cmd_results, lines
 
 
 def emit_policy_event(

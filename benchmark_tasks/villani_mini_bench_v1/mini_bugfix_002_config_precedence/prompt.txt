@@ -1,0 +1,1 @@
+Timeout resolution is using the wrong precedence across CLI flags, environment variables, and defaults. Fix it without changing the API.

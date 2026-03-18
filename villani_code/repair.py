@@ -8,6 +8,10 @@ from typing import Any
 from villani_code.validation_loop import ValidationResult, run_validation
 
 
+def _normalize_repo_path(value: str) -> str:
+    return str(value or "").replace("\\", "/").lstrip("./")
+
+
 @dataclass(slots=True)
 class RepairContext:
     task_summary: str
@@ -71,36 +75,43 @@ def execute_repair_loop(
     attempts: list[RepairAttemptSummary] = []
     failing_step = initial_validation.steps[-1].step.name if initial_validation.steps else (initial_validation.structured_failure.step_name if initial_validation.structured_failure else "unknown")
     failure_summary = initial_validation.structured_failure.concise_summary if initial_validation.structured_failure else initial_validation.failure_summary
+    runner._repair_scope_lock_active = True
+    runner._repair_locked_targets = {
+        path for path in (_normalize_repo_path(item) for item in changed_files) if path
+    }
+    try:
+        for attempt_idx in range(1, max_attempts + 1):
+            runner.event_callback({"type": "repair_attempt_started", "attempt": attempt_idx, "failing_step": failing_step})
+            context = RepairContext(
+                task_summary=str(getattr(getattr(runner, "_execution_plan", None), "task_goal", ""))[:200],
+                plan_summary=getattr(getattr(runner, "_execution_plan", None), "to_human_text", lambda: "")()[:500],
+                change_impact=str(change_impact or "source_only"),
+                files_changed=changed_files[:10],
+                failing_validation_step=failing_step,
+                failure_summary=str(failure_summary)[:500],
+            )
+            repair_summary = _run_repair_prompt(runner, context, attempts)
 
-    for attempt_idx in range(1, max_attempts + 1):
-        runner.event_callback({"type": "repair_attempt_started", "attempt": attempt_idx, "failing_step": failing_step})
-        context = RepairContext(
-            task_summary=str(getattr(getattr(runner, "_execution_plan", None), "task_goal", ""))[:200],
-            plan_summary=getattr(getattr(runner, "_execution_plan", None), "to_human_text", lambda: "")()[:500],
-            change_impact=str(change_impact or "source_only"),
-            files_changed=changed_files[:10],
-            failing_validation_step=failing_step,
-            failure_summary=str(failure_summary)[:500],
-        )
-        repair_summary = _run_repair_prompt(runner, context, attempts)
-
-        targeted = run_validation(repo, changed_files, event_callback=runner.event_callback, steps_override=[failing_step], repo_map=repo_map, change_impact=change_impact, action_classes=action_classes)
-        if targeted.passed:
-            if initial_validation.plan.escalation.broaden_after_targeted_pass or initial_validation.plan.escalation.force_broad:
-                runner.event_callback({"type": "validation_escalated", "reason": initial_validation.plan.escalation.reason})
-                broader = run_validation(repo, changed_files, event_callback=runner.event_callback, repo_map=repo_map, change_impact=change_impact, action_classes=action_classes)
-                if broader.passed:
+            targeted = run_validation(repo, changed_files, event_callback=runner.event_callback, steps_override=[failing_step], repo_map=repo_map, change_impact=change_impact, action_classes=action_classes)
+            if targeted.passed:
+                if initial_validation.plan.escalation.broaden_after_targeted_pass or initial_validation.plan.escalation.force_broad:
+                    runner.event_callback({"type": "validation_escalated", "reason": initial_validation.plan.escalation.reason})
+                    broader = run_validation(repo, changed_files, event_callback=runner.event_callback, repo_map=repo_map, change_impact=change_impact, action_classes=action_classes)
+                    if broader.passed:
+                        attempts.append(RepairAttemptSummary(attempt_idx, failing_step, str(failure_summary)[:220], repair_summary[:260], "recovered"))
+                        runner.event_callback({"type": "repair_attempt_result", "attempt": attempt_idx, "status": "recovered"})
+                        return RepairOutcome(True, f"Validation recovered after repair attempt {attempt_idx}.", attempts, "")
+                else:
                     attempts.append(RepairAttemptSummary(attempt_idx, failing_step, str(failure_summary)[:220], repair_summary[:260], "recovered"))
                     runner.event_callback({"type": "repair_attempt_result", "attempt": attempt_idx, "status": "recovered"})
                     return RepairOutcome(True, f"Validation recovered after repair attempt {attempt_idx}.", attempts, "")
-            else:
-                attempts.append(RepairAttemptSummary(attempt_idx, failing_step, str(failure_summary)[:220], repair_summary[:260], "recovered"))
-                runner.event_callback({"type": "repair_attempt_result", "attempt": attempt_idx, "status": "recovered"})
-                return RepairOutcome(True, f"Validation recovered after repair attempt {attempt_idx}.", attempts, "")
 
-        attempts.append(RepairAttemptSummary(attempt_idx, failing_step, str(failure_summary)[:220], repair_summary[:260], "failed"))
-        runner.event_callback({"type": "repair_attempt_result", "attempt": attempt_idx, "status": "failed"})
-        failing_step = targeted.steps[-1].step.name if targeted.steps else failing_step
-        failure_summary = targeted.structured_failure.concise_summary if targeted.structured_failure else targeted.failure_summary
+            attempts.append(RepairAttemptSummary(attempt_idx, failing_step, str(failure_summary)[:220], repair_summary[:260], "failed"))
+            runner.event_callback({"type": "repair_attempt_result", "attempt": attempt_idx, "status": "failed"})
+            failing_step = targeted.steps[-1].step.name if targeted.steps else failing_step
+            failure_summary = targeted.structured_failure.concise_summary if targeted.structured_failure else targeted.failure_summary
 
-    return RepairOutcome(False, "Validation failed after bounded repair attempts. Remaining failure: " + str(failure_summary)[:400], attempts, failing_step)
+        return RepairOutcome(False, "Validation failed after bounded repair attempts. Remaining failure: " + str(failure_summary)[:400], attempts, failing_step)
+    finally:
+        runner._repair_scope_lock_active = False
+        runner._repair_locked_targets = set()

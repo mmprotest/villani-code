@@ -1,0 +1,1 @@
+Command aliases resolve to the wrong handler somewhere in the registry path. Find the issue and make the smallest correct fix.

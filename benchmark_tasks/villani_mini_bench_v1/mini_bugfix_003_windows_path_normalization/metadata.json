@@ -1,0 +1,28 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/paths.py"
+  ],
+  "reference_patch_size_lines": 2,
+  "primary_skill": "cross-platform-debugging",
+  "secondary_skills": [
+    "pytest"
+  ],
+  "task_type": "single_file_bugfix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "read_files",
+    "edit_files",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "portability",
+    "correctness"
+  ],
+  "benchmark_bucket": "baseline",
+  "name": "mini_bugfix_003_windows_path_normalization",
+  "difficulty": "medium"
+}

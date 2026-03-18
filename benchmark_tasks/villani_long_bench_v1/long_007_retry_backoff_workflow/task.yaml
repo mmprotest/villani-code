@@ -1,0 +1,23 @@
+id: long_007_retry_backoff_workflow
+family: bugfix
+difficulty: hard
+language: python
+max_minutes: 8
+max_files_touched: 5
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_visible.py
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths: &id001
+- src/
+- tests/
+benchmark_track: core
+allowed_paths: *id001
+expected_touched_max: 5

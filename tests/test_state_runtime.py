@@ -170,7 +170,7 @@ def test_run_verification_targets_touched_tests(tmp_path: Path, monkeypatch: pyt
     assert any(cmd[:2] == ["pytest", "-q"] for cmd in seen)
 
 
-def test_run_verification_uses_baseline_import_for_touched_python_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_verification_uses_targeted_validation_for_touched_python_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / "a.py").write_text("x=1\n", encoding="utf-8")
@@ -178,6 +178,35 @@ def test_run_verification_uses_baseline_import_for_touched_python_source(tmp_pat
     runner._verification_baseline_changed = set()
     monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["src/a.py"])
     seen: list[list[str]] = []
+    run_validation_calls: list[dict[str, object]] = []
+
+    def fake_run_validation(repo, changed_files, **kwargs):
+        run_validation_calls.append(
+            {
+                "repo": repo,
+                "changed_files": list(changed_files),
+                "repo_map": kwargs.get("repo_map"),
+                "change_impact": kwargs.get("change_impact"),
+                "action_classes": kwargs.get("action_classes"),
+                "task_mode": kwargs.get("task_mode"),
+            }
+        )
+        step = SimpleNamespace(name="targeted_pytest")
+        plan_step = SimpleNamespace(step=step)
+        step_result = SimpleNamespace(
+            step=step,
+            command="pytest -q tests/test_targeted.py",
+            exit_code=0,
+            stdout="1 passed",
+            stderr="",
+        )
+        return SimpleNamespace(
+            passed=True,
+            plan=SimpleNamespace(selected_steps=[plan_step]),
+            steps=[step_result],
+            structured_failure=None,
+            failure_summary="",
+        )
 
     def fake_run(cmd, **kwargs):
         seen.append(cmd)
@@ -188,9 +217,132 @@ def test_run_verification_uses_baseline_import_for_touched_python_source(tmp_pat
         return P()
 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(state_runtime, "load_repo_map", lambda _repo: {"src/a.py": ["tests/test_targeted.py"]})
+    monkeypatch.setattr(state_runtime, "run_validation", fake_run_validation)
     out = runner._run_verification("edit")
-    assert "python -c" in out
-    assert any(cmd[:2] == ["bash", "-lc"] for cmd in seen)
+    assert "validation_selected_steps: [\"targeted_pytest\"]" in out
+    assert "validation_step: targeted_pytest" in out
+    assert all(cmd[:2] != ["bash", "-lc"] for cmd in seen)
+    assert run_validation_calls == [
+        {
+            "repo": tmp_path,
+            "changed_files": ["src/a.py"],
+            "repo_map": {"src/a.py": ["tests/test_targeted.py"]},
+            "change_impact": None,
+            "action_classes": [],
+            "task_mode": "general",
+        }
+    ]
+
+
+def test_run_verification_surfaces_targeted_validation_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=1\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["src/a.py"])
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return P()
+
+    def fake_run_validation(repo, changed_files, **kwargs):
+        step = SimpleNamespace(name="targeted_pytest")
+        plan_step = SimpleNamespace(step=step)
+        step_result = SimpleNamespace(
+            step=step,
+            command="pytest -q tests/test_targeted.py",
+            exit_code=1,
+            stdout="F",
+            stderr="AssertionError: bug still present",
+        )
+        structured_failure = SimpleNamespace(
+            step_name="targeted_pytest",
+            concise_summary="AssertionError: bug still present",
+            compact_output="FAILED tests/test_targeted.py::test_bug - AssertionError: bug still present",
+        )
+        return SimpleNamespace(
+            passed=False,
+            plan=SimpleNamespace(selected_steps=[plan_step]),
+            steps=[step_result],
+            structured_failure=structured_failure,
+            failure_summary="targeted_pytest failed",
+        )
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(state_runtime, "load_repo_map", lambda _repo: {})
+    monkeypatch.setattr(state_runtime, "run_validation", fake_run_validation)
+
+    out = runner._run_verification("edit")
+
+    assert "validation_status: failed" in out
+    assert "validation_failure_step: targeted_pytest" in out
+    assert "AssertionError: bug still present" in out
+    assert "status: fail" in out
+    assert "Validation command failed: validation:targeted_pytest: pytest -q tests/test_targeted.py" in out
+
+
+def test_run_verification_targeted_validation_ignores_benchmark_only_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=1\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner.benchmark_config = SimpleNamespace(
+        expected_files=["benchmark/secret.py"],
+        visible_verification=["pytest -q benchmark_tests"],
+        runtime_json={"task_id": "bench-only"},
+    )
+    runner._execution_plan = SimpleNamespace(
+        change_impact="source_only",
+        action_classes=["code_edit"],
+        task_mode="general",
+    )
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["src/a.py"])
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return P()
+
+    def fake_run_validation(repo, changed_files, **kwargs):
+        captured["repo"] = repo
+        captured["changed_files"] = list(changed_files)
+        captured["kwargs"] = dict(kwargs)
+        step = SimpleNamespace(name="targeted_pytest")
+        return SimpleNamespace(
+            passed=True,
+            plan=SimpleNamespace(selected_steps=[SimpleNamespace(step=step)]),
+            steps=[],
+            structured_failure=None,
+            failure_summary="",
+        )
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(state_runtime, "load_repo_map", lambda _repo: {"src/a.py": []})
+    monkeypatch.setattr(state_runtime, "run_validation", fake_run_validation)
+
+    runner._run_verification("edit")
+
+    assert captured["repo"] == tmp_path
+    assert captured["changed_files"] == ["src/a.py"]
+    assert captured["kwargs"] == {
+        "event_callback": runner.event_callback,
+        "repo_map": {"src/a.py": []},
+        "change_impact": "source_only",
+        "action_classes": ["code_edit"],
+        "task_mode": "general",
+    }
 
 
 def test_repeated_stale_verification_returns_compact_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

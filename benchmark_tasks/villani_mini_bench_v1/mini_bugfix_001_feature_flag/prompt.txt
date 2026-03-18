@@ -1,0 +1,1 @@
+A feature flag enabled in config is being treated as disabled at runtime. Make the minimal correct fix and verify it.

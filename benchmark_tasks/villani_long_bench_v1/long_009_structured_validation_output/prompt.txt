@@ -1,0 +1,1 @@
+Add structured validation output without breaking the existing text mode or exit codes.

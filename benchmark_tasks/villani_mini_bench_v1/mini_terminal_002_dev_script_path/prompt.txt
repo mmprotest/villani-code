@@ -1,0 +1,1 @@
+Running `python dev.py` fails because the development config file path is wrong. Fix the project so the command works and verify it.

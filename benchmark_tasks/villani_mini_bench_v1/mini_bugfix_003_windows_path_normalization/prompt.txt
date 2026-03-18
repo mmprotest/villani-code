@@ -1,0 +1,1 @@
+Windows-style paths are being normalized incorrectly. Fix the behavior without introducing platform-specific branches elsewhere.

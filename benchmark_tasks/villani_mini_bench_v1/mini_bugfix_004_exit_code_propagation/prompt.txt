@@ -1,0 +1,1 @@
+A subprocess wrapper is swallowing non-zero exit codes. Fix it and verify both stdout/stderr behavior still works.

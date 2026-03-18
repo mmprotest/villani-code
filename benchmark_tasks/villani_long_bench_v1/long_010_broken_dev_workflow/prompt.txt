@@ -1,0 +1,1 @@
+Repair the documented developer workflow so the end-to-end command succeeds again.
