@@ -2,7 +2,7 @@ id: bugfix_011_config_precedence_env
 family: bugfix
 difficulty: medium
 language: python
-max_minutes: 3
+max_minutes: 5
 max_files_touched: 4
 expected_artifacts:
 - patch
