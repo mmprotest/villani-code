@@ -12,6 +12,11 @@ from typing import Any
 
 from villani_code.autonomy import VerificationStatus
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
+from villani_code.localization import (
+    BenchmarkLocalizationPack,
+    build_benchmark_localization_pack,
+    classify_verification_failure,
+)
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
@@ -340,6 +345,46 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
     messages.insert(0, {"role": "user", "content": [{"type": "text", "text": hint}]})
 
 
+def refresh_benchmark_localization_pack(
+    runner: Any,
+    instruction: str,
+    *,
+    failure_summary: str = "",
+    compact_output: str = "",
+    relevant_paths: list[str] | None = None,
+) -> BenchmarkLocalizationPack | None:
+    if not getattr(runner, "benchmark_config", None) or not runner.benchmark_config.enabled:
+        return None
+    repo_map = load_repo_map(runner.repo)
+    failure = None
+    if failure_summary or compact_output or relevant_paths:
+        failure = classify_verification_failure(
+            failure_summary,
+            compact_output=compact_output,
+            relevant_paths=relevant_paths or [],
+        )
+    idx = getattr(runner, "_repo_index", None)
+    pack = build_benchmark_localization_pack(
+        runner.repo,
+        instruction,
+        repo_map,
+        runner.benchmark_config,
+        index=idx,
+        failure=failure,
+    )
+    runner._benchmark_localization_pack = pack
+    runner.event_callback(
+        {
+            "type": "benchmark_localization_pack_built",
+            "task_id": runner.benchmark_config.task_id,
+            "repo_context_injected": True,
+            "top_candidate_files": [candidate.path for candidate in pack.top_candidate_files],
+            "candidate_reasons": {candidate.path: candidate.reasons for candidate in pack.top_candidate_files},
+        }
+    )
+    return pack
+
+
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = [dict(m) for m in messages]
     if runner.small_model:
@@ -445,6 +490,7 @@ def init_small_model_support(runner: Any) -> None:
         runner.event_callback({"type": "index_built", "path": str(index_path)})
     runner._retriever = Retriever(idx)
     runner._repo_map = build_repo_map(idx)
+    runner._repo_index = idx
 
 
 def _is_strongly_adjacent_path(candidate: str, locked_paths: set[str]) -> bool:
@@ -960,8 +1006,20 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             "status": verification.status.value,
             "confidence": verification.confidence_score,
             "repeated_stale_state": repeated_stale,
+            "intentional_changed": sorted(attributed_intentional),
+            "targeted_verification": bool(attributed_intentional),
         }
     )
+    history = getattr(runner, "_verification_history", [])
+    history.append(
+        {
+            "trigger": trigger,
+            "status": verification.status.value,
+            "intentional_changed": sorted(attributed_intentional),
+            "findings": [finding.message for finding in verification.findings[:6]],
+        }
+    )
+    runner._verification_history = history[-8:]
     if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
         runner.event_callback(
             {
@@ -1129,6 +1187,8 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     runner._context_governance.save_inventory(inventory)
     runner.event_callback({"type": "plan_generated", "plan": plan.to_dict(), "human": plan.to_human_text()})
     runner.event_callback({"type": "plan_risk_rationale", "risk": plan.risk_level.value, "drivers": plan.risk_assessment.get("drivers", [])})
+    if runner.benchmark_config.enabled:
+        refresh_benchmark_localization_pack(runner, instruction)
 
     session = _build_session_state_from_plan(instruction, plan)
 
@@ -1215,6 +1275,17 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         change_impact=plan_impact,
         action_classes=plan_actions,
         max_attempts=int(getattr(runner, "max_repair_attempts", 2)),
+    )
+    runner._last_repair_outcome = outcome
+    runner.event_callback(
+        {
+            "type": "repair_mode_completed",
+            "recovered": outcome.recovered,
+            "repair_classification": outcome.failure_classification,
+            "branching_occurred": outcome.branching_occurred,
+            "branch_count": outcome.branch_count,
+            "environment_harness_failure": outcome.environment_harness_failure,
+        }
     )
     if outcome.recovered:
         checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed after repair"])

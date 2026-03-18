@@ -26,6 +26,7 @@ from villani_code.prompting import build_execution_instruction_from_plan, build_
 from villani_code.planning import TaskMode, classify_task_mode, generate_execution_plan
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
+from villani_code.localization import build_benchmark_localization_pack
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
@@ -398,6 +399,7 @@ class Runner:
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
         self._last_verification_artifact_count = 0
+        self._verification_history: list[dict[str, Any]] = []
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
@@ -407,7 +409,10 @@ class Runner:
         self._runtime_mode: Literal["execution", "planning"] = "execution"
         self._finalized_plan_artifact: dict[str, Any] | None = None
         self._verification_engine = VerificationEngine(self.repo)
-        if self.small_model:
+        self._benchmark_localization_pack = None
+        self._benchmark_edit_authority_log: dict[str, dict[str, Any]] = {}
+        self._last_repair_outcome = None
+        if self.small_model or self.benchmark_config.enabled:
             self._init_small_model_support()
 
 
@@ -494,6 +499,17 @@ class Runner:
                 from villani_code import state_runtime
 
                 pre_edit_failure_evidence = state_runtime.run_pre_edit_failure_localization(self)
+                if self.benchmark_config.enabled and pre_edit_failure_evidence:
+                    state_runtime.refresh_benchmark_localization_pack(
+                        self,
+                        instruction,
+                        failure_summary=str(pre_edit_failure_evidence.get("error_summary", "")),
+                        compact_output=str(pre_edit_failure_evidence.get("raw_failure_excerpt", "")),
+                        relevant_paths=[
+                            str(pre_edit_failure_evidence.get("traceback_file", "")),
+                            str(pre_edit_failure_evidence.get("first_failing_test", "")),
+                        ],
+                    )
                 diagnosis = state_runtime.run_pre_edit_diagnosis(
                     self,
                     instruction,
@@ -694,13 +710,24 @@ class Runner:
         }
         system = build_system_blocks(
             self.repo,
-            repo_map=self._repo_map if self.small_model else "",
+            repo_map=self._repo_map if (self.small_model or self.benchmark_config.enabled) else "",
             villani_mode=self.villani_mode,
             benchmark_config=self.benchmark_config,
             task_mode=self._task_mode,
+            benchmark_localization_pack=self._benchmark_localization_pack if self.benchmark_config.enabled else None,
         )
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
+            localization_lines: list[str] = []
+            if self.benchmark_config.enabled and self._benchmark_localization_pack is not None:
+                top_candidates = [
+                    f"{candidate.path} ({'; '.join(candidate.reasons[:2])})"
+                    for candidate in self._benchmark_localization_pack.top_candidate_files[:3]
+                ]
+                if top_candidates:
+                    localization_lines.append(
+                        " Benchmark localization candidates: " + " | ".join(top_candidates) + "."
+                    )
             messages.append(
                 {
                     "role": "user",
@@ -711,6 +738,7 @@ class Runner:
                                 f"Task contract ({self._task_contract['task_mode']}): name likely target file first (prefer {preferred_text}); "
                                 f"keep scope tight; verify against: {self._task_contract['success_predicate']}; avoid speculative multi-file edits."
                                 " Stop if verification repeats without new evidence."
+                                + "".join(localization_lines)
                             ),
                         }
                     ],

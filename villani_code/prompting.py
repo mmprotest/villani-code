@@ -5,12 +5,20 @@ import json
 from typing import Any
 
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
+from villani_code.localization import BenchmarkLocalizationPack
 from villani_code.plan_session import PlanSessionResult
 from villani_code.planning import TaskMode
 from villani_code.utils import now_local_date
 
 
-def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = False, benchmark_config: BenchmarkRuntimeConfig | None = None, task_mode: TaskMode | None = None) -> list[dict[str, str]]:
+def build_system_blocks(
+    repo: Path,
+    repo_map: str = "",
+    villani_mode: bool = False,
+    benchmark_config: BenchmarkRuntimeConfig | None = None,
+    task_mode: TaskMode | None = None,
+    benchmark_localization_pack: BenchmarkLocalizationPack | None = None,
+) -> list[dict[str, str]]:
     text = (
         "You are an interactive Villani Code agent for software engineering tasks. "
         "Use tools conservatively, verify changes, and keep outputs concise."
@@ -49,6 +57,17 @@ def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = Fal
         blocks.append({"type": "text", "text": f"<project-instructions>\n{instructions}\n</project-instructions>"})
     if repo_map:
         blocks.append({"type": "text", "text": f"<repo-map>\n{repo_map}\n</repo-map>"})
+    if benchmark_enabled and benchmark_localization_pack is not None:
+        blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    "<benchmark-localization-pack>\n"
+                    f"{benchmark_localization_pack.prompt_text()}\n"
+                    "</benchmark-localization-pack>"
+                ),
+            }
+        )
     return blocks
 
 

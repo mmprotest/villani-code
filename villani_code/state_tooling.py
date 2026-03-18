@@ -124,12 +124,44 @@ def _validate_benchmark_mutation(runner: Any, tool_name: str, tool_input: dict[s
             f"limit={config.max_files_touched} touched={len(set(normalized_targets))}"
         )
     for raw_path, path in zip(targets, normalized_targets):
+        authority = None
+        pack = getattr(runner, "_benchmark_localization_pack", None)
+        if pack is not None:
+            authority = pack.authority_for_path(path)
+            runner._benchmark_edit_authority_log[path] = {
+                "tool": tool_name,
+                "authority_tier": getattr(authority, "authority_tier", None),
+                "reasons": getattr(authority, "reasons", []),
+            }
+            runner.event_callback(
+                {
+                    "type": "benchmark_edit_authority_checked",
+                    "path": path,
+                    "authority_tier": getattr(authority, "authority_tier", None),
+                    "authority_reasons": getattr(authority, "reasons", []),
+                }
+            )
         if not config.in_allowlist(path):
             return f"benchmark_policy_denied: task_id={config.task_id} reason=outside_allowlist path={path}"
         if config.in_forbidden(path):
             return f"benchmark_policy_denied: task_id={config.task_id} reason=forbidden_path path={path}"
         if not config.is_expected_or_support(path):
             return f"benchmark_policy_denied: task_id={config.task_id} reason=not_expected_or_support path={path}"
+        path_name = Path(path).name
+        low_authority_config = (
+            path_name in {"pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "Makefile", "makefile", "conftest.py"}
+            or path.endswith((".toml", ".ini", ".cfg"))
+        )
+        if authority is None and low_authority_config:
+            return (
+                f"benchmark_policy_denied: task_id={config.task_id} reason=low_authority_without_evidence "
+                f"path={path}"
+            )
+        if authority is not None and authority.authority_tier >= 5:
+            return (
+                f"benchmark_policy_denied: task_id={config.task_id} reason=low_authority_without_evidence "
+                f"path={path}"
+            )
         classification = classify_repo_path(path)
         if is_ignored_repo_path(path) or classification in {"runtime_artifact", "editor_artifact", "vcs_internal"}:
             return f"benchmark_policy_denied: task_id={config.task_id} reason=ignored_or_runtime_artifact path={path}"
@@ -334,6 +366,19 @@ def execute_tool_with_policy(
             runner._intended_targets.add(normalized_target)
             runner._current_verification_targets = {normalized_target}
             runner._current_verification_before_contents = {}
+            if runner.benchmark_config.enabled:
+                authority = None
+                pack = getattr(runner, "_benchmark_localization_pack", None)
+                if pack is not None:
+                    authority = pack.authority_for_path(normalized_target)
+                runner.event_callback(
+                    {
+                        "type": "benchmark_first_edit_recorded",
+                        "path": normalized_target,
+                        "authority_tier": getattr(authority, "authority_tier", None),
+                        "authority_reasons": getattr(authority, "reasons", []),
+                    }
+                )
             target_path = (runner.repo / normalized_target).resolve()
             if target_path.exists() and target_path.is_file():
                 before_text = target_path.read_text(encoding="utf-8", errors="replace")

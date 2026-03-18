@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import os
 
 from villani_code.planning import ActionClass, ChangeImpact, TaskMode, compact_failure_output
 from villani_code.project_memory import ValidationConfig, ValidationStep, load_repo_map, load_validation_config
@@ -299,6 +300,34 @@ def summarize_validation_failure(step_name: str, stdout: str, stderr: str) -> Va
     )
 
 
+def classify_environment_failure(command: str, stdout: str, stderr: str, repo: Path) -> str | None:
+    text = "\n".join(part for part in [stdout, stderr] if part).casefold()
+    if "make: not found" in text or "'make' is not recognized" in text:
+        return "missing_make"
+    if "modulenotfounderror" in text or "no module named" in text or "importerror" in text:
+        if (repo / "src").exists():
+            return "src_layout_import_error"
+    if "bash: not found" in text or ("shell" in text and "not found" in text):
+        return "shell_incompatibility"
+    if "poetry: not found" in text or "uv: not found" in text or "pytest: not found" in text:
+        return "missing_command_runner_dependency"
+    return None
+
+
+def _retry_with_safe_env(command: str, repo: Path, repo_map: dict[str, Any] | None = None) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
+    lowered = command.casefold()
+    if not (repo / "src").exists():
+        return None, None
+    if "pytest" not in lowered and "python" not in lowered:
+        return None, None
+    env = os.environ.copy()
+    src_path = str((repo / "src").resolve())
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = src_path if not existing else f"{src_path}{os.pathsep}{existing}"
+    proc = subprocess.run(command, shell=True, cwd=repo, text=True, capture_output=True, env=env)
+    return proc, "pythopath_src_layout"
+
+
 def run_validation(repo: Path, changed_files: list[str], event_callback: Any | None = None, steps_override: list[str] | None = None, repo_map: dict[str, Any] | None = None, change_impact: str | None = None, action_classes: list[str] | None = None, task_mode: str = TaskMode.GENERAL.value) -> ValidationResult:
     cfg = load_validation_config(repo)
     repo_map = repo_map or load_repo_map(repo)
@@ -321,9 +350,54 @@ def run_validation(repo: Path, changed_files: list[str], event_callback: Any | N
         if event_callback:
             event_callback({"type": "validation_step_finished", "name": step.name, "exit_code": proc.returncode, "duration": result.duration_seconds})
         if proc.returncode != 0:
+            env_failure = classify_environment_failure(command, proc.stdout, proc.stderr, repo)
+            if env_failure == "src_layout_import_error":
+                mitigated_proc, mitigation = _retry_with_safe_env(command, repo, repo_map)
+                if mitigated_proc is not None and mitigation is not None:
+                    if event_callback:
+                        event_callback(
+                            {
+                                "type": "validation_environment_mitigation_attempted",
+                                "name": step.name,
+                                "classification": env_failure,
+                                "mitigation": mitigation,
+                            }
+                        )
+                    if mitigated_proc.returncode == 0:
+                        results[-1] = ValidationStepResult(
+                            step,
+                            command,
+                            mitigated_proc.returncode,
+                            mitigated_proc.stdout,
+                            mitigated_proc.stderr,
+                            time.monotonic() - started,
+                            planned_step.reasons + [f"mitigation={mitigation}"],
+                        )
+                        if event_callback:
+                            event_callback(
+                                {
+                                    "type": "validation_environment_mitigation_succeeded",
+                                    "name": step.name,
+                                    "classification": env_failure,
+                                    "mitigation": mitigation,
+                                }
+                            )
+                        continue
             failure = summarize_validation_failure(step.name, proc.stdout, proc.stderr)
+            if env_failure:
+                failure.failure_class = env_failure
+                failure.concise_summary = f"{env_failure}: {failure.concise_summary}"
+                failure.recommended_repair_scope = "environment_harness"
             if event_callback:
-                event_callback({"type": "validation_step_failed", "name": step.name, "summary": failure.concise_summary})
+                event_callback(
+                    {
+                        "type": "validation_step_failed",
+                        "name": step.name,
+                        "summary": failure.concise_summary,
+                        "environment_harness_failure": bool(env_failure),
+                        "environment_harness_classification": env_failure,
+                    }
+                )
             return ValidationResult(False, plan, results, f"{failure.headline}\n{failure.compact_output}", failure, ValidationRunSummary(False, [s.step.name for s in results], False))
 
     return ValidationResult(True, plan, results, run_summary=ValidationRunSummary(True, [s.step.name for s in results], False))
