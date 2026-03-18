@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from villani_code.autonomy import FailureCategory, FailureClassifier, TaskContract, VerificationEngine
 from villani_code.autonomous import AutonomousTask, VillaniModeController
+from villani_code import repair, state_runtime
 from villani_code.state import Runner
-from villani_code import state_runtime
 
 
 class _Client:
@@ -247,6 +250,50 @@ def test_small_model_scope_lock_allows_adjacent_test_expansion(tmp_path: Path) -
     assert runner._small_model_tool_guard("Patch", {"file_path": "tests/test_foo.py", "patch": "x"}) is None
 
 
+def test_repair_scope_lock_blocks_mutation_outside_original_changed_set(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=0\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("y=0\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._repair_scope_lock_active = True
+    runner._repair_locked_targets = {"src/a.py"}
+    runner._intended_targets = {"src/a.py"}
+    runner._files_read = {"src/b.py"}
+
+    blocked = runner._small_model_tool_guard("Patch", {"file_path": "src/b.py", "patch": "x"})
+
+    assert blocked is not None
+    assert "Repair scope lock" in blocked
+    assert "src/b.py" in blocked
+
+
+def test_repair_scope_lock_allows_mutation_inside_original_changed_set(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=0\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._repair_scope_lock_active = True
+    runner._repair_locked_targets = {"src/a.py"}
+
+    err = runner._small_model_tool_guard("Patch", {"file_path": "src/a.py", "patch": "x"})
+
+    assert err is None
+
+
+def test_repair_scope_lock_does_not_change_normal_scope_expansion(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=0\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("y=0\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner._intended_targets = {"src/a.py"}
+    runner._files_read = {"src/b.py"}
+
+    err = runner._small_model_tool_guard("Patch", {"file_path": "src/b.py", "patch": "x"})
+
+    assert runner._repair_scope_lock_active is False
+    assert err is None
+    assert runner._scope_expansion_used is True
+
+
 def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     target = tmp_path / "src" / "a.py"
@@ -256,6 +303,42 @@ def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Pat
     err = runner._small_model_tool_guard("Patch", {"file_path": "src/a.py", "patch": "x"})
     assert err is None
     assert runner._before_contents["src/a.py"] == "x=0\n"
+
+
+def test_execute_repair_loop_clears_scope_lock_after_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _runner(tmp_path)
+    initial_validation = SimpleNamespace(
+        steps=[SimpleNamespace(step=SimpleNamespace(name="targeted_pytest"))],
+        structured_failure=None,
+        failure_summary="failed",
+        plan=SimpleNamespace(
+            escalation=SimpleNamespace(
+                broaden_after_targeted_pass=False,
+                force_broad=False,
+                reason="targeted_then_broaden",
+            )
+        ),
+    )
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("repair prompt exploded")
+
+    monkeypatch.setattr(repair, "_run_repair_prompt", boom)
+
+    with pytest.raises(RuntimeError, match="repair prompt exploded"):
+        repair.execute_repair_loop(
+            runner=runner,
+            repo=tmp_path,
+            changed_files=["src/a.py"],
+            initial_validation=initial_validation,
+            repo_map={},
+            change_impact="source_only",
+            action_classes=["code_edit"],
+            max_attempts=1,
+        )
+
+    assert runner._repair_scope_lock_active is False
+    assert runner._repair_locked_targets == set()
 
 
 def test_patch_sanity_gate_catches_broken_python_edit(tmp_path: Path, monkeypatch) -> None:

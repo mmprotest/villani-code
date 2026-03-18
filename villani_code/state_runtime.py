@@ -485,6 +485,23 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             path = (runner.repo / fp).resolve()
             if is_ignored_repo_path(fp) or classify_repo_path(fp) != "authoritative":
                 return f"Small-model mode policy: target path is not authoritative: {fp}."
+            repair_locked_targets = {
+                str(item).replace("\\", "/").lstrip("./")
+                for item in getattr(runner, "_repair_locked_targets", set())
+                if str(item).strip()
+            }
+            if getattr(runner, "_repair_scope_lock_active", False) and fp not in repair_locked_targets:
+                runner.event_callback(
+                    {
+                        "type": "repair_scope_blocked",
+                        "file_path": fp,
+                        "locked_targets": sorted(repair_locked_targets),
+                    }
+                )
+                return (
+                    f"Repair scope lock: blocked mutation to {fp}. "
+                    f"Locked targets: {sorted(repair_locked_targets)}."
+                )
             if tool_name == "Patch" and not path.exists():
                 return f"Read-before-edit policy: cannot patch missing file {fp}. Use Write to create it first."
             if tool_name == "Write" and not path.exists():

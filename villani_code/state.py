@@ -402,6 +402,8 @@ class Runner:
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
+        self._repair_scope_lock_active = False
+        self._repair_locked_targets: set[str] = set()
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -653,6 +655,8 @@ class Runner:
         self._scope_expansion_used = False
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
+        self._repair_scope_lock_active = False
+        self._repair_locked_targets = set()
         if self._first_attempt_write_lock_active:
             self.event_callback(
                 {
