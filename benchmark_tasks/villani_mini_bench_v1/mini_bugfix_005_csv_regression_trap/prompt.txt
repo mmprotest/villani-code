@@ -1,0 +1,1 @@
+CSV parsing breaks when a field contains a quoted comma. Fix the bug without breaking normal CSV parsing.

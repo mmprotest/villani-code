@@ -1,0 +1,23 @@
+id: mini_bugfix_004_exit_code_propagation
+family: bugfix
+difficulty: medium
+language: python
+max_minutes: 5
+max_files_touched: 2
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_runner.py::test_nonzero_exit_code_is_propagated
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+expected_touched_max: 1
+task_type: single_file_bugfix
+benchmark_track: core
