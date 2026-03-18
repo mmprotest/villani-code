@@ -192,7 +192,15 @@ def test_failed_verification_triggers_structured_repair_mode_and_bounded_branchi
 def test_targeted_verification_runs_before_broader_verification(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("x=1\n", encoding="utf-8")
+    diff = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-x=1\n+x=2\n"
     runner = _runner(tmp_path)
+    runner.client.create_message = lambda payload, stream: {
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "repair-1", "name": "Patch", "input": {"unified_diff": diff}},
+            {"type": "text", "text": "repair"},
+        ],
+    }
     runner._benchmark_localization_pack = build_benchmark_localization_pack(
         tmp_path,
         "Fix app logic",

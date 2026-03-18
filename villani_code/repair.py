@@ -116,7 +116,7 @@ def _build_repair_context(
     return RepairContext(
         task_summary=str(getattr(getattr(runner, "_execution_plan", None), "task_goal", ""))[:200],
         plan_summary=getattr(getattr(runner, "_execution_plan", None), "to_human_text", lambda: "")()[:500],
-        change_impact="source_only",
+        change_impact=str(getattr(getattr(runner, "_execution_plan", None), "change_impact", "source_only")),
         files_changed=changed_files[:10],
         failing_validation_step=failing_step,
         failure_summary=str(failure_summary)[:500],
@@ -131,6 +131,11 @@ def _build_repair_context(
         verification_history=verification_history,
         edit_authority=authority,
     )
+
+
+def _meaningful_changed_files(runner: Any) -> list[str]:
+    changed = list(getattr(runner, "_git_changed_files", lambda: [])())
+    return [str(path).replace("\\", "/").lstrip("./") for path in changed]
 
 
 def _build_branches(
@@ -150,6 +155,14 @@ def _build_branches(
         branches.append(RepairBranch("adjacent-file-correction", "keep scope bounded but include the most suspicious adjacent implementation/test file", adjacent[:1]))
     elif adjacent:
         branches.append(RepairBranch("localization-shift", "shift to the strongest alternate localization candidate from verifier evidence", adjacent[:1]))
+    elif primary:
+        branches.append(
+            RepairBranch(
+                "bounded-relocalize",
+                "perform one bounded relocalization pass before stopping if the first repair hypothesis fails",
+                primary[:1],
+            )
+        )
     return branches[:2]
 
 
@@ -160,13 +173,13 @@ def _run_repair_prompt(
     branch: RepairBranch,
 ) -> str:
     payload = {
-        "repair_mode": "bounded_benchmark_repair",
+        "repair_mode": "bounded_runtime_repair",
         "branch": asdict(branch),
         "context": asdict(context),
         "prior_attempts": [asdict(a) for a in prior_attempts],
         "instruction": (
             "Repair only the failing validation signal with one minimal corrective patch. "
-            "Stay within allowed files, inherit benchmark scope, and do not reset or explore broadly."
+            "Inherit prior context, stay within the current evidence-backed target set, and do not reset or explore broadly."
         ),
     }
     prompt = "Bounded repair workflow JSON:\n" + json.dumps(payload, ensure_ascii=False)
@@ -190,12 +203,14 @@ def _run_repair_prompt(
     )
     response = raw if isinstance(raw, dict) else {"content": []}
     for block in [b for b in response.get("content", []) if b.get("type") == "tool_use"]:
-        runner._execute_tool_with_policy(
+        result = runner._execute_tool_with_policy(
             str(block.get("name", "")),
             dict(block.get("input", {})),
             str(block.get("id", "repair-tool")),
             len(call_messages),
         )
+        if str(block.get("name", "")) in {"Write", "Patch"} and not result.get("is_error"):
+            runner._edit_generation = int(getattr(runner, "_edit_generation", 0)) + 1
     text = "\n".join(
         b.get("text", "")
         for b in response.get("content", [])
@@ -289,7 +304,42 @@ def execute_repair_loop(
                 "target_files": branch.target_files,
             }
         )
+        changed_before = _meaningful_changed_files(runner)
+        patch_attempts_before = int(getattr(runner, "_edit_generation", 0))
         repair_summary = _run_repair_prompt(runner, context, attempts, branch)
+        changed_after = _meaningful_changed_files(runner)
+        produced_patch = changed_after != changed_before or int(getattr(runner, "_edit_generation", 0)) > patch_attempts_before
+        runner.event_callback(
+            {
+                "type": "repair_patch_cycle_completed",
+                "attempt": attempt_idx,
+                "branch_name": branch.name,
+                "produced_patch": produced_patch,
+                "reason": "" if produced_patch else "no_patch_produced_after_failed_verification",
+            }
+        )
+        if not produced_patch:
+            attempts.append(
+                RepairAttemptSummary(
+                    attempt_idx,
+                    failing_step,
+                    str(failure_summary)[:220],
+                    repair_summary[:260],
+                    "no_patch",
+                    branch_name=branch.name,
+                    branch_reason=branch.reason,
+                    targeted_verification_passed=False,
+                )
+            )
+            runner.event_callback(
+                {
+                    "type": "repair_attempt_result",
+                    "attempt": attempt_idx,
+                    "status": "no_patch",
+                    "branch_name": branch.name,
+                }
+            )
+            continue
         targeted = run_validation(
             repo,
             changed_files,
@@ -299,6 +349,8 @@ def execute_repair_loop(
             change_impact=change_impact,
             action_classes=action_classes,
             task_mode=str(getattr(getattr(runner, "_task_mode", None), "value", getattr(runner, "_task_mode", "general"))),
+            command_cache=getattr(runner, "_verification_command_cache", None),
+            edit_generation=int(getattr(runner, "_edit_generation", 0)),
         )
         runner.event_callback(
             {
@@ -320,6 +372,8 @@ def execute_repair_loop(
                     change_impact=change_impact,
                     action_classes=action_classes,
                     task_mode=str(getattr(getattr(runner, "_task_mode", None), "value", getattr(runner, "_task_mode", "general"))),
+                    command_cache=getattr(runner, "_verification_command_cache", None),
+                    edit_generation=int(getattr(runner, "_edit_generation", 0)),
                 )
             if broader_result is None or broader_result.passed:
                 attempts.append(
@@ -380,7 +434,7 @@ def execute_repair_loop(
 
     return RepairOutcome(
         False,
-        "Validation failed after bounded repair branching. Remaining failure: " + str(best_failure)[:400],
+        "Validation failed after bounded repair attempts. Remaining failure: " + str(best_failure)[:400],
         attempts,
         best_step,
         failure_classification=failure.classification,

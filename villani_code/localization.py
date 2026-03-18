@@ -210,6 +210,15 @@ def classify_verification_failure(
         classification = "missing_command_runner_dependency"
         repair_decision = "environment_harness_issue"
         environment = True
+    elif "edit_authority_denied" in lowered or "forbidden" in lowered and "path=" in lowered:
+        classification = "forbidden_target_drift"
+        repair_decision = "forbidden_target_drift"
+    elif "no patch" in lowered or "no_patch" in lowered:
+        classification = "no_patch_produced"
+        repair_decision = "no_patch_produced"
+    elif not traceback_files and ("failed" in lowered or "mismatch" in lowered):
+        classification = "wrong_localization"
+        repair_decision = "wrong_file_localized"
 
     targeted = traceback_files[:4]
     return VerificationFailureEvidence(

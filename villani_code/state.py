@@ -28,6 +28,7 @@ from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
 from villani_code.localization import build_benchmark_localization_pack
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
+from villani_code.runtime_telemetry import RuntimeTelemetryState, write_runtime_event
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
@@ -334,7 +335,7 @@ class Runner:
         self.plan_mode = plan_mode
         self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)
-        self.event_callback = event_callback or (lambda _event: None)
+        self._event_sink = event_callback or (lambda _event: None)
         self.small_model = small_model
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
@@ -400,6 +401,8 @@ class Runner:
         self._last_verification_intentional: set[str] = set()
         self._last_verification_artifact_count = 0
         self._verification_history: list[dict[str, Any]] = []
+        self._verification_command_cache: dict[str, int] = {}
+        self._edit_generation = 0
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
@@ -412,8 +415,16 @@ class Runner:
         self._benchmark_localization_pack = None
         self._benchmark_edit_authority_log: dict[str, dict[str, Any]] = {}
         self._last_repair_outcome = None
+        self._runtime_telemetry = RuntimeTelemetryState()
+        self.event_callback = self._dispatch_runtime_event
         if self.small_model or self.benchmark_config.enabled:
             self._init_small_model_support()
+
+    def _dispatch_runtime_event(self, event: dict[str, Any]) -> None:
+        payload = dict(event)
+        self._runtime_telemetry.observe(payload)
+        write_runtime_event(self.repo, payload)
+        self._event_sink(payload)
 
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
@@ -773,6 +784,7 @@ class Runner:
         ) -> dict[str, Any]:
             elapsed = time.monotonic() - start
             intentional_changes, incidental_changes, all_changes = _change_summary()
+            self.event_callback({"type": "runner_terminated", "reason": reason, "completed": completed})
             final_text = "\n".join(
                 block.get("text", "")
                 for block in response.get("content", [])
@@ -796,6 +808,7 @@ class Runner:
                 completed=completed,
             )
             transcript["execution"] = execution.to_dict()
+            transcript["runtime_telemetry"] = self._runtime_telemetry.finalize(completed=completed, terminated_reason=reason)
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = None
             if not self._planning_read_only:
@@ -810,6 +823,7 @@ class Runner:
                 "transcript_path": str(transcript_path) if transcript_path is not None else "",
                 "transcript": transcript,
                 "execution": execution.to_dict(),
+                "runtime_telemetry": transcript["runtime_telemetry"],
             }
 
         def _budget_reason(
@@ -967,11 +981,14 @@ class Runner:
                     if post:
                         response.setdefault("content", []).append({"type": "text", "text": post})
                     self._save_session_snapshot(messages)
+                    self.event_callback({"type": "runner_terminated", "reason": "completed", "completed": True})
+                    transcript["runtime_telemetry"] = self._runtime_telemetry.finalize(completed=True, terminated_reason="completed")
                     return {
                         "response": response,
                         "messages": messages,
                         "transcript_path": str(transcript_path),
                         "transcript": transcript,
+                        "runtime_telemetry": transcript["runtime_telemetry"],
                     }
                 proposal = self._capture_edit_proposal(response)
                 if proposal:
@@ -1092,6 +1109,7 @@ class Runner:
                     "messages": messages,
                     "transcript_path": str(transcript_path) if transcript_path is not None else "",
                     "transcript": transcript,
+                    "runtime_telemetry": self._runtime_telemetry.finalize(completed=True, terminated_reason="completed"),
                 }
 
             tool_results: list[dict[str, Any]] = []
@@ -1126,6 +1144,7 @@ class Runner:
                         "messages": messages,
                         "transcript_path": "",
                         "transcript": transcript,
+                        "runtime_telemetry": self._runtime_telemetry.finalize(completed=True, terminated_reason="plan_finalized"),
                     }
 
                 result = self._execute_tool_with_policy(
@@ -1138,6 +1157,7 @@ class Runner:
                         self._files_read.add(str(tool_input.get("file_path", "")))
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    self._edit_generation += 1
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )

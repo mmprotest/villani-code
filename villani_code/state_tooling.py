@@ -241,6 +241,49 @@ def _validate_first_attempt_locked_target_mutation(
     return None
 
 
+def _runtime_evidence_paths(runner: Any) -> set[str]:
+    paths = {str(path).replace("\\", "/").lstrip("./") for path in getattr(runner, "_intended_targets", set())}
+    paths.update(str(path).replace("\\", "/").lstrip("./") for path in getattr(runner, "_files_read", set()))
+    paths.update(str(path).replace("\\", "/").lstrip("./") for path in getattr(runner, "_current_verification_targets", set()))
+    benchmark_pack = getattr(runner, "_benchmark_localization_pack", None)
+    if benchmark_pack is not None:
+        paths.update(candidate.path for candidate in getattr(benchmark_pack, "top_candidate_files", []))
+    return {path for path in paths if path}
+
+
+def _validate_general_mutation_authority(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> str | None:
+    if tool_name not in {"Write", "Patch"}:
+        return None
+    for path in _benchmark_mutation_targets(tool_name, tool_input):
+        normalized = str(path or "").replace("\\", "/").lstrip("./")
+        if not normalized:
+            continue
+        path_name = Path(normalized).name
+        if any(part in {"__pycache__", ".pytest_cache", "build", "dist"} for part in Path(normalized).parts) or normalized.endswith(".pyc") or ".egg-info/" in normalized:
+            runner.event_callback({"type": "edit_authority_rejected", "path": normalized, "reason": "generated_or_runtime_artifact"})
+            return f"edit_authority_denied: path={normalized} reason=generated_or_runtime_artifact"
+        evidence_paths = _runtime_evidence_paths(runner)
+        requires_strong_evidence = (
+            path_name in {"pyproject.toml", "Makefile", "makefile", "pytest.ini", "tox.ini", "conftest.py", "__init__.py"}
+            or normalized.endswith((".toml", ".ini", ".cfg"))
+        )
+        if requires_strong_evidence and normalized not in evidence_paths:
+            runner.event_callback({"type": "edit_authority_rejected", "path": normalized, "reason": "low_authority_without_runtime_evidence"})
+            return f"edit_authority_denied: path={normalized} reason=low_authority_without_runtime_evidence"
+        runner.event_callback(
+            {
+                "type": "edit_authority_granted",
+                "path": normalized,
+                "reason": "runtime_evidence" if normalized in evidence_paths else "normal_source_path",
+            }
+        )
+    return None
+
+
 def execute_tool_with_policy(
     runner: Any,
     tool_name: str,
@@ -285,6 +328,9 @@ def execute_tool_with_policy(
             return {"content": policy_error, "is_error": True}
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
+    general_authority_error = _validate_general_mutation_authority(runner, tool_name, tool_input)
+    if general_authority_error:
+        return {"content": general_authority_error, "is_error": True}
     if runner.benchmark_config.enabled and tool_name in {"Write", "Patch"}:
         _normalize_mutation_payload_for_code_files(tool_name, tool_input)
 

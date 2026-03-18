@@ -328,7 +328,18 @@ def _retry_with_safe_env(command: str, repo: Path, repo_map: dict[str, Any] | No
     return proc, "pythopath_src_layout"
 
 
-def run_validation(repo: Path, changed_files: list[str], event_callback: Any | None = None, steps_override: list[str] | None = None, repo_map: dict[str, Any] | None = None, change_impact: str | None = None, action_classes: list[str] | None = None, task_mode: str = TaskMode.GENERAL.value) -> ValidationResult:
+def run_validation(
+    repo: Path,
+    changed_files: list[str],
+    event_callback: Any | None = None,
+    steps_override: list[str] | None = None,
+    repo_map: dict[str, Any] | None = None,
+    change_impact: str | None = None,
+    action_classes: list[str] | None = None,
+    task_mode: str = TaskMode.GENERAL.value,
+    command_cache: dict[str, int] | None = None,
+    edit_generation: int = 0,
+) -> ValidationResult:
     cfg = load_validation_config(repo)
     repo_map = repo_map or load_repo_map(repo)
     plan = plan_validation(cfg, changed_files, repo_map=repo_map, change_impact=change_impact, action_classes=action_classes, task_mode=task_mode)
@@ -341,10 +352,40 @@ def run_validation(repo: Path, changed_files: list[str], event_callback: Any | N
     for planned_step in plan.selected_steps:
         step = planned_step.step
         command = planned_step.command
+        if command_cache is not None and command_cache.get(command) == edit_generation:
+            failure = ValidationFailureSummary(
+                step_name=step.name,
+                failure_class="repeated_verifier_without_edit",
+                headline=f"{step.name} skipped",
+                relevant_paths=list(changed_files[:4]),
+                relevant_error_lines=["verification command already ran for current edit generation"],
+                concise_summary="verification command already ran with no intervening edit",
+                recommended_repair_scope="no_progress",
+                compact_output=command,
+            )
+            if event_callback:
+                event_callback(
+                    {
+                        "type": "validation_step_skipped_duplicate",
+                        "name": step.name,
+                        "command": command,
+                        "edit_generation": edit_generation,
+                    }
+                )
+            return ValidationResult(
+                False,
+                plan,
+                results,
+                failure.concise_summary,
+                failure,
+                ValidationRunSummary(False, [s.step.name for s in results], False),
+            )
         if event_callback:
             event_callback({"type": "validation_step_started", "name": step.name, "command": command, "reasons": planned_step.reasons})
         started = time.monotonic()
         proc = subprocess.run(command, shell=True, cwd=repo, text=True, capture_output=True)
+        if command_cache is not None:
+            command_cache[command] = edit_generation
         result = ValidationStepResult(step, command, proc.returncode, proc.stdout, proc.stderr, time.monotonic() - started, planned_step.reasons)
         results.append(result)
         if event_callback:

@@ -32,6 +32,7 @@ from villani_code.utils import ensure_dir
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
+_LOW_AUTHORITY_LOCALIZATION_NAMES = {"__init__.py", "core.py", "utils.py", "pyproject.toml", "setup.py", "setup.cfg", "Makefile"}
 
 
 def _normalize_repo_path(value: str) -> str:
@@ -207,6 +208,14 @@ def classify_diagnosis_target_confidence(
     target_file = _normalize_repo_path(str(diagnosis.get("target_file", "")))
     if not target_file:
         return "weak"
+    if Path(target_file).name in _LOW_AUTHORITY_LOCALIZATION_NAMES:
+        explicit_path_evidence = False
+        if failure_evidence:
+            traceback_file = _normalize_repo_path(str(failure_evidence.get("traceback_file", "")))
+            excerpt_path = _extract_first_path_from_text(str(failure_evidence.get("raw_failure_excerpt", "")))
+            explicit_path_evidence = target_file in {traceback_file, excerpt_path}
+        if not explicit_path_evidence:
+            return "weak"
 
     cfg = getattr(runner, "benchmark_config", None)
     expected_file = _single_clear_file(list(getattr(cfg, "expected_files", []) if cfg else []))
@@ -1228,13 +1237,24 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
 
     runner.event_callback({"type": "validation_started", "changed_files": changed_files})
     task_mode = str(getattr(plan, "task_mode", TaskMode.GENERAL.value))
-    result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback, repo_map=repo_map, change_impact=plan_impact, action_classes=plan_actions, task_mode=task_mode)
+    result = run_validation(
+        runner.repo,
+        changed_files,
+        event_callback=runner.event_callback,
+        repo_map=repo_map,
+        change_impact=plan_impact,
+        action_classes=plan_actions,
+        task_mode=task_mode,
+        command_cache=runner._verification_command_cache,
+        edit_generation=int(getattr(runner, "_edit_generation", 0)),
+    )
     runner.event_callback({
         "type": "validation_plan_selected",
         "steps": [s.step.name for s in result.plan.selected_steps],
         "reasons": [r.reason for r in result.plan.reasons[:6]],
         "escalation": result.plan.escalation.reason,
     })
+    runner.event_callback({"type": "validation_completed", "stage": "initial", "passed": result.passed})
     inventory = runner._context_governance.load_inventory()
     compact_validation = ContextCompactor.compact_validation_logs(result.failure_summary if not result.passed else "Validation passed")
     inventory.compactions.append(compact_validation)
@@ -1287,6 +1307,7 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             "environment_harness_failure": outcome.environment_harness_failure,
         }
     )
+    runner.event_callback({"type": "validation_completed", "stage": "repair_final", "passed": outcome.recovered})
     if outcome.recovered:
         checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed after repair"])
         runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_recovered"})
