@@ -1,141 +1,117 @@
 # Villani Code
 
-**The coding agent runtime built to make smaller local models actually useful.**
+**A coding agent runtime built to get useful repo work out of smaller local models.**
 
-Most coding agents are built around strong hosted models and large context budgets.
+Most coding agents are tuned for the easiest version of the problem: strong hosted models, large context windows, and plenty of slack.
 
-Villani Code is built for the opposite case: constrained local models, real repositories, explicit control, and work that has to survive contact with tests.
+Villani Code is built for the harder version: constrained local models, bounded repository tasks, explicit control, and work that has to survive verification.
 
-On a matched Qwen3.5 9B benchmark, Villani Code substantially outperformed Claude Code and OpenCode on the task families that matter most for bounded repo work.
+On the current benchmark runs in this repo, Villani Code achieved the highest solve rate at every reported Qwen 3.5 model size, with the clearest gain at **9B**.
 
-![Qwen3.5 9B benchmark comparison](villani_vs_claude_vs_opencode_qwen35_9b_clean.png)
+![Overall solve rate by model](plot_01_overall_solve_rate.png)
 
-## Benchmark snapshot
+## Why this exists
 
-On the current Qwen3.5 9B benchmark comparison:
-
-- **Villani Code:** **75.0%**
-- **OpenCode:** **35.7%**
-- **Claude Code:** **32.1%**
-
-By task family:
-
-- **Bugfix**
-  - Villani Code: **70.6%**
-  - OpenCode: **41.2%**
-  - Claude Code: **41.2%**
-
-- **Localize patch**
-  - Villani Code: **83.3%**
-  - OpenCode: **33.3%**
-  - Claude Code: **0.0%**
-
-- **Terminal workflow**
-  - Villani Code: **80.0%**
-  - OpenCode: **20.0%**
-  - Claude Code: **40.0%**
-
-The strongest signal is localize-patch performance. That is where weak models usually drift, touch the wrong files, or fail to land the fix. Villani is materially better there.
-
-## What Villani Code is
-
-![Villani Code demo](code_review.gif)
-
-Villani Code is a terminal-first coding agent runtime designed for private, local-first, cost-sensitive development workflows.
-
-It is built for the cases where model capability is limited and runtime quality matters more:
-- bounded bug fixes
-- repo navigation and localization
-- test-guided iteration
-- constrained maintenance work
-- private codebases
-- local inference setups
-
-This is not a wrapper trying to make a weak model look impressive in a demo.
-
-It is a runtime built to get more accepted work out of smaller models on real code.
-
-## The idea
-
-Small local models are cheap, private, fast to run, and easy to deploy.
+Small local models are cheap, private, and easy to deploy.
 
 They are also easy to waste.
 
-A weak model with a sloppy runtime drifts, edits the wrong files, burns context, overexplains, and breaks the repo.
-
-A weak model with tighter execution can still be useful.
+A weak model with a loose runtime drifts, edits the wrong files, burns context, and fails verification. A weak model with tighter execution can still land useful work.
 
 That is the bet behind Villani Code.
 
-## Why it exists
+## Benchmark snapshot
 
-Most people evaluating coding agents ask the wrong question.
+All headline numbers below are reported on the cleaned **28-task non-repro subset** of the current benchmark suite. OpenCode did not complete the 4B run, so that cell is omitted.
 
-They ask: *what is the strongest model?*
+| Model | Villani | Claude Code | OpenCode |
+|---|---:|---:|---:|
+| Qwen 3.5 4B | **20/28 (71.4%)** | 15/28 (53.6%) | N/A |
+| Qwen 3.5 9B | **21/28 (75.0%)** | 9/28 (32.1%) | 10/28 (35.7%) |
+| Qwen 3.5 27B | **21/28 (75.0%)** | 11/28 (39.3%) | 16/28 (57.1%) |
 
-That matters, but it misses the real constraint in a lot of environments:
-- private repositories
-- on-prem deployment
-- limited GPU budgets
-- local developer workflows
-- enterprise teams that cannot send code to frontier APIs by default
+The strongest result is at **9B**, where Villani Code more than doubled the solve rate of the two baseline agent runtimes on this task set.
 
-In those settings, the question changes:
+![Villani margin over best baseline](plot_06_margin_over_best_baseline.png)
 
-**How much useful repo work can you get from a smaller local model?**
+## What the result means
 
-That is the problem Villani Code is built to solve.
+The current evidence supports a specific claim:
+
+**Runtime design matters a lot when the model is small.**
+
+Villani Code appears to get materially better coding performance out of smaller local models than general-purpose coding-agent workflows on bounded repo tasks.
+
+That is a much narrower claim than “this beats everything everywhere.” It is also the interesting one.
+
+## Where the gains show up
+
+The strongest pattern in the current benchmark is not just aggregate solve rate. It is task-family performance.
+
+At **9B**, Villani Code led across all three task families, with the biggest edge in localization and bounded patch work.
+
+![Task-family solve rate, 9B](plot_family_9b.png)
+
+### Qwen 3.5 9B by task family
+
+| Family | Villani | Claude Code | OpenCode |
+|---|---:|---:|---:|
+| Bugfix | **12/17 (70.6%)** | 7/17 (41.2%) | 7/17 (41.2%) |
+| Localize | **5/6 (83.3%)** | 0/6 (0.0%) | 2/6 (33.3%) |
+| Terminal | **4/5 (80.0%)** | 2/5 (40.0%) | 1/5 (20.0%) |
+
+This matters because localization is where weaker models usually fall apart. They read too much, touch the wrong files, or fail to land the fix cleanly.
+
+## What Villani Code is
+
+Villani Code is a terminal-first coding agent runtime designed for:
+
+- bounded bug fixes
+- repo navigation and file localization
+- test-guided iteration
+- constrained maintenance work
+- privacy-sensitive codebases
+- local inference setups where model budget matters
+
+The goal is not to produce a clever transcript.
+
+The goal is to land a patch that passes verification.
 
 ## What makes it different
 
-### Built for constrained models
-Villani Code is designed around the weaknesses of smaller models instead of pretending they do not exist.
+### Built for constrained backends
+Villani Code is designed around the failure modes of smaller models instead of pretending they do not matter.
 
-### Terminal-first
-It works where coding agents actually have to work: files, commands, tests, diffs, and repo state.
+### Terminal-first workflow
+It operates where coding agents actually have to operate: files, commands, diffs, tests, and repo state.
 
 ### Tighter task discipline
-The runtime is built to reduce drift, keep actions bounded, and push the model toward useful edits instead of vague activity.
+The runtime is built to reduce drift, bound actions, and keep the model moving toward useful edits.
 
-### Outcome-focused
-The goal is not a pretty transcript. The goal is a patch that survives verification.
+### Verification-oriented
+The target is accepted work, not chat quality.
 
 ### Local-first by design
-Villani Code is a better fit for privacy-sensitive and budget-sensitive environments than tools that only really shine with expensive hosted models.
-
-## What the benchmark result actually means
-
-The strongest current claim is not “Villani beats everything everywhere.”
-
-The stronger and more honest claim is narrower:
-
-**Villani Code gets materially better coding performance out of smaller local models than general-purpose coding-agent workflows on the kinds of bounded repo tasks that matter in practice.**
-
-That is the interesting thing.
-
-Not that it looks smart.
-Not that it writes long explanations.
-Not that it can talk about code.
-
-That it lands more correct work.
+Villani Code fits environments where sending private code to hosted frontier APIs is not acceptable by default.
 
 ## Where it should win
 
-Villani Code is a good fit when you care about one or more of these:
+Villani Code is a good fit when:
+
 - private code must stay inside your environment
-- model budget matters
-- you want better performance from 7B to 35B-class local backends
-- your work is bounded and verifier-friendly
-- you care about explicit control over what the agent touches
-- you want a runtime that is measured by useful diffs, not vibes
+- model cost matters
+- you want more useful work from 4B to 30B-class local models
+- the task is bounded and verifier-friendly
+- you care about limiting what the agent touches
 
 ## Where it is not trying to win
 
 Villani Code is not trying to be:
+
 - a general autonomous software engineer
-- a flashy open-ended demo bot
 - a frontier-model replacement
-- a generic AI chat shell with code bolted on
+- a demo bot optimized for open-ended conversations
+- a generic chat shell with code tools glued on
 
 That is not the point.
 
@@ -184,20 +160,41 @@ villani-code --villani-mode --base-url http://127.0.0.1:1234 --model your-model 
 Run the benchmark suite:
 
 ```bash
-villani-code benchmark run --suite benchmark_tasks/villani_bench_v1 --agent villani --provider openai --model your-model --base-url http://127.0.0.1:1234 --api-key dummy --output-dir artifacts/benchmark/run_name
+villani-code benchmark run \
+  --suite benchmark_tasks/villani_bench_v1 \
+  --agent villani \
+  --provider openai \
+  --model your-model \
+  --base-url http://127.0.0.1:1234 \
+  --api-key dummy \
+  --output-dir artifacts/benchmark/run_name
 ```
 
-Generate summary stats:
+Generate summaries:
 
 ```bash
 villani-code benchmark summary --results artifacts/benchmark/run_name/results.jsonl
 villani-code benchmark stats --results artifacts/benchmark/run_name/results.jsonl
 ```
 
+## Reproducing the current figures
+
+The plots used above were generated from the cleaned benchmark matrices derived from the current benchmark outputs.
+
+Included report figures:
+
+- `plot_01_overall_solve_rate.png`
+- `plot_06_margin_over_best_baseline.png`
+- `plot_family_9b.png`
+
 ## Current thesis
 
-A better runtime can move the needle more than people think.
+A better runtime can move the needle more than most people think.
 
 Especially when the backend is small, local, private, and easy for everyone else to underestimate.
 
-That is what Villani Code is trying to prove.
+## Caveats
+
+These results are promising, but they are not the final word.
+
+The current README figures are based on the existing benchmark runs, after excluding `repro_*` tasks and normalizing to the shared non-repro subset. The next step is to tighten the benchmark further with repeated runs, a frozen held-out split, and ablations that isolate which parts of the runtime are driving the gains.
