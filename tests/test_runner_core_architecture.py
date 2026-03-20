@@ -60,6 +60,9 @@ FORBIDDEN_CORE_BENCHMARK_IMPORT_PREFIXES = (
     "villani_code.benchmark.agent_runner",
     "villani_code.benchmark.agents",
 )
+FORBIDDEN_STATE_BENCHMARK_IMPORT_PREFIXES = (
+    "villani_code.benchmark.runtime_config",
+)
 
 
 def _module_path(*parts: str) -> Path:
@@ -211,6 +214,15 @@ def test_runner_core_does_not_import_benchmark_reporting_or_agent_code() -> None
         if forbidden:
             violations.append(f"{rel}: {', '.join(forbidden)}")
     assert not violations, "Runner core must not depend on benchmark reporting or agent layers:\n" + "\n".join(violations)
+
+
+def test_state_module_does_not_import_benchmark_runtime_config_directly() -> None:
+    path = _module_path("villani_code", "state.py")
+    imports = _module_imports(path)
+    forbidden = sorted(
+        name for name in imports if name.startswith(FORBIDDEN_STATE_BENCHMARK_IMPORT_PREFIXES)
+    )
+    assert not forbidden, "state.py must depend on a neutral benchmark config interface, not benchmark runtime config types directly."
 
 
 def test_runner_core_public_surface_stays_small_and_intentional() -> None:
