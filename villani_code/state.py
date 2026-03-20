@@ -830,10 +830,11 @@ class Runner:
             self._live_stream_started = False
             self._coalescer = StreamCoalescer()
             turn_messages = self._prepare_messages_for_model(messages)
+            turn_system = self._prepare_system_blocks_for_model(system)
             payload = {
                 "model": self.model,
                 "messages": turn_messages,
-                "system": system,
+                "system": turn_system,
                 "tools": tools,
                 "max_tokens": self.max_tokens,
                 "stream": self.stream,
@@ -1337,6 +1338,13 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.prepare_messages_for_model(self, messages)
+
+    def _prepare_system_blocks_for_model(
+        self, system_blocks: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        from villani_code import state_runtime
+
+        return state_runtime.prepare_system_blocks_for_model(self, system_blocks)
 
     def _inject_retrieval_briefing(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime

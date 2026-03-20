@@ -491,21 +491,30 @@ def _record_tool_session_state(
     )
 
 
-def _prepend_focus_block(messages: list[dict[str, Any]], focus_block: str) -> list[dict[str, Any]]:
+def _prepare_focus_runtime_block(focus_block: str) -> dict[str, str] | None:
     if not focus_block:
-        return messages
-    return [{"role": "user", "content": [{"type": "text", "text": focus_block}]}, *messages]
+        return None
+    return {"type": "text", "text": f"<runtime-context>\n{focus_block}\n</runtime-context>"}
+
+
+def prepare_system_blocks_for_model(
+    runner: Any, system_blocks: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    prepared = [dict(block) for block in system_blocks]
+    focus_state = getattr(runner, "_focus_session_state", None)
+    if not isinstance(focus_state, SessionMemory):
+        focus_state = _get_session_state(runner)
+    runtime_block = _prepare_focus_runtime_block(render_focus_block(focus_state))
+    runner._focus_session_state = _get_session_state(runner)
+    if runtime_block is None:
+        return prepared
+    if not prepared:
+        return [runtime_block]
+    return [prepared[0], runtime_block, *prepared[1:]]
 
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = [dict(m) for m in messages]
-    focus_state = getattr(runner, "_focus_session_state", None)
-    if not isinstance(focus_state, SessionMemory):
-        focus_state = _get_session_state(runner)
-    focus_block = render_focus_block(focus_state)
-    if focus_block:
-        prepared = _prepend_focus_block(prepared, focus_block)
-    runner._focus_session_state = _get_session_state(runner)
     if runner.small_model:
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:

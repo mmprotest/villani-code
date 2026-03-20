@@ -124,28 +124,22 @@ def test_sync_session_state_keeps_runner_cache_populated(tmp_path: Path) -> None
     assert runner._session_state.current_goal == "Keep session cache alive"
 
 
-def test_focus_block_integration_uses_synthetic_context_message_without_mutating_history() -> None:
+def test_focus_block_integration_uses_runtime_system_context_without_mutating_history() -> None:
     messages = [{"role": "user", "content": [{"type": "text", "text": "Continue the fix"}]}]
+    system_blocks = [{"type": "text", "text": "base system"}]
     runner = SimpleNamespace(
         repo=Path("."),
         _session_state=SessionMemory(current_goal="Remember the previous turn"),
         _focus_session_state=SessionMemory(current_goal="Remember the previous turn"),
-        small_model=False,
-        _context_governance=SimpleNamespace(
-            load_inventory=lambda: SimpleNamespace(task_id="", compactions=[]),
-            register_item=lambda *args, **kwargs: None,
-            prune_for_budget=lambda *args, **kwargs: None,
-            save_inventory=lambda *args, **kwargs: None,
-        ),
-        _execution_plan=None,
     )
 
-    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+    prepared_system = state_runtime.prepare_system_blocks_for_model(runner, system_blocks)
 
-    assert prepared[0]["role"] == "user"
-    assert "[FOCUS]" in prepared[0]["content"][0]["text"]
-    assert prepared[1] == messages[0]
+    assert prepared_system[0] == system_blocks[0]
+    assert "<runtime-context>" in prepared_system[1]["text"]
+    assert "[FOCUS]" in prepared_system[1]["text"]
     assert messages == [{"role": "user", "content": [{"type": "text", "text": "Continue the fix"}]}]
+    assert system_blocks == [{"type": "text", "text": "base system"}]
 
 
 class _ContinuityClient:
@@ -171,8 +165,10 @@ def test_second_turn_sees_state_from_first_turn(tmp_path: Path) -> None:
     runner.run("Continue the same improvement")
 
     first_state = json.loads((tmp_path / ".villani" / "session_state.json").read_text(encoding="utf-8"))
-    first_message_text = client.payloads[1]["messages"][0]["content"][0]["text"]
+    second_system_text = "\n".join(block["text"] for block in client.payloads[1]["system"])
+    second_message_text = client.payloads[1]["messages"][0]["content"][0]["text"]
 
     assert first_state["current_goal"] == "Continue the same improvement"
-    assert "[FOCUS]" in first_message_text
-    assert "Add compact session memory" in first_message_text
+    assert "[FOCUS]" in second_system_text
+    assert "Add compact session memory" in second_system_text
+    assert "[FOCUS]" not in second_message_text
