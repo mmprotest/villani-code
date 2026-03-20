@@ -12,8 +12,9 @@ from villani_code.benchmark.models import (
 )
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.benchmark.runner import BenchmarkRunner
-from villani_code.benchmark.reporting import aggregate_results
+from villani_code.benchmark.reporting import aggregate_results, summarize, write_results
 from villani_code.benchmark.prompt_contract import extract_shared_contract_section, render_benchmark_prompt
+from villani_code.benchmark.usage import extract_token_usage
 from villani_code.patch_apply import extract_unified_diff_targets
 from villani_code.prompting import build_system_blocks
 from villani_code.state import Runner
@@ -357,6 +358,173 @@ def test_aggregate_results_includes_new_constraint_metrics() -> None:
     assert "self_corrected_after_failed_verify_rate" in agg["overall"]
     assert agg["overall"]["recovery_success_rate"] == 0.5
     assert agg["overall"]["no_progress_collapse_rate"] == 0.3333
+
+
+def test_extract_token_usage_accumulates_multiple_calls() -> None:
+    usage = extract_token_usage(
+        events=[
+            {
+                "type": "model_usage",
+                "timestamp": 1.0,
+                "payload": {
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 4,
+                        "cache_read_input_tokens": 3,
+                    }
+                },
+            },
+            {
+                "type": "model_usage",
+                "timestamp": 2.0,
+                "payload": {
+                    "usage": {
+                        "prompt_tokens": 8,
+                        "completion_tokens": 5,
+                        "output_token_details": {"reasoning_tokens": 2},
+                    }
+                },
+            },
+        ]
+    )
+    assert usage.prompt_tokens == 18
+    assert usage.completion_tokens == 9
+    assert usage.total_tokens == 27
+    assert usage.cached_tokens == 3
+    assert usage.reasoning_tokens == 2
+
+
+def test_extract_token_usage_returns_null_fields_when_missing() -> None:
+    usage = extract_token_usage(stdout="not-json", stderr="", events=[])
+    assert usage.prompt_tokens is None
+    assert usage.completion_tokens is None
+    assert usage.total_tokens is None
+    assert usage.cached_tokens is None
+    assert usage.reasoning_tokens is None
+
+
+def test_summary_aggregation_includes_token_usage_totals() -> None:
+    from villani_code.benchmark.models import (
+        BenchmarkRunResult,
+        BenchmarkTrack,
+        FairnessClassification,
+        TaskDifficulty,
+        TaskFamily,
+        TelemetryQuality,
+    )
+
+    base = dict(
+        task_id="t1",
+        benchmark_track=BenchmarkTrack.CORE,
+        task_family=TaskFamily.BUGFIX,
+        task_difficulty=TaskDifficulty.EASY,
+        task_language="python",
+        task_checksum="abc",
+        benchmark_bucket="b",
+        task_type="bugfix",
+        agent_name="a",
+        adapter_name="x",
+        adapter_version="1",
+        adapter_capability="x",
+        fairness_classification=FairnessClassification.EXACT_COMPARABLE,
+        fairness_notes="",
+        telemetry_capability="x",
+        model_name="m",
+        success=1,
+        pass_rate=1.0,
+        failed=0,
+        timed_out=0,
+        visible_pass=True,
+        hidden_pass=True,
+        runtime_seconds=1.0,
+        wall_clock_seconds=1.0,
+        timeout=False,
+        touched_file_paths=["src/a.py"],
+        files_touched=1,
+        lines_added=1,
+        lines_deleted=0,
+        verifications_run=[],
+        runtime_stressors=[],
+        telemetry_quality=TelemetryQuality.INFERRED,
+        telemetry_field_quality_map={},
+    )
+    row1 = BenchmarkRunResult(
+        **base,
+        prompt_tokens=10,
+        completion_tokens=4,
+        total_tokens=14,
+        cached_tokens=2,
+        reasoning_tokens=1,
+    )
+    row2 = BenchmarkRunResult(**(base | {"task_id": "t2"}))
+    summary = summarize([row1, row2])
+    assert summary.token_usage.prompt_tokens == 10
+    assert summary.token_usage.completion_tokens == 4
+    assert summary.token_usage.total_tokens == 14
+    assert summary.token_usage.cached_tokens == 2
+    assert summary.token_usage.reasoning_tokens == 1
+    assert summary.token_usage_reported_tasks == 1
+
+
+def test_write_results_serializes_token_usage_fields(tmp_path: Path) -> None:
+    from villani_code.benchmark.models import (
+        BenchmarkRunResult,
+        BenchmarkTrack,
+        FairnessClassification,
+        TaskDifficulty,
+        TaskFamily,
+        TelemetryQuality,
+    )
+
+    row = BenchmarkRunResult(
+        task_id="t1",
+        benchmark_track=BenchmarkTrack.CORE,
+        task_family=TaskFamily.BUGFIX,
+        task_difficulty=TaskDifficulty.EASY,
+        task_language="python",
+        task_checksum="abc",
+        benchmark_bucket="b",
+        task_type="bugfix",
+        agent_name="a",
+        adapter_name="x",
+        adapter_version="1",
+        adapter_capability="x",
+        fairness_classification=FairnessClassification.EXACT_COMPARABLE,
+        fairness_notes="",
+        telemetry_capability="x",
+        model_name="m",
+        success=1,
+        pass_rate=1.0,
+        failed=0,
+        timed_out=0,
+        visible_pass=True,
+        hidden_pass=True,
+        runtime_seconds=1.0,
+        wall_clock_seconds=1.0,
+        timeout=False,
+        touched_file_paths=["src/a.py"],
+        files_touched=1,
+        lines_added=1,
+        lines_deleted=0,
+        prompt_tokens=12,
+        completion_tokens=7,
+        tokens_input=12,
+        tokens_output=7,
+        total_tokens=19,
+        cached_tokens=None,
+        reasoning_tokens=0,
+        verifications_run=[],
+        runtime_stressors=[],
+        telemetry_quality=TelemetryQuality.INFERRED,
+        telemetry_field_quality_map={},
+    )
+    out = write_results([row], tmp_path)
+    payload = out.read_text(encoding="utf-8")
+    assert '"prompt_tokens":12' in payload
+    assert '"completion_tokens":7' in payload
+    assert '"total_tokens":19' in payload
+    assert '"cached_tokens":null' in payload
+    assert '"reasoning_tokens":0' in payload
 
 
 def _minimal_task(tmp_path: Path, **overrides) -> BenchmarkTask:

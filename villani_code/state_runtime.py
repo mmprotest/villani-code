@@ -19,6 +19,7 @@ from villani_code.context_governance import ContextCompactor, ContextInclusionRe
 from villani_code.session_state import SessionMemory, load_session_state, update_session_state as update_session_memory
 from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
+from villani_code.usage_events import emit_model_usage_event
 from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
@@ -307,6 +308,7 @@ def run_pre_edit_diagnosis(
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback({"type": "diagnosis_failed", "reason": f"call_error:{exc.__class__.__name__}"})
         return None
+    emit_model_usage_event(runner.event_callback, response if isinstance(response, dict) else None, model=runner.model, phase="pre_edit_diagnosis")
 
     blocks = response.get("content", []) if isinstance(response, dict) else []
     text = "\n".join(

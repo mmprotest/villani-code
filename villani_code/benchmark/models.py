@@ -202,6 +202,14 @@ class ReproducibilityManifest(BaseModel):
     workspace_preserved: bool = False
 
 
+class TokenUsageSummary(BaseModel):
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+
 class BenchmarkRunResult(BaseModel):
     benchmark_version: str = BENCHMARK_VERSION
     benchmark_track: BenchmarkTrack = BenchmarkTrack.CORE
@@ -255,9 +263,13 @@ class BenchmarkRunResult(BaseModel):
     lines_deleted: int
     num_shell_commands: int | None = None
     num_failed_commands: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     tokens_input: int | None = None
     tokens_output: int | None = None
     total_tokens: int | None = None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
     estimated_cost: float | None = None
     number_of_turns: int | None = None
     tool_calls_total: int | None = None
@@ -301,3 +313,5 @@ class BenchmarkSummary(BaseModel):
     successes: int
     success_rate: float
     by_family: dict[str, dict[str, float]]
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
+    token_usage_reported_tasks: int = 0

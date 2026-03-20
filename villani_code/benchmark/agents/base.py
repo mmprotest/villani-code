@@ -10,6 +10,7 @@ from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
 from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+from villani_code.benchmark.usage import extract_token_usage
 
 
 class AgentRunner(ABC):
@@ -22,6 +23,7 @@ class AgentRunner(ABC):
     command_capture: FieldQuality = FieldQuality.UNAVAILABLE
     file_event_capture: FieldQuality = FieldQuality.UNAVAILABLE
     verify_capture: FieldQuality = FieldQuality.INFERRED
+    usage_capture: FieldQuality = FieldQuality.UNAVAILABLE
     supports_model_override: bool = True
 
     def render_launch_prompt(self, benchmark_prompt: str) -> str:
@@ -66,9 +68,13 @@ class AgentRunner(ABC):
             "test_runs": self.verify_capture,
             "retries_after_failure": FieldQuality.INFERRED,
             "number_of_turns": self.file_event_capture,
-            "tokens_input": FieldQuality.UNAVAILABLE,
-            "tokens_output": FieldQuality.UNAVAILABLE,
-            "total_tokens": FieldQuality.UNAVAILABLE,
+            "prompt_tokens": self.usage_capture,
+            "completion_tokens": self.usage_capture,
+            "tokens_input": self.usage_capture,
+            "tokens_output": self.usage_capture,
+            "total_tokens": self.usage_capture,
+            "cached_tokens": self.usage_capture,
+            "reasoning_tokens": self.usage_capture,
             "estimated_cost": FieldQuality.UNAVAILABLE,
         }
 
@@ -285,6 +291,7 @@ class AgentRunner(ABC):
             runtime_seconds=runtime_seconds,
             telemetry_quality=TelemetryQuality.INFERRED,
             telemetry_field_quality_map=self._field_quality(),
+            token_usage=extract_token_usage(stdout=stdout, stderr=stderr, events=events).model_dump(),
             events=events,
             debug_artifacts=debug_artifacts,
         )

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality, TokenUsageSummary
 
 
 class AdapterEvent(BaseModel):
@@ -31,6 +31,7 @@ class AdapterRunResult(BaseModel):
     runtime_seconds: float
     telemetry_quality: TelemetryQuality
     telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
+    token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     events: list[AdapterEvent] = Field(default_factory=list)
     debug_artifacts: dict[str, str] = Field(default_factory=dict)
 

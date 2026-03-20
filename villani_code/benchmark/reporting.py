@@ -21,9 +21,41 @@ def _group_pass(rows: list[BenchmarkRunResult]) -> dict[str, float]:
 
 
 def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
+    reported_usage_tasks = sum(
+        1
+        for r in rows
+        if any(
+            value is not None
+            for value in (
+                r.prompt_tokens,
+                r.completion_tokens,
+                r.total_tokens,
+                r.cached_tokens,
+                r.reasoning_tokens,
+            )
+        )
+    )
+    solved_rows = [r for r in rows if r.success]
+
+    def _sum_usage(values: list[int | None]) -> int | None:
+        usable = [v for v in values if v is not None]
+        return sum(usable) if usable else None
+
     return {
         **_group_pass(rows),
+        "reported_usage_tasks": reported_usage_tasks,
+        "prompt_tokens_total": _sum_usage([r.prompt_tokens for r in rows]),
+        "completion_tokens_total": _sum_usage([r.completion_tokens for r in rows]),
+        "total_tokens_total": _sum_usage([r.total_tokens for r in rows]),
+        "cached_tokens_total": _sum_usage([r.cached_tokens for r in rows]),
+        "reasoning_tokens_total": _sum_usage([r.reasoning_tokens for r in rows]),
         "avg_total_tokens": _safe_mean([r.total_tokens for r in rows]),
+        "avg_prompt_tokens": _safe_mean([r.prompt_tokens for r in rows]),
+        "avg_completion_tokens": _safe_mean([r.completion_tokens for r in rows]),
+        "avg_cached_tokens": _safe_mean([r.cached_tokens for r in rows]),
+        "avg_reasoning_tokens": _safe_mean([r.reasoning_tokens for r in rows]),
+        "avg_total_tokens_per_task": round((_sum_usage([r.total_tokens for r in rows]) or 0) / len(rows), 4) if rows else None,
+        "avg_total_tokens_per_solved_task": round((_sum_usage([r.total_tokens for r in solved_rows]) or 0) / len(solved_rows), 4) if solved_rows else None,
         "avg_wall_clock_seconds": _safe_mean([r.wall_clock_seconds for r in rows]),
         "avg_tool_calls_total": _safe_mean([r.tool_calls_total for r in rows]),
         "avg_test_runs": _safe_mean([r.test_runs for r in rows]),
@@ -74,7 +106,11 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
         "timed_out",
         "runtime_seconds",
         "wall_clock_seconds",
+        "prompt_tokens",
+        "completion_tokens",
         "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
         "estimated_cost",
         "number_of_turns",
         "tool_calls_total",
@@ -113,7 +149,11 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
                     "timed_out": r.timed_out,
                     "runtime_seconds": r.runtime_seconds,
                     "wall_clock_seconds": r.wall_clock_seconds,
+                    "prompt_tokens": r.prompt_tokens,
+                    "completion_tokens": r.completion_tokens,
                     "total_tokens": r.total_tokens,
+                    "cached_tokens": r.cached_tokens,
+                    "reasoning_tokens": r.reasoning_tokens,
                     "estimated_cost": r.estimated_cost,
                     "number_of_turns": r.number_of_turns,
                     "tool_calls_total": r.tool_calls_total,
@@ -156,7 +196,38 @@ def summarize(results: list[BenchmarkRunResult]) -> BenchmarkSummary:
     for family in by_family.values():
         total_family = family["total"]
         family["success_rate"] = round((family["successes"] / total_family) if total_family else 0.0, 4)
-    return BenchmarkSummary(total_tasks=total, successes=successes, success_rate=round((successes / total) if total else 0.0, 4), by_family=by_family)
+    reported_usage_tasks = sum(
+        1
+        for item in results
+        if any(
+            value is not None
+            for value in (
+                item.prompt_tokens,
+                item.completion_tokens,
+                item.total_tokens,
+                item.cached_tokens,
+                item.reasoning_tokens,
+            )
+        )
+    )
+    def _sum_usage(values: list[int | None]) -> int | None:
+        usable = [value for value in values if value is not None]
+        return sum(usable) if usable else None
+
+    return BenchmarkSummary(
+        total_tasks=total,
+        successes=successes,
+        success_rate=round((successes / total) if total else 0.0, 4),
+        by_family=by_family,
+        token_usage={
+            "prompt_tokens": _sum_usage([item.prompt_tokens for item in results]),
+            "completion_tokens": _sum_usage([item.completion_tokens for item in results]),
+            "total_tokens": _sum_usage([item.total_tokens for item in results]),
+            "cached_tokens": _sum_usage([item.cached_tokens for item in results]),
+            "reasoning_tokens": _sum_usage([item.reasoning_tokens for item in results]),
+        },
+        token_usage_reported_tasks=reported_usage_tasks,
+    )
 
 
 def aggregate_results(results: list[BenchmarkRunResult]) -> str:
@@ -277,6 +348,15 @@ def render_summary_table(results: list[BenchmarkRunResult]) -> str:
     lines = [
         f"tasks={d['summary']['total_tasks']} successes={d['summary']['successes']} success_rate={d['summary']['success_rate']:.2%}",
         f"ci95=({d['pass_rate_ci_95']['low']:.2%}, {d['pass_rate_ci_95']['high']:.2%}) hidden_after_visible={d['hidden_fail_after_visible_pass_rate']:.2%}",
+        (
+            "usage(prompt/completion/total/cached/reasoning)="
+            f"{d['summary']['token_usage']['prompt_tokens']}/"
+            f"{d['summary']['token_usage']['completion_tokens']}/"
+            f"{d['summary']['token_usage']['total_tokens']}/"
+            f"{d['summary']['token_usage']['cached_tokens']}/"
+            f"{d['summary']['token_usage']['reasoning_tokens']} "
+            f"reported_tasks={d['summary']['token_usage_reported_tasks']}"
+        ),
         "same_model_comparison(agent::model pass_rate first_pass recovered avg_total_tokens avg_wall_s)",
     ]
     for key, row in sorted(agg["by_agent_model"].items()):
@@ -296,6 +376,7 @@ def write_markdown_report(results: list[BenchmarkRunResult], out: Path) -> None:
     import json
 
     agg = json.loads(d["aggregates"])
+    overall = agg["overall"]
     lines = ["# Benchmark Report", "", "## Overall leaderboard", "", "| group | pass_rate | successes/total |", "|---|---:|---:|"]
     for group, rows in [("Agent", agg["by_agent"]), ("Model", agg["by_model"]), ("Agent+Model", agg["by_agent_model"])]:
         for key, val in sorted(rows.items()):
@@ -315,8 +396,22 @@ def write_markdown_report(results: list[BenchmarkRunResult], out: Path) -> None:
     for key, val in sorted(agg["by_task_type"].items()):
         lines.append(f"| {key} | {val['pass_rate']:.2%} |")
 
+    lines.extend([
+        "",
+        "## Token usage summary",
+        "",
+        "| group | reported_usage_tasks | prompt_tokens_total | completion_tokens_total | total_tokens_total | cached_tokens_total | reasoning_tokens_total | avg_total_tokens_per_task | avg_total_tokens_per_solved_task |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    lines.append(
+        f"| overall | {overall['reported_usage_tasks']} | {overall['prompt_tokens_total']} | {overall['completion_tokens_total']} | {overall['total_tokens_total']} | {overall['cached_tokens_total']} | {overall['reasoning_tokens_total']} | {overall['avg_total_tokens_per_task']} | {overall['avg_total_tokens_per_solved_task']} |"
+    )
+    for key, val in sorted(agg["by_agent_model"].items()):
+        lines.append(
+            f"| {key} | {val['reported_usage_tasks']} | {val['prompt_tokens_total']} | {val['completion_tokens_total']} | {val['total_tokens_total']} | {val['cached_tokens_total']} | {val['reasoning_tokens_total']} | {val['avg_total_tokens_per_task']} | {val['avg_total_tokens_per_solved_task']} |"
+        )
+
     lines.extend(["", "## Efficiency summary", "", "| group | avg_total_tokens | avg_wall_clock_seconds | avg_tool_calls_total | avg_test_runs | avg_patch_attempts |", "|---|---:|---:|---:|---:|---:|"])
-    overall = agg["overall"]
     lines.append(
         f"| overall | {overall['avg_total_tokens']} | {overall['avg_wall_clock_seconds']} | {overall['avg_tool_calls_total']} | {overall['avg_test_runs']} | {overall['avg_patch_attempts']} |"
     )

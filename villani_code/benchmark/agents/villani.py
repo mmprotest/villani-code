@@ -19,6 +19,7 @@ class VillaniAgentRunner(AgentRunner):
     command_capture = FieldQuality.EXACT
     file_event_capture = FieldQuality.EXACT
     verify_capture = FieldQuality.EXACT
+    usage_capture = FieldQuality.EXACT
 
     def build_command(
         self,

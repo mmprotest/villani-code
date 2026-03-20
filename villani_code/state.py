@@ -29,6 +29,7 @@ from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
+from villani_code.usage_events import emit_model_usage_event
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.state_execution import (
@@ -857,6 +858,12 @@ class Runner:
                 response = raw
 
             response["content"] = normalize_content_blocks(response.get("content"))
+            emit_model_usage_event(
+                self.event_callback,
+                response,
+                model=self.model,
+                phase="main_loop",
+            )
             transcript["responses"].append(response)
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}

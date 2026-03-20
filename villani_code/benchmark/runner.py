@@ -381,6 +381,11 @@ class BenchmarkRunner:
         retries_after_failure: int | None = None
         agent_exit_code: int | None = None
         agent_stderr_preview: str | None = None
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        total_tokens: int | None = None
+        cached_tokens: int | None = None
+        reasoning_tokens: int | None = None
         denied_summary_detail = ""
         prompt_artifact_path: str | None = None
         contract_artifact_path: str | None = None
@@ -467,6 +472,11 @@ class BenchmarkRunner:
                 field_quality_map = execution.telemetry_field_quality_map
                 agent_exit_code = execution.exit_code
                 agent_stderr_preview = self._stderr_snippet(execution.stderr, max_len=400) if execution.stderr else None
+                prompt_tokens = execution.token_usage.prompt_tokens
+                completion_tokens = execution.token_usage.completion_tokens
+                total_tokens = execution.token_usage.total_tokens
+                cached_tokens = execution.token_usage.cached_tokens
+                reasoning_tokens = execution.token_usage.reasoning_tokens
                 self._log(
                     f"agent exit_code={execution.exit_code} runtime={execution.runtime_seconds:.1f}s, running verification..."
                 )
@@ -770,9 +780,13 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
-                tokens_input=None,
-                tokens_output=None,
-                total_tokens=None,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                tokens_input=prompt_tokens,
+                tokens_output=completion_tokens,
+                total_tokens=total_tokens,
+                cached_tokens=cached_tokens,
+                reasoning_tokens=reasoning_tokens,
                 estimated_cost=None,
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,

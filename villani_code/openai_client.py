@@ -164,7 +164,11 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
                 "input": parsed_arguments,
             }
         )
-    return {"role": "assistant", "content": content}
+    converted = {"role": "assistant", "content": content}
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        converted["usage"] = usage
+    return converted
 
 
 class OpenAIClient:
@@ -191,4 +195,3 @@ class OpenAIClient:
                     yield from openai_stream_to_anthropic_events(response.iter_lines(), str(payload.get("model", "")))
 
         return gen()
-

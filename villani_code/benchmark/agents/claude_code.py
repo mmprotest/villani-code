@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.benchmark.agents.base import AgentRunner
+from villani_code.benchmark.models import FieldQuality
 
 
 class ClaudeCodeAgentRunner(AgentRunner):
     name = "claude-code"
+    usage_capture = FieldQuality.INFERRED
 
     CLI_EXECUTABLE = "claude"
     NON_INTERACTIVE_FLAGS = ["--print", "--output-format", "json"]
