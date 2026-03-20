@@ -24,11 +24,11 @@ from villani_code.permissions import Decision, PermissionConfig, PermissionEngin
 from villani_code.plan_session import PlanAnswer, PlanOption, PlanQuestion, PlanSessionResult
 from villani_code.prompting import build_execution_instruction_from_plan, build_initial_messages, build_planning_instruction, build_system_blocks
 from villani_code.planning import TaskMode, classify_task_mode, generate_execution_plan
-from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
+from villani_code.state_types import DisabledBenchmarkConfig, RunnerBenchmarkConfig
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
@@ -314,7 +314,7 @@ class Runner:
         small_model: bool = False,
         villani_mode: bool = False,
         villani_objective: str | None = None,
-        benchmark_config: BenchmarkRuntimeConfig | None = None,
+        benchmark_config: RunnerBenchmarkConfig | None = None,
     ):
         self.client = client
         self.repo = repo
@@ -340,7 +340,7 @@ class Runner:
         self.villani_config = VillaniModeConfig(
             enabled=villani_mode, steering_objective=villani_objective
         )
-        self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
+        self.benchmark_config = benchmark_config or DisabledBenchmarkConfig()
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
         self.permissions = PermissionEngine(
