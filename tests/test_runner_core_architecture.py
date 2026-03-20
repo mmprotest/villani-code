@@ -172,6 +172,34 @@ def test_autonomous_mode_consumes_runner_without_defining_a_second_generic_tool_
     assert not forbidden_imports, "Autonomous mode must not import low-level runtime/tool executors directly."
 
 
+FORBIDDEN_STATE_TOOLING_HELPERS = {
+    "_benchmark_mutation_targets",
+    "_benchmark_post_write_python_validation",
+    "_validate_benchmark_mutation",
+    "_parse_benchmark_denial_message",
+    "_benchmark_denial_feedback",
+    "benchmark_mutation_targets",
+    "benchmark_post_write_python_validation",
+    "validate_benchmark_mutation",
+    "parse_benchmark_denial_message",
+    "benchmark_denial_feedback",
+}
+
+
+def test_state_tooling_does_not_define_benchmark_specific_policy_helpers() -> None:
+    path = _module_path("villani_code", "state_tooling.py")
+    tree = _parse_module(path)
+    helpers = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in FORBIDDEN_STATE_TOOLING_HELPERS
+    }
+    assert not helpers, (
+        "state_tooling.py should call benchmark tool policy helpers from villani_code.benchmark.tool_policy, not define them: "
+        + ", ".join(sorted(helpers))
+    )
+
+
 def test_runner_core_does_not_import_benchmark_reporting_or_agent_code() -> None:
     violations: list[str] = []
     for rel in CORE_MODULES:
