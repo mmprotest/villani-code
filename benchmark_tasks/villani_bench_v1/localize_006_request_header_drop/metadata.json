@@ -34,5 +34,6 @@
     "repair_efficiency",
     "test_interpretation"
   ],
-  "benchmark_bucket": "runtime_stressing"
+  "benchmark_bucket": "runtime_stressing",
+  "benchmark_category": "failing_test_diagnosis"
 }

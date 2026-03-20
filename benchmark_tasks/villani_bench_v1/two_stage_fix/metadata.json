@@ -37,5 +37,6 @@
     "iterative_repair",
     "verification"
   ],
-  "benchmark_bucket": "runtime_stressing"
+  "benchmark_bucket": "runtime_stressing",
+  "benchmark_category": "failing_test_diagnosis"
 }

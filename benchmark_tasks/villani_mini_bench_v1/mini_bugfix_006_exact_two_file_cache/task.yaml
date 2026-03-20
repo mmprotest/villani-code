@@ -1,4 +1,6 @@
 id: mini_bugfix_006_exact_two_file_cache
+benchmark_track: core
+benchmark_category: bug_fix
 family: bugfix
 difficulty: hard
 language: python
@@ -20,7 +22,6 @@ allowlist_paths:
 - tests/
 expected_touched_max: 2
 task_type: adjacent_two_file_fix
-benchmark_track: core
 forbidden_paths:
 - README.md
 - docs/

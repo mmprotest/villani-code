@@ -1,4 +1,6 @@
 id: terminal_002_makefile_test_path
+benchmark_track: core
+benchmark_category: config_tooling_repair
 family: terminal_workflow
 difficulty: easy
 language: python
@@ -21,4 +23,3 @@ allowlist_paths:
 - tests/
 - pyproject.toml
 - src/
-benchmark_track: core

@@ -1,4 +1,6 @@
 id: mini_bugfix_004_exit_code_propagation
+benchmark_track: core
+benchmark_category: bug_fix
 family: bugfix
 difficulty: medium
 language: python
@@ -20,4 +22,3 @@ allowlist_paths:
 - tests/
 expected_touched_max: 1
 task_type: single_file_bugfix
-benchmark_track: core

@@ -1,5 +1,6 @@
 id: two_stage_fix
 benchmark_track: core
+benchmark_category: failing_test_diagnosis
 family: bugfix
 difficulty: hard
 language: python

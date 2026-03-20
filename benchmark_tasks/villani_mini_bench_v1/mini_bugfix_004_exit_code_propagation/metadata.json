@@ -25,5 +25,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_bugfix_004_exit_code_propagation",
-  "difficulty": "medium"
+  "difficulty": "medium",
+  "benchmark_category": "bug_fix"
 }

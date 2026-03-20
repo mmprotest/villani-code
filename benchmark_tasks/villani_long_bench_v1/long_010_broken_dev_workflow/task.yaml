@@ -1,4 +1,6 @@
 id: long_010_broken_dev_workflow
+benchmark_track: core
+benchmark_category: config_tooling_repair
 family: terminal_workflow
 difficulty: hard
 language: python
@@ -21,6 +23,5 @@ allowlist_paths: &id001
 - scripts/
 - README.md
 - config/
-benchmark_track: core
 allowed_paths: *id001
 expected_touched_max: 5

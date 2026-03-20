@@ -1,4 +1,6 @@
 id: long_007_retry_backoff_workflow
+benchmark_track: core
+benchmark_category: small_feature_work
 family: bugfix
 difficulty: hard
 language: python
@@ -18,6 +20,5 @@ success_policy:
 allowlist_paths: &id001
 - src/
 - tests/
-benchmark_track: core
 allowed_paths: *id001
 expected_touched_max: 5

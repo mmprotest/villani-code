@@ -26,5 +26,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_bugfix_006_exact_two_file_cache",
-  "difficulty": "hard"
+  "difficulty": "hard",
+  "benchmark_category": "bug_fix"
 }

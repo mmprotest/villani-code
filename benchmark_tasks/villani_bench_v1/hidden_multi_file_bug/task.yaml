@@ -1,5 +1,6 @@
 id: hidden_multi_file_bug
 benchmark_track: core
+benchmark_category: failing_test_diagnosis
 family: bugfix
 difficulty: medium
 language: python

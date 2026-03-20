@@ -7,6 +7,7 @@ import yaml
 
 from villani_code.benchmark.models import BenchmarkTrack
 from villani_code.benchmark.task_loader import TaskLoadError, load_task
+from villani_code.benchmark.taxonomy import benchmark_category_counts, validate_benchmark_categories
 
 
 def _looks_bounded(task) -> bool:
@@ -35,6 +36,18 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
     for task_id, count in ids.items():
         if count > 1:
             errors.append({"code": "duplicate_task_id", "task": task_id, "message": "Duplicate task id"})
+
+    category_issues = validate_benchmark_categories(suite_dir)
+    if category_issues:
+        offending = ", ".join(issue["task"] for issue in category_issues)
+        errors.append(
+            {
+                "code": "benchmark_category_validation_failed",
+                "task": offending,
+                "message": "benchmark_category issues found for tasks: "
+                + "; ".join(f"{issue['task']} ({issue['message']})" for issue in category_issues),
+            }
+        )
 
     for task in tasks:
         raw = raw_by_task.get(task.task_dir.name, {})
@@ -83,6 +96,7 @@ def run_healthcheck(suite_dir: Path) -> dict[str, object]:
         "tasks": len(tasks),
         "families": dict(families),
         "difficulties": dict(difficulties),
+        "benchmark_categories": benchmark_category_counts((suite_dir,)),
         "errors": errors,
         "warnings": warnings,
         "duplicate_checksums": duplicate_checksums,

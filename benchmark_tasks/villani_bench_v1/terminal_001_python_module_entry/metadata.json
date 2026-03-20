@@ -35,5 +35,6 @@
     "app/__main__.py",
     "app/main.py",
     "pyproject.toml"
-  ]
+  ],
+  "benchmark_category": "config_tooling_repair"
 }

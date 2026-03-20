@@ -1,4 +1,6 @@
 id: mini_terminal_002_dev_script_path
+benchmark_track: core
+benchmark_category: config_tooling_repair
 family: terminal_workflow
 difficulty: hard
 language: python
@@ -19,7 +21,6 @@ allowlist_paths:
 - settings/
 - pyproject.toml
 task_type: terminal_script_path_fix
-benchmark_track: core
 forbidden_paths:
 - README.md
 - docs/

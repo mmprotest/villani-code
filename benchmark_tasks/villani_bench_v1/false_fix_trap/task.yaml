@@ -1,5 +1,6 @@
 id: false_fix_trap
 benchmark_track: core
+benchmark_category: failing_test_diagnosis
 family: bugfix
 difficulty: medium
 language: python

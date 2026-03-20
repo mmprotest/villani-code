@@ -25,5 +25,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_terminal_001_module_entry",
-  "difficulty": "easy"
+  "difficulty": "easy",
+  "benchmark_category": "config_tooling_repair"
 }

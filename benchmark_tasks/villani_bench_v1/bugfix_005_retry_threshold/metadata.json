@@ -31,5 +31,6 @@
     "deterministic_tests"
   ],
   "benchmark_bucket": "baseline",
-  "description": "Fix retry threshold so should_retry includes HTTP 500 and above while excluding 400-class statuses."
+  "description": "Fix retry threshold so should_retry includes HTTP 500 and above while excluding 400-class statuses.",
+  "benchmark_category": "bug_fix"
 }

@@ -32,5 +32,6 @@
   "benchmark_bucket": "baseline",
   "allowed_support_files": [
     "src/app/cli.py"
-  ]
+  ],
+  "benchmark_category": "bug_fix"
 }

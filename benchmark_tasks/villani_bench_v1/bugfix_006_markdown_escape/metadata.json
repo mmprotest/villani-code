@@ -32,5 +32,6 @@
     "correctness",
     "deterministic_tests"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "benchmark_category": "bug_fix"
 }

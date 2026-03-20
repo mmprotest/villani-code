@@ -13,6 +13,14 @@ class BenchmarkTrack(str, Enum):
     FEATURE = "feature"
 
 
+class BenchmarkCategory(str, Enum):
+    BUG_FIX = "bug_fix"
+    FAILING_TEST_DIAGNOSIS = "failing_test_diagnosis"
+    REFACTOR = "refactor"
+    CONFIG_TOOLING_REPAIR = "config_tooling_repair"
+    SMALL_FEATURE_WORK = "small_feature_work"
+
+
 class TaskFamily(str, Enum):
     BUGFIX = "bugfix"
     REPRO_TEST = "repro_test"
@@ -80,6 +88,7 @@ class SuccessPolicy(BaseModel):
 class TaskMetadata(BaseModel):
     name: str | None = None
     difficulty: str | None = None
+    benchmark_category: BenchmarkCategory | None = None
     expected_files: list[str] = Field(default_factory=list)
     allowed_support_files: list[str] = Field(default_factory=list)
     allowed_support_globs: list[str] = Field(default_factory=list)
@@ -111,6 +120,7 @@ class TaskMetadata(BaseModel):
 class BenchmarkTask(BaseModel):
     id: str
     benchmark_track: BenchmarkTrack
+    benchmark_category: BenchmarkCategory | None = None
     family: TaskFamily
     difficulty: TaskDifficulty
     language: str
