@@ -164,6 +164,53 @@ class SessionState:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SessionState":
+        if not isinstance(payload, dict):
+            return cls()
+
+        def _text(key: str) -> str:
+            value = payload.get(key, "")
+            return value.strip() if isinstance(value, str) else ""
+
+        def _text_list(key: str) -> list[str]:
+            value = payload.get(key, [])
+            if not isinstance(value, list):
+                return []
+            items: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        items.append(text)
+            return items
+
+        def _dict_list(key: str) -> list[dict[str, Any]]:
+            value = payload.get(key, [])
+            if not isinstance(value, list):
+                return []
+            return [item for item in value if isinstance(item, dict)]
+
+        return cls(
+            task_summary=_text("task_summary"),
+            plan_summary=_text("plan_summary"),
+            plan_risk=_text("plan_risk"),
+            grounding_evidence_summary=_text_list("grounding_evidence_summary"),
+            action_classes=_text_list("action_classes"),
+            estimated_scope=_text("estimated_scope"),
+            change_impact=_text("change_impact"),
+            task_mode=_text("task_mode") or "general",
+            candidate_targets_summary=_text_list("candidate_targets_summary"),
+            affected_files=_text_list("affected_files"),
+            validation_plan_summary=_text_list("validation_plan_summary"),
+            validation_summary=_text("validation_summary"),
+            last_failed_step=_text("last_failed_step"),
+            repair_attempt_summaries=_dict_list("repair_attempt_summaries"),
+            outcome_status=_text("outcome_status") or "pending",
+            next_step_hints=_text_list("next_step_hints"),
+            handoff_checkpoint=_text("handoff_checkpoint"),
+        )
+
 
 @dataclass(slots=True)
 class RepoDiscovery:
@@ -362,6 +409,8 @@ def scan_repo(repo: Path) -> tuple[RepoMap, ValidationConfig, ProjectRules]:
 
 
 def init_project_memory(repo: Path) -> dict[str, Path]:
+    from villani_code.session_state import SessionMemory, save_session_state
+
     root = repo / VILLANI_DIR
     root.mkdir(parents=True, exist_ok=True)
 
@@ -376,7 +425,7 @@ def init_project_memory(repo: Path) -> dict[str, Path]:
     files["project_rules"].write_text(rules.to_markdown() + "\n", encoding="utf-8")
     files["validation"].write_text(json.dumps(validation.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     files["repo_map"].write_text(json.dumps(repo_map.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    files["session_state"].write_text(json.dumps(SessionState().to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    save_session_state(repo, SessionMemory())
     return files
 
 
@@ -402,7 +451,10 @@ def load_validation_config(repo: Path) -> ValidationConfig:
     return ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
-def update_session_state(repo: Path, state: SessionState) -> None:
-    path = repo / VILLANI_DIR / "session_state.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+def update_session_state(repo: Path, state: SessionState):
+    from villani_code.session_state import (
+        session_memory_from_project_state,
+        update_session_state as update_persistent_session_state,
+    )
+
+    return update_persistent_session_state(repo, session_memory_from_project_state(state))

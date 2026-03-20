@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -409,6 +408,8 @@ class Runner:
         self._runtime_mode: Literal["execution", "planning"] = "execution"
         self._finalized_plan_artifact: dict[str, Any] | None = None
         self._verification_engine = VerificationEngine(self.repo)
+        self._session_state = None
+        self._focus_session_state = None
         if self.small_model:
             self._init_small_model_support()
 
@@ -479,6 +480,11 @@ class Runner:
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
     ) -> dict[str, Any]:
+        from villani_code import state_runtime
+        from villani_code.session_state import load_session_state
+
+        self._session_state = load_session_state(self.repo)
+        self._focus_session_state = self._session_state
         messages = messages or build_initial_messages(self.repo, instruction)
         if self._runtime_mode == "planning":
             self._task_mode = TaskMode.INSPECT_AND_PLAN
@@ -779,6 +785,12 @@ class Runner:
             post = self._run_post_execution_validation(_change_summary()[2])
             if post:
                 response.setdefault("content", []).append({"type": "text", "text": post})
+            state_runtime._update_turn_session_state(
+                self,
+                instruction=instruction,
+                response_text=final_text,
+                next_action="" if completed else f"Resume from bounded stop reason: {reason}",
+            )
             self._save_session_snapshot(messages)
             return {
                 "response": response,
@@ -818,10 +830,11 @@ class Runner:
             self._live_stream_started = False
             self._coalescer = StreamCoalescer()
             turn_messages = self._prepare_messages_for_model(messages)
+            turn_system = self._prepare_system_blocks_for_model(system)
             payload = {
                 "model": self.model,
                 "messages": turn_messages,
-                "system": system,
+                "system": turn_system,
                 "tools": tools,
                 "max_tokens": self.max_tokens,
                 "stream": self.stream,
@@ -942,6 +955,14 @@ class Runner:
                     post = self._run_post_execution_validation(_change_summary()[2])
                     if post:
                         response.setdefault("content", []).append({"type": "text", "text": post})
+                    state_runtime._update_turn_session_state(
+                        self,
+                        instruction=instruction,
+                        response_text="\n".join(
+                            str(block.get("text", "")) for block in response.get("content", []) if isinstance(block, dict)
+                        ),
+                        next_action="",
+                    )
                     self._save_session_snapshot(messages)
                     return {
                         "response": response,
@@ -1059,6 +1080,14 @@ class Runner:
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
+                    state_runtime._update_turn_session_state(
+                        self,
+                        instruction=instruction,
+                        response_text="\n".join(
+                            str(block.get("text", "")) for block in response.get("content", []) if isinstance(block, dict)
+                        ),
+                        next_action="",
+                    )
                     transcript_path = save_transcript(
                         self.repo, transcript, redact=self.redact
                     )
@@ -1121,6 +1150,13 @@ class Runner:
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
+                state_runtime._record_tool_session_state(
+                    self,
+                    tool_name,
+                    tool_input,
+                    result,
+                    verification=self._pending_verification,
+                )
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
@@ -1302,6 +1338,13 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.prepare_messages_for_model(self, messages)
+
+    def _prepare_system_blocks_for_model(
+        self, system_blocks: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        from villani_code import state_runtime
+
+        return state_runtime.prepare_system_blocks_for_model(self, system_blocks)
 
     def _inject_retrieval_briefing(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime

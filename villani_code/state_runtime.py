@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,11 +10,13 @@ import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
+from villani_code.focus_block import render_focus_block
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
-from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
+from villani_code.project_memory import ensure_project_memory, load_repo_map
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
+from villani_code.session_state import SessionMemory, load_session_state, update_session_state as update_session_memory
 from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
 from villani_code.repair import execute_repair_loop
@@ -337,6 +338,179 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
             content.insert(0, {"type": "text", "text": hint})
         return
     messages.insert(0, {"role": "user", "content": [{"type": "text", "text": hint}]})
+
+
+def _stringify_tool_result_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = str(item.get("text") or item.get("content") or "").strip()
+                if text:
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item.strip())
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
+
+
+def _compact_line(text: str, limit: int = 160) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _describe_tool_action(tool_name: str, tool_input: dict[str, Any]) -> str:
+    if tool_name == "Bash":
+        command = str(tool_input.get("command", "")).strip()
+        return command or "Bash"
+    if tool_name == "Read":
+        return f"Read {tool_input.get('file_path', '')}".strip()
+    if tool_name in {"Write", "Patch"}:
+        target = tool_input.get("file_path") or tool_input.get("path") or ""
+        return f"{tool_name} {target}".strip()
+    if tool_name == "Ls":
+        return f"ls {tool_input.get('path', '.')}".strip()
+    return f"{tool_name} {json.dumps(tool_input, sort_keys=True)}" if tool_input else tool_name
+
+
+def _summarize_tool_result(result: dict[str, Any], verification: str = "") -> str:
+    body = _stringify_tool_result_content(result.get("content", ""))
+    for source in [body, verification]:
+        for line in str(source).splitlines():
+            stripped = line.strip()
+            if stripped and stripped.lower() not in {"stdout:", "stderr:", "</verification>", "<verification>"}:
+                return _compact_line(stripped)
+    return "ok" if not result.get("is_error") else "error"
+
+
+def _extract_error_summary(*texts: str) -> str:
+    markers = ("traceback", "assert", "error", "failed", "exception")
+    for text in texts:
+        for line in str(text or "").splitlines():
+            stripped = line.strip().strip("-")
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if any(marker in lowered for marker in markers):
+                return _compact_line(stripped)
+    for text in texts:
+        stripped = _compact_line(str(text or ""))
+        if stripped:
+            return stripped
+    return ""
+
+
+def _get_session_state(runner: Any) -> SessionMemory:
+    state = getattr(runner, "_session_state", None)
+    if isinstance(state, SessionMemory):
+        return state
+    loaded = load_session_state(runner.repo)
+    runner._session_state = loaded
+    return loaded
+
+
+def _sync_session_state(runner: Any, update: SessionMemory) -> SessionMemory:
+    state = update_session_memory(runner.repo, update)
+    runner._session_state = state
+    return state
+
+
+def _update_turn_session_state(
+    runner: Any,
+    *,
+    instruction: str = "",
+    response_text: str = "",
+    next_action: str = "",
+) -> None:
+    plan = getattr(runner, "_execution_plan", None)
+    changed_files = git_changed_files(runner.repo)
+    update = SessionMemory(
+        current_goal=instruction[:220] if instruction else "",
+        current_plan=list(getattr(plan, "proposed_actions", [])[:4]) if plan is not None else [],
+        changed_files=changed_files,
+        next_action=next_action[:160],
+        latest_error=_extract_error_summary(response_text) if response_text else "",
+    )
+    _sync_session_state(runner, update)
+
+
+def _record_tool_session_state(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    result: dict[str, Any],
+    verification: str = "",
+) -> None:
+    previous = _get_session_state(runner)
+    changed_files = git_changed_files(runner.repo)
+    command = _describe_tool_action(tool_name, tool_input)
+    result_summary = _summarize_tool_result(result, verification=verification)
+    recent_action = f"{command} -> {result_summary}"
+    attempted_fixes = [recent_action] if tool_name in {"Write", "Patch", "Bash"} and not result.get("is_error") else []
+    latest_error = _extract_error_summary(
+        verification,
+        _stringify_tool_result_content(result.get("content", "")),
+    ) if (result.get("is_error") or verification) else ""
+    failed_hypotheses: list[str] = []
+    if (
+        result.get("is_error")
+        and previous.last_command == command
+        and previous.last_command_result == result_summary
+        and set(previous.changed_files) == set(changed_files)
+    ):
+        failed_hypotheses.append(_compact_line(f"{command} retried unchanged and failed the same way"))
+
+    next_action = ""
+    if result.get("is_error"):
+        next_action = "Inspect the failing output and choose a different bounded step"
+    elif verification and "status: failed" in verification.lower():
+        next_action = "Address the latest verification failure before continuing"
+    elif tool_name == "Read":
+        next_action = "Use the inspected file to choose the next smallest edit or check"
+    elif tool_name == "Bash":
+        next_action = "Use the command output to pick the next concrete repo action"
+
+    plan = getattr(runner, "_execution_plan", None)
+    _sync_session_state(
+        runner,
+        SessionMemory(
+            current_plan=list(getattr(plan, "proposed_actions", [])[:4]) if plan is not None else [],
+            last_command=command,
+            last_command_result=result_summary,
+            changed_files=changed_files,
+            attempted_fixes=attempted_fixes,
+            failed_hypotheses=failed_hypotheses,
+            latest_error=latest_error,
+            next_action=next_action,
+            recent_actions=[recent_action],
+        ),
+    )
+
+
+def _prepare_focus_runtime_block(focus_block: str) -> dict[str, str] | None:
+    if not focus_block:
+        return None
+    return {"type": "text", "text": f"<runtime-context>\n{focus_block}\n</runtime-context>"}
+
+
+def prepare_system_blocks_for_model(
+    runner: Any, system_blocks: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    prepared = [dict(block) for block in system_blocks]
+    focus_state = getattr(runner, "_focus_session_state", None)
+    if not isinstance(focus_state, SessionMemory):
+        focus_state = _get_session_state(runner)
+    runtime_block = _prepare_focus_runtime_block(render_focus_block(focus_state))
+    runner._focus_session_state = _get_session_state(runner)
+    if runtime_block is None:
+        return prepared
+    if not prepared:
+        return [runtime_block]
+    return [prepared[0], runtime_block, *prepared[1:]]
 
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1110,6 +1284,7 @@ def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
         json.dumps({"id": "last", "messages": messages, "cwd": str(runner.repo), "settings": {"model": runner.model}}, indent=2),
         encoding="utf-8",
     )
+    runner._session_state = load_session_state(runner.repo)
 
 
 def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
@@ -1149,21 +1324,14 @@ def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
 
 
 
-def _build_session_state_from_plan(instruction: str, plan: Any) -> SessionState:
-    return SessionState(
-        task_summary=instruction[:220],
-        plan_summary=plan.task_goal[:220],
-        plan_risk=plan.risk_level.value,
-        grounding_evidence_summary=list(plan.grounding_evidence.get("explicit_signals", []))[:6] if isinstance(plan.grounding_evidence, dict) else [],
-        action_classes=list(plan.action_classes),
-        estimated_scope=plan.estimated_scope,
-        change_impact=str(getattr(plan, "change_impact", "source_only")),
-        task_mode=str(getattr(plan, "task_mode", TaskMode.GENERAL.value)),
-        candidate_targets_summary=[str(v.get("target", "")) for v in getattr(plan, "candidate_targets", [])[:8]],
-        validation_plan_summary=list(plan.validation_steps[:6]),
-        outcome_status="planned",
-        next_step_hints=["Execute scoped edits", "Run targeted validation", "Escalate validation when required"],
-        handoff_checkpoint=f"risk={plan.risk_level.value};scope={plan.estimated_scope};impact={getattr(plan, 'change_impact', 'source_only')}",
+def _build_session_state_from_plan(instruction: str, plan: Any) -> SessionMemory:
+    current_plan = list(getattr(plan, "proposed_actions", [])[:4])
+    if not current_plan:
+        current_plan = list(getattr(plan, "validation_steps", [])[:2])
+    return SessionMemory(
+        current_goal=instruction[:220],
+        current_plan=current_plan,
+        next_action="Take the smallest next step from the approved plan",
     )
 
 
@@ -1171,6 +1339,7 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     if getattr(runner, "_planning_read_only", False):
         return
     ensure_project_memory(runner.repo)
+    runner._session_state = load_session_state(runner.repo)
     runner.event_callback({"type": "init_started"})
     runner.event_callback({"type": "init_completed", "path": str(runner.repo / ".villani")})
     runner.event_callback({"type": "planning_started"})
@@ -1216,27 +1385,25 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     runner.event_callback({"type": "plan_risk_rationale", "risk": plan.risk_level.value, "drivers": plan.risk_assessment.get("drivers", [])})
 
     session = _build_session_state_from_plan(instruction, plan)
-
     if runner.plan_mode == "off" or not plan.non_trivial:
         runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
-        update_session_state(runner.repo, session)
+        runner._session_state = update_session_memory(runner.repo, session)
         return
 
     if runner.villani_mode:
         runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
-        update_session_state(runner.repo, session)
+        runner._session_state = update_session_memory(runner.repo, session)
         return
 
     runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
     approved = runner.approval_callback("ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value})
     if not approved:
         runner.event_callback({"type": "plan_rejected"})
-        session.outcome_status = "rejected"
-        session.next_step_hints = ["Revise plan scope or lower risk before retrying"]
-        update_session_state(runner.repo, session)
+        session.next_action = "Revise plan scope or lower risk before retrying"
+        runner._session_state = update_session_memory(runner.repo, session)
         raise RuntimeError("Execution plan rejected by user.")
     runner.event_callback({"type": "plan_approved", "risk": plan.risk_level.value})
-    update_session_state(runner.repo, session)
+    runner._session_state = update_session_memory(runner.repo, session)
 
 
 
@@ -1281,14 +1448,14 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     if result.passed:
         checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed"])
         runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "validation_passed"})
-        update_session_state(runner.repo, SessionState(
-            affected_files=changed_files,
-            validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
-            validation_summary="passed",
-            outcome_status="success",
-            next_step_hints=["Finalize and report output"],
-            handoff_checkpoint="validation_passed",
-        ))
+        runner._session_state = update_session_memory(
+            runner.repo,
+            SessionMemory(
+                changed_files=changed_files,
+                last_command_result="Validation: passed.",
+                next_action="Finalize and report output",
+            ),
+        )
         return "Validation: passed."
 
     outcome = execute_repair_loop(
@@ -1304,27 +1471,26 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     if outcome.recovered:
         checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed after repair"])
         runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_recovered"})
-        update_session_state(runner.repo, SessionState(
-            affected_files=changed_files,
-            validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
-            validation_summary="passed after repair",
-            repair_attempt_summaries=[asdict(a) for a in outcome.attempts],
-            outcome_status="recovered",
-            next_step_hints=["Report repaired validation and summarize edits"],
-            handoff_checkpoint="repair_recovered",
-        ))
+        runner._session_state = update_session_memory(
+            runner.repo,
+            SessionMemory(
+                changed_files=changed_files,
+                attempted_fixes=[f"repair loop recovered after {len(outcome.attempts)} attempt(s)"],
+                last_command_result="Validation: passed after repair.",
+                next_action="Report repaired validation and summarize edits",
+            ),
+        )
         return outcome.message
 
     checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"])
     runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_exhausted"})
-    update_session_state(runner.repo, SessionState(
-        affected_files=changed_files,
-        validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
-        validation_summary="failed",
-        last_failed_step=outcome.last_failed_step,
-        repair_attempt_summaries=[asdict(a) for a in outcome.attempts],
-        outcome_status="failed",
-        next_step_hints=["Inspect failing step and rerun with interactive guidance"],
-        handoff_checkpoint="repair_exhausted",
-    ))
+    runner._session_state = update_session_memory(
+        runner.repo,
+        SessionMemory(
+            changed_files=changed_files,
+            attempted_fixes=[f"repair loop exhausted after {len(outcome.attempts)} attempt(s)"],
+            latest_error=outcome.last_failed_step,
+            next_action="Inspect failing step and rerun with interactive guidance",
+        ),
+    )
     return outcome.message
