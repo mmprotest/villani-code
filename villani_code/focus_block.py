@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from villani_code.project_memory import SessionState
+from villani_code.session_state import SessionMemory
 
 
 def _shorten(text: str, limit: int = 120) -> str:
@@ -21,14 +21,12 @@ def _format_list(items: list[str], item_limit: int = 4, text_limit: int = 120) -
     return _shorten(text, limit=text_limit)
 
 
-def render_focus_block(state: SessionState, max_chars: int = 600) -> str:
+def render_focus_block(state: SessionMemory, max_chars: int = 600) -> str:
     rows: list[tuple[str, str]] = []
-    goal = state.current_goal or state.task_summary
-    plan = _format_list(state.current_plan, item_limit=3, text_limit=140) or _shorten(
-        state.plan_summary, limit=140
-    )
-    latest_error = state.latest_error or state.last_failed_step
-    changed_files = _format_list(state.changed_files or state.affected_files, item_limit=4)
+    goal = state.current_goal
+    plan = _format_list(state.current_plan, item_limit=3, text_limit=140)
+    latest_error = state.latest_error
+    changed_files = _format_list(state.changed_files, item_limit=4)
     failed = _format_list(state.failed_hypotheses, item_limit=3)
 
     for label, value in [

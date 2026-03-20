@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from villani_code.focus_block import render_focus_block
-from villani_code.project_memory import SessionState
-from villani_code.session_state import load_session_state, update_session_state
+from villani_code.session_state import SessionMemory, load_session_state, update_session_state
 from villani_code.state import Runner
+from villani_code import state_runtime
 
 
 def _seed_repo(repo: Path) -> None:
@@ -36,7 +37,7 @@ def test_load_session_state_survives_corrupted_json(tmp_path: Path) -> None:
 def test_save_and_reload_session_state_round_trips(tmp_path: Path) -> None:
     saved = update_session_state(
         tmp_path,
-        SessionState(
+        SessionMemory(
             current_goal="Fix context continuity",
             current_plan=["Inspect state runtime", "Add focus block"],
             last_command="pytest -q",
@@ -57,7 +58,7 @@ def test_save_and_reload_session_state_round_trips(tmp_path: Path) -> None:
 
 def test_recent_actions_are_capped(tmp_path: Path) -> None:
     for idx in range(20):
-        update_session_state(tmp_path, SessionState(recent_actions=[f"action {idx}"]))
+        update_session_state(tmp_path, SessionMemory(recent_actions=[f"action {idx}"]))
 
     loaded = load_session_state(tmp_path)
 
@@ -68,7 +69,7 @@ def test_recent_actions_are_capped(tmp_path: Path) -> None:
 
 def test_focus_block_omits_empty_fields_and_stays_compact() -> None:
     block = render_focus_block(
-        SessionState(
+        SessionMemory(
             current_goal="Keep follow-up turns anchored",
             current_plan=["Load state", "Render focus", "Save turn updates"],
             last_command="pytest tests/test_session_state.py -q",
@@ -82,6 +83,69 @@ def test_focus_block_omits_empty_fields_and_stays_compact() -> None:
     assert "Latest error:" not in block
     assert "Failed ideas:" not in block
     assert len(block) <= 320
+
+
+def test_persisted_schema_stays_minimal(tmp_path: Path) -> None:
+    update_session_state(
+        tmp_path,
+        SessionMemory(
+            current_goal="Keep continuity",
+            current_plan=["Load saved state"],
+            recent_actions=["Read villani_code/state.py"],
+        ),
+    )
+
+    payload = json.loads((tmp_path / ".villani" / "session_state.json").read_text(encoding="utf-8"))
+
+    assert sorted(payload.keys()) == [
+        "attempted_fixes",
+        "changed_files",
+        "current_goal",
+        "current_plan",
+        "failed_hypotheses",
+        "last_command",
+        "last_command_result",
+        "latest_error",
+        "next_action",
+        "recent_actions",
+        "updated_at",
+    ]
+
+
+def test_sync_session_state_keeps_runner_cache_populated(tmp_path: Path) -> None:
+    runner = SimpleNamespace(repo=tmp_path, _session_state=None)
+
+    synced = state_runtime._sync_session_state(  # noqa: SLF001
+        runner,
+        SessionMemory(current_goal="Keep session cache alive"),
+    )
+
+    assert runner._session_state is synced
+    assert runner._session_state.current_goal == "Keep session cache alive"
+
+
+def test_focus_block_integration_uses_synthetic_context_message_without_mutating_history() -> None:
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Continue the fix"}]}]
+    runner = SimpleNamespace(
+        repo=Path("."),
+        _session_state=SessionMemory(current_goal="Remember the previous turn"),
+        _focus_session_state=SessionMemory(current_goal="Remember the previous turn"),
+        small_model=False,
+        _context_governance=SimpleNamespace(
+            load_inventory=lambda: SimpleNamespace(task_id="", compactions=[]),
+            register_item=lambda *args, **kwargs: None,
+            prune_for_budget=lambda *args, **kwargs: None,
+            save_inventory=lambda *args, **kwargs: None,
+        ),
+        _execution_plan=None,
+    )
+
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+
+    assert prepared[0]["role"] == "user"
+    assert "[FOCUS]" in prepared[0]["content"][0]["text"]
+    assert prepared[1] == messages[0]
+    assert messages == [{"role": "user", "content": [{"type": "text", "text": "Continue the fix"}]}]
 
 
 class _ContinuityClient:

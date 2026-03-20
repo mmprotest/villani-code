@@ -143,17 +143,6 @@ class ValidationConfig:
 
 @dataclass(slots=True)
 class SessionState:
-    current_goal: str = ""
-    current_plan: list[str] = field(default_factory=list)
-    attempted_fixes: list[str] = field(default_factory=list)
-    failed_hypotheses: list[str] = field(default_factory=list)
-    last_command: str = ""
-    last_command_result: str = ""
-    changed_files: list[str] = field(default_factory=list)
-    latest_error: str = ""
-    next_action: str = ""
-    recent_actions: list[str] = field(default_factory=list)
-    updated_at: str = ""
     task_summary: str = ""
     plan_summary: str = ""
     plan_risk: str = ""
@@ -203,17 +192,6 @@ class SessionState:
             return [item for item in value if isinstance(item, dict)]
 
         return cls(
-            current_goal=_text("current_goal"),
-            current_plan=_text_list("current_plan"),
-            attempted_fixes=_text_list("attempted_fixes"),
-            failed_hypotheses=_text_list("failed_hypotheses"),
-            last_command=_text("last_command"),
-            last_command_result=_text("last_command_result"),
-            changed_files=_text_list("changed_files"),
-            latest_error=_text("latest_error"),
-            next_action=_text("next_action"),
-            recent_actions=_text_list("recent_actions"),
-            updated_at=_text("updated_at"),
             task_summary=_text("task_summary"),
             plan_summary=_text("plan_summary"),
             plan_risk=_text("plan_risk"),
@@ -431,7 +409,7 @@ def scan_repo(repo: Path) -> tuple[RepoMap, ValidationConfig, ProjectRules]:
 
 
 def init_project_memory(repo: Path) -> dict[str, Path]:
-    from villani_code.session_state import save_session_state
+    from villani_code.session_state import SessionMemory, save_session_state
 
     root = repo / VILLANI_DIR
     root.mkdir(parents=True, exist_ok=True)
@@ -447,7 +425,7 @@ def init_project_memory(repo: Path) -> dict[str, Path]:
     files["project_rules"].write_text(rules.to_markdown() + "\n", encoding="utf-8")
     files["validation"].write_text(json.dumps(validation.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     files["repo_map"].write_text(json.dumps(repo_map.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    save_session_state(repo, SessionState())
+    save_session_state(repo, SessionMemory())
     return files
 
 
@@ -473,7 +451,10 @@ def load_validation_config(repo: Path) -> ValidationConfig:
     return ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
-def update_session_state(repo: Path, state: SessionState) -> None:
-    from villani_code.session_state import update_session_state as update_persistent_session_state
+def update_session_state(repo: Path, state: SessionState):
+    from villani_code.session_state import (
+        session_memory_from_project_state,
+        update_session_state as update_persistent_session_state,
+    )
 
-    update_persistent_session_state(repo, state)
+    return update_persistent_session_state(repo, session_memory_from_project_state(state))

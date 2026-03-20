@@ -6,6 +6,7 @@ from pathlib import Path
 
 from villani_code.planning import PlanRiskLevel, generate_execution_plan
 from villani_code.project_memory import SessionState, init_project_memory, load_repo_map, load_validation_config
+from villani_code.session_state import SessionMemory
 from villani_code.state import Runner
 from villani_code import state_runtime
 from villani_code.validation_loop import (
@@ -130,10 +131,11 @@ def test_dedicated_repair_executor_is_bounded(tmp_path: Path) -> None:
     result = state_runtime.run_post_execution_validation(runner, ["villani_code/mod.py"])
     assert "bounded repair attempts" in result
     state_payload = json.loads((tmp_path / ".villani" / "session_state.json").read_text(encoding="utf-8"))
-    assert len(state_payload.get("repair_attempt_summaries", [])) == 2
+    assert "attempted_fixes" in state_payload
+    assert "repair loop exhausted" in state_payload["attempted_fixes"][0]
 
 
-def test_session_state_checkpoint_fields_roundtrip(tmp_path: Path) -> None:
+def test_project_memory_update_persists_minimal_session_subset(tmp_path: Path) -> None:
     _seed_repo(tmp_path)
     init_project_memory(tmp_path)
     state = SessionState(
@@ -154,8 +156,12 @@ def test_session_state_checkpoint_fields_roundtrip(tmp_path: Path) -> None:
 
     update_session_state(tmp_path, state)
     payload = json.loads((tmp_path / ".villani" / "session_state.json").read_text(encoding="utf-8"))
-    assert payload["task_summary"] == "task"
-    assert payload["action_classes"] == ["code_edit"]
+    memory = SessionMemory.from_dict(payload)
+    assert memory.current_goal == "task"
+    assert memory.current_plan == ["plan"]
+    assert memory.changed_files == ["villani_code/mod.py"]
+    assert memory.latest_error == "passed"
+    assert memory.updated_at
 
 
 def test_autonomous_high_risk_auto_approved(tmp_path: Path) -> None:
