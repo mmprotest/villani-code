@@ -19,6 +19,30 @@ from villani_code.tools import execute_tool
 _FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
 
 
+def _normalize_mutation_target_path(runner: Any, raw_target: str) -> tuple[str | None, str | None]:
+    target = str(raw_target or "").strip()
+    if not target:
+        return None, "Missing file_path for mutation target"
+
+    repo_root = runner.repo.resolve()
+    target_path = Path(target)
+    try:
+        candidate = target_path.resolve() if target_path.is_absolute() else (repo_root / target_path).resolve()
+    except OSError as exc:
+        return None, f"Invalid mutation target path: {target} ({exc})"
+
+    try:
+        relative = candidate.relative_to(repo_root)
+    except ValueError:
+        return None, f"Mutation target must stay under the active repo root: {target}"
+
+    normalized = relative.as_posix()
+    if not normalized or normalized == ".":
+        return None, f"Invalid mutation target path: {target}"
+    return normalized, None
+
+
+
 def _extract_fenced_code(text: str) -> str | None:
     match = _FENCED_BLOCK_RE.search(text)
     if not match:
@@ -127,6 +151,14 @@ def execute_tool_with_policy(
             if not any(command.startswith(prefix) for prefix in readonly_prefixes):
                 return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
+    if tool_name in {"Write", "Patch"}:
+        raw_target = str(tool_input.get("file_path", "") or "").strip()
+        if raw_target:
+            normalized_target, target_error = _normalize_mutation_target_path(runner, raw_target)
+            if target_error:
+                return {"content": target_error, "is_error": True}
+            tool_input["file_path"] = normalized_target
+
     if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
         policy_error = runner._small_model_tool_guard(tool_name, tool_input)
         if policy_error:
@@ -208,9 +240,8 @@ def execute_tool_with_policy(
                 return {"content": msg, "is_error": True}
 
     if tool_name in {"Write", "Patch"}:
-        target = str(tool_input.get("file_path", ""))
-        if target:
-            normalized_target = target.replace("\\", "/").lstrip("./")
+        normalized_target = str(tool_input.get("file_path", "") or "").strip()
+        if normalized_target:
             runner._intended_targets.add(normalized_target)
             runner._current_verification_targets = {normalized_target}
             runner._current_verification_before_contents = {}
@@ -219,10 +250,8 @@ def execute_tool_with_policy(
                 before_text = target_path.read_text(encoding="utf-8", errors="replace")
                 runner._before_contents[normalized_target] = before_text
                 runner._current_verification_before_contents[normalized_target] = before_text
-        checkpoint_target = str(tool_input.get("file_path", "")).strip()
-        if checkpoint_target:
             runner.checkpoints.create(
-                [Path(checkpoint_target)],
+                [Path(normalized_target)],
                 message_index=message_count,
             )
     runner.event_callback(
