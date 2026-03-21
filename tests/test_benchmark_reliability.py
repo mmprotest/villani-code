@@ -17,6 +17,34 @@ from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.policy import enforce_path_policy
 
 
+def _write_patch_artifact_task(task_dir: Path, *, expected_artifacts: list[str] | None = None) -> None:
+    expected_artifacts = expected_artifacts or ["patch"]
+    (task_dir / "repo" / "src").mkdir(parents=True)
+    (task_dir / "repo" / "src" / "app.py").write_text("value = 'old'\n", encoding="utf-8")
+    (task_dir / "prompt.txt").write_text("Fix the app.\n", encoding="utf-8")
+    (task_dir / "metadata.json").write_text(json.dumps({"expected_files": ["src/app.py"]}), encoding="utf-8")
+    (task_dir / "task.yaml").write_text(
+        "\n".join(
+            [
+                "id: patch_artifact_task",
+                "benchmark_track: core",
+                "family: bugfix",
+                "difficulty: easy",
+                "language: python",
+                "max_minutes: 1",
+                "max_files_touched: 1",
+                f"expected_artifacts: [{', '.join(expected_artifacts)}]",
+                "visible_verification: ['true']",
+                "hidden_verification: ['true']",
+                "success_policy: {require_visible_pass: true, require_hidden_pass: true, fail_on_timeout: true, fail_on_repo_dirty_outside_allowlist: true}",
+                "allowlist_paths: ['src/']",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_runtime_artifact_filtering_ignores_junk_but_keeps_real_edits() -> None:
     touched = [
         "src/app/core.py",
@@ -42,6 +70,182 @@ def test_patch_artifact_filtering_excludes_required_repo_root_patch_but_keeps_ra
 
     assert filtered == ["src/app.py"]
     assert "patch" in touched
+
+
+def test_runner_auto_generates_required_patch_artifact_from_real_diff(tmp_path: Path, monkeypatch, capsys) -> None:
+    from villani_code.benchmark.models import FairnessClassification
+    from villani_code.benchmark.reporting import load_results
+
+    suite_dir = tmp_path / "suite"
+    task_dir = suite_dir / "patch_artifact_task"
+    task_dir.mkdir(parents=True)
+    _write_patch_artifact_task(task_dir)
+    captured_repo: Path | None = None
+
+    class FakeRunner:
+        name = "villani"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            nonlocal captured_repo
+            captured_repo = kwargs["repo_path"]
+            (captured_repo / "src" / "app.py").write_text("value = 'new'\n", encoding="utf-8")
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+
+    runner = BenchmarkRunner(output_dir=tmp_path / "artifacts", keep_workspace=True)
+    data = runner.run(
+        suite_dir=suite_dir,
+        task_id="patch_artifact_task",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    assert captured_repo is not None
+    patch_path = captured_repo / "patch"
+    assert patch_path.exists()
+    patch_text = patch_path.read_text(encoding="utf-8")
+    assert "diff --git a/src/app.py b/src/app.py" in patch_text
+    assert "+value = 'new'" in patch_text
+
+    out = capsys.readouterr().out
+    assert "benchmark_patch_artifact_generated path=patch diff_nonempty=1 source=runner_generated" in out
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.success == 1
+    assert row.failure_reason is None
+    assert row.meaningful_touched_paths == ["src/app.py"]
+    assert "patch" in row.raw_touched_file_paths
+    assert row.path_classifications["patch"] == PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT
+
+
+def test_runner_does_not_generate_fake_patch_artifact_without_real_diff(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.models import FairnessClassification
+    from villani_code.benchmark.reporting import load_results
+
+    suite_dir = tmp_path / "suite"
+    task_dir = suite_dir / "patch_artifact_task"
+    task_dir.mkdir(parents=True)
+    _write_patch_artifact_task(task_dir)
+    captured_repo: Path | None = None
+
+    class FakeRunner:
+        name = "villani"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            nonlocal captured_repo
+            captured_repo = kwargs["repo_path"]
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+
+    runner = BenchmarkRunner(output_dir=tmp_path / "artifacts", keep_workspace=True)
+    data = runner.run(
+        suite_dir=suite_dir,
+        task_id="patch_artifact_task",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    assert captured_repo is not None
+    assert not (captured_repo / "patch").exists()
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.success == 0
+    assert row.failure_reason is not None
+    assert row.failure_reason.value == "missing_artifact"
+    assert row.error == "missing required artifact: patch (patch does not exist)"
+
+
+def test_runner_preserves_existing_patch_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
+    from villani_code.benchmark.models import FairnessClassification
+    from villani_code.benchmark.reporting import load_results
+
+    suite_dir = tmp_path / "suite"
+    task_dir = suite_dir / "patch_artifact_task"
+    task_dir.mkdir(parents=True)
+    _write_patch_artifact_task(task_dir)
+    captured_repo: Path | None = None
+    existing_patch = "preexisting patch artifact\n"
+
+    class FakeRunner:
+        name = "villani"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            nonlocal captured_repo
+            captured_repo = kwargs["repo_path"]
+            (captured_repo / "src" / "app.py").write_text("value = 'new'\n", encoding="utf-8")
+            (captured_repo / "patch").write_text(existing_patch, encoding="utf-8")
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+
+    runner = BenchmarkRunner(output_dir=tmp_path / "artifacts", keep_workspace=True)
+    data = runner.run(
+        suite_dir=suite_dir,
+        task_id="patch_artifact_task",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    assert captured_repo is not None
+    assert (captured_repo / "patch").read_text(encoding="utf-8") == existing_patch
+    assert "benchmark_patch_artifact_generated" not in capsys.readouterr().out
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.success == 1
+    assert row.failure_reason is None
 
 
 def test_runtime_artifact_matcher_patterns() -> None:

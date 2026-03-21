@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from villani_code.benchmark.agents import build_agent_runner
-from villani_code.benchmark.diff_stats import ensure_git_repo, line_stats, list_touched_files
+from villani_code.benchmark.diff_stats import build_patch_artifact_from_repo_diff, ensure_git_repo, line_stats, list_touched_files
 from villani_code.benchmark.failure_taxonomy import classify_failure_taxonomy
 from villani_code.benchmark.manifest import command_set_checksum, repo_checksum
 from villani_code.benchmark.models import (
@@ -150,6 +150,30 @@ class BenchmarkRunner:
         if normalized == "patch":
             return PATCH_ARTIFACT_PATH
         return normalized
+
+    @staticmethod
+    def _requires_patch_artifact(task: BenchmarkTask) -> bool:
+        return "patch" in unique_normalized_paths(task.expected_artifacts)
+
+    @classmethod
+    def _maybe_generate_required_patch_artifact(cls, task: BenchmarkTask, repo_path: Path) -> bool:
+        if not cls._requires_patch_artifact(task):
+            return False
+
+        patch_path = repo_path / PATCH_ARTIFACT_PATH
+        if patch_path.exists():
+            return False
+
+        patch_text = build_patch_artifact_from_repo_diff(repo_path, require_patch_artifact=True)
+        if not patch_text.strip():
+            return False
+
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(patch_text, encoding="utf-8")
+        cls._log(
+            f"benchmark_patch_artifact_generated path={PATCH_ARTIFACT_PATH} diff_nonempty=1 source=runner_generated"
+        )
+        return True
 
     @classmethod
     def _collect_required_artifact_checks(
@@ -746,10 +770,11 @@ class BenchmarkRunner:
                 elif field_quality_map.get("retry_count") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     retry_count = metrics["retry_count"]
 
+                self._maybe_generate_required_patch_artifact(task, workspace_repo)
                 raw_post_run_changes = list_touched_files(workspace_repo)
                 post_run_changes = filter_meaningful_touched_paths(
                     raw_post_run_changes,
-                    require_patch_artifact="patch" in task.expected_artifacts,
+                    require_patch_artifact=self._requires_patch_artifact(task),
                 )
                 post_run_artifact_checks = self._collect_required_artifact_checks(task, workspace_repo, raw_post_run_changes)
                 changed_files_for_log = post_run_changes
@@ -833,6 +858,7 @@ class BenchmarkRunner:
                 failure_reason = FailureReason.BENCHMARK_ERROR
                 self._log(f"benchmark harness error: {self._stderr_snippet(error, max_len=300)}")
 
+            self._maybe_generate_required_patch_artifact(task, workspace_repo)
             raw_touched = list_touched_files(workspace_repo)
             policy_result = enforce_path_policy(
                 raw_touched,
@@ -843,13 +869,13 @@ class BenchmarkRunner:
                 task_type=task.task_type or task.metadata.task_type,
                 allowed_support_files=task.metadata.allowed_support_files,
                 allowed_support_globs=task.metadata.allowed_support_globs,
-                require_patch_artifact="patch" in task.expected_artifacts,
+                require_patch_artifact=self._requires_patch_artifact(task),
             )
             touched = policy_result.meaningful_touched_paths
             files_touched = len(touched)
             lines_added, lines_deleted = self._line_stats_for_task(
                 workspace_repo,
-                require_patch_artifact="patch" in task.expected_artifacts,
+                require_patch_artifact=self._requires_patch_artifact(task),
             )
             runtime_seconds = time.monotonic() - started
             artifact_checks = self._collect_required_artifact_checks(task, workspace_repo, raw_touched)
