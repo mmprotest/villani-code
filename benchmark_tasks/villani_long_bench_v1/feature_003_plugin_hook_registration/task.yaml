@@ -1,0 +1,27 @@
+id: feature_003_plugin_hook_registration
+benchmark_track: core
+benchmark_category: small_feature_work
+family: terminal_workflow
+difficulty: hard
+language: python
+max_minutes: 8
+max_files_touched: 6
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_visible.py
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+allowed_paths:
+- src/
+- tests/
+expected_touched_max: 5
+task_type: plugin_feature_extension

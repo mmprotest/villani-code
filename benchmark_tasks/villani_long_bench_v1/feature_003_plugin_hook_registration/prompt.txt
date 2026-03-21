@@ -1,0 +1,1 @@
+Add post-run plugin hook registration and invocation end-to-end.

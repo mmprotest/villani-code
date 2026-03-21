@@ -1,0 +1,50 @@
+{
+  "source_type": "curated",
+  "tags": [
+    "feature",
+    "plugins",
+    "hooks",
+    "hard"
+  ],
+  "task_version": "1.0",
+  "expected_patch_size_band": "medium",
+  "name": "feature_003_plugin_hook_registration",
+  "description": "Support registering plugin post-run hooks and invoke them after command execution.",
+  "difficulty": "hard",
+  "benchmark_category": "small_feature_work",
+  "expected_files": [
+    "src/app/registry.py",
+    "src/app/plugins.py",
+    "src/app/runner.py",
+    "src/app/cli.py"
+  ],
+  "reference_patch_size_lines": 30,
+  "primary_skill": "python-feature-work",
+  "secondary_skills": [
+    "pytest",
+    "plugin-systems"
+  ],
+  "runtime_stressors": [
+    "registry_coordination",
+    "end_to_end_feature_flow"
+  ],
+  "task_type": "plugin_feature_extension",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "read_files",
+    "run_tests",
+    "edit_files",
+    "rerun_tests"
+  ],
+  "evaluation_focus": [
+    "feature_completeness",
+    "registry_behavior",
+    "hook_invocation"
+  ],
+  "benchmark_bucket": "baseline",
+  "reference_solution_notes": "Category rationale: this is small feature work because it adds a new plugin capability\u2014post-run hooks\u2014across registration and invocation layers. It is not a disguised bug fix because command registration already works; the new behavior extends the platform.",
+  "mutability_notes": "Non-trivial because the new hook path must be plumbed through registry setup, plugin specs, execution, and CLI rendering without breaking existing command resolution."
+}

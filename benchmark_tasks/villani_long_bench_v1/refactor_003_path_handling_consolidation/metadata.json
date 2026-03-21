@@ -1,0 +1,50 @@
+{
+  "source_type": "curated",
+  "tags": [
+    "refactor",
+    "paths",
+    "cli",
+    "hard"
+  ],
+  "task_version": "1.0",
+  "expected_patch_size_band": "medium",
+  "name": "refactor_003_path_handling_consolidation",
+  "description": "Centralize workspace path normalization used by bundle and scanner paths.",
+  "difficulty": "hard",
+  "benchmark_category": "refactor",
+  "expected_files": [
+    "src/app/paths.py",
+    "src/app/bundle.py",
+    "src/app/scanner.py",
+    "src/app/cli.py"
+  ],
+  "reference_patch_size_lines": 28,
+  "primary_skill": "python-refactoring",
+  "secondary_skills": [
+    "pytest",
+    "pathlib"
+  ],
+  "runtime_stressors": [
+    "path_normalization",
+    "multi_module_coordination"
+  ],
+  "task_type": "repo_navigation_refactor",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "read_files",
+    "run_tests",
+    "edit_files",
+    "rerun_tests"
+  ],
+  "evaluation_focus": [
+    "behavior_preservation",
+    "shared_abstraction",
+    "path_consistency"
+  ],
+  "benchmark_bucket": "baseline",
+  "reference_solution_notes": "Category rationale: this is a refactor because it asks for one reusable path-resolution helper while preserving current path outputs across modules. It is not a disguised bug fix because the desired output semantics are already defined and must remain stable.",
+  "mutability_notes": "Non-trivial because multiple modules resolve paths slightly differently today, so the solver must understand CLI and helper interactions before centralizing logic."
+}

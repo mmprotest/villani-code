@@ -134,6 +134,14 @@ def test_healthcheck_expanded() -> None:
     assert health["benchmark_categories"]["bug_fix"] >= 1
 
 
+def test_long_suite_healthcheck_passes_with_new_taxonomy_tasks() -> None:
+    health = run_healthcheck(Path("benchmark_tasks/villani_long_bench_v1"))
+    assert health["tasks"] >= 18
+    assert health["ok"]
+    assert health["benchmark_categories"]["refactor"] >= 5
+    assert health["benchmark_categories"]["small_feature_work"] >= 8
+
+
 def test_new_runtime_stressing_tasks_load() -> None:
     for task_id in ["hidden_multi_file_bug", "false_fix_trap", "two_stage_fix"]:
         task = load_task(Path(f"benchmark_tasks/villani_bench_v1/{task_id}"))
@@ -270,6 +278,23 @@ def test_all_benchmark_suites_have_category_counts() -> None:
         "bug_fix": 24,
         "config_tooling_repair": 9,
         "failing_test_diagnosis": 15,
-        "refactor": 1,
-        "small_feature_work": 4,
+        "refactor": 5,
+        "small_feature_work": 8,
     }
+
+
+def test_new_long_suite_taxonomy_tasks_load_with_expected_categories() -> None:
+    expected = {
+        "refactor_001_shared_normalizer": "refactor",
+        "refactor_002_result_formatter": "refactor",
+        "refactor_003_path_handling_consolidation": "refactor",
+        "refactor_004_split_bloated_function": "refactor",
+        "feature_001_cli_output_format": "small_feature_work",
+        "feature_002_config_override_layer": "small_feature_work",
+        "feature_003_plugin_hook_registration": "small_feature_work",
+        "feature_004_structured_summary_output": "small_feature_work",
+    }
+    for task_id, category in expected.items():
+        task = load_task(Path(f"benchmark_tasks/villani_long_bench_v1/{task_id}"))
+        assert task.benchmark_category and task.benchmark_category.value == category
+        assert task.metadata.benchmark_category and task.metadata.benchmark_category.value == category

@@ -1,0 +1,1 @@
+Split the bloated release summary function into smaller helpers without changing behavior.

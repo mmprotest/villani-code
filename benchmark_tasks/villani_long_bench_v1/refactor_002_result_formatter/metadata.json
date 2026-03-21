@@ -1,0 +1,49 @@
+{
+  "source_type": "curated",
+  "tags": [
+    "refactor",
+    "formatter",
+    "result-shaping",
+    "hard"
+  ],
+  "task_version": "1.0",
+  "expected_patch_size_band": "medium",
+  "name": "refactor_002_result_formatter",
+  "description": "Introduce a shared result formatter used by both HTTP and CLI presentation layers.",
+  "difficulty": "hard",
+  "benchmark_category": "refactor",
+  "expected_files": [
+    "src/app/formatters.py",
+    "src/app/http.py",
+    "src/app/cli.py"
+  ],
+  "reference_patch_size_lines": 24,
+  "primary_skill": "python-refactoring",
+  "secondary_skills": [
+    "pytest",
+    "api-design"
+  ],
+  "runtime_stressors": [
+    "cross_layer_behavior_preservation",
+    "hidden_delegation_assertions"
+  ],
+  "task_type": "repo_navigation_refactor",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "read_files",
+    "run_tests",
+    "edit_files",
+    "rerun_tests"
+  ],
+  "evaluation_focus": [
+    "behavior_preservation",
+    "shared_abstraction",
+    "cross_surface_consistency"
+  ],
+  "benchmark_bucket": "baseline",
+  "reference_solution_notes": "Category rationale: this task is a refactor because the job result shape should become centralized without changing the observable HTTP or CLI payloads. It is not a disguised bug fix because the tests enforce shared formatting rather than a broken output contract.",
+  "mutability_notes": "Non-trivial because the runner must understand the raw service object, preserve rendering behavior, and wire both output paths through the new formatter."
+}
