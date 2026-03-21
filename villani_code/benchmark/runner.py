@@ -8,6 +8,7 @@ import stat
 import sys
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
 from villani_code.benchmark.agents import build_agent_runner
@@ -28,16 +29,27 @@ from villani_code.benchmark.models import (
 )
 from villani_code.benchmark.observability import derive_observability_metrics
 from villani_code.benchmark.policy import (
+    PATCH_ARTIFACT_PATH,
     PATH_CLASS_CLEARLY_UNRELATED,
     benchmark_asset_integrity,
     enforce_path_policy,
     filter_meaningful_touched_paths,
+    normalize_path,
+    unique_normalized_paths,
 )
 from villani_code.benchmark.prompt_contract import benchmark_contract_from_task, render_benchmark_prompt
 from villani_code.benchmark.reporting import render_summary_table, summarize, write_markdown_report, write_results
 from villani_code.benchmark.task_loader import load_tasks
 from villani_code.benchmark.verifier import run_commands
 from villani_code.benchmark.workspace import WorkspaceManager
+
+
+@dataclass(frozen=True)
+class RequiredArtifactCheck:
+    artifact: str
+    present: bool
+    detail: str | None = None
+    counts_as_patch_attempt_evidence: bool = False
 
 
 class BenchmarkRunner:
@@ -109,13 +121,6 @@ class BenchmarkRunner:
         return None
 
     @staticmethod
-    def _collect_meaningful_repo_changes(repo_path: Path, *, require_patch_artifact: bool = False) -> list[str]:
-        return filter_meaningful_touched_paths(
-            list_touched_files(repo_path),
-            require_patch_artifact=require_patch_artifact,
-        )
-
-    @staticmethod
     def _line_stats_for_task(repo_path: Path, *, require_patch_artifact: bool) -> tuple[int, int]:
         try:
             return line_stats(repo_path, require_patch_artifact=require_patch_artifact)
@@ -128,8 +133,83 @@ class BenchmarkRunner:
         file_writes: int | None,
         patch_attempts: int | None,
         meaningful_changed_files: list[str],
+        has_artifact_evidence: bool = False,
     ) -> bool:
-        return (file_writes or 0) == 0 and (patch_attempts or 0) == 0 and len(meaningful_changed_files) == 0
+        return (
+            (file_writes or 0) == 0
+            and (patch_attempts or 0) == 0
+            and len(meaningful_changed_files) == 0
+            and not has_artifact_evidence
+        )
+
+    @staticmethod
+    def _required_artifact_path(artifact: str) -> str | None:
+        normalized = normalize_path(artifact)
+        if not normalized or normalized == "test":
+            return None
+        if normalized == "patch":
+            return PATCH_ARTIFACT_PATH
+        return normalized
+
+    @classmethod
+    def _collect_required_artifact_checks(
+        cls,
+        task: BenchmarkTask,
+        repo_path: Path,
+        raw_touched: list[str],
+    ) -> list[RequiredArtifactCheck]:
+        checks: list[RequiredArtifactCheck] = []
+        normalized_touched = unique_normalized_paths(raw_touched)
+        existing_touched_test_files = [
+            path for path in normalized_touched if path.startswith("tests/") and (repo_path / path).exists()
+        ]
+
+        for artifact in unique_normalized_paths(task.expected_artifacts):
+            artifact_path = cls._required_artifact_path(artifact)
+            if artifact == "test":
+                if existing_touched_test_files:
+                    checks.append(RequiredArtifactCheck(artifact=artifact, present=True))
+                else:
+                    checks.append(
+                        RequiredArtifactCheck(
+                            artifact=artifact,
+                            present=False,
+                            detail="missing required artifact: test (no touched test file exists under tests/)",
+                        )
+                    )
+                continue
+
+            if artifact_path is None:
+                continue
+
+            full_path = repo_path / artifact_path
+            if not full_path.exists():
+                checks.append(
+                    RequiredArtifactCheck(
+                        artifact=artifact,
+                        present=False,
+                        detail=f"missing required artifact: {artifact} ({artifact_path} does not exist)",
+                    )
+                )
+                continue
+            if full_path.is_file() and full_path.stat().st_size == 0:
+                checks.append(
+                    RequiredArtifactCheck(
+                        artifact=artifact,
+                        present=False,
+                        detail=f"missing required artifact: {artifact} ({artifact_path} is empty)",
+                    )
+                )
+                continue
+            checks.append(
+                RequiredArtifactCheck(
+                    artifact=artifact,
+                    present=True,
+                    counts_as_patch_attempt_evidence=(artifact == "patch"),
+                )
+            )
+        return checks
+
 
     def list_tasks(self, suite_dir: Path, include_private: bool = False, **filters: str | None) -> list[BenchmarkTask]:
         tasks = load_tasks(suite_dir, **filters)
@@ -666,16 +746,21 @@ class BenchmarkRunner:
                 elif field_quality_map.get("retry_count") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     retry_count = metrics["retry_count"]
 
-                post_run_changes = self._collect_meaningful_repo_changes(
-                    workspace_repo,
+                raw_post_run_changes = list_touched_files(workspace_repo)
+                post_run_changes = filter_meaningful_touched_paths(
+                    raw_post_run_changes,
                     require_patch_artifact="patch" in task.expected_artifacts,
                 )
+                post_run_artifact_checks = self._collect_required_artifact_checks(task, workspace_repo, raw_post_run_changes)
                 changed_files_for_log = post_run_changes
                 termination_reason = self._extract_termination_reason(execution.events)
                 noop_candidate = self._is_noop_patch_attempt(
                     file_writes=metrics["file_writes"],
                     patch_attempts=metrics["patch_attempts"],
                     meaningful_changed_files=post_run_changes,
+                    has_artifact_evidence=any(
+                        check.counts_as_patch_attempt_evidence and check.present for check in post_run_artifact_checks
+                    ),
                 )
                 self._log(f"termination_reason={termination_reason or 'unknown'}")
                 if changed_files_for_log:
@@ -767,7 +852,8 @@ class BenchmarkRunner:
                 require_patch_artifact="patch" in task.expected_artifacts,
             )
             runtime_seconds = time.monotonic() - started
-            artifacts_ok, artifact_failure_detail = self._check_required_artifacts(task, touched)
+            artifact_checks = self._collect_required_artifact_checks(task, workspace_repo, raw_touched)
+            artifacts_ok, artifact_failure_detail = self._check_required_artifacts(artifact_checks)
 
             solved_checks_passed = visible_pass and hidden_pass
             hidden_required = task.success_policy.require_hidden_pass or bool(task.hidden_verification)
@@ -802,6 +888,9 @@ class BenchmarkRunner:
                 file_writes=None,
                 patch_attempts=None,
                 meaningful_changed_files=touched,
+                has_artifact_evidence=any(
+                    check.counts_as_patch_attempt_evidence and check.present for check in artifact_checks
+                ),
             )
             if (
                 no_op_patch_attempt
@@ -1011,12 +1100,13 @@ class BenchmarkRunner:
                 repeat_index=repeat_index,
             )
 
-    def _check_required_artifacts(self, task: BenchmarkTask, touched: list[str]) -> tuple[bool, str | None]:
-        expected = set(task.expected_artifacts)
-        if "patch" in expected and not touched:
-            return False, "missing required artifact: patch (no meaningful file changes detected)"
-        if "test" in expected and not any(path.startswith("tests/") for path in touched):
-            return False, "missing required artifact: test (no changes under tests/)"
+    def _check_required_artifacts(
+        self,
+        artifact_checks: list[RequiredArtifactCheck],
+    ) -> tuple[bool, str | None]:
+        for check in artifact_checks:
+            if not check.present:
+                return False, check.detail
         return True, None
 
     @staticmethod
