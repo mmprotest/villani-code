@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from villani_code.benchmark.failure_taxonomy import classify_failure_taxonomy
 from villani_code.benchmark.models import (
     BENCHMARK_VERSION,
     BenchmarkRunResult,
@@ -250,12 +251,35 @@ def _rebuild_from_manifest(
             failure_reason = FailureReason.VISIBLE_VERIFICATION_FAILED
         elif hidden_rows and visible_pass and not hidden_pass:
             failure_reason = FailureReason.HIDDEN_VERIFICATION_FAILED
+    verification_output = "\n".join(
+        str(part)
+        for row in [*visible_rows, *hidden_rows]
+        for part in (row.get("stdout"), row.get("stderr"))
+        if part
+    )
+    failure_taxonomy, failure_taxonomy_detail = classify_failure_taxonomy(
+        success=success,
+        failure_reason=failure_reason,
+        visible_pass=visible_pass,
+        hidden_pass=hidden_pass,
+        verification_output=verification_output,
+        files_touched=0,
+        meaningful_touched_paths=[],
+        meaningful_expected_paths=[],
+        meaningful_unexpected_paths=[],
+        touched_file_paths=[],
+        expected_files=task.metadata.expected_files,
+        task_family=task.family,
+        task_type=task.task_type or task.metadata.task_type,
+        benchmark_category=task.benchmark_category or task.metadata.benchmark_category,
+    )
 
     return BenchmarkRunResult(
         benchmark_version=BENCHMARK_VERSION,
         benchmark_track=task.benchmark_track,
         task_id=manifest.task_id,
         task_version=manifest.task_version,
+        benchmark_category=task.benchmark_category or task.metadata.benchmark_category,
         task_family=task.family,
         task_difficulty=task.difficulty,
         task_language=task.language,
@@ -286,6 +310,8 @@ def _rebuild_from_manifest(
         wall_clock_seconds=None,
         timeout=timeout,
         failure_reason=failure_reason,
+        failure_taxonomy=failure_taxonomy,
+        failure_taxonomy_detail=failure_taxonomy_detail,
         forbidden_reason_detail=None,
         policy_warning="reconstructed_result",
         policy_warning_detail="recovered from manifest + verifier metadata",
@@ -295,6 +321,7 @@ def _rebuild_from_manifest(
         touched_file_paths=[],
         raw_touched_file_paths=[],
         normalized_touched_paths=[],
+        runtime_artifact_paths=[],
         path_classifications={},
         meaningful_touched_paths=[],
         meaningful_expected_paths=[],

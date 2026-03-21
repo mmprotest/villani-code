@@ -231,3 +231,48 @@ def test_runner_core_public_surface_stays_small_and_intentional() -> None:
         for rel in EXPECTED_CORE_PUBLIC_SURFACE
     }
     assert actual == EXPECTED_CORE_PUBLIC_SURFACE
+
+
+def _string_constants(path: Path) -> set[str]:
+    tree = _parse_module(path)
+    values: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            values.add(node.value)
+    return values
+
+
+def test_state_module_routes_benchmark_execution_policy_through_benchmark_module() -> None:
+    path = _module_path("villani_code", "state.py")
+    imports = _module_imports(path)
+    assert "villani_code.benchmark.execution_policy" in imports
+
+    tree = _parse_module(path)
+    benchmark_named_defs = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and "benchmark" in node.name.casefold()
+    }
+    assert not benchmark_named_defs, (
+        "state.py should orchestrate benchmark runner policy via the benchmark module, "
+        f"not define benchmark-specific helpers directly: {sorted(benchmark_named_defs)}"
+    )
+
+    forbidden_inline_strings = {
+        "Benchmark mode: no prose-only turns. Make exactly one concrete next tool call.",
+        "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue.",
+        "Benchmark mode requires a real patch in task scope before completion.",
+    }
+    assert forbidden_inline_strings.isdisjoint(_string_constants(path)), (
+        "state.py should not own benchmark reminder strings inline; move them into the benchmark execution policy module."
+    )
+
+
+def test_state_runtime_routes_benchmark_scope_policy_through_benchmark_module() -> None:
+    path = _module_path("villani_code", "state_runtime.py")
+    imports = _module_imports(path)
+    assert "villani_code.benchmark.execution_policy" in imports
+    assert "target is outside benchmark allowlist" not in _string_constants(path), (
+        "Benchmark-specific scope lock reasons should live in the benchmark execution policy module."
+    )

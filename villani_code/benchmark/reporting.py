@@ -165,16 +165,34 @@ def _inc(bucket: dict[str, dict[str, float]], key: str, success: int) -> None:
     stat["successes"] += success
 
 
+def _finalize_group_pass(bucket: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+    for row in bucket.values():
+        total = row["total"]
+        row["success_rate"] = round((row["successes"] / total) if total else 0.0, 4)
+    return bucket
+
+
 def summarize(results: list[BenchmarkRunResult]) -> BenchmarkSummary:
     total = len(results)
     successes = sum(item.success for item in results)
     by_family: dict[str, dict[str, float]] = {}
+    by_benchmark_category: dict[str, dict[str, float]] = {}
+    by_failure_mode_category: dict[str, dict[str, float]] = {}
+    by_failure_taxonomy: dict[str, dict[str, float]] = {}
     for item in results:
         _inc(by_family, item.task_family.value, item.success)
-    for family in by_family.values():
-        total_family = family["total"]
-        family["success_rate"] = round((family["successes"] / total_family) if total_family else 0.0, 4)
-    return BenchmarkSummary(total_tasks=total, successes=successes, success_rate=round((successes / total) if total else 0.0, 4), by_family=by_family)
+        _inc(by_benchmark_category, item.benchmark_category.value if item.benchmark_category else "unknown", item.success)
+        _inc(by_failure_mode_category, item.failure_mode_category.value, item.success)
+        _inc(by_failure_taxonomy, item.failure_taxonomy.value, item.success)
+    return BenchmarkSummary(
+        total_tasks=total,
+        successes=successes,
+        success_rate=round((successes / total) if total else 0.0, 4),
+        by_family=_finalize_group_pass(by_family),
+        by_benchmark_category=_finalize_group_pass(by_benchmark_category),
+        by_failure_mode_category=_finalize_group_pass(by_failure_mode_category),
+        by_failure_taxonomy=_finalize_group_pass(by_failure_taxonomy),
+    )
 
 
 def aggregate_results(results: list[BenchmarkRunResult]) -> str:

@@ -1,0 +1,30 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/__main__.py"
+  ],
+  "reference_patch_size_lines": 1,
+  "primary_skill": "python-packaging",
+  "secondary_skills": [
+    "terminal"
+  ],
+  "task_type": "terminal_module_entry_fix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": false,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_command",
+    "read_files",
+    "edit_files",
+    "run_command"
+  ],
+  "evaluation_focus": [
+    "terminal-workflow",
+    "correctness"
+  ],
+  "benchmark_bucket": "baseline",
+  "name": "mini_terminal_001_module_entry",
+  "difficulty": "easy",
+  "benchmark_category": "config_tooling_repair"
+}

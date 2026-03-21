@@ -1,0 +1,30 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/registry.py"
+  ],
+  "reference_patch_size_lines": 1,
+  "primary_skill": "fault-localization",
+  "secondary_skills": [
+    "pytest"
+  ],
+  "task_type": "single_file_localize_patch",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "search",
+    "read_files",
+    "edit_files",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "localization",
+    "correctness"
+  ],
+  "benchmark_bucket": "baseline",
+  "name": "mini_localize_002_command_alias",
+  "difficulty": "medium",
+  "benchmark_category": "failing_test_diagnosis"
+}

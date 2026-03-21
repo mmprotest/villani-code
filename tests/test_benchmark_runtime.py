@@ -501,6 +501,9 @@ def test_verification_relevant_unrelated_command_false() -> None:
 def test_verification_relevant_touched_test_and_module_true(tmp_path: Path) -> None:
     task = _minimal_task(tmp_path)
     task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
     assert BenchmarkRunner._verification_relevant(task, ["pytest -q tests/test_app.py"], ["tests/test_app.py"]) is True
     assert BenchmarkRunner._verification_relevant(task, ["python -m src.app"], ["src/app.py"]) is True
 
@@ -567,6 +570,9 @@ def test_launch_failure_maps_to_verification_command_failed_to_launch(tmp_path: 
     monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
 
     task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.failure_reason == FailureReason.VERIFICATION_COMMAND_FAILED_TO_LAUNCH
 
@@ -596,6 +602,9 @@ def test_test_failure_stays_visible_verification_failed(tmp_path: Path, monkeypa
     monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
 
     task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.failure_reason == FailureReason.VISIBLE_VERIFICATION_FAILED
 

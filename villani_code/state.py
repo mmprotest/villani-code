@@ -9,6 +9,18 @@ from typing import Any, Callable, Literal
 from rich.console import Console
 
 from villani_code.autonomous import VillaniModeConfig, VillaniModeController
+from villani_code.benchmark.execution_policy import (
+    benchmark_mode_enabled_event,
+    benchmark_no_go_paths,
+    benchmark_scope_targets,
+    build_benchmark_execution_state,
+    has_meaningful_benchmark_edit,
+    maybe_block_benchmark_completion,
+    maybe_handle_benchmark_prose_only_response,
+    note_benchmark_tool_progress,
+    observe_benchmark_mutation_denial,
+    reset_benchmark_progress_state,
+)
 from villani_code.autonomy import (
     FailureClassifier,
     VerificationEngine,
@@ -341,7 +353,6 @@ class Runner:
             enabled=villani_mode, steering_objective=villani_objective
         )
         self.benchmark_config = benchmark_config or DisabledBenchmarkConfig()
-        self._benchmark_noop_completion_attempts = 0
         self.console = Console()
         self.permissions = PermissionEngine(
             PermissionConfig.from_strings(
@@ -550,13 +561,9 @@ class Runner:
                     "enforced": bool(required_initial_read),
                 }
             )
-        if self.benchmark_config.enabled:
-            self.event_callback({
-                "type": "benchmark_mode_enabled",
-                "task_id": self.benchmark_config.task_id,
-                "allowlist_paths": self.benchmark_config.allowlist_paths,
-                "expected_files": self.benchmark_config.expected_files,
-            })
+        benchmark_enabled_event = benchmark_mode_enabled_event(self.benchmark_config)
+        if benchmark_enabled_event is not None:
+            self.event_callback(benchmark_enabled_event)
         if required_initial_read:
             forced_tool_use_id = "forced-initial-read"
             forced_input = {"file_path": required_initial_read}
@@ -637,11 +644,10 @@ class Runner:
         tool_calls_used = 1 if initial_read_enforced else 0
         consecutive_no_edit_turns = 0
         consecutive_recon_turns = 0
-        benchmark_prose_only_after_forced_read = 0
-        benchmark_forced_read_no_progress_guard_active = initial_read_enforced
-        # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
-        benchmark_mutation_denials = 0
-        benchmark_denial_limit = 3
+        benchmark_runtime = build_benchmark_execution_state(
+            self.benchmark_config,
+            initial_read_enforced=initial_read_enforced,
+        )
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
@@ -666,10 +672,10 @@ class Runner:
                 }
             )
 
-        source_targets = list(getattr(getattr(self, "_execution_plan", None), "relevant_files", []))
-        if self.benchmark_config.enabled:
-            source_targets.extend(self.benchmark_config.expected_files)
-            source_targets.extend(self.benchmark_config.allowlist_paths)
+        source_targets = benchmark_scope_targets(
+            list(getattr(getattr(self, "_execution_plan", None), "relevant_files", [])),
+            self.benchmark_config,
+        )
         seen_targets: set[str] = set()
         deduped_targets: list[str] = []
         for target in source_targets:
@@ -679,9 +685,10 @@ class Runner:
             seen_targets.add(norm)
             deduped_targets.append(norm)
         preferred_targets = [p for p in deduped_targets if not p.startswith("tests/")] + [p for p in deduped_targets if p.startswith("tests/")]
-        no_go_paths = [".git/", ".villani_code/", "__pycache__/"]
-        if self.benchmark_config.enabled:
-            no_go_paths.extend(self.benchmark_config.forbidden_paths)
+        no_go_paths = benchmark_no_go_paths(
+            [".git/", ".villani_code/", "__pycache__/"],
+            self.benchmark_config,
+        )
         success_predicates = {
             TaskMode.FIX_FAILING_TEST: "patch the failing implementation or directly relevant test target and improve failing verification",
             TaskMode.FIX_LINT_OR_TYPE: "resolve the lint/type issue with minimal file scope",
@@ -731,18 +738,11 @@ class Runner:
             return summary.intentional, summary.incidental, summary.all_changes
 
         def _has_meaningful_benchmark_edit() -> bool:
-            if not self.benchmark_config.enabled:
-                return True
             intentional_changes, _incidental, _all = _change_summary()
-            if not intentional_changes:
-                return False
-            meaningful = [
-                path
-                for path in intentional_changes
-                if self.benchmark_config.in_allowlist(path)
-                and self.benchmark_config.is_expected_or_support(path)
-            ]
-            return bool(meaningful)
+            return has_meaningful_benchmark_edit(
+                self.benchmark_config,
+                intentional_changes,
+            )
 
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
@@ -877,38 +877,31 @@ class Runner:
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
-            if benchmark_forced_read_no_progress_guard_active and tool_uses:
-                benchmark_forced_read_no_progress_guard_active = False
+            note_benchmark_tool_progress(
+                benchmark_runtime,
+                tool_uses_present=bool(tool_uses),
+            )
             if not tool_uses:
                 content_blocks = response.get("content", [])
                 only_textual_response = bool(content_blocks) and all(
                     isinstance(block, dict) and block.get("type") == "text"
                     for block in content_blocks
                 )
-                prose_only_non_progress = (
-                    self.benchmark_config.enabled
-                    and benchmark_forced_read_no_progress_guard_active
-                    and not _has_meaningful_benchmark_edit()
-                    and (empty or only_textual_response)
+                prose_only_decision = maybe_handle_benchmark_prose_only_response(
+                    self.benchmark_config,
+                    benchmark_runtime,
+                    has_meaningful_edit=_has_meaningful_benchmark_edit(),
+                    empty_response=empty,
+                    only_textual_response=only_textual_response,
                 )
-                if prose_only_non_progress:
-                    benchmark_prose_only_after_forced_read += 1
-                    self.event_callback(
-                        {
-                            "type": "benchmark_prose_only_after_forced_read",
-                            "task_id": self.benchmark_config.task_id,
-                            "attempt": benchmark_prose_only_after_forced_read,
-                        }
-                    )
-                    if benchmark_prose_only_after_forced_read >= 2:
-                        self.event_callback(
-                            {
-                                "type": "benchmark_no_progress_after_forced_read",
-                                "task_id": self.benchmark_config.task_id,
-                            }
-                        )
+                if prose_only_decision.events or prose_only_decision.reminder_text or prose_only_decision.terminate_reason:
+                    for event in prose_only_decision.events:
+                        self.event_callback(event)
+                    if prose_only_decision.terminate_reason:
                         return _finish_bounded(
-                            response, "benchmark_no_progress_after_forced_read", False
+                            response,
+                            prose_only_decision.terminate_reason,
+                            False,
                         )
                     messages.append(
                         {
@@ -916,25 +909,43 @@ class Runner:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": "Benchmark mode: no prose-only turns. Make exactly one concrete next tool call.",
+                                    "text": prose_only_decision.reminder_text,
                                 }
                             ],
                         }
                     )
                     continue
                 if empty:
+                    completion_decision = maybe_block_benchmark_completion(
+                        self.benchmark_config,
+                        benchmark_runtime,
+                        has_meaningful_edit=_has_meaningful_benchmark_edit(),
+                        response_kind="empty",
+                    )
                     if (
-                        self.benchmark_config.enabled
-                        and not benchmark_forced_read_no_progress_guard_active
-                        and not _has_meaningful_benchmark_edit()
+                        completion_decision.events
+                        or completion_decision.reminder_text
+                        or completion_decision.terminate_reason
                     ):
-                        self._benchmark_noop_completion_attempts += 1
-                        self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
-                        if self._benchmark_noop_completion_attempts >= 2:
-                            return _finish_bounded(response, "benchmark_incomplete_no_patch", False)
-                        reminder = "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue."
-                        self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
-                        messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                        for event in completion_decision.events:
+                            self.event_callback(event)
+                        if completion_decision.terminate_reason:
+                            return _finish_bounded(
+                                response,
+                                completion_decision.terminate_reason,
+                                False,
+                            )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": completion_decision.reminder_text,
+                                    }
+                                ],
+                            }
+                        )
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -1044,18 +1055,36 @@ class Runner:
                 else:
                     self._no_progress_cycles = 0
                     self._recovery_count = 0
+                completion_decision = maybe_block_benchmark_completion(
+                    self.benchmark_config,
+                    benchmark_runtime,
+                    has_meaningful_edit=_has_meaningful_benchmark_edit(),
+                    response_kind="textual_completion",
+                )
                 if (
-                    self.benchmark_config.enabled
-                    and not benchmark_forced_read_no_progress_guard_active
-                    and not _has_meaningful_benchmark_edit()
+                    completion_decision.events
+                    or completion_decision.reminder_text
+                    or completion_decision.terminate_reason
                 ):
-                    self._benchmark_noop_completion_attempts += 1
-                    self.event_callback({"type": "benchmark_noop_completion_blocked", "task_id": self.benchmark_config.task_id, "attempt": self._benchmark_noop_completion_attempts})
-                    if self._benchmark_noop_completion_attempts >= 2:
-                        return _finish_bounded(response, "benchmark_incomplete_no_patch", False)
-                    reminder = "Benchmark mode requires a real patch in task scope before completion."
-                    self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
-                    messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                    for event in completion_decision.events:
+                        self.event_callback(event)
+                    if completion_decision.terminate_reason:
+                        return _finish_bounded(
+                            response,
+                            completion_decision.terminate_reason,
+                            False,
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": completion_decision.reminder_text,
+                                }
+                            ],
+                        }
+                    )
                     continue
                 reason = _budget_reason(completed=True)
                 if reason:
@@ -1128,30 +1157,21 @@ class Runner:
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
-                    if (
-                        self.benchmark_config.enabled
-                        and tool_name in {"Write", "Patch"}
-                        and "Benchmark policy blocked this mutation" in result_text
-                    ):
-                        benchmark_mutation_denials += 1
-                        self.event_callback(
-                            {
-                                "type": "benchmark_mutation_denial_observed",
-                                "task_id": self.benchmark_config.task_id,
-                                "count": benchmark_mutation_denials,
-                                "limit": benchmark_denial_limit,
-                            }
+                    benchmark_denial_decision = observe_benchmark_mutation_denial(
+                        self.benchmark_config,
+                        benchmark_runtime,
+                        tool_name=tool_name,
+                        result_text=result_text,
+                        has_meaningful_edit=_has_meaningful_benchmark_edit(),
+                    )
+                    for event in benchmark_denial_decision.events:
+                        self.event_callback(event)
+                    if benchmark_denial_decision.terminate_reason:
+                        return _finish_bounded(
+                            response,
+                            benchmark_denial_decision.terminate_reason,
+                            False,
                         )
-                        if benchmark_mutation_denials >= benchmark_denial_limit and not _has_meaningful_benchmark_edit():
-                            self.event_callback(
-                                {
-                                    "type": "benchmark_repeated_mutation_denials",
-                                    "task_id": self.benchmark_config.task_id,
-                                    "count": benchmark_mutation_denials,
-                                    "limit": benchmark_denial_limit,
-                                }
-                            )
-                            return _finish_bounded(response, "benchmark_repeated_mutation_denials", False)
                     failure = self._failure_classifier.classify(
                         f"{tool_name} failed", result_text
                     )
@@ -1228,8 +1248,7 @@ class Runner:
             if edited_this_turn:
                 consecutive_no_edit_turns = 0
                 if self.benchmark_config.enabled and _has_meaningful_benchmark_edit():
-                    self._benchmark_noop_completion_attempts = 0
-                    benchmark_mutation_denials = 0
+                    reset_benchmark_progress_state(benchmark_runtime)
             else:
                 consecutive_no_edit_turns += 1
 

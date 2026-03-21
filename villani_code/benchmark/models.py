@@ -261,6 +261,7 @@ class BenchmarkRunResult(BaseModel):
     benchmark_track: BenchmarkTrack = BenchmarkTrack.CORE
     task_id: str
     task_version: str = "1.0"
+    benchmark_category: BenchmarkCategory | None = None
     task_family: TaskFamily
     task_difficulty: TaskDifficulty
     task_language: str
@@ -300,6 +301,7 @@ class BenchmarkRunResult(BaseModel):
     touched_file_paths: list[str]
     raw_touched_file_paths: list[str] = Field(default_factory=list)
     normalized_touched_paths: list[str] = Field(default_factory=list)
+    runtime_artifact_paths: list[str] = Field(default_factory=list)
     path_classifications: dict[str, str] = Field(default_factory=dict)
     meaningful_touched_paths: list[str] = Field(default_factory=list)
     meaningful_expected_paths: list[str] = Field(default_factory=list)
@@ -366,3 +368,6 @@ class BenchmarkSummary(BaseModel):
     successes: int
     success_rate: float
     by_family: dict[str, dict[str, float]]
+    by_benchmark_category: dict[str, dict[str, float]] = Field(default_factory=dict)
+    by_failure_mode_category: dict[str, dict[str, float]] = Field(default_factory=dict)
+    by_failure_taxonomy: dict[str, dict[str, float]] = Field(default_factory=dict)

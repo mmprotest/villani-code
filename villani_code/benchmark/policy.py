@@ -15,8 +15,17 @@ RUNTIME_ARTIFACT_PATTERNS = [
     "build/**",
     "dist/**",
     ".pytest_cache/**",
+    ".cache/**",
+    "**/.cache/**",
     "**/.mypy_cache/**",
     "**/.ruff_cache/**",
+    "tmp/**",
+    "temp/**",
+    ".tmp/**",
+    "**/*.tmp",
+    "**/*.temp",
+    "htmlcov/**",
+    ".coverage*",
 ]
 
 PATH_CLASS_IGNORED_RUNTIME_ARTIFACT = "ignored_runtime_artifact"
@@ -72,8 +81,23 @@ def is_runtime_artifact_path(path: str) -> bool:
     return False
 
 
+def unique_normalized_paths(paths: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        normalized = normalize_path(path)
+        if not normalized:
+            continue
+        key = comparison_key(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
 def filter_meaningful_touched_paths(touched: list[str]) -> list[str]:
-    return [normalize_path(path) for path in touched if not is_runtime_artifact_path(path)]
+    return [path for path in unique_normalized_paths(touched) if not is_runtime_artifact_path(path)]
 
 
 @dataclass

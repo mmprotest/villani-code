@@ -1,0 +1,24 @@
+id: mini_localize_002_command_alias
+benchmark_track: core
+benchmark_category: failing_test_diagnosis
+family: localize_patch
+difficulty: medium
+language: python
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_registry.py::test_alias_resolves_to_registered_command
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+expected_touched_max: 1
+task_type: single_file_localize_patch
