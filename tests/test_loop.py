@@ -740,6 +740,95 @@ def test_benchmark_prose_only_after_forced_read_terminates_early(tmp_path: Path)
     assert any(e.get("type") == "benchmark_no_progress_after_forced_read" for e in events)
 
 
+def test_benchmark_edit_intent_prose_uses_failed_tool_recovery_before_prose_only_guard(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('x')\n", encoding="utf-8")
+    diag = '{"target_file":"src/app.py","bug_class":"logic_error","fix_intent":"Read and patch minimal behavior."}'
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.payloads = []
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            self.payloads.append(payload)
+            if self.calls == 1:
+                return {"role": "assistant", "content": [{"type": "text", "text": diag}]}
+            if self.calls == 2:
+                return {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "I will update src/app.py with a minimal fix.\n"
+                                "```python\n"
+                                "print('patched')\n"
+                                "```\n"
+                                "Then I will replace the file contents."
+                            ),
+                        }
+                    ],
+                }
+            if self.calls == 3:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "read-1", "name": "Read", "input": {"file_path": "src/app.py"}}],
+                }
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    events: list[dict] = []
+    cfg = BenchmarkRuntimeConfig(enabled=True, task_id="t-recovery", allowlist_paths=["src/"], expected_files=["src/app.py"])
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, small_model=True, benchmark_config=cfg, event_callback=events.append)
+
+    out = runner.run("fix benchmark bug")
+
+    assert out["response"]["content"][0]["text"] == "done"
+    assert any(e.get("type") == "suspected_failed_tool_call_recovery" for e in events)
+    assert any(e.get("type") == "recovery_message_injected" for e in events)
+    assert not any(e.get("type") == "benchmark_prose_only_after_forced_read" for e in events)
+    recovery_messages = [
+        block.get("text", "")
+        for payload in runner.client.payloads[2:]
+        for message in payload.get("messages", [])
+        if message.get("role") == "user"
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert any("did not produce a usable tool call" in text for text in recovery_messages)
+    assert all("Benchmark mode: no prose-only turns." not in text for text in recovery_messages)
+
+
+def test_benchmark_plain_prose_still_uses_prose_only_guard_when_recovery_does_not_apply(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('x')\n", encoding="utf-8")
+    diag = '{"target_file":"src/app.py","bug_class":"logic_error","fix_intent":"Read and patch minimal behavior."}'
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"role": "assistant", "content": [{"type": "text", "text": diag}]}
+            return {"role": "assistant", "content": [{"type": "text", "text": "still planning"}]}
+
+    events: list[dict] = []
+    cfg = BenchmarkRuntimeConfig(enabled=True, task_id="t-prose", allowlist_paths=["src/"], expected_files=["src/app.py"])
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, small_model=True, benchmark_config=cfg, event_callback=events.append)
+
+    out = runner.run("fix benchmark bug")
+
+    assert out["execution"]["terminated_reason"] == "benchmark_no_progress_after_forced_read"
+    assert any(e.get("type") == "benchmark_prose_only_after_forced_read" for e in events)
+    assert any(e.get("type") == "suspected_failed_tool_call_recovery_skipped" for e in events)
+    assert not any(e.get("type") == "suspected_failed_tool_call_recovery" for e in events)
+
+
 def test_interactive_mode_keeps_recovery_prompts_after_forced_read(tmp_path: Path) -> None:
     target = tmp_path / "src" / "app.py"
     target.parent.mkdir(parents=True)

@@ -904,6 +904,56 @@ class Runner:
                 tool_uses_present=bool(tool_uses),
             )
             if not tool_uses:
+                # Give the runner-general malformed/dropped tool-call recovery path
+                # the first chance to handle edit-intent prose turns before
+                # benchmark prose-only policies consume them.
+                failed_tool_turn = state_runtime.detect_suspected_failed_tool_call_turn(
+                    self,
+                    response,
+                    malformed_tool_uses=malformed_tool_uses,
+                )
+                if failed_tool_turn.should_recover:
+                    self.event_callback(
+                        {
+                            "type": "suspected_failed_tool_call_recovery",
+                            "reason": failed_tool_turn.reason,
+                            "consecutive_count": self._failed_tool_call_recovery_count + 1,
+                            "had_code_block": failed_tool_turn.had_code_block,
+                            "content_length": failed_tool_turn.content_length,
+                            "prior_tool_intent": failed_tool_turn.prior_tool_intent,
+                            "recovery_action": (
+                                "inject_retry"
+                                if self._failed_tool_call_recovery_count
+                                < state_runtime._FAILED_TOOL_CALL_RECOVERY_LIMIT
+                                else "cap_reached"
+                            ),
+                        }
+                    )
+                    if (
+                        self._failed_tool_call_recovery_count
+                        < state_runtime._FAILED_TOOL_CALL_RECOVERY_LIMIT
+                    ):
+                        recovery_text = state_runtime.build_failed_tool_call_recovery_message()
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [{"type": "text", "text": recovery_text}],
+                            }
+                        )
+                        self._failed_tool_call_recovery_count += 1
+                        self._no_progress_cycles = 0
+                        self.event_callback(
+                            {
+                                "type": "recovery_message_injected",
+                                "reason": failed_tool_turn.reason,
+                                "consecutive_count": self._failed_tool_call_recovery_count,
+                                "recovery_action": "retry_with_single_tool_call",
+                            }
+                        )
+                        continue
+                else:
+                    self._failed_tool_call_recovery_count = 0
+
                 content_blocks = response.get("content", [])
                 only_textual_response = bool(content_blocks) and all(
                     isinstance(block, dict) and block.get("type") == "text"
@@ -917,6 +967,16 @@ class Runner:
                     only_textual_response=only_textual_response,
                 )
                 if prose_only_decision.events or prose_only_decision.reminder_text or prose_only_decision.terminate_reason:
+                    if self.benchmark_config.enabled:
+                        self.event_callback(
+                            {
+                                "type": "suspected_failed_tool_call_recovery_skipped",
+                                "reason": failed_tool_turn.reason or "not_suspected",
+                                "had_code_block": failed_tool_turn.had_code_block,
+                                "content_length": failed_tool_turn.content_length,
+                                "recovery_action": "benchmark_prose_only",
+                            }
+                        )
                     for event in prose_only_decision.events:
                         self.event_callback(event)
                     if prose_only_decision.terminate_reason:
@@ -996,52 +1056,6 @@ class Runner:
                             "files": proposal.files_touched,
                         }
                     )
-                failed_tool_turn = state_runtime.detect_suspected_failed_tool_call_turn(
-                    self,
-                    response,
-                    malformed_tool_uses=malformed_tool_uses,
-                )
-                if failed_tool_turn.should_recover:
-                    self.event_callback(
-                        {
-                            "type": "suspected_failed_tool_call_recovery",
-                            "reason": failed_tool_turn.reason,
-                            "consecutive_count": self._failed_tool_call_recovery_count + 1,
-                            "had_code_block": failed_tool_turn.had_code_block,
-                            "content_length": failed_tool_turn.content_length,
-                            "prior_tool_intent": failed_tool_turn.prior_tool_intent,
-                            "recovery_action": (
-                                "inject_retry"
-                                if self._failed_tool_call_recovery_count
-                                < state_runtime._FAILED_TOOL_CALL_RECOVERY_LIMIT
-                                else "cap_reached"
-                            ),
-                        }
-                    )
-                    if (
-                        self._failed_tool_call_recovery_count
-                        < state_runtime._FAILED_TOOL_CALL_RECOVERY_LIMIT
-                    ):
-                        recovery_text = state_runtime.build_failed_tool_call_recovery_message()
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": [{"type": "text", "text": recovery_text}],
-                            }
-                        )
-                        self._failed_tool_call_recovery_count += 1
-                        self._no_progress_cycles = 0
-                        self.event_callback(
-                            {
-                                "type": "recovery_message_injected",
-                                "reason": failed_tool_turn.reason,
-                                "consecutive_count": self._failed_tool_call_recovery_count,
-                                "recovery_action": "retry_with_single_tool_call",
-                            }
-                        )
-                        continue
-                else:
-                    self._failed_tool_call_recovery_count = 0
                 if self._is_no_progress_response(response):
                     self._no_progress_cycles += 1
                     if execution_budget is not None:
