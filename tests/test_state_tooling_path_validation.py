@@ -82,6 +82,35 @@ def test_write_accepts_absolute_path_under_repo_and_normalizes_tracking(tmp_path
     assert target.read_text(encoding="utf-8") == "x=1\n"
 
 
+def test_patch_accepts_absolute_path_under_repo_and_normalizes_tracking(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("x=0\n", encoding="utf-8")
+    diff = """--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-x=0
++x=1
+"""
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"file_path": str(target.resolve()), "unified_diff": diff},
+        "1",
+        0,
+    )
+
+    assert result["is_error"] is False
+    assert runner._intended_targets == {"src/app.py"}
+    assert runner._current_verification_targets == {"src/app.py"}
+    checkpoints = runner.checkpoints.list()
+    assert len(checkpoints) == 1
+    assert checkpoints[0].files == ["src/app.py"]
+    assert target.read_text(encoding="utf-8") == "x=1\n"
+
+
 def test_write_rejects_absolute_path_outside_repo_without_crashing(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     outside = tmp_path.parent / "outside.py"
@@ -96,6 +125,32 @@ def test_write_rejects_absolute_path_outside_repo_without_crashing(tmp_path: Pat
     assert runner._current_verification_targets == set()
     assert runner.checkpoints.list() == []
     assert not outside.exists()
+
+
+def test_patch_rejects_absolute_path_outside_repo_without_crashing(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    outside = tmp_path.parent / "outside.py"
+    diff = """--- a/src/app.py
++++ b/src/app.py
+@@ -0,0 +1 @@
++x=1
+"""
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"file_path": str(outside.resolve()), "unified_diff": diff},
+        "1",
+        0,
+    )
+
+    assert result == {
+        "content": f"Mutation target must stay under the active repo root: {outside.resolve()}",
+        "is_error": True,
+    }
+    assert runner._intended_targets == set()
+    assert runner._current_verification_targets == set()
+    assert runner.checkpoints.list() == []
 
 
 def test_write_rejects_windows_absolute_path_outside_repo_without_crashing(tmp_path: Path) -> None:
