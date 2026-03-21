@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from villani_code.benchmark.policy import filter_meaningful_touched_paths
+
 
 def _run(repo: Path, args: list[str]) -> str:
     proc = subprocess.run(args, cwd=repo, text=True, capture_output=True, check=False)
@@ -16,18 +18,31 @@ def list_touched_files(repo: Path) -> list[str]:
 
 
 def line_stats(repo: Path) -> tuple[int, int]:
-    proc = subprocess.run(["git", "diff", "--numstat"], cwd=repo, text=True, capture_output=True, check=False)
+    raw_tracked = _run(repo, ["git", "diff", "--name-only"]).splitlines()
+    raw_untracked = _run(repo, ["git", "ls-files", "--others", "--exclude-standard"]).splitlines()
+    meaningful_tracked = filter_meaningful_touched_paths(raw_tracked)
+    meaningful_untracked = filter_meaningful_touched_paths(raw_untracked)
+
     added = 0
     deleted = 0
-    for line in proc.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        if parts[0].isdigit():
-            added += int(parts[0])
-        if parts[1].isdigit():
-            deleted += int(parts[1])
-    for path in _run(repo, ["git", "ls-files", "--others", "--exclude-standard"]).splitlines():
+    if meaningful_tracked:
+        proc = subprocess.run(
+            ["git", "diff", "--numstat", "--", *meaningful_tracked],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        for line in proc.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            if parts[0].isdigit():
+                added += int(parts[0])
+            if parts[1].isdigit():
+                deleted += int(parts[1])
+
+    for path in meaningful_untracked:
         full = repo / path
         if full.exists():
             try:

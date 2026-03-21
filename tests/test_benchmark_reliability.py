@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from villani_code.benchmark.adapters.base import AdapterRunResult
+from villani_code.benchmark.diff_stats import ensure_git_repo, line_stats
 from villani_code.benchmark.models import FieldQuality, TelemetryQuality, VerificationOutcome
 from villani_code.benchmark.policy import (
     filter_meaningful_touched_paths,
@@ -37,7 +38,38 @@ def test_runtime_artifact_matcher_patterns() -> None:
     assert is_runtime_artifact_path(".villani_code/state.json")
     assert is_runtime_artifact_path("pkg/__pycache__/mod.pyc")
     assert is_runtime_artifact_path("pkg/mod.pyc")
+    assert is_runtime_artifact_path("tmp/benchmark.log")
     assert not is_runtime_artifact_path("src/app/main.py")
+
+
+def test_line_stats_exclude_runtime_artifacts_from_tracked_and_untracked_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("one\ntwo\n", encoding="utf-8")
+    ensure_git_repo(repo)
+
+    (repo / "src" / "app.py").write_text("one\nthree\n", encoding="utf-8")
+    (repo / ".villani_code").mkdir()
+    (repo / ".villani_code" / "runtime_events.jsonl").write_text("\n".join(f"event-{idx}" for idx in range(200)), encoding="utf-8")
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "app.cpython-312.pyc").write_bytes(b"\x00\x01")
+    (repo / "tmp").mkdir()
+    (repo / "tmp" / "runner.log").write_text("noise\n" * 50, encoding="utf-8")
+
+    assert line_stats(repo) == (1, 1)
+
+
+def test_line_stats_ignore_untracked_runtime_artifacts_but_count_meaningful_untracked_file(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("alpha\n", encoding="utf-8")
+    ensure_git_repo(repo)
+
+    (repo / "src" / "new_module.py").write_text("a\nb\nc\n", encoding="utf-8")
+    (repo / ".villani").mkdir()
+    (repo / ".villani" / "session.txt").write_text("runner noise\n" * 40, encoding="utf-8")
+
+    assert line_stats(repo) == (3, 0)
 
 
 def test_windows_safe_rmtree_removes_readonly_tree(tmp_path: Path) -> None:
@@ -129,6 +161,7 @@ def test_logging_and_stderr_preview_and_filtered_policy(monkeypatch, capsys) -> 
     assert "Traceback" in row.stderr_preview
     assert row.touched_file_paths == ["src/app.py"]
     assert ".villani_code/state.json" in row.raw_touched_file_paths
+    assert row.runtime_artifact_paths == [".villani_code/state.json", "build/out.bin"]
     assert row.files_touched == 1
     assert row.task_family == TaskFamily.BUGFIX
 

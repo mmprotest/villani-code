@@ -120,6 +120,7 @@ def _sample_result(*, success: int = 0) -> BenchmarkRunResult:
         benchmark_track=BenchmarkTrack.CORE,
         task_id='t1',
         task_version='1.0',
+        benchmark_category=BenchmarkCategory.CONFIG_TOOLING_REPAIR,
         task_family=TaskFamily.BUGFIX,
         task_difficulty=TaskDifficulty.EASY,
         task_language='python',
@@ -175,14 +176,35 @@ def test_result_serialization_and_reporting_include_failure_taxonomy(tmp_path: P
     markdown = (out_dir / 'report.md').read_text(encoding='utf-8')
     summary = render_summary_table([row])
     stats = diagnostics([row])
+    summary_json = json.loads((out_dir / 'summary.json').read_text(encoding='utf-8'))
 
     assert serialized['failure_taxonomy'] == 'syntax_breakage'
     assert serialized['failure_taxonomy_detail'] == 'syntax error detected in execution output'
     assert aggregates['overall']['failure_taxonomy_counts']['syntax_breakage'] == 1
+    assert summary_json['by_benchmark_category']['config_tooling_repair']['total'] == 1
+    assert summary_json['by_failure_mode_category']['verification_failure']['total'] == 1
+    assert summary_json['by_failure_taxonomy']['syntax_breakage']['total'] == 1
     assert 'failure_taxonomy' in (out_dir / 'results.csv').read_text(encoding='utf-8')
     assert 'Failure taxonomy histogram' in markdown
     assert 'syntax_breakage' in summary
     assert stats['failure_taxonomy_histogram']['syntax_breakage'] == 1
+
+
+def test_failure_taxonomy_ignores_runtime_artifacts_when_classifying_wrong_file_signals() -> None:
+    taxonomy, detail = classify_failure_taxonomy(
+        success=False,
+        failure_reason=FailureReason.VISIBLE_VERIFICATION_FAILED,
+        meaningful_touched_paths=[],
+        meaningful_expected_paths=[],
+        meaningful_unexpected_paths=[],
+        touched_file_paths=['.villani_code/transcripts/last.json', '__pycache__/app.pyc'],
+        expected_files=['src/app.py'],
+        touched_unexpected_files=False,
+        unrelated_file_touch=False,
+    )
+
+    assert taxonomy is FailureTaxonomy.UNKNOWN_FAILURE
+    assert detail is None
 
 
 def test_rebuild_path_populates_failure_taxonomy(tmp_path: Path) -> None:
