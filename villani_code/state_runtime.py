@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
+from villani_code.benchmark.execution_policy import benchmark_scope_widening_policy
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
@@ -514,8 +515,14 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
 
             intended = set(getattr(runner, "_intended_targets", set()))
             if intended and fp not in intended:
-                explicit_allowlisted = runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp)
-                benchmark_scope_ok = (not runner.benchmark_config.enabled) or explicit_allowlisted
+                benchmark_scope_policy = benchmark_scope_widening_policy(
+                    runner.benchmark_config,
+                    fp,
+                )
+                benchmark_scope_ok = (
+                    not runner.benchmark_config.enabled
+                    or benchmark_scope_policy.explicit_allowlisted
+                )
                 has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(fp, intended)
                 can_expand_once = (
                     (not runner._scope_expansion_used)
@@ -526,13 +533,13 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 )
                 if can_expand_once:
                     runner._scope_expansion_used = True
-                elif explicit_allowlisted:
+                elif benchmark_scope_policy.explicit_allowlisted:
                     pass
                 else:
                     if runner._scope_expansion_used:
                         reason = "scope expansion already consumed"
-                    elif not benchmark_scope_ok:
-                        reason = "target is outside benchmark allowlist"
+                    elif benchmark_scope_policy.blocked_reason:
+                        reason = benchmark_scope_policy.blocked_reason
                     else:
                         reason = "target lacks prior read evidence or strong adjacency"
                     runner.event_callback(
