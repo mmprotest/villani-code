@@ -22,6 +22,7 @@ from villani_code.benchmark.models import (
     TaskFamily,
     TelemetryQuality,
     VerificationOutcome,
+    classify_failure_mode,
 )
 from villani_code.benchmark.policy import (
     PATH_CLASS_CLEARLY_UNRELATED,
@@ -185,6 +186,9 @@ class BenchmarkRunner:
         test_runs = 0
         number_of_turns = 0
         retries_after_failure = 0
+        repair_attempts = 0
+        noop_retries = 0
+        empty_turn_retries = 0
         verification_seen = False
         verification_failed = False
         benchmark_mutation_denials = 0
@@ -215,6 +219,12 @@ class BenchmarkRunner:
                 elif isinstance(exit_code, int) and exit_code == 0 and verification_failed:
                     retries_after_failure += 1
                     verification_failed = False
+            if etype == "repair_attempt_started":
+                repair_attempts += 1
+            if etype == "benchmark_noop_completion_blocked":
+                noop_retries += 1
+            if etype == "empty_turn_retry":
+                empty_turn_retries += 1
 
             payload_type = str(payload.get("type") or "").strip()
             payload_event = str(payload.get("event") or "").strip()
@@ -279,12 +289,92 @@ class BenchmarkRunner:
             "test_runs": test_runs if test_runs > 0 else None,
             "number_of_turns": number_of_turns,
             "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
+            "retry_count": retries_after_failure + repair_attempts + noop_retries + empty_turn_retries,
             "benchmark_mutation_denials": benchmark_mutation_denials if benchmark_mutation_denials > 0 else None,
             "benchmark_write_denials": benchmark_write_denials if benchmark_write_denials > 0 else None,
             "benchmark_patch_denials": benchmark_patch_denials if benchmark_patch_denials > 0 else None,
             "first_denied_path": first_denied_path,
             "first_denied_reason": first_denied_reason,
         }
+
+    @staticmethod
+    def _extract_token_usage(
+        execution,
+        field_quality_map: dict[str, FieldQuality],
+    ) -> tuple[int | None, int | None, int | None, FieldQuality]:
+        def _coerce_int(value: object) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+            return None
+
+        def _usage_from_payload(payload: dict[str, object]) -> tuple[int | None, int | None]:
+            usage = payload.get("usage")
+            if not isinstance(usage, dict):
+                return None, None
+            tokens_in = next(
+                (
+                    value
+                    for value in (
+                        _coerce_int(usage.get("input_tokens")),
+                        _coerce_int(usage.get("prompt_tokens")),
+                        _coerce_int(usage.get("prompt_token_count")),
+                    )
+                    if value is not None
+                ),
+                None,
+            )
+            tokens_out = next(
+                (
+                    value
+                    for value in (
+                        _coerce_int(usage.get("output_tokens")),
+                        _coerce_int(usage.get("completion_tokens")),
+                        _coerce_int(usage.get("completion_token_count")),
+                    )
+                    if value is not None
+                ),
+                None,
+            )
+            return tokens_in, tokens_out
+
+        direct_in = _coerce_int(getattr(execution, "tokens_input", None))
+        direct_out = _coerce_int(getattr(execution, "tokens_output", None))
+        direct_total = _coerce_int(getattr(execution, "total_tokens", None))
+        if direct_in is not None or direct_out is not None or direct_total is not None:
+            if direct_total is None and direct_in is not None and direct_out is not None:
+                direct_total = direct_in + direct_out
+            return direct_in, direct_out, direct_total, FieldQuality.EXACT
+
+        events = getattr(execution, "events", [])
+        latest_in: int | None = None
+        latest_out: int | None = None
+        latest_total: int | None = None
+        for event in events:
+            payload = getattr(event, "payload", {})
+            if not isinstance(payload, dict):
+                continue
+            tokens_in, tokens_out = _usage_from_payload(payload)
+            if tokens_in is not None:
+                latest_in = tokens_in
+            if tokens_out is not None:
+                latest_out = tokens_out
+            total = _coerce_int(payload.get("total_tokens"))
+            if total is not None:
+                latest_total = total
+
+        if latest_in is not None or latest_out is not None or latest_total is not None:
+            if latest_total is None and latest_in is not None and latest_out is not None:
+                latest_total = latest_in + latest_out
+            return latest_in, latest_out, latest_total, FieldQuality.EXACT
+
+        existing_quality = field_quality_map.get("tokens_input")
+        if existing_quality in {FieldQuality.EXACT, FieldQuality.INFERRED}:
+            return None, None, None, existing_quality
+        return None, None, None, FieldQuality.UNAVAILABLE
 
     @staticmethod
     def _tokenize_command(command: str) -> set[str]:
@@ -379,6 +469,10 @@ class BenchmarkRunner:
         patch_attempts: int | None = None
         test_runs: int | None = None
         retries_after_failure: int | None = None
+        retry_count: int | None = None
+        tokens_input: int | None = None
+        tokens_output: int | None = None
+        total_tokens: int | None = None
         agent_exit_code: int | None = None
         agent_stderr_preview: str | None = None
         denied_summary_detail = ""
@@ -465,6 +559,15 @@ class BenchmarkRunner:
                 timeout = execution.timeout
                 telemetry_quality = execution.telemetry_quality
                 field_quality_map = execution.telemetry_field_quality_map
+                tokens_input, tokens_output, total_tokens, token_quality = self._extract_token_usage(execution, field_quality_map)
+                field_quality_map = dict(field_quality_map)
+                field_quality_map["tokens_input"] = token_quality
+                field_quality_map["tokens_output"] = token_quality
+                field_quality_map["total_tokens"] = token_quality
+                execution_retry_count = getattr(execution, "retry_count", None)
+                if isinstance(execution_retry_count, int):
+                    retry_count = execution_retry_count
+                    field_quality_map["retry_count"] = FieldQuality.EXACT
                 agent_exit_code = execution.exit_code
                 agent_stderr_preview = self._stderr_snippet(execution.stderr, max_len=400) if execution.stderr else None
                 self._log(
@@ -509,6 +612,9 @@ class BenchmarkRunner:
                     patch_attempts = metrics["patch_attempts"]
                     test_runs = metrics["test_runs"]
                     retries_after_failure = metrics["retries_after_failure"]
+                    retry_count = metrics["retry_count"]
+                elif field_quality_map.get("retry_count") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
+                    retry_count = metrics["retry_count"]
 
                 post_run_changes = self._collect_meaningful_repo_changes(workspace_repo)
                 changed_files_for_log = post_run_changes
@@ -692,6 +798,9 @@ class BenchmarkRunner:
             if recovery_attempted:
                 recovery_success = bool(success and (had_failed_verification or (retries_after_failure or 0) > 0))
             no_progress_termination = failure_reason == FailureReason.NO_PROGRESS
+            failure_mode_category = classify_failure_mode(success=success, failure_reason=failure_reason)
+            field_quality_map.setdefault("retry_count", FieldQuality.INFERRED if retry_count is not None else FieldQuality.UNAVAILABLE)
+            field_quality_map["failure_mode_category"] = FieldQuality.EXACT
 
             detail = ""
             if failure_reason == FailureReason.MISSING_ARTIFACT and artifact_failure_detail:
@@ -770,9 +879,11 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
-                tokens_input=None,
-                tokens_output=None,
-                total_tokens=None,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                total_tokens=total_tokens,
+                retry_count=retry_count,
+                failure_mode_category=failure_mode_category,
                 estimated_cost=None,
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,

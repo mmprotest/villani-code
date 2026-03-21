@@ -979,3 +979,206 @@ def test_shared_contract_section_matches_villani_and_claude(tmp_path: Path) -> N
     claude_prompt = render_benchmark_prompt(task, repo_c)
 
     assert extract_shared_contract_section(villani_prompt).replace(str(repo_v), "<repo>") == extract_shared_contract_section(claude_prompt).replace(str(repo_c), "<repo>")
+
+
+def test_failure_mode_category_mapping_is_centralized() -> None:
+    from villani_code.benchmark.models import (
+        FailureModeCategory,
+        FailureReason,
+        classify_failure_mode,
+    )
+
+    assert classify_failure_mode(success=True, failure_reason=FailureReason.TIMEOUT) is FailureModeCategory.SUCCESS
+    assert classify_failure_mode(success=False, failure_reason=FailureReason.VISIBLE_VERIFICATION_FAILED) is FailureModeCategory.VERIFICATION_FAILURE
+    assert classify_failure_mode(success=False, failure_reason=FailureReason.VERIFICATION_COMMAND_FAILED_TO_LAUNCH) is FailureModeCategory.VERIFIER_CRASH
+    assert classify_failure_mode(success=False, failure_reason=FailureReason.BENCHMARK_NO_PATCH_ATTEMPT) is FailureModeCategory.NO_PROGRESS
+
+
+def test_runner_plumbs_token_usage_and_retry_count(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+    task = _minimal_task(tmp_path)
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = "approximately_comparable"
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **_kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.EXACT,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.EXACT},
+                events=[
+                    AdapterEvent(type="command_started", timestamp=1.0, payload={"command": "python -c 'print(1)'"}),
+                    AdapterEvent(type="command_finished", timestamp=2.0, payload={"exit_code": 1}),
+                    AdapterEvent(type="command_started", timestamp=3.0, payload={"command": "python -c 'print(1)'"}),
+                    AdapterEvent(type="command_finished", timestamp=4.0, payload={"exit_code": 0}),
+                    AdapterEvent(type="repair_attempt_started", timestamp=5.0, payload={"attempt": 1}),
+                    AdapterEvent(
+                        type="model_usage",
+                        timestamp=6.0,
+                        payload={"usage": {"input_tokens": 123, "output_tokens": 45}},
+                    ),
+                ],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+
+    result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert result.tokens_input == 123
+    assert result.tokens_output == 45
+    assert result.total_tokens == 168
+    assert result.retries_after_failure == 1
+    assert result.retry_count == 2
+    assert result.telemetry_field_quality_map["tokens_input"] == FieldQuality.EXACT
+    assert result.telemetry_field_quality_map["retry_count"] == FieldQuality.INFERRED
+
+
+def test_runner_leaves_token_fields_honest_when_usage_missing(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+    task = _minimal_task(tmp_path)
+
+    class FakeAgent:
+        name = "cmd"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = "coarse_wrapper_only"
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **_kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[AdapterEvent(type="command_started", timestamp=1.0, payload={"command": "python -c 'print(1)'"})],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+
+    result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="cmd:test",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert result.tokens_input is None
+    assert result.tokens_output is None
+    assert result.total_tokens is None
+    assert result.telemetry_field_quality_map["tokens_input"] == FieldQuality.UNAVAILABLE
+
+
+def test_reporting_and_serialization_include_canonical_observability_metrics(tmp_path: Path) -> None:
+    import json
+
+    from villani_code.benchmark.models import (
+        BENCHMARK_VERSION,
+        BenchmarkRunResult,
+        BenchmarkTrack,
+        FailureModeCategory,
+        FailureReason,
+        FairnessClassification,
+        TaskDifficulty,
+        TaskFamily,
+        TaskSource,
+        TelemetryQuality,
+    )
+    from villani_code.benchmark.reporting import render_summary_table, write_markdown_report, write_results
+
+    row = BenchmarkRunResult(
+        benchmark_version=BENCHMARK_VERSION,
+        benchmark_track=BenchmarkTrack.CORE,
+        task_id="t1",
+        task_version="1.0",
+        task_family=TaskFamily.BUGFIX,
+        task_difficulty=TaskDifficulty.EASY,
+        task_language="python",
+        task_source_type=TaskSource.CURATED,
+        task_tags=[],
+        task_type="unit",
+        benchmark_bucket="baseline",
+        runtime_stressors=[],
+        expected_files=["src/app.py"],
+        task_checksum="abc",
+        agent_name="villani",
+        adapter_name="villani",
+        adapter_version="1",
+        adapter_capability="native",
+        fairness_classification=FairnessClassification.EXACT_COMPARABLE,
+        fairness_notes="ok",
+        telemetry_capability="full",
+        model_name="m",
+        success=0,
+        pass_rate=0.0,
+        failed=1,
+        timed_out=0,
+        visible_pass=False,
+        hidden_pass=False,
+        runtime_seconds=2.0,
+        wall_clock_seconds=2.0,
+        timeout=False,
+        failure_reason=FailureReason.VISIBLE_VERIFICATION_FAILED,
+        touched_file_paths=["src/app.py"],
+        files_touched=1,
+        lines_added=2,
+        lines_deleted=1,
+        num_shell_commands=3,
+        tokens_input=10,
+        tokens_output=5,
+        total_tokens=15,
+        retry_count=2,
+        failure_mode_category=FailureModeCategory.VERIFICATION_FAILURE,
+        verifications_run=["pytest -q"],
+        telemetry_quality=TelemetryQuality.EXACT,
+        repeat_index=0,
+    )
+
+    out_dir = tmp_path / "report"
+    results_path = write_results([row], out_dir)
+    write_markdown_report([row], out_dir / "report.md")
+
+    serialized = json.loads(results_path.read_text(encoding="utf-8").splitlines()[0])
+    assert serialized["tokens_input"] == 10
+    assert serialized["tokens_output"] == 5
+    assert serialized["total_tokens"] == 15
+    assert serialized["retry_count"] == 2
+    assert serialized["failure_mode_category"] == "verification_failure"
+
+    csv_text = (out_dir / "results.csv").read_text(encoding="utf-8")
+    markdown = (out_dir / "report.md").read_text(encoding="utf-8")
+    summary = render_summary_table([row])
+    aggregates = json.loads((out_dir / "aggregates.json").read_text(encoding="utf-8"))
+
+    assert "retry_count" in csv_text
+    assert "failure_mode_category" in csv_text
+    assert "tok_in" in summary
+    assert "failure_mode" in markdown
+    assert aggregates["overall"]["avg_retry_count"] == 2.0

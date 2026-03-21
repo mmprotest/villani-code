@@ -29,6 +29,10 @@ class AdapterRunResult(BaseModel):
     exit_code: int | None
     timeout: bool
     runtime_seconds: float
+    tokens_input: int | None = None
+    tokens_output: int | None = None
+    total_tokens: int | None = None
+    retry_count: int | None = None
     telemetry_quality: TelemetryQuality
     telemetry_field_quality_map: dict[str, FieldQuality] = Field(default_factory=dict)
     events: list[AdapterEvent] = Field(default_factory=list)
