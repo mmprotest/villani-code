@@ -9,15 +9,16 @@
   "task_version": "1.0",
   "expected_patch_size_band": "medium",
   "name": "refactor_002_result_formatter",
-  "description": "Introduce a shared result formatter used by both HTTP and CLI presentation layers.",
+  "description": "Introduce a shared result formatter used by HTTP, CLI, and notification presentation layers.",
   "difficulty": "hard",
   "benchmark_category": "refactor",
   "expected_files": [
     "src/app/formatters.py",
     "src/app/http.py",
-    "src/app/cli.py"
+    "src/app/cli.py",
+    "src/app/notifications.py"
   ],
-  "reference_patch_size_lines": 24,
+  "reference_patch_size_lines": 30,
   "primary_skill": "python-refactoring",
   "secondary_skills": [
     "pytest",
@@ -25,6 +26,7 @@
   ],
   "runtime_stressors": [
     "cross_layer_behavior_preservation",
+    "multiple_call_sites",
     "hidden_delegation_assertions"
   ],
   "task_type": "repo_navigation_refactor",
@@ -44,6 +46,6 @@
     "cross_surface_consistency"
   ],
   "benchmark_bucket": "baseline",
-  "reference_solution_notes": "Category rationale: this task is a refactor because the job result shape should become centralized without changing the observable HTTP or CLI payloads. It is not a disguised bug fix because the tests enforce shared formatting rather than a broken output contract.",
-  "mutability_notes": "Non-trivial because the runner must understand the raw service object, preserve rendering behavior, and wire both output paths through the new formatter."
+  "reference_solution_notes": "Category rationale: this task remains a refactor because HTTP, CLI, and notification outputs must stay behavior-compatible while result shaping moves into one shared formatter. It is harder now because there is a second presentation call site and a verification script that checks the full contract, not just one path.",
+  "mutability_notes": "Weakness addressed: the original task was solvable by editing one output path. The hardened version now catches shallow fixes that update HTTP or CLI formatting without routing notifications and no-warning cases through the same shared formatter."
 }

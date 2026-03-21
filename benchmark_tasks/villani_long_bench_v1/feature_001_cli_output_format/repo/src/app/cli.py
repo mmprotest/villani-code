@@ -1,7 +1,6 @@
 import argparse
 
-from .formatters import format_summary
-from .service import summarize_values
+from .commands import run_stats
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,5 +12,4 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> tuple[int, str]:
     args = build_parser().parse_args(argv)
-    summary = summarize_values(args.values)
-    return 0, format_summary(summary, args.format)
+    return 0, run_stats(args.values, args.format)

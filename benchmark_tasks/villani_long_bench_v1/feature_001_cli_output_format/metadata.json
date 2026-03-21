@@ -9,15 +9,17 @@
   "task_version": "1.0",
   "expected_patch_size_band": "medium",
   "name": "feature_001_cli_output_format",
-  "description": "Extend the stats CLI with a csv output format that flows through argument parsing and shared formatting.",
+  "description": "Extend the stats CLI with a csv output format that flows through parser, commands, and formatter code paths.",
   "difficulty": "medium",
   "benchmark_category": "small_feature_work",
   "expected_files": [
     "src/app/cli.py",
+    "src/app/commands.py",
+    "src/app/contracts.py",
     "src/app/formatters.py",
     "src/app/service.py"
   ],
-  "reference_patch_size_lines": 22,
+  "reference_patch_size_lines": 28,
   "primary_skill": "python-feature-work",
   "secondary_skills": [
     "pytest",
@@ -25,7 +27,8 @@
   ],
   "runtime_stressors": [
     "cli_contracts",
-    "multi_file_feature_flow"
+    "programmatic_and_cli_paths",
+    "canonical_field_order"
   ],
   "task_type": "cli_feature_extension",
   "requires_repo_navigation": true,
@@ -44,6 +47,6 @@
     "format_consistency"
   ],
   "benchmark_bucket": "baseline",
-  "reference_solution_notes": "Category rationale: this is small feature work because it adds a new supported output format end-to-end across CLI parsing, internal formatting, and result rendering. It is not a bug fix because no existing format is broken; the required behavior is net-new.",
-  "mutability_notes": "Non-trivial because the new format must flow through parser choices, the shared formatter, and both visible and hidden CLI expectations."
+  "reference_solution_notes": "Category rationale: this remains small feature work because it adds a new csv format across parsing, command dispatch, and shared formatting while keeping existing text and json behavior stable. It is harder now because both CLI and programmatic commands must support the new format with a canonical column order.",
+  "mutability_notes": "Weakness addressed: the original task was nearly a parser-choice tweak. The hardened version catches shallow fixes that only add csv to argparse or only patch one rendering path without updating command dispatch and the stable output contract."
 }

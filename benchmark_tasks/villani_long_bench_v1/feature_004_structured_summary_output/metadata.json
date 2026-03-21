@@ -9,15 +9,16 @@
   "task_version": "1.0",
   "expected_patch_size_band": "medium",
   "name": "feature_004_structured_summary_output",
-  "description": "Add a summary field that appears in both programmatic audit results and CLI output formats.",
+  "description": "Add a summary field that appears in programmatic audit results, widget payloads, and CLI output formats.",
   "difficulty": "medium",
   "benchmark_category": "small_feature_work",
   "expected_files": [
     "src/app/validator.py",
     "src/app/reporting.py",
+    "src/app/dashboard.py",
     "src/app/cli.py"
   ],
-  "reference_patch_size_lines": 20,
+  "reference_patch_size_lines": 26,
   "primary_skill": "python-feature-work",
   "secondary_skills": [
     "pytest",
@@ -25,7 +26,8 @@
   ],
   "runtime_stressors": [
     "multi_surface_output_contracts",
-    "programmatic_and_cli_consistency"
+    "programmatic_and_cli_consistency",
+    "backward_compat_text_output"
   ],
   "task_type": "reporting_feature_extension",
   "requires_repo_navigation": true,
@@ -44,6 +46,6 @@
     "structured_results"
   ],
   "benchmark_bucket": "baseline",
-  "reference_solution_notes": "Category rationale: this is small feature work because it expands the audit contract with a new structured summary field that must flow through reporting and CLI rendering. It is not a disguised bug fix because the existing result schema is valid; the task adds new observable behavior.",
-  "mutability_notes": "Non-trivial because the summary must be generated from validation state and surfaced consistently in both programmatic and CLI JSON/text pathways."
+  "reference_solution_notes": "Category rationale: this remains small feature work because it adds a new structured summary field across reporting surfaces instead of repairing an incorrect existing field. It is harder now because both widget consumers and CLI output must carry the same summary while preserving the original first-line text contract.",
+  "mutability_notes": "Weakness addressed: the original task was easy to satisfy by patching one return dict. The hardened version now catches shallow fixes that update only the CLI or only run_audit without propagating summary data into downstream programmatic consumers."
 }
