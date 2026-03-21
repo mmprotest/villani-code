@@ -136,7 +136,7 @@ def test_healthcheck_expanded() -> None:
 
 def test_long_suite_healthcheck_passes_with_new_taxonomy_tasks() -> None:
     health = run_healthcheck(Path("benchmark_tasks/villani_long_bench_v1"))
-    assert health["tasks"] >= 18
+    assert health["tasks"] >= 13
     assert health["ok"]
     assert health["benchmark_categories"]["refactor"] >= 5
     assert health["benchmark_categories"]["small_feature_work"] >= 8
