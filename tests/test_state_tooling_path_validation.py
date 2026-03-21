@@ -96,3 +96,18 @@ def test_write_rejects_absolute_path_outside_repo_without_crashing(tmp_path: Pat
     assert runner._current_verification_targets == set()
     assert runner.checkpoints.list() == []
     assert not outside.exists()
+
+
+def test_write_rejects_windows_absolute_path_outside_repo_without_crashing(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    windows_path = r"C:\repo\verify_fix.py"
+
+    result = execute_tool_with_policy(runner, "Write", {"file_path": windows_path, "content": "x=1\n"}, "1", 0)
+
+    assert result == {
+        "content": f"Mutation target must stay under the active repo root: {windows_path}",
+        "is_error": True,
+    }
+    assert runner._intended_targets == set()
+    assert runner._current_verification_targets == set()
+    assert runner.checkpoints.list() == []
