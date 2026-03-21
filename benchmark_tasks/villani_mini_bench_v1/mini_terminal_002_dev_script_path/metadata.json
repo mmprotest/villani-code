@@ -25,5 +25,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_terminal_002_dev_script_path",
-  "difficulty": "hard"
+  "difficulty": "hard",
+  "benchmark_category": "config_tooling_repair"
 }

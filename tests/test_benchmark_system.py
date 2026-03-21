@@ -11,12 +11,14 @@ from villani_code.benchmark.reporting import diagnostics, load_results, paired_c
 from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.benchmark.stats import wilson_interval
 from villani_code.benchmark.task_loader import TaskLoadError, load_task, load_tasks
+from villani_code.benchmark.taxonomy import BENCHMARK_SUITE_DIRS, benchmark_category_counts
 
 
 def test_task_loader_parses_valid_task() -> None:
     task = load_task(Path("benchmark_tasks/villani_bench_v1/bugfix_001_datetime_cli"))
     assert task.id == "bugfix_001_datetime_cli"
     assert task.benchmark_track == BenchmarkTrack.CORE
+    assert task.benchmark_category and task.benchmark_category.value == "bug_fix"
     assert task.source_type in {TaskSource.CURATED, TaskSource.SEEDED, TaskSource.MUTATED}
     assert len(task.task_checksum or "") > 5
     assert task.allowed_paths == ["src/", "tests/"]
@@ -121,7 +123,7 @@ def test_paired_comparison_and_ci() -> None:
 def test_smoke_load_all_tasks_with_track_filter() -> None:
     tasks = load_tasks(Path("benchmark_tasks/villani_bench_v1"), track="core")
     assert len(tasks) >= 25
-    assert {task.family.value for task in tasks} == {"bugfix", "repro_test", "localize_patch", "terminal_workflow"}
+    assert {task.family.value for task in tasks} == {"bugfix", "localize_patch", "terminal_workflow"}
 
 
 def test_healthcheck_expanded() -> None:
@@ -129,6 +131,15 @@ def test_healthcheck_expanded() -> None:
     assert health["tasks"] >= 25
     assert "errors" in health
     assert health["ok"]
+    assert health["benchmark_categories"]["bug_fix"] >= 1
+
+
+def test_long_suite_healthcheck_passes_with_new_taxonomy_tasks() -> None:
+    health = run_healthcheck(Path("benchmark_tasks/villani_long_bench_v1"))
+    assert health["tasks"] >= 18
+    assert health["ok"]
+    assert health["benchmark_categories"]["refactor"] >= 5
+    assert health["benchmark_categories"]["small_feature_work"] >= 8
 
 
 def test_new_runtime_stressing_tasks_load() -> None:
@@ -259,3 +270,31 @@ def test_suite_loads_renamed_bugfix_005_task() -> None:
     task_ids = {task.id for task in tasks}
     assert "bugfix_005_retry_threshold" in task_ids
     assert "bugfix_005_cache_key_args" not in task_ids
+
+
+def test_all_benchmark_suites_have_category_counts() -> None:
+    counts = benchmark_category_counts(BENCHMARK_SUITE_DIRS)
+    assert counts == {
+        "bug_fix": 24,
+        "config_tooling_repair": 9,
+        "failing_test_diagnosis": 15,
+        "refactor": 5,
+        "small_feature_work": 8,
+    }
+
+
+def test_new_long_suite_taxonomy_tasks_load_with_expected_categories() -> None:
+    expected = {
+        "refactor_001_shared_normalizer": "refactor",
+        "refactor_002_result_formatter": "refactor",
+        "refactor_003_path_handling_consolidation": "refactor",
+        "refactor_004_split_bloated_function": "refactor",
+        "feature_001_cli_output_format": "small_feature_work",
+        "feature_002_config_override_layer": "small_feature_work",
+        "feature_003_plugin_hook_registration": "small_feature_work",
+        "feature_004_structured_summary_output": "small_feature_work",
+    }
+    for task_id, category in expected.items():
+        task = load_task(Path(f"benchmark_tasks/villani_long_bench_v1/{task_id}"))
+        assert task.benchmark_category and task.benchmark_category.value == category
+        assert task.metadata.benchmark_category and task.metadata.benchmark_category.value == category

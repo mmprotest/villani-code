@@ -27,5 +27,6 @@
     "scope_discipline",
     "verification_discipline"
   ],
-  "benchmark_bucket": "runtime_stressing"
+  "benchmark_bucket": "runtime_stressing",
+  "benchmark_category": "failing_test_diagnosis"
 }

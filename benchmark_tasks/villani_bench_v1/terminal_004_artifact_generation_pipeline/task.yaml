@@ -1,4 +1,6 @@
 id: terminal_004_artifact_generation_pipeline
+benchmark_track: core
+benchmark_category: config_tooling_repair
 family: terminal_workflow
 difficulty: easy
 language: python
@@ -20,4 +22,3 @@ allowlist_paths:
 - tests/
 - Makefile
 - pyproject.toml
-benchmark_track: core

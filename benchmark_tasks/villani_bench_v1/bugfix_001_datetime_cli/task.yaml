@@ -1,4 +1,6 @@
 id: bugfix_001_datetime_cli
+benchmark_track: core
+benchmark_category: bug_fix
 family: bugfix
 difficulty: easy
 language: python
@@ -23,4 +25,3 @@ allowed_paths:
 - tests/
 expected_touched_max: 3
 task_type: single_file_bugfix
-benchmark_track: core

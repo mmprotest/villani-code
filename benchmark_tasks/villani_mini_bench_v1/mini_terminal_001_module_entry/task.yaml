@@ -1,4 +1,6 @@
 id: mini_terminal_001_module_entry
+benchmark_track: core
+benchmark_category: config_tooling_repair
 family: terminal_workflow
 difficulty: easy
 language: python
@@ -18,7 +20,6 @@ allowlist_paths:
 - src/
 - pyproject.toml
 task_type: terminal_module_entry_fix
-benchmark_track: core
 forbidden_paths:
 - README.md
 - docs/

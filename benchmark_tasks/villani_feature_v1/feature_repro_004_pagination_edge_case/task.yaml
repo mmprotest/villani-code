@@ -1,4 +1,6 @@
 id: feature_repro_004_pagination_edge_case
+benchmark_track: feature
+benchmark_category: bug_fix
 family: repro_test
 difficulty: hard
 language: python
@@ -18,4 +20,3 @@ success_policy:
 allowlist_paths:
 - tests/
 - src/
-benchmark_track: feature

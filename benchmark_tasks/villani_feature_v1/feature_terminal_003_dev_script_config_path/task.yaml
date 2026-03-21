@@ -1,4 +1,6 @@
 id: feature_terminal_003_dev_script_config_path
+benchmark_track: feature
+benchmark_category: config_tooling_repair
 family: terminal_workflow
 difficulty: easy
 language: python
@@ -19,4 +21,3 @@ allowlist_paths:
 - app/
 - tests/
 - Makefile
-benchmark_track: feature

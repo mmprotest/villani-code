@@ -24,5 +24,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_bugfix_002_config_precedence",
-  "difficulty": "easy"
+  "difficulty": "easy",
+  "benchmark_category": "bug_fix"
 }

@@ -66,6 +66,7 @@ def load_task(task_dir: Path) -> BenchmarkTask:
     payload["task_dir"] = task_dir
     payload["prompt"] = _read_prompt(prompt_txt)
     payload["benchmark_track"] = _resolve_track(task_dir, payload, metadata_raw)
+    payload.setdefault("benchmark_category", payload.get("benchmark_category", metadata_raw.get("benchmark_category")))
     if "allowlist_paths" not in payload and "allowed_paths" in payload:
         payload["allowlist_paths"] = payload["allowed_paths"]
     payload.setdefault("source_type", metadata_raw.get("source_type", "curated"))
@@ -76,10 +77,9 @@ def load_task(task_dir: Path) -> BenchmarkTask:
     payload.setdefault("variant_id", metadata_raw.get("variant_id"))
     payload.setdefault("forbidden_paths", metadata_raw.get("forbidden_paths", []))
     payload.setdefault("env_allowlist", metadata_raw.get("env_allowlist", []))
-    payload["metadata"] = TaskMetadata.model_validate(metadata_raw)
-
-    payload["task_checksum"] = _checksum_files(task_dir, ["task.yaml", "prompt.txt", "metadata.json"])
     try:
+        payload["metadata"] = TaskMetadata.model_validate(metadata_raw)
+        payload["task_checksum"] = _checksum_files(task_dir, ["task.yaml", "prompt.txt", "metadata.json"])
         return BenchmarkTask.model_validate(payload)
     except (ValidationError, ValueError) as exc:
         raise TaskLoadError(f"Invalid task schema in {task_yaml}: {exc}") from exc

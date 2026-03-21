@@ -41,5 +41,6 @@
   "benchmark_bucket": "runtime_stressing",
   "allowed_support_globs": [
     "src/app/*.py"
-  ]
+  ],
+  "benchmark_category": "failing_test_diagnosis"
 }

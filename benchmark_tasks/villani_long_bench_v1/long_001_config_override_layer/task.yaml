@@ -1,4 +1,6 @@
 id: long_001_config_override_layer
+benchmark_track: core
+benchmark_category: failing_test_diagnosis
 family: bugfix
 difficulty: hard
 language: python
@@ -18,6 +20,5 @@ success_policy:
 allowlist_paths: &id001
 - src/
 - tests/
-benchmark_track: core
 allowed_paths: *id001
 expected_touched_max: 5

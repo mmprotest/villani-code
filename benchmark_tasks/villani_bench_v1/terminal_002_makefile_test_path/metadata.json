@@ -28,5 +28,6 @@
     "workflow_correctness",
     "verification_discipline"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "benchmark_category": "config_tooling_repair"
 }

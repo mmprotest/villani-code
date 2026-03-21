@@ -26,5 +26,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_localize_001_serializer_shape",
-  "difficulty": "medium"
+  "difficulty": "medium",
+  "benchmark_category": "failing_test_diagnosis"
 }

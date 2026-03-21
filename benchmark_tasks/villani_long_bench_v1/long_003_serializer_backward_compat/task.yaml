@@ -1,4 +1,6 @@
 id: long_003_serializer_backward_compat
+benchmark_track: core
+benchmark_category: bug_fix
 family: bugfix
 difficulty: hard
 language: python
@@ -18,6 +20,5 @@ success_policy:
 allowlist_paths: &id001
 - src/
 - tests/
-benchmark_track: core
 allowed_paths: *id001
 expected_touched_max: 5

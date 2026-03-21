@@ -1,4 +1,6 @@
 id: mini_localize_001_serializer_shape
+benchmark_track: core
+benchmark_category: failing_test_diagnosis
 family: localize_patch
 difficulty: medium
 language: python
@@ -20,4 +22,3 @@ allowlist_paths:
 - tests/
 expected_touched_max: 1
 task_type: single_file_localize_patch
-benchmark_track: core

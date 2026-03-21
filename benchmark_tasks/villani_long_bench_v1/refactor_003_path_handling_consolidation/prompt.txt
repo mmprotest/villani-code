@@ -1,0 +1,1 @@
+Consolidate the repeated workspace path handling across the CLI and helper modules without changing outputs.

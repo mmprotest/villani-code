@@ -25,5 +25,6 @@
   ],
   "benchmark_bucket": "baseline",
   "name": "mini_localize_002_command_alias",
-  "difficulty": "medium"
+  "difficulty": "medium",
+  "benchmark_category": "failing_test_diagnosis"
 }

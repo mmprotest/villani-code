@@ -13,13 +13,23 @@ def _write_task(root: Path, name: str, track: str = "core") -> None:
     t = root / name
     (t / "repo" / "src").mkdir(parents=True)
     (t / "prompt.txt").write_text("fix", encoding="utf-8")
-    (t / "metadata.json").write_text(json.dumps({"expected_files": ["src/a.py"], "primary_skill": "debug"}), encoding="utf-8")
+    (t / "metadata.json").write_text(
+        json.dumps(
+            {
+                "expected_files": ["src/a.py"],
+                "primary_skill": "debug",
+                "benchmark_category": "bug_fix",
+            }
+        ),
+        encoding="utf-8",
+    )
     (t / "repo" / "src" / "a.py").write_text("x=1\n", encoding="utf-8")
     (t / "task.yaml").write_text(
         yaml.safe_dump(
             {
                 "id": name,
                 "benchmark_track": track,
+                "benchmark_category": "bug_fix",
                 "family": "bugfix",
                 "difficulty": "easy",
                 "language": "python",
@@ -79,3 +89,29 @@ def test_healthcheck_warns_hidden_verifier_conflict(tmp_path: Path) -> None:
     health = run_healthcheck(tmp_path)
     warning_codes = {w["code"] for w in health["warnings"]}
     assert "hidden_verifier_conflict" in warning_codes
+
+
+def test_healthcheck_fails_missing_invalid_or_mismatched_benchmark_category(tmp_path: Path) -> None:
+    _write_task(tmp_path, "missing")
+    _write_task(tmp_path, "invalid")
+    _write_task(tmp_path, "mismatch")
+
+    missing_yaml = yaml.safe_load((tmp_path / "missing" / "task.yaml").read_text(encoding="utf-8"))
+    missing_yaml.pop("benchmark_category", None)
+    (tmp_path / "missing" / "task.yaml").write_text(yaml.safe_dump(missing_yaml, sort_keys=False), encoding="utf-8")
+
+    invalid_metadata = json.loads((tmp_path / "invalid" / "metadata.json").read_text(encoding="utf-8"))
+    invalid_metadata["benchmark_category"] = "not_real"
+    (tmp_path / "invalid" / "metadata.json").write_text(json.dumps(invalid_metadata), encoding="utf-8")
+
+    mismatch_yaml = yaml.safe_load((tmp_path / "mismatch" / "task.yaml").read_text(encoding="utf-8"))
+    mismatch_yaml["benchmark_category"] = "refactor"
+    (tmp_path / "mismatch" / "task.yaml").write_text(yaml.safe_dump(mismatch_yaml, sort_keys=False), encoding="utf-8")
+
+    health = run_healthcheck(tmp_path)
+    category_errors = [error for error in health["errors"] if error["code"] == "benchmark_category_validation_failed"]
+    assert len(category_errors) == 1
+    message = category_errors[0]["message"]
+    assert "missing" in message
+    assert "invalid" in message
+    assert "mismatch" in message

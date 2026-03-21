@@ -1,4 +1,6 @@
 id: bugfix_003_csv_quotes
+benchmark_track: core
+benchmark_category: bug_fix
 family: bugfix
 difficulty: medium
 language: python
@@ -18,4 +20,3 @@ success_policy:
 allowlist_paths:
 - src/
 - tests/
-benchmark_track: core
