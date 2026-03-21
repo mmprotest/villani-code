@@ -9,16 +9,17 @@
   "task_version": "1.0",
   "expected_patch_size_band": "medium",
   "name": "feature_003_plugin_hook_registration",
-  "description": "Support registering plugin post-run hooks and invoke them after command execution.",
+  "description": "Support registering plugin post-run hooks with alias-aware lookup and status reporting.",
   "difficulty": "hard",
   "benchmark_category": "small_feature_work",
   "expected_files": [
     "src/app/registry.py",
     "src/app/plugins.py",
     "src/app/runner.py",
+    "src/app/status.py",
     "src/app/cli.py"
   ],
-  "reference_patch_size_lines": 30,
+  "reference_patch_size_lines": 38,
   "primary_skill": "python-feature-work",
   "secondary_skills": [
     "pytest",
@@ -26,6 +27,7 @@
   ],
   "runtime_stressors": [
     "registry_coordination",
+    "alias_resolution",
     "end_to_end_feature_flow"
   ],
   "task_type": "plugin_feature_extension",
@@ -45,6 +47,6 @@
     "hook_invocation"
   ],
   "benchmark_bucket": "baseline",
-  "reference_solution_notes": "Category rationale: this is small feature work because it adds a new plugin capability\u2014post-run hooks\u2014across registration and invocation layers. It is not a disguised bug fix because command registration already works; the new behavior extends the platform.",
-  "mutability_notes": "Non-trivial because the new hook path must be plumbed through registry setup, plugin specs, execution, and CLI rendering without breaking existing command resolution."
+  "reference_solution_notes": "Category rationale: this remains small feature work because it adds post-run hook registration plus alias-aware introspection across registry, invocation, and status reporting. The weakness addressed was a too-neat happy path; the hardened task now requires aliases, status output, and duplicate-alias safety in addition to hook execution.",
+  "mutability_notes": "Extra interaction added: plugin metadata must flow into command lookup, hook invocation, and status listing. Shallow solutions that only patch execute() or only register hooks without aliases/introspection are now caught by hidden tests and the contract script."
 }

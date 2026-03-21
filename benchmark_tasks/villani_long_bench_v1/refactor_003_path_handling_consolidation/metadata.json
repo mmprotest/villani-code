@@ -9,16 +9,18 @@
   "task_version": "1.0",
   "expected_patch_size_band": "medium",
   "name": "refactor_003_path_handling_consolidation",
-  "description": "Centralize workspace path normalization used by bundle and scanner paths.",
+  "description": "Centralize workspace path normalization used by bundle, scanner, registry, and reporting paths.",
   "difficulty": "hard",
   "benchmark_category": "refactor",
   "expected_files": [
     "src/app/paths.py",
     "src/app/bundle.py",
     "src/app/scanner.py",
+    "src/app/registry.py",
+    "src/app/reporting.py",
     "src/app/cli.py"
   ],
-  "reference_patch_size_lines": 28,
+  "reference_patch_size_lines": 34,
   "primary_skill": "python-refactoring",
   "secondary_skills": [
     "pytest",
@@ -26,7 +28,8 @@
   ],
   "runtime_stressors": [
     "path_normalization",
-    "multi_module_coordination"
+    "multi_module_coordination",
+    "display_format_stability"
   ],
   "task_type": "repo_navigation_refactor",
   "requires_repo_navigation": true,
@@ -45,6 +48,6 @@
     "path_consistency"
   ],
   "benchmark_bucket": "baseline",
-  "reference_solution_notes": "Category rationale: this is a refactor because it asks for one reusable path-resolution helper while preserving current path outputs across modules. It is not a disguised bug fix because the desired output semantics are already defined and must remain stable.",
-  "mutability_notes": "Non-trivial because multiple modules resolve paths slightly differently today, so the solver must understand CLI and helper interactions before centralizing logic."
+  "reference_solution_notes": "Category rationale: this remains a refactor because the task is to replace repeated path normalization with one shared utility while preserving CLI, registry, and reporting behavior. The weakness addressed was a too-tidy two-call-site setup; the hardened version adds internal consumers and a path-format contract script so one-call-site refactors no longer pass.",
+  "mutability_notes": "Extra interaction added: registry keys and reporting output now depend on the same canonical path display. Shallow solutions that update only bundle/scanner or preserve mixed separators in one path are now caught by hidden checks and the targeted contract script."
 }

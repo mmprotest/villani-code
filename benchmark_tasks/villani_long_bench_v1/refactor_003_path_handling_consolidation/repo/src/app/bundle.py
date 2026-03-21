@@ -11,5 +11,6 @@ def _resolve_workspace_path(root: str, candidate: str) -> str:
         return resolved.as_posix()
 
 
+
 def plan_bundle(root: str, candidates: list[str]) -> list[str]:
     return [_resolve_workspace_path(root, candidate) for candidate in candidates]

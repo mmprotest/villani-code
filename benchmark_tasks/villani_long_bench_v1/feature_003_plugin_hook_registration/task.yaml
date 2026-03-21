@@ -12,6 +12,7 @@ visible_verification:
 - pytest -q tests/test_visible.py
 hidden_verification:
 - pytest -q
+- PYTHONPATH=src python tests/verify_plugin_contracts.py
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

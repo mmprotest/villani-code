@@ -12,5 +12,5 @@ def _resolve_workspace_path(root: str, candidate: str) -> str:
 
 
 
-def collect_manifest(root: str, candidates: list[str]) -> str:
-    return '|'.join(_resolve_workspace_path(root, candidate) for candidate in candidates)
+def render_report(root: str, candidates: list[str]) -> str:
+    return ','.join(_resolve_workspace_path(root, candidate) for candidate in candidates)
