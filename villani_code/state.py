@@ -387,6 +387,7 @@ class Runner:
         self._live_stream_started = False
         self._no_progress_cycles = 0
         self._recovery_count = 0
+        self._failed_tool_call_recovery_count = 0
         self._last_failed_tool_sig = ""
         self._repo_map = ""
         self._retriever: Retriever | None = None
@@ -813,6 +814,8 @@ class Runner:
                 return "completed"
             return None
 
+        from villani_code import state_runtime
+
         while True:
             self._live_stream_buffer = ""
             self._live_stream_started = False
@@ -845,17 +848,36 @@ class Runner:
 
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
+            tool_uses, malformed_tool_uses = state_runtime.split_response_tool_uses(response)
+            assistant_message_content = response.get("content", [])
+            if malformed_tool_uses:
+                assistant_message_content = [
+                    block
+                    for block in assistant_message_content
+                    if not (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block not in tool_uses
+                    )
+                ]
             usage = response.get("usage")
             if isinstance(usage, dict):
                 self.event_callback({"type": "model_usage", "model": self.model, "usage": usage})
             messages.append(
-                {"role": "assistant", "content": response.get("content", [])}
+                {"role": "assistant", "content": assistant_message_content}
             )
             turns_used += 1
 
-            tool_uses = [
-                b for b in response.get("content", []) if b.get("type") == "tool_use"
-            ]
+            for malformed in malformed_tool_uses:
+                self.event_callback(
+                    {
+                        "type": "malformed_tool_call_retry",
+                        "reason": malformed.get("reason", "malformed_tool_use"),
+                        "block_index": malformed.get("index"),
+                        "tool_name": malformed.get("name", ""),
+                        "recovery_action": "awaiting_runner_recovery",
+                    }
+                )
             empty = is_effectively_empty_content(response.get("content", []))
             if not tool_uses and empty and empty_turn_retries < 2:
                 empty_turn_retries += 1
@@ -974,6 +996,52 @@ class Runner:
                             "files": proposal.files_touched,
                         }
                     )
+                failed_tool_turn = state_runtime.detect_suspected_failed_tool_call_turn(
+                    self,
+                    response,
+                    malformed_tool_uses=malformed_tool_uses,
+                )
+                if failed_tool_turn.should_recover:
+                    self.event_callback(
+                        {
+                            "type": "suspected_failed_tool_call_recovery",
+                            "reason": failed_tool_turn.reason,
+                            "consecutive_count": self._failed_tool_call_recovery_count + 1,
+                            "had_code_block": failed_tool_turn.had_code_block,
+                            "content_length": failed_tool_turn.content_length,
+                            "prior_tool_intent": failed_tool_turn.prior_tool_intent,
+                            "recovery_action": (
+                                "inject_retry"
+                                if self._failed_tool_call_recovery_count
+                                < state_runtime._FAILED_TOOL_CALL_RECOVERY_LIMIT
+                                else "cap_reached"
+                            ),
+                        }
+                    )
+                    if (
+                        self._failed_tool_call_recovery_count
+                        < state_runtime._FAILED_TOOL_CALL_RECOVERY_LIMIT
+                    ):
+                        recovery_text = state_runtime.build_failed_tool_call_recovery_message()
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [{"type": "text", "text": recovery_text}],
+                            }
+                        )
+                        self._failed_tool_call_recovery_count += 1
+                        self._no_progress_cycles = 0
+                        self.event_callback(
+                            {
+                                "type": "recovery_message_injected",
+                                "reason": failed_tool_turn.reason,
+                                "consecutive_count": self._failed_tool_call_recovery_count,
+                                "recovery_action": "retry_with_single_tool_call",
+                            }
+                        )
+                        continue
+                else:
+                    self._failed_tool_call_recovery_count = 0
                 if self._is_no_progress_response(response):
                     self._no_progress_cycles += 1
                     if execution_budget is not None:
@@ -1235,6 +1303,7 @@ class Runner:
             ):
                 self._no_progress_cycles = 0
                 self._recovery_count = 0
+                self._failed_tool_call_recovery_count = 0
                 self._last_failed_tool_sig = ""
             else:
                 sig = "|".join(f"{b.get('name')}:{b.get('input')}" for b in tool_uses)
@@ -1247,6 +1316,7 @@ class Runner:
             previous_attributed = attributed
             if edited_this_turn:
                 consecutive_no_edit_turns = 0
+                self._failed_tool_call_recovery_count = 0
                 if self.benchmark_config.enabled and _has_meaningful_benchmark_edit():
                     reset_benchmark_progress_state(benchmark_runtime)
             else:
