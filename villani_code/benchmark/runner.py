@@ -7,6 +7,7 @@ import shutil
 import stat
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from villani_code.benchmark.agents import build_agent_runner
@@ -17,14 +18,15 @@ from villani_code.benchmark.models import (
     BENCHMARK_VERSION,
     BenchmarkRunResult,
     BenchmarkTask,
-    FailureReason,
     FieldQuality,
+    FailureReason,
     ReproducibilityManifest,
     TaskFamily,
     TelemetryQuality,
     VerificationOutcome,
     classify_failure_mode,
 )
+from villani_code.benchmark.observability import derive_observability_metrics
 from villani_code.benchmark.policy import (
     PATH_CLASS_CLEARLY_UNRELATED,
     benchmark_asset_integrity,
@@ -190,8 +192,8 @@ class BenchmarkRunner:
         repair_attempts = 0
         noop_retries = 0
         empty_turn_retries = 0
-        verification_seen = False
         verification_failed = False
+        verification_failed_then_recovered = False
         benchmark_mutation_denials = 0
         benchmark_write_denials = 0
         benchmark_patch_denials = 0
@@ -199,6 +201,8 @@ class BenchmarkRunner:
         first_denied_reason: str | None = None
 
         verification_commands = set(visible_commands + hidden_commands)
+        expected_files_set = {str(path).replace("\\", "/").lstrip("./") for path in expected_files}
+        pending_verification_commands: deque[bool] = deque()
         for e in events:
             etype = str(getattr(e, "type", "") or "")
             payload = getattr(e, "payload", {})
@@ -208,18 +212,21 @@ class BenchmarkRunner:
             if etype == "command_started":
                 command_starts += 1
                 command = str(payload.get("command", ""))
-                if any(cmd in command for cmd in verification_commands):
+                is_verification_command = any(cmd in command for cmd in verification_commands)
+                pending_verification_commands.append(is_verification_command)
+                if is_verification_command:
                     test_runs += 1
-                    verification_seen = True
             if etype == "command_finished":
+                is_verification_command = pending_verification_commands.popleft() if pending_verification_commands else False
                 exit_code = payload.get("exit_code")
                 if isinstance(exit_code, int) and exit_code != 0:
                     command_failures += 1
-                    if verification_seen:
+                    if is_verification_command:
                         verification_failed = True
-                elif isinstance(exit_code, int) and exit_code == 0 and verification_failed:
+                elif isinstance(exit_code, int) and exit_code == 0 and is_verification_command and verification_failed:
                     retries_after_failure += 1
                     verification_failed = False
+                    verification_failed_then_recovered = True
             if etype == "repair_attempt_started":
                 repair_attempts += 1
             if etype == "benchmark_noop_completion_blocked":
@@ -250,9 +257,10 @@ class BenchmarkRunner:
                 event_type in {"file_read", "read_file", "open_file", "Read"}
                 or (event_type in {"tool_started", "tool_finished", "tool_result"} and tool_name == "Read")
             ) and isinstance(path, str):
+                normalized_path = str(path).replace("\\", "/").lstrip("./")
                 file_reads += 1
-                read_paths.add(path)
-                if path in expected_files and first_expected_read is None:
+                read_paths.add(normalized_path)
+                if normalized_path in expected_files_set and first_expected_read is None:
                     first_expected_read = max(0.0, ts - started)
 
             if event_type == "benchmark_write_blocked":
@@ -281,7 +289,7 @@ class BenchmarkRunner:
             "num_failed_commands": command_failures if command_starts > 0 else None,
             "time_to_first_edit": first_edit,
             "expected_file_first_read_time": first_expected_read,
-            "expected_files_found": len(set(expected_files) & read_paths) if expected_files else 0,
+            "expected_files_read": read_paths & expected_files_set,
             "expected_files_total": len(expected_files),
             "tool_calls_total": tool_calls_total if tool_calls_total > 0 else None,
             "file_reads": file_reads if file_reads > 0 else None,
@@ -291,6 +299,7 @@ class BenchmarkRunner:
             "number_of_turns": number_of_turns,
             "retries_after_failure": retries_after_failure if retries_after_failure > 0 else 0,
             "retry_count": retries_after_failure + repair_attempts + noop_retries + empty_turn_retries,
+            "verification_failed_then_recovered": verification_failed_then_recovered,
             "benchmark_mutation_denials": benchmark_mutation_denials if benchmark_mutation_denials > 0 else None,
             "benchmark_write_denials": benchmark_write_denials if benchmark_write_denials > 0 else None,
             "benchmark_patch_denials": benchmark_patch_denials if benchmark_patch_denials > 0 else None,
@@ -312,10 +321,10 @@ class BenchmarkRunner:
                 return int(value)
             return None
 
-        def _usage_from_payload(payload: dict[str, object]) -> tuple[int | None, int | None]:
+        def _usage_from_payload(payload: dict[str, object]) -> tuple[int | None, int | None, int | None]:
             usage = payload.get("usage")
             if not isinstance(usage, dict):
-                return None, None
+                return None, None, None
             tokens_in = next(
                 (
                     value
@@ -340,7 +349,20 @@ class BenchmarkRunner:
                 ),
                 None,
             )
-            return tokens_in, tokens_out
+            total = next(
+                (
+                    value
+                    for value in (
+                        _coerce_int(usage.get("total_tokens")),
+                        _coerce_int(payload.get("total_tokens")),
+                    )
+                    if value is not None
+                ),
+                None,
+            )
+            if total is None and tokens_in is not None and tokens_out is not None:
+                total = tokens_in + tokens_out
+            return tokens_in, tokens_out, total
 
         direct_in = _coerce_int(getattr(execution, "tokens_input", None))
         direct_out = _coerce_int(getattr(execution, "tokens_output", None))
@@ -351,22 +373,30 @@ class BenchmarkRunner:
             return direct_in, direct_out, direct_total, FieldQuality.EXACT
 
         events = getattr(execution, "events", [])
-        latest_in: int | None = None
-        latest_out: int | None = None
-        latest_total: int | None = None
+        sum_in = 0
+        sum_out = 0
+        sum_total = 0
+        saw_in = False
+        saw_out = False
+        saw_total = False
         for event in events:
             payload = getattr(event, "payload", {})
             if not isinstance(payload, dict):
                 continue
-            tokens_in, tokens_out = _usage_from_payload(payload)
+            tokens_in, tokens_out, total = _usage_from_payload(payload)
             if tokens_in is not None:
-                latest_in = tokens_in
+                sum_in += tokens_in
+                saw_in = True
             if tokens_out is not None:
-                latest_out = tokens_out
-            total = _coerce_int(payload.get("total_tokens"))
+                sum_out += tokens_out
+                saw_out = True
             if total is not None:
-                latest_total = total
+                sum_total += total
+                saw_total = True
 
+        latest_in = sum_in if saw_in else None
+        latest_out = sum_out if saw_out else None
+        latest_total = sum_total if saw_total else None
         if latest_in is not None or latest_out is not None or latest_total is not None:
             if latest_total is None and latest_in is not None and latest_out is not None:
                 latest_total = latest_in + latest_out
@@ -414,6 +444,13 @@ class BenchmarkRunner:
         return False
 
     @staticmethod
+    def _stderr_snippet(stderr: str, max_len: int = 240) -> str:
+        compact = " ".join(stderr.strip().split())
+        if len(compact) <= max_len:
+            return compact
+        return compact[: max_len - 3] + "..."
+
+    @staticmethod
     def _recovery_attempted(
         retries_after_failure: int | None,
         verification_attempt_count: int,
@@ -422,18 +459,13 @@ class BenchmarkRunner:
     ) -> bool:
         if (retries_after_failure or 0) > 0:
             return True
-        if verification_attempt_count > 1 and (
-            had_failed_verification
-            or failure_reason in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED}
-        ):
-            return True
-        return False
-    @staticmethod
-    def _stderr_snippet(stderr: str, max_len: int = 240) -> str:
-        compact = " ".join(stderr.strip().split())
-        if len(compact) <= max_len:
-            return compact
-        return compact[: max_len - 3] + "..."
+        return bool(
+            verification_attempt_count > 1
+            and (
+                had_failed_verification
+                or failure_reason in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED}
+            )
+        )
 
     def _run_task(
         self,
@@ -481,6 +513,12 @@ class BenchmarkRunner:
         denied_summary_detail = ""
         prompt_artifact_path: str | None = None
         contract_artifact_path: str | None = None
+        metrics: dict[str, object] = {
+            "expected_files_read": set(),
+            "expected_files_total": len(task.metadata.expected_files),
+            "verification_failed_then_recovered": False,
+            "retry_count": None,
+        }
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -606,7 +644,6 @@ class BenchmarkRunner:
                     num_failed_commands = metrics["num_failed_commands"]
                     time_to_first_edit = metrics["time_to_first_edit"]
                     expected_file_first_read_time = metrics["expected_file_first_read_time"]
-                    expected_files_found = metrics["expected_files_found"]
                     expected_files_total = metrics["expected_files_total"]
                     number_of_turns = metrics["number_of_turns"]
                     tool_calls_total = metrics["tool_calls_total"]
@@ -715,11 +752,6 @@ class BenchmarkRunner:
             runtime_seconds = time.monotonic() - started
             artifacts_ok, artifact_failure_detail = self._check_required_artifacts(task, touched)
 
-            if expected_files_total is None:
-                expected_files_total = len(task.metadata.expected_files)
-            if expected_files_found is None:
-                expected_files_found = sum(1 for rel in task.metadata.expected_files if (workspace_repo / rel).exists())
-
             solved_checks_passed = visible_pass and hidden_pass
             hidden_required = task.success_policy.require_hidden_pass or bool(task.hidden_verification)
             policy_warning = None
@@ -782,24 +814,26 @@ class BenchmarkRunner:
 
             hidden_checks = task.hidden_verification
             hidden_failed = any("hidden" in c for c in verifications[-len(hidden_checks) :]) if hidden_checks else False
-            first_pass_success = bool(success and (retries_after_failure or 0) == 0)
-            recovered_after_failed_attempt = bool(success and (retries_after_failure or 0) > 0)
             expected_files_set = set(policy_result.meaningful_expected_paths)
             touched_unexpected = bool(policy_result.meaningful_unexpected_paths)
-            expected_files_touched_count = len(expected_files_set)
+            observability = derive_observability_metrics(
+                success=bool(success),
+                expected_files=task.metadata.expected_files,
+                expected_files_read=set(metrics.get("expected_files_read") or set()),
+                expected_files_touched=expected_files_set,
+                verification_failed_then_recovered=bool(metrics.get("verification_failed_then_recovered")),
+                retries_after_failure=retries_after_failure,
+            )
+            expected_files_found = observability.expected_files_found
+            expected_files_total = observability.expected_files_total
+            expected_files_touched_count = observability.expected_files_touched_count
+            first_pass_success = observability.first_pass_success
+            recovered_after_failed_attempt = observability.recovered_after_failed_attempt
             visible_only_pass = bool(visible_pass and not hidden_pass)
             unrelated_file_touch = any(cls == PATH_CLASS_CLEARLY_UNRELATED for cls in policy_result.path_classifications.values())
             verification_relevant = self._verification_relevant(task, verifications, touched)
-            had_failed_verification = (not visible_pass) or (not hidden_pass)
-            recovery_attempted = self._recovery_attempted(
-                retries_after_failure,
-                len(verifications),
-                had_failed_verification,
-                failure_reason,
-            )
-            recovery_success = None
-            if recovery_attempted:
-                recovery_success = bool(success and (had_failed_verification or (retries_after_failure or 0) > 0))
+            recovery_attempted = observability.recovery_attempted
+            recovery_success = observability.recovery_success
             no_progress_termination = failure_reason == FailureReason.NO_PROGRESS
             failure_mode_category = classify_failure_mode(success=success, failure_reason=failure_reason)
             verification_output = "\n".join(
@@ -865,6 +899,7 @@ class BenchmarkRunner:
                 benchmark_track=task.benchmark_track,
                 task_id=task.id,
                 task_version=task.task_version,
+                benchmark_category=task.benchmark_category or task.metadata.benchmark_category,
                 task_family=task.family,
                 task_difficulty=task.difficulty,
                 task_language=task.language,
@@ -904,6 +939,7 @@ class BenchmarkRunner:
                 touched_file_paths=touched,
                 raw_touched_file_paths=raw_touched,
                 normalized_touched_paths=policy_result.normalized_touched_paths,
+                runtime_artifact_paths=policy_result.ignored_junk_paths,
                 path_classifications=policy_result.path_classifications,
                 meaningful_touched_paths=policy_result.meaningful_touched_paths,
                 meaningful_expected_paths=policy_result.meaningful_expected_paths,
@@ -946,7 +982,7 @@ class BenchmarkRunner:
                 expected_files_found=expected_files_found,
                 expected_files_total=expected_files_total,
                 expected_file_first_read_time=expected_file_first_read_time,
-                self_corrected_after_failed_verify=(visible_pass and hidden_pass and not hidden_failed) if verifications else None,
+                self_corrected_after_failed_verify=observability.self_corrected_after_failed_verify,
                 touched_irrelevant_files=sum(1 for p in touched if not any(p.startswith(a) for a in task.allowlist_paths)),
                 telemetry_quality=telemetry_quality,
                 telemetry_field_quality_map=field_quality_map,

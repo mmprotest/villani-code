@@ -127,7 +127,6 @@ def classify_failure_taxonomy(
     expected_touched = set(meaningful_expected_paths or [])
     unexpected_touched = list(meaningful_unexpected_paths or [])
     meaningful_touched = list(meaningful_touched_paths or [])
-    touched = list(touched_file_paths or [])
 
     if unexpected_touched:
         if (
@@ -142,7 +141,7 @@ def classify_failure_taxonomy(
         if expected and not expected_touched:
             return _choose(FailureTaxonomy.EDITED_WRONG_FILE, "touched files did not intersect expected target paths")
 
-    if (unrelated_file_touch or bool(touched_unexpected_files)) and expected and not expected_touched and (meaningful_touched or touched):
+    if (unrelated_file_touch or bool(touched_unexpected_files)) and expected and not expected_touched and meaningful_touched:
         return _choose(FailureTaxonomy.EDITED_WRONG_FILE, "edits appear outside expected target area")
 
     if num_shell_commands == 0 and _task_requires_commands(task_family=task_family, task_type=task_type, benchmark_category=benchmark_category):

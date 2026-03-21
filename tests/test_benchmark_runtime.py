@@ -501,6 +501,9 @@ def test_verification_relevant_unrelated_command_false() -> None:
 def test_verification_relevant_touched_test_and_module_true(tmp_path: Path) -> None:
     task = _minimal_task(tmp_path)
     task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
     assert BenchmarkRunner._verification_relevant(task, ["pytest -q tests/test_app.py"], ["tests/test_app.py"]) is True
     assert BenchmarkRunner._verification_relevant(task, ["python -m src.app"], ["src/app.py"]) is True
 
@@ -567,6 +570,9 @@ def test_launch_failure_maps_to_verification_command_failed_to_launch(tmp_path: 
     monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
 
     task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.failure_reason == FailureReason.VERIFICATION_COMMAND_FAILED_TO_LAUNCH
 
@@ -596,6 +602,9 @@ def test_test_failure_stays_visible_verification_failed(tmp_path: Path, monkeypa
     monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
 
     task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
+    task.metadata.expected_files = ["src/app.py"]
     row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(task, agent="villani", model="m", base_url=None, api_key=None, provider=None)
     assert row.failure_reason == FailureReason.VISIBLE_VERIFICATION_FAILED
 
@@ -1050,6 +1059,151 @@ def test_runner_plumbs_token_usage_and_retry_count(tmp_path: Path, monkeypatch) 
     assert result.retry_count == 2
     assert result.telemetry_field_quality_map["tokens_input"] == FieldQuality.EXACT
     assert result.telemetry_field_quality_map["retry_count"] == FieldQuality.INFERRED
+
+
+def test_runner_expected_files_found_counts_meaningful_interaction_not_filesystem_existence(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.APPROXIMATELY_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **_kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.EXACT,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.EXACT},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py", ".villani_code/state.json"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert result.expected_files_found == 1
+    assert result.expected_files_touched_count == 1
+    assert result.runtime_artifact_paths == [".villani_code/state.json"]
+
+
+def test_self_corrected_after_failed_verify_is_false_on_first_pass_success(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.APPROXIMATELY_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **_kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.EXACT,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.EXACT},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert result.first_pass_success is True
+    assert result.recovery_attempted is False
+    assert result.self_corrected_after_failed_verify is False
+
+
+def test_self_corrected_after_failed_verify_requires_real_failed_then_recovered_verification(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.APPROXIMATELY_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **_kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.EXACT,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.EXACT},
+                events=[
+                    AdapterEvent(type="command_started", timestamp=1.0, payload={"command": "python -c 'print(1)'"}),
+                    AdapterEvent(type="command_finished", timestamp=2.0, payload={"exit_code": 1}),
+                    AdapterEvent(type="command_started", timestamp=3.0, payload={"command": "python -c 'print(1)'"}),
+                    AdapterEvent(type="command_finished", timestamp=4.0, payload={"exit_code": 0}),
+                ],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    result = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert result.first_pass_success is False
+    assert result.recovery_attempted is True
+    assert result.recovered_after_failed_attempt is True
+    assert result.recovery_success is True
+    assert result.self_corrected_after_failed_verify is True
 
 
 def test_runner_leaves_token_fields_honest_when_usage_missing(tmp_path: Path, monkeypatch) -> None:
