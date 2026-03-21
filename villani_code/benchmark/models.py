@@ -63,6 +63,50 @@ class FailureReason(str, Enum):
     ENVIRONMENT_FAILURE = "environment_failure"
 
 
+class FailureModeCategory(str, Enum):
+    SUCCESS = "success"
+    VERIFICATION_FAILURE = "verification_failure"
+    TIMEOUT = "timeout"
+    FORBIDDEN_EDIT = "forbidden_edit"
+    INSPECT_ONLY_VIOLATION = "inspect_only_violation"
+    MISSING_ARTIFACT = "missing_artifact"
+    AGENT_CRASH = "agent_crash"
+    VERIFIER_CRASH = "verifier_crash"
+    NO_PROGRESS = "no_progress"
+    ENVIRONMENT_FAILURE = "environment_failure"
+    BENCHMARK_ERROR = "benchmark_error"
+
+
+FAILURE_REASON_TO_CATEGORY: dict[FailureReason, FailureModeCategory] = {
+    FailureReason.VISIBLE_VERIFICATION_FAILED: FailureModeCategory.VERIFICATION_FAILURE,
+    FailureReason.HIDDEN_VERIFICATION_FAILED: FailureModeCategory.VERIFICATION_FAILURE,
+    FailureReason.VERIFICATION_COMMAND_FAILED_TO_LAUNCH: FailureModeCategory.VERIFIER_CRASH,
+    FailureReason.INVALID_REPRO_TEST: FailureModeCategory.VERIFICATION_FAILURE,
+    FailureReason.TIMEOUT: FailureModeCategory.TIMEOUT,
+    FailureReason.FORBIDDEN_EDIT: FailureModeCategory.FORBIDDEN_EDIT,
+    FailureReason.INSPECT_ONLY_VIOLATION: FailureModeCategory.INSPECT_ONLY_VIOLATION,
+    FailureReason.MISSING_ARTIFACT: FailureModeCategory.MISSING_ARTIFACT,
+    FailureReason.AGENT_CRASH: FailureModeCategory.AGENT_CRASH,
+    FailureReason.VERIFIER_CRASH: FailureModeCategory.VERIFIER_CRASH,
+    FailureReason.BENCHMARK_ERROR: FailureModeCategory.BENCHMARK_ERROR,
+    FailureReason.NO_PROGRESS: FailureModeCategory.NO_PROGRESS,
+    FailureReason.BENCHMARK_NO_PATCH_ATTEMPT: FailureModeCategory.NO_PROGRESS,
+    FailureReason.ENVIRONMENT_FAILURE: FailureModeCategory.ENVIRONMENT_FAILURE,
+}
+
+
+def classify_failure_mode(
+    *,
+    success: bool | int,
+    failure_reason: FailureReason | None,
+) -> FailureModeCategory:
+    if bool(success):
+        return FailureModeCategory.SUCCESS
+    if failure_reason is None:
+        return FailureModeCategory.BENCHMARK_ERROR
+    return FAILURE_REASON_TO_CATEGORY.get(failure_reason, FailureModeCategory.BENCHMARK_ERROR)
+
+
 class TaskSource(str, Enum):
     SEEDED = "seeded"
     CURATED = "curated"
@@ -268,6 +312,8 @@ class BenchmarkRunResult(BaseModel):
     tokens_input: int | None = None
     tokens_output: int | None = None
     total_tokens: int | None = None
+    retry_count: int | None = None
+    failure_mode_category: FailureModeCategory = FailureModeCategory.SUCCESS
     estimated_cost: float | None = None
     number_of_turns: int | None = None
     tool_calls_total: int | None = None
@@ -304,6 +350,15 @@ class BenchmarkRunResult(BaseModel):
     contract_artifact_path: str | None = None
     scoring_inputs_mode: str = "harness_only"
     repeat_index: int = 0
+
+    @model_validator(mode="after")
+    def _normalize_canonical_metrics(self) -> "BenchmarkRunResult":
+        if self.total_tokens is None and self.tokens_input is not None and self.tokens_output is not None:
+            self.total_tokens = self.tokens_input + self.tokens_output
+        if self.retry_count is None:
+            self.retry_count = self.retries_after_failure
+        self.failure_mode_category = classify_failure_mode(success=self.success, failure_reason=self.failure_reason)
+        return self
 
 
 class BenchmarkSummary(BaseModel):

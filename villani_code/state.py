@@ -845,6 +845,9 @@ class Runner:
 
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
+            usage = response.get("usage")
+            if isinstance(usage, dict):
+                self.event_callback({"type": "model_usage", "model": self.model, "usage": usage})
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}
             )
@@ -856,6 +859,7 @@ class Runner:
             empty = is_effectively_empty_content(response.get("content", []))
             if not tool_uses and empty and empty_turn_retries < 2:
                 empty_turn_retries += 1
+                self.event_callback({"type": "empty_turn_retry", "attempt": empty_turn_retries})
                 messages.append(
                     {
                         "role": "user",
