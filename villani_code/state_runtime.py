@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,6 +27,50 @@ from villani_code.utils import ensure_dir
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
+_EDIT_INTENT_KEYWORDS = (
+    "apply patch",
+    "patch ",
+    "write ",
+    "rewrite ",
+    "update ",
+    "modify ",
+    "change ",
+    "replace ",
+    "edit ",
+    "create ",
+    "delete ",
+    "rename ",
+    "implement ",
+    "fix ",
+)
+_REPO_ACTION_KEYWORDS = ("run ", "execute ", "bash ", "git ")
+_CODE_LINE_PREFIXES = (
+    "def ",
+    "class ",
+    "import ",
+    "from ",
+    "return ",
+    "if ",
+    "for ",
+    "while ",
+    "@@",
+    "--- ",
+    "+++ ",
+    "+",
+    "-",
+)
+_FILE_REF_RE = re.compile(r"[\w./-]+\.[a-zA-Z0-9]{1,8}")
+_FAILED_TOOL_CALL_RECOVERY_LIMIT = 2
+
+
+@dataclass(frozen=True)
+class SuspectedFailedToolCallTurn:
+    should_recover: bool
+    reason: str = ""
+    content_length: int = 0
+    had_code_block: bool = False
+    prior_tool_intent: bool = False
+    recovery_count: int = 0
 
 
 def _normalize_repo_path(value: str) -> str:
@@ -1083,6 +1127,100 @@ def emit_policy_event(
             "decision": getattr(decision, "value", str(decision)),
             "reason": reason,
         }
+    )
+
+
+def split_response_tool_uses(
+    response: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    usable: list[dict[str, Any]] = []
+    malformed: list[dict[str, Any]] = []
+    for index, block in enumerate(response.get("content", [])):
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        name = str(block.get("name", "")).strip()
+        raw_input = block.get("input", {})
+        if not name:
+            malformed.append({"index": index, "reason": "missing_tool_name"})
+            continue
+        if not isinstance(raw_input, dict):
+            malformed.append({"index": index, "reason": "non_mapping_input", "name": name})
+            continue
+        usable.append(block)
+    return usable, malformed
+
+
+def build_failed_tool_call_recovery_message() -> str:
+    return (
+        "Your previous turn did not produce a usable tool call. "
+        "Retry with one valid tool call only. "
+        "Make the smallest possible repo action; prefer Patch or a targeted edit over Write. "
+        "Do not resend full file contents unless it is strictly required."
+    )
+
+
+def detect_suspected_failed_tool_call_turn(
+    runner: Any,
+    response: dict[str, Any],
+    malformed_tool_uses: list[dict[str, Any]] | None = None,
+) -> SuspectedFailedToolCallTurn:
+    malformed = malformed_tool_uses or []
+    blocks = response.get("content", [])
+    if not isinstance(blocks, list) or not blocks:
+        return SuspectedFailedToolCallTurn(False)
+
+    if any(isinstance(block, dict) and block.get("type") == "tool_use" for block in blocks) and not malformed:
+        return SuspectedFailedToolCallTurn(False)
+
+    text_blocks = [
+        str(block.get("text", ""))
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    text = "\n".join(part for part in text_blocks if part).strip()
+    if not text and not malformed:
+        return SuspectedFailedToolCallTurn(False)
+
+    lowered = text.lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    content_length = len(text)
+    had_code_block = "```" in text
+    code_like_lines = sum(
+        1
+        for line in lines
+        if line.startswith(_CODE_LINE_PREFIXES) or (" = " in line and len(line) > 12)
+    )
+    mentions_file = bool(_FILE_REF_RE.search(text)) or any(
+        token in lowered for token in (" file ", " file:", " contents of ", " unified diff", " patch", " diff")
+    )
+    edit_intent = any(token in lowered for token in _EDIT_INTENT_KEYWORDS)
+    repo_action_intent = any(token in lowered for token in _REPO_ACTION_KEYWORDS)
+    prior_tool_intent = bool(getattr(runner, "_failed_tool_call_recovery_count", 0) > 0)
+    large_edit_payload = content_length >= 280 and (had_code_block or code_like_lines >= 5)
+
+    reason = ""
+    if malformed:
+        reason = malformed[0].get("reason", "malformed_tool_use")
+    elif large_edit_payload and edit_intent:
+        reason = "code_heavy_edit_intent_without_tool"
+    elif had_code_block and edit_intent and mentions_file:
+        reason = "coded_edit_intent_without_tool"
+    elif edit_intent and mentions_file and (content_length >= 180 or code_like_lines >= 3):
+        reason = "file_edit_intent_without_tool"
+    elif prior_tool_intent and (edit_intent or repo_action_intent or mentions_file):
+        reason = "repeated_edit_intent_without_tool"
+
+    should_recover = bool(reason)
+    if not should_recover:
+        return SuspectedFailedToolCallTurn(False, content_length=content_length, had_code_block=had_code_block)
+
+    return SuspectedFailedToolCallTurn(
+        should_recover=True,
+        reason=reason,
+        content_length=content_length,
+        had_code_block=had_code_block,
+        prior_tool_intent=prior_tool_intent,
+        recovery_count=int(getattr(runner, "_failed_tool_call_recovery_count", 0)),
     )
 
 

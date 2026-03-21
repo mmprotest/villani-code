@@ -321,6 +321,188 @@ class FakeClientStall:
         return {"id": str(self.calls), "role": "assistant", "content": [{"type": "text", "text": "ok"}]}
 
 
+class FakeClientProseOnlyAnswer:
+    def __init__(self):
+        self.calls = 0
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        return {
+            "id": str(self.calls),
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Here is the explanation you asked for."}],
+        }
+
+
+class FakeClientDroppedPatchThenDone:
+    def __init__(self):
+        self.calls = 0
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return {
+                "id": "1",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "I'll update src/app.py with a small fix.\n"
+                            "```python\n"
+                            "def repaired():\n"
+                            "    return 'ok'\n"
+                            "```\n"
+                            "Then I'll replace the file contents."
+                        ),
+                    }
+                ],
+            }
+        if self.calls == 2:
+            return {
+                "id": "2",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "read-1", "name": "Read", "input": {"file_path": "src/app.py"}}],
+            }
+        return {
+            "id": "3",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+        }
+
+
+class FakeClientRepeatedDroppedPatch:
+    def __init__(self):
+        self.calls = 0
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        return {
+            "id": str(self.calls),
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "I will update src/app.py now.\n"
+                        "```python\n"
+                        "print('rewrite')\n"
+                        "```\n"
+                        "I am replacing the file contents."
+                    ),
+                }
+            ],
+        }
+
+
+class FakeClientMalformedToolUseThenDone:
+    def __init__(self):
+        self.calls = 0
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return {
+                "id": "1",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool-1", "name": "Write", "input": '{"file_path":"src/app.py"'}],
+            }
+        return {
+            "id": "2",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+        }
+
+
+def test_ordinary_prose_answer_does_not_trigger_failed_tool_call_recovery(tmp_path: Path):
+    client = FakeClientProseOnlyAnswer()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    out = runner.run("explain the repository")
+
+    assert out["response"]["content"][0]["text"] == "Here is the explanation you asked for."
+    assert client.calls == 1
+    assert all(
+        "usable tool call" not in block.get("text", "")
+        for payload in client.payloads
+        for message in payload.get("messages", [])
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def test_edit_intent_prose_only_turn_triggers_failed_tool_call_recovery(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('x')\n", encoding="utf-8")
+    client = FakeClientDroppedPatchThenDone()
+    events: list[dict] = []
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, event_callback=events.append)
+
+    runner.run("fix src/app.py")
+
+    assert client.calls == 3
+    recovery_texts = [
+        block.get("text", "")
+        for payload in client.payloads[1:]
+        for message in payload["messages"]
+        if message["role"] == "user"
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert any("did not produce a usable tool call" in text for text in recovery_texts)
+    assert any("prefer Patch or a targeted edit over Write" in text for text in recovery_texts)
+    assert any(event.get("type") == "suspected_failed_tool_call_recovery" for event in events)
+    assert any(event.get("type") == "recovery_message_injected" for event in events)
+
+
+def test_repeated_failed_tool_call_recovery_is_bounded(tmp_path: Path):
+    client = FakeClientRepeatedDroppedPatch()
+    events: list[dict] = []
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, event_callback=events.append)
+
+    out = runner.run("fix the bug")
+
+    assert client.calls == 3
+    injected = [event for event in events if event.get("type") == "recovery_message_injected"]
+    suspected = [event for event in events if event.get("type") == "suspected_failed_tool_call_recovery"]
+    assert len(injected) == 2
+    assert suspected[-1]["recovery_action"] == "cap_reached"
+    assert out["response"]["content"][0]["text"].startswith("I will update src/app.py now.")
+
+
+def test_failed_tool_call_recovery_resets_after_successful_tool_execution(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('x')\n", encoding="utf-8")
+    client = FakeClientDroppedPatchThenDone()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+    runner.run("fix src/app.py")
+
+    assert runner._failed_tool_call_recovery_count == 0
+
+
+def test_malformed_tool_use_without_mapping_input_triggers_recovery(tmp_path: Path):
+    client = FakeClientMalformedToolUseThenDone()
+    events: list[dict] = []
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, event_callback=events.append)
+
+    out = runner.run("fix the bug")
+
+    assert out["response"]["content"][0]["text"] == "done"
+    assert any(
+        event.get("type") == "malformed_tool_call_retry" and event.get("reason") == "non_mapping_input"
+        for event in events
+    )
+    assert any(event.get("type") == "suspected_failed_tool_call_recovery" for event in events)
+
+
 def test_stall_recovery_injects_instruction(tmp_path: Path):
     runner = Runner(client=FakeClientStall(), repo=tmp_path, model="m", stream=False)
     runner.run("x")
@@ -556,6 +738,95 @@ def test_benchmark_prose_only_after_forced_read_terminates_early(tmp_path: Path)
 
     assert out["execution"]["terminated_reason"] == "benchmark_no_progress_after_forced_read"
     assert any(e.get("type") == "benchmark_no_progress_after_forced_read" for e in events)
+
+
+def test_benchmark_edit_intent_prose_uses_failed_tool_recovery_before_prose_only_guard(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('x')\n", encoding="utf-8")
+    diag = '{"target_file":"src/app.py","bug_class":"logic_error","fix_intent":"Read and patch minimal behavior."}'
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.payloads = []
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            self.payloads.append(payload)
+            if self.calls == 1:
+                return {"role": "assistant", "content": [{"type": "text", "text": diag}]}
+            if self.calls == 2:
+                return {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "I will update src/app.py with a minimal fix.\n"
+                                "```python\n"
+                                "print('patched')\n"
+                                "```\n"
+                                "Then I will replace the file contents."
+                            ),
+                        }
+                    ],
+                }
+            if self.calls == 3:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "read-1", "name": "Read", "input": {"file_path": "src/app.py"}}],
+                }
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    events: list[dict] = []
+    cfg = BenchmarkRuntimeConfig(enabled=True, task_id="t-recovery", allowlist_paths=["src/"], expected_files=["src/app.py"])
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, small_model=True, benchmark_config=cfg, event_callback=events.append)
+
+    out = runner.run("fix benchmark bug")
+
+    assert out["response"]["content"][0]["text"] == "done"
+    assert any(e.get("type") == "suspected_failed_tool_call_recovery" for e in events)
+    assert any(e.get("type") == "recovery_message_injected" for e in events)
+    assert not any(e.get("type") == "benchmark_prose_only_after_forced_read" for e in events)
+    recovery_messages = [
+        block.get("text", "")
+        for payload in runner.client.payloads[2:]
+        for message in payload.get("messages", [])
+        if message.get("role") == "user"
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert any("did not produce a usable tool call" in text for text in recovery_messages)
+    assert all("Benchmark mode: no prose-only turns." not in text for text in recovery_messages)
+
+
+def test_benchmark_plain_prose_still_uses_prose_only_guard_when_recovery_does_not_apply(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('x')\n", encoding="utf-8")
+    diag = '{"target_file":"src/app.py","bug_class":"logic_error","fix_intent":"Read and patch minimal behavior."}'
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"role": "assistant", "content": [{"type": "text", "text": diag}]}
+            return {"role": "assistant", "content": [{"type": "text", "text": "still planning"}]}
+
+    events: list[dict] = []
+    cfg = BenchmarkRuntimeConfig(enabled=True, task_id="t-prose", allowlist_paths=["src/"], expected_files=["src/app.py"])
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, small_model=True, benchmark_config=cfg, event_callback=events.append)
+
+    out = runner.run("fix benchmark bug")
+
+    assert out["execution"]["terminated_reason"] == "benchmark_no_progress_after_forced_read"
+    assert any(e.get("type") == "benchmark_prose_only_after_forced_read" for e in events)
+    assert any(e.get("type") == "suspected_failed_tool_call_recovery_skipped" for e in events)
+    assert not any(e.get("type") == "suspected_failed_tool_call_recovery" for e in events)
 
 
 def test_interactive_mode_keeps_recovery_prompts_after_forced_read(tmp_path: Path) -> None:
