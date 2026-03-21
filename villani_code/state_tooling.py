@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import re
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,12 @@ def _normalize_mutation_target_path(runner: Any, raw_target: str) -> tuple[str |
     repo_root = runner.repo.resolve()
     target_path = Path(target)
     try:
-        candidate = target_path.resolve() if target_path.is_absolute() else (repo_root / target_path).resolve()
+        if target_path.is_absolute():
+            candidate = target_path.resolve()
+        elif ntpath.isabs(target):
+            return None, f"Mutation target must stay under the active repo root: {target}"
+        else:
+            candidate = (repo_root / target_path).resolve()
     except OSError as exc:
         return None, f"Invalid mutation target path: {target} ({exc})"
 
