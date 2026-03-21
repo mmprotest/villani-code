@@ -65,6 +65,7 @@ class AgentRunner(ABC):
             "patch_attempts": self.file_event_capture,
             "test_runs": self.verify_capture,
             "retries_after_failure": FieldQuality.INFERRED,
+            "retry_count": FieldQuality.INFERRED,
             "number_of_turns": self.file_event_capture,
             "tokens_input": FieldQuality.UNAVAILABLE,
             "tokens_output": FieldQuality.UNAVAILABLE,
