@@ -17,11 +17,60 @@ def list_touched_files(repo: Path) -> list[str]:
     return sorted(path for path in (tracked | untracked) if path)
 
 
-def line_stats(repo: Path, *, require_patch_artifact: bool = False) -> tuple[int, int]:
+def _meaningful_tracked_and_untracked_paths(
+    repo: Path,
+    *,
+    require_patch_artifact: bool = False,
+) -> tuple[list[str], list[str]]:
     raw_tracked = _run(repo, ["git", "diff", "--name-only"]).splitlines()
     raw_untracked = _run(repo, ["git", "ls-files", "--others", "--exclude-standard"]).splitlines()
     meaningful_tracked = filter_meaningful_touched_paths(raw_tracked, require_patch_artifact=require_patch_artifact)
     meaningful_untracked = filter_meaningful_touched_paths(raw_untracked, require_patch_artifact=require_patch_artifact)
+    return meaningful_tracked, meaningful_untracked
+
+
+def build_patch_artifact_from_repo_diff(repo: Path, *, require_patch_artifact: bool = False) -> str:
+    meaningful_tracked, meaningful_untracked = _meaningful_tracked_and_untracked_paths(
+        repo,
+        require_patch_artifact=require_patch_artifact,
+    )
+    meaningful_paths: list[str] = []
+    seen: set[str] = set()
+    for path in [*meaningful_tracked, *meaningful_untracked]:
+        if path in seen:
+            continue
+        seen.add(path)
+        meaningful_paths.append(path)
+
+    if not meaningful_paths:
+        return ""
+
+    if meaningful_untracked:
+        subprocess.run(
+            ["git", "add", "-N", "--", *meaningful_untracked],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    proc = subprocess.run(
+        ["git", "diff", "--binary", "--full-index", "--", *meaningful_paths],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode not in {0, 1}:
+        return ""
+    return proc.stdout
+
+
+def line_stats(repo: Path, *, require_patch_artifact: bool = False) -> tuple[int, int]:
+    meaningful_tracked, meaningful_untracked = _meaningful_tracked_and_untracked_paths(
+        repo,
+        require_patch_artifact=require_patch_artifact,
+    )
 
     added = 0
     deleted = 0
