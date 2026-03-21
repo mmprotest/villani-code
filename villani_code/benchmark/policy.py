@@ -27,8 +27,10 @@ RUNTIME_ARTIFACT_PATTERNS = [
     "htmlcov/**",
     ".coverage*",
 ]
+PATCH_ARTIFACT_PATH = "patch"
 
 PATH_CLASS_IGNORED_RUNTIME_ARTIFACT = "ignored_runtime_artifact"
+PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT = "benchmark_required_artifact"
 PATH_CLASS_EXACT_EXPECTED = "exact_expected"
 PATH_CLASS_TASK_ADJACENT_SUPPORT = "task_adjacent_support"
 PATH_CLASS_METADATA_OMISSION_REASONABLE = "metadata_omission_reasonable"
@@ -81,6 +83,23 @@ def is_runtime_artifact_path(path: str) -> bool:
     return False
 
 
+def is_benchmark_required_artifact_path(path: str, *, require_patch_artifact: bool = False) -> bool:
+    normalized = normalize_path(path)
+    return bool(require_patch_artifact and paths_equal(normalized, PATCH_ARTIFACT_PATH))
+
+
+def should_count_as_meaningful_repo_edit(path: str, *, require_patch_artifact: bool = False) -> bool:
+    normalized = normalize_path(path)
+    return not is_runtime_artifact_path(normalized) and not is_benchmark_required_artifact_path(
+        normalized,
+        require_patch_artifact=require_patch_artifact,
+    )
+
+
+def should_exclude_from_forbidden_edit(path: str, *, require_patch_artifact: bool = False) -> bool:
+    return not should_count_as_meaningful_repo_edit(path, require_patch_artifact=require_patch_artifact)
+
+
 def unique_normalized_paths(paths: list[str]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
@@ -96,8 +115,12 @@ def unique_normalized_paths(paths: list[str]) -> list[str]:
     return deduped
 
 
-def filter_meaningful_touched_paths(touched: list[str]) -> list[str]:
-    return [path for path in unique_normalized_paths(touched) if not is_runtime_artifact_path(path)]
+def filter_meaningful_touched_paths(touched: list[str], *, require_patch_artifact: bool = False) -> list[str]:
+    return [
+        path
+        for path in unique_normalized_paths(touched)
+        if should_count_as_meaningful_repo_edit(path, require_patch_artifact=require_patch_artifact)
+    ]
 
 
 @dataclass
@@ -113,6 +136,7 @@ class PolicyCheckResult:
     forbidden_ok: bool
     suspicious_patterns: list[str]
     ignored_junk_paths: list[str]
+    benchmark_artifact_paths: list[str]
     normalized_touched_paths: list[str]
     path_classifications: dict[str, str]
     path_classification_reasons: dict[str, str]
@@ -193,10 +217,13 @@ def classify_touched_path(
     task_type: str | None,
     allowed_support_files: list[str],
     allowed_support_globs: list[str],
+    require_patch_artifact: bool = False,
 ) -> ClassifiedPath:
     normalized = normalize_path(path)
     if is_runtime_artifact_path(normalized):
         return ClassifiedPath(normalized, PATH_CLASS_IGNORED_RUNTIME_ARTIFACT, "runtime artifact pattern")
+    if is_benchmark_required_artifact_path(normalized, require_patch_artifact=require_patch_artifact):
+        return ClassifiedPath(normalized, PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT, "benchmark-required artifact path")
     if any(paths_equal(normalized, expected) for expected in expected_paths):
         return ClassifiedPath(normalized, PATH_CLASS_EXACT_EXPECTED, "explicitly listed in expected_files")
     if _is_task_adjacent_support(
@@ -223,6 +250,7 @@ def enforce_path_policy(
     task_type: str | None = None,
     allowed_support_files: list[str] | None = None,
     allowed_support_globs: list[str] | None = None,
+    require_patch_artifact: bool = False,
 ) -> PolicyCheckResult:
     expected_paths = [normalize_path(path) for path in (expected_paths or [])]
     allowed_support_files = [normalize_path(path) for path in (allowed_support_files or [])]
@@ -237,12 +265,21 @@ def enforce_path_policy(
             task_type=task_type,
             allowed_support_files=allowed_support_files,
             allowed_support_globs=allowed_support_globs,
+            require_patch_artifact=require_patch_artifact,
         )
         for path in normalized_touched
     ]
 
     ignored_paths = [item.path for item in classified if item.classification == PATH_CLASS_IGNORED_RUNTIME_ARTIFACT]
-    meaningful = [item.path for item in classified if item.classification != PATH_CLASS_IGNORED_RUNTIME_ARTIFACT]
+    benchmark_artifact_paths = [
+        item.path for item in classified if item.classification == PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT
+    ]
+    meaningful = [
+        item.path
+        for item in classified
+        if item.classification
+        not in {PATH_CLASS_IGNORED_RUNTIME_ARTIFACT, PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT}
+    ]
 
     allowlist_ok = all(any(_path_matches_scope(path, prefix) for prefix in allowlist) for path in meaningful)
     forbidden_hits = [path for path in meaningful if any(_path_matches_scope(path, prefix) for prefix in forbidden)]
@@ -280,6 +317,7 @@ def enforce_path_policy(
         forbidden_ok=forbidden_ok,
         suspicious_patterns=suspicious,
         ignored_junk_paths=ignored_paths,
+        benchmark_artifact_paths=benchmark_artifact_paths,
         normalized_touched_paths=normalized_touched,
         path_classifications={item.path: item.classification for item in classified},
         path_classification_reasons={item.path: item.reason for item in classified},

@@ -478,6 +478,104 @@ def test_inspect_only_uses_dedicated_failure_reason(tmp_path: Path, monkeypatch)
     assert row.failure_reason == FailureReason.INSPECT_ONLY_VIOLATION
 
 
+def test_required_patch_artifact_at_repo_root_does_not_trigger_forbidden_edit(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda _repo, _cmds, _timeout=None, timeout_seconds=None, **_kwargs: (True, [], 1.0, 2.0, False))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py", "patch"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo, require_patch_artifact=False: (1, 1))
+
+    task = _minimal_task(tmp_path, forbidden_paths=["patch", ".git/"])
+    task.metadata.expected_files = ["src/app.py"]
+    row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert row.success == 1
+    assert row.failure_reason is None
+    assert row.raw_touched_file_paths == ["src/app.py", "patch"]
+    assert row.meaningful_touched_paths == ["src/app.py"]
+    assert row.meaningful_unexpected_paths == []
+    assert row.files_touched == 1
+    assert row.path_classifications["patch"] == "benchmark_required_artifact"
+
+
+def test_non_patch_repo_root_edit_still_fails_forbidden_edit_when_patch_artifact_required(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FailureReason, FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda _repo, _cmds, _timeout=None, timeout_seconds=None, **_kwargs: (True, [], 1.0, 2.0, False))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py", "README.md", "patch"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo, require_patch_artifact=False: (2, 1))
+
+    task = _minimal_task(tmp_path, forbidden_paths=["README.md", ".git/"])
+    task.metadata.expected_files = ["src/app.py"]
+    row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert row.success == 0
+    assert row.failure_reason == FailureReason.FORBIDDEN_EDIT
+    assert row.meaningful_touched_paths == ["src/app.py", "README.md"]
+    assert row.meaningful_unexpected_paths == ["README.md"]
+    assert row.forbidden_reason_detail == "clearly unrelated meaningful edits: README.md"
+
+
 def test_verification_relevant_unrelated_command_false() -> None:
     task = BenchmarkTask.model_validate({
         "id": "x",

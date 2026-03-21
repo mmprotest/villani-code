@@ -17,11 +17,11 @@ def list_touched_files(repo: Path) -> list[str]:
     return sorted(path for path in (tracked | untracked) if path)
 
 
-def line_stats(repo: Path) -> tuple[int, int]:
+def line_stats(repo: Path, *, require_patch_artifact: bool = False) -> tuple[int, int]:
     raw_tracked = _run(repo, ["git", "diff", "--name-only"]).splitlines()
     raw_untracked = _run(repo, ["git", "ls-files", "--others", "--exclude-standard"]).splitlines()
-    meaningful_tracked = filter_meaningful_touched_paths(raw_tracked)
-    meaningful_untracked = filter_meaningful_touched_paths(raw_untracked)
+    meaningful_tracked = filter_meaningful_touched_paths(raw_tracked, require_patch_artifact=require_patch_artifact)
+    meaningful_untracked = filter_meaningful_touched_paths(raw_untracked, require_patch_artifact=require_patch_artifact)
 
     added = 0
     deleted = 0

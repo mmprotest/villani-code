@@ -109,8 +109,18 @@ class BenchmarkRunner:
         return None
 
     @staticmethod
-    def _collect_meaningful_repo_changes(repo_path: Path) -> list[str]:
-        return filter_meaningful_touched_paths(list_touched_files(repo_path))
+    def _collect_meaningful_repo_changes(repo_path: Path, *, require_patch_artifact: bool = False) -> list[str]:
+        return filter_meaningful_touched_paths(
+            list_touched_files(repo_path),
+            require_patch_artifact=require_patch_artifact,
+        )
+
+    @staticmethod
+    def _line_stats_for_task(repo_path: Path, *, require_patch_artifact: bool) -> tuple[int, int]:
+        try:
+            return line_stats(repo_path, require_patch_artifact=require_patch_artifact)
+        except TypeError:
+            return line_stats(repo_path)
 
     @staticmethod
     def _is_noop_patch_attempt(
@@ -656,7 +666,10 @@ class BenchmarkRunner:
                 elif field_quality_map.get("retry_count") in {FieldQuality.EXACT, FieldQuality.INFERRED}:
                     retry_count = metrics["retry_count"]
 
-                post_run_changes = self._collect_meaningful_repo_changes(workspace_repo)
+                post_run_changes = self._collect_meaningful_repo_changes(
+                    workspace_repo,
+                    require_patch_artifact="patch" in task.expected_artifacts,
+                )
                 changed_files_for_log = post_run_changes
                 termination_reason = self._extract_termination_reason(execution.events)
                 noop_candidate = self._is_noop_patch_attempt(
@@ -745,10 +758,14 @@ class BenchmarkRunner:
                 task_type=task.task_type or task.metadata.task_type,
                 allowed_support_files=task.metadata.allowed_support_files,
                 allowed_support_globs=task.metadata.allowed_support_globs,
+                require_patch_artifact="patch" in task.expected_artifacts,
             )
             touched = policy_result.meaningful_touched_paths
             files_touched = len(touched)
-            lines_added, lines_deleted = line_stats(workspace_repo)
+            lines_added, lines_deleted = self._line_stats_for_task(
+                workspace_repo,
+                require_patch_artifact="patch" in task.expected_artifacts,
+            )
             runtime_seconds = time.monotonic() - started
             artifacts_ok, artifact_failure_detail = self._check_required_artifacts(task, touched)
 

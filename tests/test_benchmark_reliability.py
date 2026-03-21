@@ -10,6 +10,7 @@ from villani_code.benchmark.diff_stats import ensure_git_repo, line_stats
 from villani_code.benchmark.models import FieldQuality, TelemetryQuality, VerificationOutcome
 from villani_code.benchmark.policy import (
     filter_meaningful_touched_paths,
+    PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT,
     is_runtime_artifact_path,
 )
 from villani_code.benchmark.runner import BenchmarkRunner
@@ -32,6 +33,15 @@ def test_runtime_artifact_filtering_ignores_junk_but_keeps_real_edits() -> None:
     assert ".villani/memory.md" not in filtered
     assert "src/app/__pycache__/core.cpython-312.pyc" not in filtered
     assert "dist/wheel.whl" not in filtered
+
+
+def test_patch_artifact_filtering_excludes_required_repo_root_patch_but_keeps_raw_visibility() -> None:
+    touched = ["src/app.py", "patch", ".villani_code/logs/session.json"]
+
+    filtered = filter_meaningful_touched_paths(touched, require_patch_artifact=True)
+
+    assert filtered == ["src/app.py"]
+    assert "patch" in touched
 
 
 def test_runtime_artifact_matcher_patterns() -> None:
@@ -70,6 +80,18 @@ def test_line_stats_ignore_untracked_runtime_artifacts_but_count_meaningful_untr
     (repo / ".villani" / "session.txt").write_text("runner noise\n" * 40, encoding="utf-8")
 
     assert line_stats(repo) == (3, 0)
+
+
+def test_line_stats_exclude_required_patch_artifact_from_untracked_diff_stats(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("alpha\n", encoding="utf-8")
+    ensure_git_repo(repo)
+
+    (repo / "src" / "app.py").write_text("beta\n", encoding="utf-8")
+    (repo / "patch").write_text("--- a/src/app.py\n+++ b/src/app.py\n", encoding="utf-8")
+
+    assert line_stats(repo, require_patch_artifact=True) == (1, 1)
 
 
 def test_windows_safe_rmtree_removes_readonly_tree(tmp_path: Path) -> None:
@@ -178,6 +200,24 @@ def test_forbidden_edit_policy_ignores_runtime_artifacts_but_flags_real_unexpect
     unexpected = filter_meaningful_touched_paths(["src/app.py", "tests/test_app.py"])
     unexpected_policy = enforce_path_policy(unexpected, allowlist, forbidden)
     assert not unexpected_policy.allowlist_ok
+
+
+def test_policy_excludes_required_patch_artifact_from_forbidden_edit_inputs() -> None:
+    policy = enforce_path_policy(
+        touched=["src/app.py", "patch"],
+        allowlist=["src/"],
+        forbidden=["patch", ".git/"],
+        expected_paths=["src/app.py"],
+        family="bugfix",
+        task_type="single_file_bugfix",
+        require_patch_artifact=True,
+    )
+
+    assert policy.meaningful_touched_paths == ["src/app.py"]
+    assert policy.meaningful_unexpected_paths == []
+    assert policy.violating_paths == []
+    assert policy.benchmark_artifact_paths == ["patch"]
+    assert policy.path_classifications["patch"] == PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT
 
 
 def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
