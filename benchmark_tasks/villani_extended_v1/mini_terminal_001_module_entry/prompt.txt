@@ -1,0 +1,1 @@
+`python -m app` is broken in this repo. Fix the project so the command works and verify it.

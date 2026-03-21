@@ -1,0 +1,25 @@
+id: mini_terminal_001_module_entry
+benchmark_track: core
+benchmark_category: config_tooling_repair
+family: terminal_workflow
+difficulty: easy
+language: python
+max_minutes: 5
+max_files_touched: 2
+expected_artifacts: []
+visible_verification:
+- python -m app
+hidden_verification:
+- python -c "import subprocess,sys;sys.exit(subprocess.run([sys.executable,'-m','app']).returncode)"
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- pyproject.toml
+task_type: terminal_module_entry_fix
+forbidden_paths:
+- README.md
+- docs/

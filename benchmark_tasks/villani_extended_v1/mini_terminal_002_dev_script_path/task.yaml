@@ -1,0 +1,26 @@
+id: mini_terminal_002_dev_script_path
+benchmark_track: core
+benchmark_category: config_tooling_repair
+family: terminal_workflow
+difficulty: hard
+language: python
+max_minutes: 5
+max_files_touched: 2
+expected_artifacts: []
+visible_verification:
+- python dev.py
+hidden_verification:
+- python -c "import subprocess,sys;sys.exit(subprocess.run([sys.executable,'dev.py']).returncode)"
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- dev.py
+- settings/
+- pyproject.toml
+task_type: terminal_script_path_fix
+forbidden_paths:
+- README.md
+- docs/
