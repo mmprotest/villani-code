@@ -492,6 +492,7 @@ def test_required_patch_artifact_at_repo_root_does_not_trigger_forbidden_edit(tm
         supports_model_override = True
 
         def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -1116,7 +1117,8 @@ def test_runner_plumbs_token_usage_and_retry_count(tmp_path: Path, monkeypatch) 
         fairness_notes = "x"
         supports_model_override = True
 
-        def run_agent(self, **_kwargs):
+        def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -1175,7 +1177,8 @@ def test_runner_expected_files_found_counts_meaningful_interaction_not_filesyste
         fairness_notes = "x"
         supports_model_override = True
 
-        def run_agent(self, **_kwargs):
+        def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -1221,7 +1224,8 @@ def test_self_corrected_after_failed_verify_is_false_on_first_pass_success(tmp_p
         fairness_notes = "x"
         supports_model_override = True
 
-        def run_agent(self, **_kwargs):
+        def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -1267,7 +1271,8 @@ def test_self_corrected_after_failed_verify_requires_real_failed_then_recovered_
         fairness_notes = "x"
         supports_model_override = True
 
-        def run_agent(self, **_kwargs):
+        def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",

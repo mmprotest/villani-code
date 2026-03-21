@@ -245,8 +245,8 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
-    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: [])
-    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (0, 0))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (1, 0))
     monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda repo, commands, timeout_seconds, **_kwargs: (True, [], 1.0, 2.0, False))
 
     runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
@@ -261,7 +261,7 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
 
     out = capsys.readouterr().out
     assert "reason=missing_artifact" in out
-    assert "detail=missing required artifact: patch" in out
+    assert "detail=missing required artifact: patch (patch does not exist)" in out
 
     from villani_code.benchmark.reporting import load_results
 
@@ -269,7 +269,62 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
     assert row.failure_reason is not None
     assert row.failure_reason.value == "missing_artifact"
     assert row.error is not None
-    assert "missing required artifact: patch" in row.error
+    assert row.error == "missing required artifact: patch (patch does not exist)"
+
+
+def test_patch_artifact_presence_is_scored_from_repo_artifact_not_meaningful_touched(monkeypatch, capsys) -> None:
+    from villani_code.benchmark.models import FairnessClassification
+
+    class FakeRunner:
+        name = "villani"
+        version = "1"
+        capability = "cli_wrapper"
+        telemetry_capability = "coarse_process_only"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            repo_path = kwargs["repo_path"]
+            (repo_path / "patch").write_text("--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.1,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: ["patch"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (0, 0))
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda repo, commands, timeout_seconds, **_kwargs: (True, [], 1.0, 2.0, False))
+
+    runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="bugfix_001_datetime_cli",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    out = capsys.readouterr().out
+    assert "reason=missing_artifact" not in out
+    assert "reason=benchmark_no_patch_attempt" not in out
+
+    from villani_code.benchmark.reporting import load_results
+
+    row = load_results(Path(data["results_path"]))[0]
+    assert row.success == 1
+    assert row.failure_reason is None
+    assert row.raw_touched_file_paths == ["patch"]
+    assert row.meaningful_touched_paths == []
+    assert row.path_classifications["patch"] == PATH_CLASS_BENCHMARK_REQUIRED_ARTIFACT
 
 
 def test_solved_task_with_support_file_edit_is_allowed_with_warning(monkeypatch, capsys) -> None:
@@ -285,6 +340,7 @@ def test_solved_task_with_support_file_edit_is_allowed_with_warning(monkeypatch,
         supports_model_override = True
 
         def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -338,6 +394,7 @@ def test_solved_task_with_unrelated_edit_still_fails_forbidden_with_detail(monke
         supports_model_override = True
 
         def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -407,6 +464,7 @@ def test_solved_task_with_metadata_omission_edit_is_allowed_with_warning(monkeyp
         supports_model_override = True
 
         def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -473,6 +531,7 @@ def test_solved_task_with_expected_file_outside_allowlist_still_succeeds(monkeyp
         supports_model_override = True
 
         def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
@@ -538,6 +597,7 @@ def test_metadata_omission_is_warning_not_failure_for_solved_task(monkeypatch) -
         supports_model_override = True
 
         def run_agent(self, **kwargs):
+            (kwargs["repo_path"] / "patch").write_text("diff\n", encoding="utf-8")
             return AdapterRunResult(
                 stdout="",
                 stderr="",
