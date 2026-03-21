@@ -30,7 +30,10 @@ class CheckpointManager:
             absf = (self.repo / f).resolve() if not f.is_absolute() else f.resolve()
             if not absf.exists():
                 continue
-            rel = absf.relative_to(self.repo)
+            try:
+                rel = absf.relative_to(self.repo)
+            except ValueError:
+                continue
             out = cdir / rel
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(absf, out)
