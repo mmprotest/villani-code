@@ -11,6 +11,7 @@ from pathlib import Path
 
 from villani_code.benchmark.agents import build_agent_runner
 from villani_code.benchmark.diff_stats import ensure_git_repo, line_stats, list_touched_files
+from villani_code.benchmark.failure_taxonomy import classify_failure_taxonomy
 from villani_code.benchmark.manifest import command_set_checksum, repo_checksum
 from villani_code.benchmark.models import (
     BENCHMARK_VERSION,
@@ -450,6 +451,8 @@ class BenchmarkRunner:
         error: str | None = None
         visible_pass = False
         hidden_pass = False
+        visible_outcomes: list[VerificationOutcome] = []
+        hidden_outcomes: list[VerificationOutcome] = []
         verifications: list[str] = []
         time_to_first_verify: float | None = None
         last_verify: float | None = None
@@ -799,8 +802,39 @@ class BenchmarkRunner:
                 recovery_success = bool(success and (had_failed_verification or (retries_after_failure or 0) > 0))
             no_progress_termination = failure_reason == FailureReason.NO_PROGRESS
             failure_mode_category = classify_failure_mode(success=success, failure_reason=failure_reason)
+            verification_output = "\n".join(
+                part
+                for outcome in [*visible_outcomes, *hidden_outcomes]
+                for part in (outcome.stdout, outcome.stderr)
+                if part
+            )
+            failure_taxonomy, failure_taxonomy_detail = classify_failure_taxonomy(
+                success=success,
+                failure_reason=failure_reason,
+                visible_pass=visible_pass,
+                hidden_pass=hidden_pass,
+                verification_output=verification_output,
+                error=error,
+                stderr_preview=agent_stderr_preview,
+                num_shell_commands=num_shell_commands,
+                file_reads=file_reads,
+                patch_attempts=patch_attempts,
+                files_touched=files_touched,
+                meaningful_touched_paths=policy_result.meaningful_touched_paths,
+                meaningful_expected_paths=policy_result.meaningful_expected_paths,
+                meaningful_unexpected_paths=policy_result.meaningful_unexpected_paths,
+                touched_file_paths=touched,
+                expected_files=task.metadata.expected_files,
+                touched_unexpected_files=touched_unexpected,
+                unrelated_file_touch=unrelated_file_touch,
+                verification_relevant=verification_relevant,
+                task_family=task.family,
+                task_type=task.task_type or task.metadata.task_type,
+                benchmark_category=task.benchmark_category or task.metadata.benchmark_category,
+            )
             field_quality_map.setdefault("retry_count", FieldQuality.INFERRED if retry_count is not None else FieldQuality.UNAVAILABLE)
             field_quality_map["failure_mode_category"] = FieldQuality.EXACT
+            field_quality_map["failure_taxonomy"] = FieldQuality.EXACT
 
             detail = ""
             if failure_reason == FailureReason.MISSING_ARTIFACT and artifact_failure_detail:
@@ -884,6 +918,8 @@ class BenchmarkRunner:
                 total_tokens=total_tokens,
                 retry_count=retry_count,
                 failure_mode_category=failure_mode_category,
+                failure_taxonomy=failure_taxonomy,
+                failure_taxonomy_detail=failure_taxonomy_detail,
                 estimated_cost=None,
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,

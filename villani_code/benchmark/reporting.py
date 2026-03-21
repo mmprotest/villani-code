@@ -22,6 +22,7 @@ def _group_pass(rows: list[BenchmarkRunResult]) -> dict[str, float]:
 
 def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
     failure_modes = Counter(r.failure_mode_category.value for r in rows)
+    failure_taxonomies = Counter(r.failure_taxonomy.value for r in rows)
     return {
         **_group_pass(rows),
         "avg_tokens_input": _safe_mean([r.tokens_input for r in rows]),
@@ -36,6 +37,7 @@ def _aggregate(rows: list[BenchmarkRunResult]) -> dict[str, object]:
         "avg_retry_count": _safe_mean([r.retry_count for r in rows]),
         "avg_retries_after_failure": _safe_mean([r.retries_after_failure for r in rows]),
         "failure_mode_counts": dict(failure_modes),
+        "failure_taxonomy_counts": dict(failure_taxonomies),
         "first_pass_success_rate": round(sum(1 for r in rows if r.first_pass_success) / total, 4) if (total := len(rows)) else 0.0,
         "recovered_after_failed_attempt_rate": round(sum(1 for r in rows if r.recovered_after_failed_attempt) / total, 4) if total else 0.0,
         "forbidden_edit_rate": round(sum(1 for r in rows if r.failure_reason and r.failure_reason.value == "forbidden_edit") / total, 4) if total else 0.0,
@@ -88,6 +90,8 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
         "total_tokens",
         "retry_count",
         "failure_mode_category",
+        "failure_taxonomy",
+        "failure_taxonomy_detail",
         "estimated_cost",
         "number_of_turns",
         "tool_calls_total",
@@ -132,6 +136,8 @@ def write_csv(results: list[BenchmarkRunResult], path: Path) -> None:
                     "total_tokens": r.total_tokens,
                     "retry_count": r.retry_count,
                     "failure_mode_category": r.failure_mode_category.value,
+                    "failure_taxonomy": r.failure_taxonomy.value,
+                    "failure_taxonomy_detail": r.failure_taxonomy_detail,
                     "estimated_cost": r.estimated_cost,
                     "number_of_turns": r.number_of_turns,
                     "tool_calls_total": r.tool_calls_total,
@@ -217,6 +223,7 @@ def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
     by_fairness: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "success": 0})
     failures = Counter()
     failure_reasons = Counter()
+    failure_taxonomies = Counter()
     hidden_after_visible = 0
     invalid_repro = 0
     forbidden_edits = 0
@@ -245,6 +252,7 @@ def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
         if r.failure_reason:
             failure_reasons[r.failure_reason.value] += 1
         failures[r.failure_mode_category.value] += 1
+        failure_taxonomies[r.failure_taxonomy.value] += 1
     successes = sum(x.success for x in results)
     ci = wilson_interval(successes, len(results))
 
@@ -265,6 +273,7 @@ def diagnostics(results: list[BenchmarkRunResult]) -> dict[str, object]:
         "forbidden_edit_rate": forbidden_edits / len(results) if results else 0.0,
         "failure_reason_histogram": dict(failure_reasons),
         "failure_mode_histogram": dict(failures),
+        "failure_taxonomy_histogram": dict(failure_taxonomies),
         "solved_runtime_median": median(solved_runtimes) if solved_runtimes else None,
         "solved_lines_changed_median": median(solved_lines) if solved_lines else None,
         "pass_rate_ci_95": {"low": ci[0], "high": ci[1]},
@@ -304,10 +313,11 @@ def render_summary_table(results: list[BenchmarkRunResult]) -> str:
         lines.append(
             f"- {key}: {row['pass_rate']:.2%} {row['first_pass_success_rate']:.2%} {row['recovered_after_failed_attempt_rate']:.2%} {row['avg_total_tokens']} {row['avg_wall_clock_seconds']} {row['avg_retry_count']}"
         )
-    lines.append("id | bucket | task_type | success | wall_s | commands | files | retries | tok_in | tok_out | total_tok | failure_mode")
+    lines.append(f"failure_taxonomy_histogram={d['failure_taxonomy_histogram']}")
+    lines.append("id | bucket | task_type | success | wall_s | commands | files | retries | tok_in | tok_out | total_tok | failure_mode | failure_taxonomy")
     for row in results:
         lines.append(
-            f"{row.task_id} | {row.benchmark_bucket} | {row.task_type or '-'} | {row.success} | {row.wall_clock_seconds} | {row.num_shell_commands} | {row.files_touched} | {row.retry_count} | {row.tokens_input} | {row.tokens_output} | {row.total_tokens} | {row.failure_mode_category.value}"
+            f"{row.task_id} | {row.benchmark_bucket} | {row.task_type or '-'} | {row.success} | {row.wall_clock_seconds} | {row.num_shell_commands} | {row.files_touched} | {row.retry_count} | {row.tokens_input} | {row.tokens_output} | {row.total_tokens} | {row.failure_mode_category.value} | {row.failure_taxonomy.value}"
         )
     return "\n".join(lines)
 
@@ -342,10 +352,14 @@ def write_markdown_report(results: list[BenchmarkRunResult], out: Path) -> None:
         f"| overall | {overall['avg_tokens_input']} | {overall['avg_tokens_output']} | {overall['avg_total_tokens']} | {overall['avg_wall_clock_seconds']} | {overall['avg_num_shell_commands']} | {overall['avg_files_touched']} | {overall['avg_retry_count']} |"
     )
 
-    lines.extend(["", "## Task-by-task outcomes", "", "| task | bucket | type | success | wall_s | commands | files | retry_count | tok_in | tok_out | total_tok | failure_mode |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"])
+    lines.extend(["", "## Failure taxonomy histogram", ""])
+    for key, value in sorted(d["failure_taxonomy_histogram"].items()):
+        lines.append(f"- {key}: {value}")
+
+    lines.extend(["", "## Task-by-task outcomes", "", "| task | bucket | type | success | wall_s | commands | files | retry_count | tok_in | tok_out | total_tok | failure_mode | failure_taxonomy | taxonomy_detail |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"])
     for row in results:
         lines.append(
-            f"| {row.task_id} | {row.benchmark_bucket} | {row.task_type or '-'} | {row.success} | {row.wall_clock_seconds} | {row.num_shell_commands} | {row.files_touched} | {row.retry_count} | {row.tokens_input} | {row.tokens_output} | {row.total_tokens} | {row.failure_mode_category.value} |"
+            f"| {row.task_id} | {row.benchmark_bucket} | {row.task_type or '-'} | {row.success} | {row.wall_clock_seconds} | {row.num_shell_commands} | {row.files_touched} | {row.retry_count} | {row.tokens_input} | {row.tokens_output} | {row.total_tokens} | {row.failure_mode_category.value} | {row.failure_taxonomy.value} | {row.failure_taxonomy_detail or '-'} |"
         )
 
     out.write_text("\n".join(lines), encoding="utf-8")
