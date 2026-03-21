@@ -77,6 +77,26 @@ class FailureModeCategory(str, Enum):
     BENCHMARK_ERROR = "benchmark_error"
 
 
+class FailureTaxonomy(str, Enum):
+    SUCCESS = "success"
+    TIMEOUT = "timeout"
+    GOT_LOST_IN_REPO = "got_lost_in_repo"
+    EDITED_WRONG_FILE = "edited_wrong_file"
+    FAILED_TO_RUN_CORRECT_COMMAND = "failed_to_run_correct_command"
+    OVER_EDITED = "over_edited"
+    SYNTAX_BREAKAGE = "syntax_breakage"
+    PARTIAL_FIX_MISSED_ACCEPTANCE = "partial_fix_missed_acceptance"
+    FORBIDDEN_EDIT = "forbidden_edit"
+    INSPECT_ONLY_VIOLATION = "inspect_only_violation"
+    MISSING_ARTIFACT = "missing_artifact"
+    AGENT_CRASH = "agent_crash"
+    VERIFIER_CRASH = "verifier_crash"
+    ENVIRONMENT_FAILURE = "environment_failure"
+    NO_PROGRESS = "no_progress"
+    BENCHMARK_ERROR = "benchmark_error"
+    UNKNOWN_FAILURE = "unknown_failure"
+
+
 FAILURE_REASON_TO_CATEGORY: dict[FailureReason, FailureModeCategory] = {
     FailureReason.VISIBLE_VERIFICATION_FAILED: FailureModeCategory.VERIFICATION_FAILURE,
     FailureReason.HIDDEN_VERIFICATION_FAILED: FailureModeCategory.VERIFICATION_FAILURE,
@@ -314,6 +334,8 @@ class BenchmarkRunResult(BaseModel):
     total_tokens: int | None = None
     retry_count: int | None = None
     failure_mode_category: FailureModeCategory = FailureModeCategory.SUCCESS
+    failure_taxonomy: FailureTaxonomy = FailureTaxonomy.SUCCESS
+    failure_taxonomy_detail: str | None = None
     estimated_cost: float | None = None
     number_of_turns: int | None = None
     tool_calls_total: int | None = None
@@ -353,11 +375,35 @@ class BenchmarkRunResult(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_canonical_metrics(self) -> "BenchmarkRunResult":
+        from villani_code.benchmark.failure_taxonomy import classify_failure_taxonomy
+
         if self.total_tokens is None and self.tokens_input is not None and self.tokens_output is not None:
             self.total_tokens = self.tokens_input + self.tokens_output
         if self.retry_count is None:
             self.retry_count = self.retries_after_failure
         self.failure_mode_category = classify_failure_mode(success=self.success, failure_reason=self.failure_reason)
+        self.failure_taxonomy, self.failure_taxonomy_detail = classify_failure_taxonomy(
+            success=self.success,
+            failure_reason=self.failure_reason,
+            visible_pass=self.visible_pass,
+            hidden_pass=self.hidden_pass,
+            error=self.error,
+            stderr_preview=self.stderr_preview,
+            num_shell_commands=self.num_shell_commands,
+            file_reads=self.file_reads,
+            patch_attempts=self.patch_attempts,
+            files_touched=self.files_touched,
+            meaningful_touched_paths=self.meaningful_touched_paths,
+            meaningful_expected_paths=self.meaningful_expected_paths,
+            meaningful_unexpected_paths=self.meaningful_unexpected_paths,
+            touched_file_paths=self.touched_file_paths,
+            expected_files=self.expected_files,
+            touched_unexpected_files=self.touched_unexpected_files,
+            unrelated_file_touch=self.unrelated_file_touch,
+            verification_relevant=self.verification_relevant,
+            task_family=self.task_family,
+            task_type=self.task_type,
+        )
         return self
 
 
