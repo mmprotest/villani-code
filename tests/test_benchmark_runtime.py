@@ -387,6 +387,57 @@ def _minimal_task(tmp_path: Path, **overrides) -> BenchmarkTask:
     return BenchmarkTask(**base)
 
 
+
+def test_runner_forwards_usage_metrics_into_results_jsonl(tmp_path: Path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+    from villani_code.benchmark.reporting import load_results
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return SimpleNamespace(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.INFERRED,
+                telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
+                events=[],
+                debug_artifacts={},
+                usage={"input_tokens": 11, "completion_tokens": 7, "cost": 0.125},
+            )
+
+    task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+
+    monkeypatch.setattr("villani_code.benchmark.runner.load_tasks", lambda *_args, **_kwargs: [task])
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda _repo, _cmds, _timeout=None, timeout_seconds=None, **_kwargs: (True, [], 1.0, 2.0, False))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    output_dir = tmp_path / "out"
+    runner = BenchmarkRunner(output_dir=output_dir)
+    runner.run(tmp_path / "suite", "villani", "m", None, None, None, task_id=task.id)
+
+    rows = load_results(output_dir / "results.jsonl")
+    assert len(rows) == 1
+    assert rows[0].tokens_input == 11
+    assert rows[0].tokens_output == 7
+    assert rows[0].total_tokens == 18
+    assert rows[0].estimated_cost == 0.125
+
+
 def test_visible_only_and_hidden_verifier_scoring(tmp_path: Path, monkeypatch) -> None:
     from villani_code.benchmark.adapters.base import AdapterRunResult
     from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality

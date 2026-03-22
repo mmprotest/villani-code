@@ -337,12 +337,57 @@ class BenchmarkRunner:
         ):
             return True
         return False
+
     @staticmethod
     def _stderr_snippet(stderr: str, max_len: int = 240) -> str:
         compact = " ".join(stderr.strip().split())
         if len(compact) <= max_len:
             return compact
         return compact[: max_len - 3] + "..."
+
+    @staticmethod
+    def _usage_value(source: object, *field_names: str) -> object | None:
+        if source is None:
+            return None
+        for field_name in field_names:
+            if isinstance(source, dict) and field_name in source:
+                return source[field_name]
+            if hasattr(source, field_name):
+                return getattr(source, field_name)
+        return None
+
+    @classmethod
+    def _extract_usage_metrics(cls, execution: object) -> dict[str, int | float | None]:
+        candidates = [execution]
+        for nested_name in ("usage", "metrics"):
+            nested = cls._usage_value(execution, nested_name)
+            if nested is not None:
+                candidates.append(nested)
+
+        tokens_input = None
+        tokens_output = None
+        total_tokens = None
+        estimated_cost = None
+
+        for candidate in candidates:
+            if tokens_input is None:
+                tokens_input = cls._usage_value(candidate, "tokens_input", "input_tokens", "prompt_tokens")
+            if tokens_output is None:
+                tokens_output = cls._usage_value(candidate, "tokens_output", "output_tokens", "completion_tokens")
+            if total_tokens is None:
+                total_tokens = cls._usage_value(candidate, "total_tokens")
+            if estimated_cost is None:
+                estimated_cost = cls._usage_value(candidate, "estimated_cost", "cost")
+
+        if total_tokens is None and isinstance(tokens_input, int) and isinstance(tokens_output, int):
+            total_tokens = tokens_input + tokens_output
+
+        return {
+            "tokens_input": tokens_input if isinstance(tokens_input, int) else None,
+            "tokens_output": tokens_output if isinstance(tokens_output, int) else None,
+            "total_tokens": total_tokens if isinstance(total_tokens, int) else None,
+            "estimated_cost": estimated_cost if isinstance(estimated_cost, (int, float)) else None,
+        }
 
     def _run_task(
         self,
@@ -484,6 +529,7 @@ class BenchmarkRunner:
                     failure_reason = FailureReason.AGENT_CRASH
                     self._log(f"agent crash: {agent_stderr_preview or 'no stderr preview available'}")
 
+                usage_metrics = self._extract_usage_metrics(execution)
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
                 self._log_event_metrics_summary(metrics)
                 denied_count = int(metrics.get("benchmark_mutation_denials") or 0)
@@ -770,10 +816,10 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
-                tokens_input=None,
-                tokens_output=None,
-                total_tokens=None,
-                estimated_cost=None,
+                tokens_input=usage_metrics["tokens_input"],
+                tokens_output=usage_metrics["tokens_output"],
+                total_tokens=usage_metrics["total_tokens"],
+                estimated_cost=usage_metrics["estimated_cost"],
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,
                 file_reads=file_reads,
