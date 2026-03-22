@@ -630,6 +630,74 @@ def test_event_metrics_recognize_villani_native_runtime_events(tmp_path: Path) -
     assert metrics['first_denied_path'] == 'docs/x.md'
 
 
+def test_benchmark_runner_aggregates_usage_from_model_request_finished_events(tmp_path: Path, monkeypatch) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeAgent:
+        name = "villani"
+        version = "1"
+        capability = "x"
+        telemetry_capability = "x"
+        fairness_classification = FairnessClassification.EXACT_COMPARABLE
+        fairness_notes = "x"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return AdapterRunResult(
+                stdout="",
+                stderr="",
+                exit_code=0,
+                timeout=False,
+                runtime_seconds=0.01,
+                telemetry_quality=TelemetryQuality.EXACT,
+                telemetry_field_quality_map={
+                    "num_shell_commands": FieldQuality.INFERRED,
+                    "tokens_input": FieldQuality.EXACT,
+                    "tokens_output": FieldQuality.EXACT,
+                    "total_tokens": FieldQuality.EXACT,
+                },
+                events=[
+                    AdapterEvent(
+                        type="model_request_finished",
+                        timestamp=1.0,
+                        payload={
+                            "type": "model_request_finished",
+                            "usage": {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14},
+                        },
+                    ),
+                    AdapterEvent(
+                        type="model_request_finished",
+                        timestamp=2.0,
+                        payload={
+                            "type": "model_request_finished",
+                            "usage": {"input_tokens": 8, "output_tokens": 3},
+                        },
+                    ),
+                ],
+            )
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda _agent: FakeAgent())
+    monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda _repo, _cmds, _timeout=None, timeout_seconds=None, **_kwargs: (True, [], 1.0, 2.0, False))
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda _repo: ["src/app.py"])
+    monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda _repo: (1, 0))
+
+    task = _minimal_task(tmp_path)
+    task.metadata.expected_files = ["src/app.py"]
+    row = BenchmarkRunner(output_dir=tmp_path / "out")._run_task(
+        task,
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+    )
+
+    assert row.tokens_input == 18
+    assert row.tokens_output == 7
+    assert row.total_tokens == 25
+
+
 def test_extract_termination_reason_reads_villani_native_signals(tmp_path: Path) -> None:
     from villani_code.benchmark.adapters.base import AdapterEvent
 

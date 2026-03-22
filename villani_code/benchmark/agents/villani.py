@@ -20,6 +20,17 @@ class VillaniAgentRunner(AgentRunner):
     file_event_capture = FieldQuality.EXACT
     verify_capture = FieldQuality.EXACT
 
+    def _field_quality(self) -> dict[str, FieldQuality]:
+        quality = super()._field_quality()
+        quality.update(
+            {
+                "tokens_input": FieldQuality.EXACT,
+                "tokens_output": FieldQuality.EXACT,
+                "total_tokens": FieldQuality.EXACT,
+            }
+        )
+        return quality
+
     def build_command(
         self,
         repo_path: Path,

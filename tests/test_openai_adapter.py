@@ -1,6 +1,10 @@
 import json
 
-from villani_code.openai_client import convert_messages_to_openai, convert_tools_to_openai
+from villani_code.openai_client import (
+    convert_messages_to_openai,
+    convert_openai_response_to_anthropic,
+    convert_tools_to_openai,
+)
 
 
 def test_convert_tools_to_openai_format():
@@ -57,3 +61,28 @@ def test_convert_anthropic_messages_to_openai_messages():
     assert converted[2]["tool_calls"][0]["function"]["name"] == "Write"
     assert json.loads(converted[2]["tool_calls"][0]["function"]["arguments"]) == {"file_path": "a.txt"}
     assert converted[3] == {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+
+
+def test_convert_openai_response_preserves_usage() -> None:
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": "Done",
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "total_tokens": 19,
+        },
+    }
+
+    converted = convert_openai_response_to_anthropic(response)
+
+    assert converted["usage"] == {
+        "input_tokens": 12,
+        "output_tokens": 7,
+        "total_tokens": 19,
+    }

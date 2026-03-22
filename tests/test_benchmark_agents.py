@@ -11,6 +11,7 @@ from villani_code.benchmark.agents.claude_code import ClaudeCodeAgentRunner
 from villani_code.benchmark.agents.command import CommandAgentRunner
 from villani_code.benchmark.agents.opencode import OpenCodeAgentRunner
 from villani_code.benchmark.agents.villani import VillaniAgentRunner
+from villani_code.benchmark.models import FieldQuality
 
 
 def _expected_process_group_kwargs() -> set[tuple[str, object]]:
@@ -460,6 +461,16 @@ def test_villani_run_agent_preserves_runtime_event_type(monkeypatch, tmp_path: P
     )
 
     assert any(event.type == 'tool_started' for event in result.events)
+
+
+def test_villani_field_quality_marks_token_telemetry_exact() -> None:
+    runner = VillaniAgentRunner()
+
+    quality = runner._field_quality()
+
+    assert quality["tokens_input"] == FieldQuality.EXACT
+    assert quality["tokens_output"] == FieldQuality.EXACT
+    assert quality["total_tokens"] == FieldQuality.EXACT
 
 
 def test_agent_runner_uses_utf8_replace_text_mode(monkeypatch, tmp_path: Path) -> None:

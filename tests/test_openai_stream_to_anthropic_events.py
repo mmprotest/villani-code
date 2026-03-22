@@ -40,3 +40,23 @@ def test_openai_stream_tool_call_arguments_emit_input_json_delta():
     assert events[3]["delta"]["partial_json"] == '.txt","content":"x"}'
     assert events[-2] == {"type": "content_block_stop", "index": 1}
     assert events[-1] == {"type": "message_stop"}
+
+
+def test_openai_stream_preserves_usage_from_final_chunk():
+    lines = [
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}',
+        'data: [DONE]',
+    ]
+
+    events = list(openai_stream_to_anthropic_events(lines, model="gpt-test"))
+
+    assert events[-2] == {
+        "type": "message_delta",
+        "delta": {},
+        "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "total_tokens": 16,
+        },
+    }

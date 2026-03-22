@@ -84,10 +84,23 @@ def build_openai_payload(payload: dict[str, Any], stream: bool) -> dict[str, Any
     return out
 
 
+def _convert_openai_usage(usage: Any) -> dict[str, int]:
+    if not isinstance(usage, dict):
+        return {}
+
+    mapped = {
+        "input_tokens": usage.get("prompt_tokens"),
+        "output_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+    }
+    return {key: int(value) for key, value in mapped.items() if isinstance(value, int)}
+
+
 def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) -> Generator[dict[str, Any], None, None]:
     yield {"type": "message_start", "message": {"id": "openai", "type": "message", "role": "assistant", "model": model, "content": []}}
     text_started = False
     tool_indices: dict[int, int] = {}
+    final_usage: dict[str, int] = {}
 
     for raw in lines:
         line = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
@@ -101,6 +114,9 @@ def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) 
             data = json.loads(data_str)
         except json.JSONDecodeError:
             continue
+        usage = _convert_openai_usage(data.get("usage"))
+        if usage:
+            final_usage = usage
         choices = data.get("choices", [])
         if not choices:
             continue
@@ -140,6 +156,8 @@ def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) 
         yield {"type": "content_block_stop", "index": 0}
     for block_index in tool_indices.values():
         yield {"type": "content_block_stop", "index": block_index}
+    if final_usage:
+        yield {"type": "message_delta", "delta": {}, "usage": final_usage}
     yield {"type": "message_stop"}
 
 
@@ -164,7 +182,11 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
                 "input": parsed_arguments,
             }
         )
-    return {"role": "assistant", "content": content}
+    converted = {"role": "assistant", "content": content}
+    usage = _convert_openai_usage(response.get("usage"))
+    if usage:
+        converted["usage"] = usage
+    return converted
 
 
 class OpenAIClient:
@@ -191,4 +213,3 @@ class OpenAIClient:
                     yield from openai_stream_to_anthropic_events(response.iter_lines(), str(payload.get("model", "")))
 
         return gen()
-
