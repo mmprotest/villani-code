@@ -228,6 +228,59 @@ def test_hidden_verifier_alias_normalized_to_hidden_verification(tmp_path: Path)
     assert task.hidden_verifier is None
 
 
+def test_benchmark_runner_forwards_usage_metrics_into_results_jsonl(monkeypatch, tmp_path: Path) -> None:
+    from villani_code.benchmark.adapters.base import AdapterEvent
+    from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
+
+    class FakeExecution:
+        def __init__(self) -> None:
+            self.stdout = ""
+            self.stderr = ""
+            self.exit_code = 0
+            self.timeout = False
+            self.runtime_seconds = 0.05
+            self.telemetry_quality = TelemetryQuality.INFERRED
+            self.telemetry_field_quality_map = {"num_shell_commands": FieldQuality.INFERRED}
+            self.events = [AdapterEvent(type="command_started", timestamp=1.0, payload={})]
+            self.debug_artifacts = {}
+            self.usage = {
+                "prompt_tokens": 123,
+                "completion_tokens": 45,
+                "cost": 0.67,
+            }
+
+    class FakeRunner:
+        name = "fake"
+        version = "1"
+        capability = "fake"
+        telemetry_capability = "fake"
+        fairness_classification = FairnessClassification.COARSE_WRAPPER_ONLY
+        fairness_notes = "fake"
+        supports_model_override = True
+
+        def run_agent(self, **kwargs):
+            return FakeExecution()
+
+    monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
+
+    runner = BenchmarkRunner(output_dir=tmp_path / "benchmark-test")
+    data = runner.run(
+        suite_dir=Path("benchmark_tasks/villani_bench_v1"),
+        task_id="terminal_001_python_module_entry",
+        agent="villani",
+        model="tiny-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    rows = load_results(Path(data["results_path"]))
+    row = rows[0]
+    assert row.tokens_input == 123
+    assert row.tokens_output == 45
+    assert row.total_tokens == 168
+    assert row.estimated_cost == 0.67
+
+
 def test_terminal_001_is_not_inspect_only() -> None:
     task = load_task(Path("benchmark_tasks/villani_bench_v1/terminal_001_python_module_entry"))
     assert task.inspect_only is False

@@ -105,6 +105,55 @@ class BenchmarkRunner:
         return None
 
     @staticmethod
+    def _usage_value(source: object, *keys: str) -> object | None:
+        for key in keys:
+            if isinstance(source, dict) and key in source:
+                return source[key]
+            if hasattr(source, key):
+                return getattr(source, key)
+        return None
+
+    @classmethod
+    def _extract_usage_metrics(cls, execution: object) -> dict[str, int | float | None]:
+        usage_sources: list[object] = [execution]
+        nested_usage = cls._usage_value(execution, "usage", "metrics")
+        if nested_usage is not None:
+            usage_sources.append(nested_usage)
+
+        tokens_input: int | None = None
+        tokens_output: int | None = None
+        total_tokens: int | None = None
+        estimated_cost: float | None = None
+
+        for source in usage_sources:
+            if tokens_input is None:
+                value = cls._usage_value(source, "tokens_input", "input_tokens", "prompt_tokens")
+                if isinstance(value, int):
+                    tokens_input = value
+            if tokens_output is None:
+                value = cls._usage_value(source, "tokens_output", "output_tokens", "completion_tokens")
+                if isinstance(value, int):
+                    tokens_output = value
+            if total_tokens is None:
+                value = cls._usage_value(source, "total_tokens")
+                if isinstance(value, int):
+                    total_tokens = value
+            if estimated_cost is None:
+                value = cls._usage_value(source, "estimated_cost", "cost")
+                if isinstance(value, int | float):
+                    estimated_cost = float(value)
+
+        if total_tokens is None and tokens_input is not None and tokens_output is not None:
+            total_tokens = tokens_input + tokens_output
+
+        return {
+            "tokens_input": tokens_input,
+            "tokens_output": tokens_output,
+            "total_tokens": total_tokens,
+            "estimated_cost": estimated_cost,
+        }
+
+    @staticmethod
     def _collect_meaningful_repo_changes(repo_path: Path) -> list[str]:
         return filter_meaningful_touched_paths(list_touched_files(repo_path))
 
@@ -384,6 +433,12 @@ class BenchmarkRunner:
         denied_summary_detail = ""
         prompt_artifact_path: str | None = None
         contract_artifact_path: str | None = None
+        usage_metrics: dict[str, int | float | None] = {
+            "tokens_input": None,
+            "tokens_output": None,
+            "total_tokens": None,
+            "estimated_cost": None,
+        }
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -463,6 +518,7 @@ class BenchmarkRunner:
                     debug_dir=task_debug_dir,
                 )
                 timeout = execution.timeout
+                usage_metrics = self._extract_usage_metrics(execution)
                 telemetry_quality = execution.telemetry_quality
                 field_quality_map = execution.telemetry_field_quality_map
                 agent_exit_code = execution.exit_code
@@ -770,10 +826,10 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
-                tokens_input=None,
-                tokens_output=None,
-                total_tokens=None,
-                estimated_cost=None,
+                tokens_input=usage_metrics["tokens_input"],
+                tokens_output=usage_metrics["tokens_output"],
+                total_tokens=usage_metrics["total_tokens"],
+                estimated_cost=usage_metrics["estimated_cost"],
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,
                 file_reads=file_reads,
