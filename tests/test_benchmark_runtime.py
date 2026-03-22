@@ -389,8 +389,9 @@ def _minimal_task(tmp_path: Path, **overrides) -> BenchmarkTask:
 
 
 def test_runner_forwards_usage_metrics_into_results_jsonl(tmp_path: Path, monkeypatch) -> None:
-    from types import SimpleNamespace
+    import json
 
+    from villani_code.benchmark.adapters.base import AdapterRunResult
     from villani_code.benchmark.models import FairnessClassification, FieldQuality, TelemetryQuality
     from villani_code.benchmark.reporting import load_results
 
@@ -404,7 +405,20 @@ def test_runner_forwards_usage_metrics_into_results_jsonl(tmp_path: Path, monkey
         supports_model_override = True
 
         def run_agent(self, **kwargs):
-            return SimpleNamespace(
+            transcripts = kwargs["repo_path"] / ".villani_code" / "transcripts"
+            transcripts.mkdir(parents=True, exist_ok=True)
+            (transcripts / "latest.json").write_text(
+                json.dumps(
+                    {
+                        "responses": [
+                            {"usage": {"input_tokens": 11, "output_tokens": 7}},
+                            {"usage": {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.125}},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return AdapterRunResult(
                 stdout="",
                 stderr="",
                 exit_code=0,
@@ -413,8 +427,6 @@ def test_runner_forwards_usage_metrics_into_results_jsonl(tmp_path: Path, monkey
                 telemetry_quality=TelemetryQuality.INFERRED,
                 telemetry_field_quality_map={"num_shell_commands": FieldQuality.INFERRED},
                 events=[],
-                debug_artifacts={},
-                usage={"input_tokens": 11, "completion_tokens": 7, "cost": 0.125},
             )
 
     task = _minimal_task(tmp_path)
@@ -432,9 +444,9 @@ def test_runner_forwards_usage_metrics_into_results_jsonl(tmp_path: Path, monkey
 
     rows = load_results(output_dir / "results.jsonl")
     assert len(rows) == 1
-    assert rows[0].tokens_input == 11
-    assert rows[0].tokens_output == 7
-    assert rows[0].total_tokens == 18
+    assert rows[0].tokens_input == 14
+    assert rows[0].tokens_output == 9
+    assert rows[0].total_tokens == 23
     assert rows[0].estimated_cost == 0.125
 
 

@@ -357,10 +357,10 @@ class BenchmarkRunner:
         return None
 
     @classmethod
-    def _extract_usage_metrics(cls, execution: object) -> dict[str, int | float | None]:
-        candidates = [execution]
-        for nested_name in ("usage", "metrics"):
-            nested = cls._usage_value(execution, nested_name)
+    def _extract_usage_metrics_from_source(cls, source: object) -> dict[str, int | float | None]:
+        candidates = [source]
+        for nested_name in ("usage", "metrics", "response", "result"):
+            nested = cls._usage_value(source, nested_name)
             if nested is not None:
                 candidates.append(nested)
 
@@ -386,7 +386,87 @@ class BenchmarkRunner:
             "tokens_input": tokens_input if isinstance(tokens_input, int) else None,
             "tokens_output": tokens_output if isinstance(tokens_output, int) else None,
             "total_tokens": total_tokens if isinstance(total_tokens, int) else None,
-            "estimated_cost": estimated_cost if isinstance(estimated_cost, (int, float)) else None,
+            "estimated_cost": float(estimated_cost) if isinstance(estimated_cost, (int, float)) else None,
+        }
+
+    @classmethod
+    def _latest_transcript_usage_metrics(cls, workspace_repo: Path) -> dict[str, int | float | None]:
+        transcript_dir = workspace_repo / ".villani_code" / "transcripts"
+        if not transcript_dir.exists():
+            return {
+                "tokens_input": None,
+                "tokens_output": None,
+                "total_tokens": None,
+                "estimated_cost": None,
+            }
+
+        transcript_files = sorted(transcript_dir.glob("*.json"))
+        if not transcript_files:
+            return {
+                "tokens_input": None,
+                "tokens_output": None,
+                "total_tokens": None,
+                "estimated_cost": None,
+            }
+
+        try:
+            transcript = json.loads(transcript_files[-1].read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {
+                "tokens_input": None,
+                "tokens_output": None,
+                "total_tokens": None,
+                "estimated_cost": None,
+            }
+
+        responses = transcript.get("responses")
+        if not isinstance(responses, list):
+            return cls._extract_usage_metrics_from_source(transcript)
+
+        aggregated = {
+            "tokens_input": 0,
+            "tokens_output": 0,
+            "total_tokens": 0,
+            "estimated_cost": 0.0,
+        }
+        found = {
+            "tokens_input": False,
+            "tokens_output": False,
+            "total_tokens": False,
+            "estimated_cost": False,
+        }
+        for response in responses:
+            metrics = cls._extract_usage_metrics_from_source(response)
+            for key in ("tokens_input", "tokens_output", "total_tokens"):
+                value = metrics[key]
+                if isinstance(value, int):
+                    aggregated[key] += value
+                    found[key] = True
+            cost = metrics["estimated_cost"]
+            if isinstance(cost, float):
+                aggregated["estimated_cost"] += cost
+                found["estimated_cost"] = True
+
+        if not found["total_tokens"] and found["tokens_input"] and found["tokens_output"]:
+            aggregated["total_tokens"] = aggregated["tokens_input"] + aggregated["tokens_output"]
+            found["total_tokens"] = True
+
+        return {
+            "tokens_input": aggregated["tokens_input"] if found["tokens_input"] else None,
+            "tokens_output": aggregated["tokens_output"] if found["tokens_output"] else None,
+            "total_tokens": aggregated["total_tokens"] if found["total_tokens"] else None,
+            "estimated_cost": aggregated["estimated_cost"] if found["estimated_cost"] else None,
+        }
+
+    @classmethod
+    def _extract_usage_metrics(cls, execution: object, workspace_repo: Path) -> dict[str, int | float | None]:
+        direct_metrics = cls._extract_usage_metrics_from_source(execution)
+        transcript_metrics = cls._latest_transcript_usage_metrics(workspace_repo)
+        return {
+            "tokens_input": direct_metrics["tokens_input"] if direct_metrics["tokens_input"] is not None else transcript_metrics["tokens_input"],
+            "tokens_output": direct_metrics["tokens_output"] if direct_metrics["tokens_output"] is not None else transcript_metrics["tokens_output"],
+            "total_tokens": direct_metrics["total_tokens"] if direct_metrics["total_tokens"] is not None else transcript_metrics["total_tokens"],
+            "estimated_cost": direct_metrics["estimated_cost"] if direct_metrics["estimated_cost"] is not None else transcript_metrics["estimated_cost"],
         }
 
     def _run_task(
@@ -529,7 +609,7 @@ class BenchmarkRunner:
                     failure_reason = FailureReason.AGENT_CRASH
                     self._log(f"agent crash: {agent_stderr_preview or 'no stderr preview available'}")
 
-                usage_metrics = self._extract_usage_metrics(execution)
+                usage_metrics = self._extract_usage_metrics(execution, workspace_repo)
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
                 self._log_event_metrics_summary(metrics)
                 denied_count = int(metrics.get("benchmark_mutation_denials") or 0)
