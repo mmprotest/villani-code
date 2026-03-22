@@ -290,6 +290,21 @@ def _format_answer(plan_answer: PlanAnswer) -> str:
     return f"{plan_answer.question_id}: {value}"
 
 
+def _response_usage_event_payload(response: dict[str, Any], model: str) -> dict[str, Any]:
+    event: dict[str, Any] = {"type": "model_request_finished", "model": model}
+    raw_usage = response.get("usage")
+    if not isinstance(raw_usage, dict):
+        return event
+    usage = {
+        key: value
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+        if isinstance((value := raw_usage.get(key)), int)
+    }
+    if usage:
+        event["usage"] = usage
+    return event
+
+
 
 class Runner:
     def __init__(
@@ -844,6 +859,7 @@ class Runner:
                 response = raw
 
             response["content"] = normalize_content_blocks(response.get("content"))
+            self.event_callback(_response_usage_event_payload(response, self.model))
             transcript["responses"].append(response)
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}

@@ -109,6 +109,56 @@ class BenchmarkRunner:
         return filter_meaningful_touched_paths(list_touched_files(repo_path))
 
     @staticmethod
+    def _aggregate_token_usage(events: list[object]) -> dict[str, int | None]:
+        tokens_input = 0
+        tokens_output = 0
+        total_tokens = 0
+        saw_input = False
+        saw_output = False
+        saw_total = False
+
+        for event in events:
+            payload = getattr(event, "payload", {})
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(payload.get("type") or getattr(event, "type", "") or "").strip()
+            if event_type != "model_request_finished":
+                continue
+            usage = payload.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            input_tokens = usage.get("input_tokens")
+            output_tokens = usage.get("output_tokens")
+            event_total = usage.get("total_tokens")
+            if isinstance(input_tokens, int):
+                tokens_input += input_tokens
+                saw_input = True
+            if isinstance(output_tokens, int):
+                tokens_output += output_tokens
+                saw_output = True
+            if isinstance(event_total, int):
+                total_tokens += event_total
+                saw_total = True
+            else:
+                inferred_total = 0
+                inferred_any = False
+                if isinstance(input_tokens, int):
+                    inferred_total += input_tokens
+                    inferred_any = True
+                if isinstance(output_tokens, int):
+                    inferred_total += output_tokens
+                    inferred_any = True
+                if inferred_any:
+                    total_tokens += inferred_total
+                    saw_total = True
+
+        return {
+            "tokens_input": tokens_input if saw_input else None,
+            "tokens_output": tokens_output if saw_output else None,
+            "total_tokens": total_tokens if saw_total else None,
+        }
+
+    @staticmethod
     def _is_noop_patch_attempt(
         *,
         file_writes: int | None,
@@ -485,6 +535,7 @@ class BenchmarkRunner:
                     self._log(f"agent crash: {agent_stderr_preview or 'no stderr preview available'}")
 
                 metrics = self._event_metrics(execution.events, started, task.metadata.expected_files, task.visible_verification, task.hidden_verification)
+                token_usage = self._aggregate_token_usage(execution.events)
                 self._log_event_metrics_summary(metrics)
                 denied_count = int(metrics.get("benchmark_mutation_denials") or 0)
                 denied_first_path = metrics.get("first_denied_path")
@@ -770,9 +821,9 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
-                tokens_input=None,
-                tokens_output=None,
-                total_tokens=None,
+                tokens_input=token_usage["tokens_input"],
+                tokens_output=token_usage["tokens_output"],
+                total_tokens=token_usage["total_tokens"],
                 estimated_cost=None,
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,
