@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- 'python -c "from app.c import entry; assert entry(-7) == \"-7\""'
+- 'PYTHONPATH=src python -c "from app.c import entry; assert entry(-7) == \"-7\""'
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- python -c "from app.core import paginate; assert paginate([1,2,3], 5) == [[1,2,3]]"
+- PYTHONPATH=src python -c "from app.core import should_retry; assert should_retry(502); assert not should_retry(422)"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

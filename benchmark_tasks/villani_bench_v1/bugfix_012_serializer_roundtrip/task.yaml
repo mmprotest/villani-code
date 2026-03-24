@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- python -c "from app.core import normalize_path; assert normalize_path(r'\\server\\share') == '/server/share'"
+- PYTHONPATH=src python -c "from app.core import should_retry; assert should_retry(503); assert not should_retry(418)"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true
