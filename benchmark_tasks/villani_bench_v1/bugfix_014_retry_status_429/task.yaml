@@ -7,9 +7,9 @@ max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- pytest -q
+- PYTHONPATH=src pytest -q
 hidden_verification:
-- cd repo && PYTHONPATH=src python -c "from app.core import should_retry; assert should_retry(429); assert should_retry(500); assert should_retry(502); assert not should_retry(404)"
+- PYTHONPATH=src pytest -q tests/test_core.py::test_retry_429
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

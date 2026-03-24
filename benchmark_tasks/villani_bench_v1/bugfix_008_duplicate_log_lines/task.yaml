@@ -7,9 +7,9 @@ max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- pytest -q
+- PYTHONPATH=src pytest -q
 hidden_verification:
-- cd repo && PYTHONPATH=src python -c "from app.core import paginate; data=['l1','l2','l3','l4','l5']; pages=paginate(data, 2); assert [x for p in pages for x in p] == data"
+- PYTHONPATH=src pytest -q tests/test_core.py::test_paginate
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

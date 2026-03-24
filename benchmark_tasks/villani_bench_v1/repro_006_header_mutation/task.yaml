@@ -7,9 +7,10 @@ max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- pytest -q
+- PYTHONPATH=src pytest -q tests/test_header_mutation_regression.py && exit 1 || exit
+  0
 hidden_verification:
-- python -c "import ast,pathlib; p=pathlib.Path('tests/test_smoke.py'); t=ast.parse(p.read_text()); names=[n.name for n in t.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')]; assert any(n != 'test_smoke' for n in names), names"
+- PYTHONPATH=src pytest -q tests/test_header_mutation_regression.py
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

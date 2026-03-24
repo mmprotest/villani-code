@@ -6,9 +6,9 @@
   ],
   "task_version": "1.0",
   "expected_files": [
-    "src/app/core.py"
+    "tests/test_path_normalization_regression.py"
   ],
-  "primary_skill": "debug",
+  "primary_skill": "regression-testing",
   "name": "repro_005_path_normalization",
   "difficulty": "hard",
   "reference_patch_size_lines": 0,
@@ -29,5 +29,8 @@
     "correctness",
     "deterministic_tests"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "secondary_skills": [
+    "pytest"
+  ]
 }

@@ -6,9 +6,9 @@
   ],
   "task_version": "1.0",
   "expected_files": [
-    "src/app/core.py"
+    "tests/test_header_mutation_regression.py"
   ],
-  "primary_skill": "debug",
+  "primary_skill": "regression-testing",
   "name": "repro_006_header_mutation",
   "difficulty": "hard",
   "reference_patch_size_lines": 0,
@@ -32,5 +32,8 @@
     "correctness",
     "deterministic_tests"
   ],
-  "benchmark_bucket": "runtime_stressing"
+  "benchmark_bucket": "runtime_stressing",
+  "secondary_skills": [
+    "pytest"
+  ]
 }
