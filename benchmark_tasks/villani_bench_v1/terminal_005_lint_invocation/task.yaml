@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- pytest -q
+- make test
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

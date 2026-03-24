@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- pytest -q
+- python -c "from app.core import paginate; assert paginate([1,2,3,4,5], 4) == [[1,2,3,4],[5]]"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

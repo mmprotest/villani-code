@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- pytest -q
+- python -c "from app.core import should_retry; assert should_retry(501); assert not should_retry(499)"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

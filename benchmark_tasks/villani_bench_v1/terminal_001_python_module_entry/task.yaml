@@ -8,7 +8,7 @@ expected_artifacts: []
 visible_verification:
 - python -m app --help
 hidden_verification:
-- python -c "import subprocess,sys;sys.exit(subprocess.run([sys.executable,'-m','app','--help']).returncode)"
+- python -m app
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

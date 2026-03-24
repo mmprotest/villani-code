@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - make test
 hidden_verification:
-- sh -c 'cd . && make test'
+- pytest -q tests/test_basic.py
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true
