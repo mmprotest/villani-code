@@ -60,9 +60,19 @@ def test_opencode_command_and_env_forward_model_and_endpoint() -> None:
         provider="openai",
     )
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd == ["opencode", "run", "--model", "openai/qwen-9b", "--prompt", "fix bug"]
+    assert cmd == [
+        "opencode",
+        "run",
+        "--model",
+        "qwen-9b",
+        "--hostname",
+        "http://127.0.0.1:1234",
+        "--command",
+        "fix bug",
+    ]
     assert env["OPENAI_API_BASE"] == "http://127.0.0.1:1234"
     assert env["OPENAI_API_KEY"] == "sk-test"
+    assert "OPENAI_PROVIDER" not in env
 
 def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
     runner = ClaudeCodeAgentRunner()
