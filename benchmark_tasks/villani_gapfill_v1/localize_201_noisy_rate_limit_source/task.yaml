@@ -1,0 +1,25 @@
+id: localize_201_noisy_rate_limit_source
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_backoff.py::test_retry_after_fractional_rounds_up_once
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/app/http/retries.py
+forbidden_paths:
+- tests/
+- src/app/http/client.py
+- src/app/http/policies.py
+- pyproject.toml
+benchmark_track: core

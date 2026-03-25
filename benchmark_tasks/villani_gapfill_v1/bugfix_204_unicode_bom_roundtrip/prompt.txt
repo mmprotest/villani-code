@@ -1,0 +1,1 @@
+CSV export followed by import breaks when the input includes a UTF-8 BOM and non-ASCII text. Fix the roundtrip bug and verify it.

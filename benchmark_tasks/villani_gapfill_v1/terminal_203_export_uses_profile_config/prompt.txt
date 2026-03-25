@@ -1,0 +1,1 @@
+A terminal export command ignores the selected profile and writes the wrong delimiter. Fix the workflow and verify it.

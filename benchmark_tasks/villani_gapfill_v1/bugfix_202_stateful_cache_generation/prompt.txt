@@ -1,0 +1,1 @@
+After a write followed by a read, stale data is returned from an in-memory cache. Fix the invalidation bug and verify it.

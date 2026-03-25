@@ -7,9 +7,12 @@ max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- pytest -q
+- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve()));
+  from app.core import paginate; assert paginate([1,2,3,4], 3)[-1] == [4]"
 hidden_verification:
-- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve())); from app.core import paginate; assert paginate([1,2,3,4,5,6], 3)[-1] == [4,5,6]; assert paginate([1,2,3,4,5], 3)[-1] == [4,5]"
+- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve()));
+  from app.core import paginate; assert paginate([1,2,3,4,5,6], 3)[-1] == [4,5,6];
+  assert paginate([1,2,3,4,5], 3)[-1] == [4,5]"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

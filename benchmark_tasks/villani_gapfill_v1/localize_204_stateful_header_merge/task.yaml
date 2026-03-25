@@ -1,0 +1,24 @@
+id: localize_204_stateful_header_merge
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_headers.py::test_request_specific_headers_do_not_leak
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/app/http/builder.py
+forbidden_paths:
+- tests/
+- src/app/http/client.py
+- src/app/http/defaults.py
+benchmark_track: core

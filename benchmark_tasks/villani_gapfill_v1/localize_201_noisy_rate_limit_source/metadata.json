@@ -1,0 +1,34 @@
+{
+  "seed_type": "localization",
+  "expected_files": [
+    "src/app/http/retries.py"
+  ],
+  "reference_patch_size_lines": 8,
+  "primary_skill": "cross-file-localization",
+  "secondary_skills": [
+    "repo-navigation"
+  ],
+  "name": "localize_201_noisy_rate_limit_source",
+  "difficulty": "hard",
+  "runtime_stressors": [
+    "repo_navigation",
+    "search_required",
+    "false_fix_trap",
+    "multi_file_context"
+  ],
+  "task_type": "repo_navigation_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "search",
+    "read_files",
+    "edit_files",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "localization_accuracy"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

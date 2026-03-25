@@ -1,0 +1,35 @@
+{
+  "seed_type": "terminal",
+  "expected_files": [
+    "scripts/render_report.py"
+  ],
+  "reference_patch_size_lines": 10,
+  "primary_skill": "terminal-workflow",
+  "secondary_skills": [
+    "path-handling"
+  ],
+  "name": "terminal_201_cwd_sensitive_config_script",
+  "difficulty": "medium",
+  "runtime_stressors": [
+    "workflow_correctness",
+    "cwd_sensitivity"
+  ],
+  "task_type": "terminal_workflow_fix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_command",
+    "read_files",
+    "edit_files",
+    "rerun_command"
+  ],
+  "evaluation_focus": [
+    "workflow_correctness"
+  ],
+  "benchmark_bucket": "runtime_stressing",
+  "allowed_support_files": [
+    "scripts/r.ptmp"
+  ]
+}

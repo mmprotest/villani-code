@@ -1,0 +1,1 @@
+A terminal pipeline builds an artifact manifest in a non-deterministic order. Fix it so the generated manifest is stable and verify it.

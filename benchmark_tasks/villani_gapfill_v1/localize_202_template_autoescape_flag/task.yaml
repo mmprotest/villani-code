@@ -1,0 +1,25 @@
+id: localize_202_template_autoescape_flag
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_template_render.py::test_conditional_autoescape_applies_when_enabled
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/app/template/render.py
+forbidden_paths:
+- tests/
+- src/app/template/filters.py
+- src/app/template/config.py
+- pyproject.toml
+benchmark_track: core

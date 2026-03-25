@@ -1,0 +1,1 @@
+A command alias works in one code path but disappears in the registry used by the dispatcher. Find the real bug and make the minimal fix.

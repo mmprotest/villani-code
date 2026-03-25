@@ -1,0 +1,1 @@
+Headers built for successive requests are leaking stale state. Find the real source of the mutation bug and make the minimal fix.

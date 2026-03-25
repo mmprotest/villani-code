@@ -1,4 +1,4 @@
-from app.a import run
+from app.a import resolve
 
 def do(v):
-    return run(v)
+    return resolve(v)

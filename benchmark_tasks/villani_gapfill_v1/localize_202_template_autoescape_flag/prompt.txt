@@ -1,0 +1,1 @@
+Escaped output is inconsistent across the templating layer. Find the actual bug and make the minimal correct fix.

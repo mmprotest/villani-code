@@ -1,0 +1,24 @@
+id: terminal_202_manifest_order_pipeline
+family: terminal_workflow
+difficulty: medium
+language: python
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts: []
+visible_verification:
+- python tests/verify_terminal_202.py
+hidden_verification:
+- pytest -q tests/test_manifest.py
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- scripts/
+- tests/
+- data/
+- manifest.txt
+benchmark_track: core
+forbidden_paths:
+- docs/

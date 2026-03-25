@@ -1,0 +1,1 @@
+A terminal script only works when launched from the project root because it resolves the config path incorrectly. Fix the workflow so the command works from anywhere.

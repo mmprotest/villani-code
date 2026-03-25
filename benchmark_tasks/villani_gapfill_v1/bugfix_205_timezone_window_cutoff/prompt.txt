@@ -1,0 +1,1 @@
+A reporting window is classified using UTC day boundaries instead of local day boundaries around midnight. Fix it and verify the behavior.

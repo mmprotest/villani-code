@@ -1,0 +1,35 @@
+{
+  "seed_type": "terminal",
+  "expected_files": [
+    "scripts/build_manifest.py"
+  ],
+  "reference_patch_size_lines": 8,
+  "primary_skill": "terminal-workflow",
+  "secondary_skills": [
+    "determinism"
+  ],
+  "name": "terminal_202_manifest_order_pipeline",
+  "difficulty": "medium",
+  "runtime_stressors": [
+    "workflow_correctness",
+    "deterministic_output"
+  ],
+  "task_type": "terminal_workflow_fix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": false,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_command",
+    "read_files",
+    "edit_files",
+    "rerun_command"
+  ],
+  "evaluation_focus": [
+    "artifact_correctness"
+  ],
+  "benchmark_bucket": "runtime_stressing",
+  "allowed_support_files": [
+    "manifest.txt"
+  ]
+}

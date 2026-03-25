@@ -1,0 +1,33 @@
+{
+  "seed_type": "localization",
+  "expected_files": [
+    "src/app/http/builder.py"
+  ],
+  "reference_patch_size_lines": 10,
+  "primary_skill": "stateful-localization",
+  "secondary_skills": [
+    "http"
+  ],
+  "name": "localize_204_stateful_header_merge",
+  "difficulty": "hard",
+  "runtime_stressors": [
+    "stateful_bug",
+    "repo_navigation",
+    "search_required"
+  ],
+  "task_type": "repo_navigation_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "search",
+    "read_files",
+    "edit_files",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "state_isolation"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

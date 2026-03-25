@@ -1,0 +1,40 @@
+{
+  "seed_type": "terminal",
+  "expected_files": [
+    "app/cli.py",
+    "app/config.py"
+  ],
+  "reference_patch_size_lines": 14,
+  "primary_skill": "terminal-workflow",
+  "secondary_skills": [
+    "config"
+  ],
+  "name": "terminal_203_export_uses_profile_config",
+  "difficulty": "hard",
+  "runtime_stressors": [
+    "multi_file_patch",
+    "workflow_correctness",
+    "config_interaction"
+  ],
+  "task_type": "terminal_workflow_fix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_command",
+    "read_files",
+    "edit_files",
+    "rerun_command"
+  ],
+  "evaluation_focus": [
+    "workflow_correctness",
+    "config_precedence"
+  ],
+  "benchmark_bucket": "runtime_stressing",
+  "allowed_support_files": [
+    "export.txt",
+    "export_hidden.txt",
+    "test_default.txt"
+  ]
+}

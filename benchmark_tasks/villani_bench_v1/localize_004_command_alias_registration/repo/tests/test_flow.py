@@ -1,4 +1,4 @@
 from app.c import entry
 
-def test_entry():
-    assert entry(1)=="1"
+def test_remove_alias():
+    assert entry('rm') == 'remove'
