@@ -1,4 +1,4 @@
-id: feature_bugfix_001_datetime_cli
+id: bugfix_015_config_fallback
 family: bugfix
 difficulty: easy
 language: python
@@ -7,7 +7,7 @@ max_files_touched: 3
 expected_artifacts:
 - patch
 visible_verification:
-- pytest -q tests/test_cli_datetime.py
+- pytest -q tests/test_config_precedence.py::test_env_wins_over_file
 hidden_verification:
 - pytest -q
 success_policy:
@@ -18,9 +18,4 @@ success_policy:
 allowlist_paths:
 - src/
 - tests/
-allowed_paths:
-- src/
-- tests/
-expected_touched_max: 3
-task_type: single_file_bugfix
-benchmark_track: feature
+benchmark_track: core

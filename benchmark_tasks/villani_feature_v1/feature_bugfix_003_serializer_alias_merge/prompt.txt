@@ -1,0 +1,1 @@
+Serialized API payloads should honor field aliases without dropping unaliased fields. Fix the merge bug and verify it.

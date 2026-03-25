@@ -1,0 +1,1 @@
+When both an environment variable and config file are present, the app should prefer the environment variable. Fix the precedence bug and verify it.

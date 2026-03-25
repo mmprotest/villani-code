@@ -1,0 +1,26 @@
+id: terminal_007_python_module_entry
+family: terminal_workflow
+difficulty: easy
+language: python
+max_minutes: 3
+max_files_touched: 3
+expected_artifacts: []
+visible_verification:
+- python -m app --help
+hidden_verification:
+- python -m app
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- app/
+- pyproject.toml
+inspect_only: false
+task_type: terminal_module_entry_fix
+benchmark_track: core
+forbidden_paths:
+- docs/
+- README.md

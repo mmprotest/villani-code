@@ -1,1 +1,0 @@
-Use terminal workflow to fix dev script config path.

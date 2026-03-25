@@ -28,5 +28,6 @@
     "correctness",
     "precedence_rules"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "benchmark_track": "core"
 }

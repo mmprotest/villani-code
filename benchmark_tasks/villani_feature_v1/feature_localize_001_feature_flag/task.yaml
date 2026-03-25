@@ -1,13 +1,13 @@
-id: feature_bugfix_001_datetime_cli
-family: bugfix
-difficulty: easy
+id: feature_localize_001_feature_flag
+family: localize_patch
+difficulty: medium
 language: python
-max_minutes: 5
-max_files_touched: 3
+max_minutes: 3
+max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- pytest -q tests/test_cli_datetime.py
+- pytest -q tests/test_feature_flag_runtime.py::test_enabled_flag_takes_effect
 hidden_verification:
 - pytest -q
 success_policy:
@@ -16,11 +16,10 @@ success_policy:
   fail_on_timeout: true
   fail_on_repo_dirty_outside_allowlist: true
 allowlist_paths:
-- src/
+- src/app/runtime.py
+forbidden_paths:
 - tests/
-allowed_paths:
-- src/
-- tests/
-expected_touched_max: 3
-task_type: single_file_bugfix
+- pyproject.toml
+- src/app/config.py
+- src/app/flags.py
 benchmark_track: feature

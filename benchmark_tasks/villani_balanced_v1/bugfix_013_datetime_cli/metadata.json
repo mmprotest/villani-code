@@ -1,34 +1,32 @@
 {
   "seed_type": "bug-seeded",
   "expected_files": [
-    "src/app/cli.py"
+    "src/app/date_utils.py"
   ],
-  "reference_patch_size_lines": 10,
-  "primary_skill": "cli-debugging",
+  "reference_patch_size_lines": 8,
+  "primary_skill": "python-debugging",
   "secondary_skills": [
-    "argparse",
     "pytest"
   ],
-  "name": "terminal_006_cli_export_flag",
-  "difficulty": "medium",
+  "name": "bugfix_013_datetime_cli",
+  "difficulty": "easy",
   "runtime_stressors": [
-    "terminal_workflow",
-    "argparse_contract"
+    "fault_localization",
+    "test_interpretation"
   ],
-  "task_type": "cli_workflow_fix",
+  "task_type": "single_file_bugfix",
   "requires_repo_navigation": false,
-  "requires_multi_step_reasoning": true,
+  "requires_multi_step_reasoning": false,
   "has_false_fix_trap": false,
   "requires_retry_recovery": false,
   "likely_tool_sequence": [
-    "run_commands",
     "read_files",
     "edit_files",
     "run_tests"
   ],
   "evaluation_focus": [
-    "cli_behavior",
-    "end_to_end"
+    "correctness",
+    "deterministic_tests"
   ],
   "benchmark_bucket": "baseline",
   "benchmark_track": "core"

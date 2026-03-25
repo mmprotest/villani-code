@@ -28,5 +28,6 @@
     "correctness",
     "state_management"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "benchmark_track": "core"
 }

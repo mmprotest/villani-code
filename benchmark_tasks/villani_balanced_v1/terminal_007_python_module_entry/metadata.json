@@ -1,0 +1,40 @@
+{
+  "seed_type": "terminal",
+  "expected_files": [
+    "app/__main__.py",
+    "app/main.py",
+    "pyproject.toml"
+  ],
+  "reference_patch_size_lines": 12,
+  "primary_skill": "python-packaging",
+  "secondary_skills": [
+    "cli"
+  ],
+  "name": "terminal_007_python_module_entry",
+  "difficulty": "easy",
+  "runtime_stressors": [
+    "test_interpretation"
+  ],
+  "task_type": "single_file_bugfix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": false,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "inspect_makefile",
+    "run_tests",
+    "edit_files",
+    "rerun_tests"
+  ],
+  "evaluation_focus": [
+    "workflow_correctness",
+    "verification_discipline"
+  ],
+  "benchmark_bucket": "baseline",
+  "allowed_support_files": [
+    "app/__main__.py",
+    "app/main.py",
+    "pyproject.toml"
+  ],
+  "benchmark_track": "core"
+}

@@ -9,7 +9,7 @@
     "argparse",
     "pytest"
   ],
-  "name": "terminal_006_cli_export_flag",
+  "name": "feature_terminal_001_cli_export_flag",
   "difficulty": "medium",
   "runtime_stressors": [
     "terminal_workflow",
@@ -31,5 +31,5 @@
     "end_to_end"
   ],
   "benchmark_bucket": "baseline",
-  "benchmark_track": "core"
+  "benchmark_track": "feature"
 }

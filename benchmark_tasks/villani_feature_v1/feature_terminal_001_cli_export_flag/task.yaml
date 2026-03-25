@@ -1,4 +1,4 @@
-id: terminal_006_cli_export_flag
+id: feature_terminal_001_cli_export_flag
 family: terminal_workflow
 difficulty: medium
 language: python
@@ -19,7 +19,7 @@ success_policy:
 allowlist_paths:
 - src/
 - tests/
-benchmark_track: core
+benchmark_track: feature
 task_type: cli_workflow_fix
 allowed_paths:
 - src/

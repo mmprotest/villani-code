@@ -29,5 +29,6 @@
     "localization",
     "correctness"
   ],
-  "benchmark_bucket": "runtime_stressing"
+  "benchmark_bucket": "runtime_stressing",
+  "benchmark_track": "core"
 }

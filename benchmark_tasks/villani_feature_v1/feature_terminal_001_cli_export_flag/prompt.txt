@@ -1,0 +1,1 @@
+The documented export CLI should accept --format json. Fix the command-line workflow and verify it.

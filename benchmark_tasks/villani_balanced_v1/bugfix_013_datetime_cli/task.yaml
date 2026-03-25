@@ -1,4 +1,4 @@
-id: feature_bugfix_001_datetime_cli
+id: bugfix_013_datetime_cli
 family: bugfix
 difficulty: easy
 language: python
@@ -23,4 +23,4 @@ allowed_paths:
 - tests/
 expected_touched_max: 3
 task_type: single_file_bugfix
-benchmark_track: feature
+benchmark_track: core

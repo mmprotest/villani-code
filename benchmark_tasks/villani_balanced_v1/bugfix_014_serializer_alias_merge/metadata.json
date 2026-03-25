@@ -28,5 +28,6 @@
     "correctness",
     "data_transformation"
   ],
-  "benchmark_bucket": "baseline"
+  "benchmark_bucket": "baseline",
+  "benchmark_track": "core"
 }
