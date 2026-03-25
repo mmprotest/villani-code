@@ -7,9 +7,9 @@ max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- PYTHONPATH=src pytest -q
+- python -c "import pathlib, sys, pytest; sys.path.insert(0, str(pathlib.Path('src').resolve())); raise SystemExit(pytest.main(['-q']))"
 hidden_verification:
-- PYTHONPATH=src pytest -q tests/test_core.py::test_retry_429
+- python -c "import pathlib, sys, pytest; sys.path.insert(0, str(pathlib.Path('src').resolve())); raise SystemExit(pytest.main(['-q', 'tests/test_core.py::test_retry_429']))"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true
