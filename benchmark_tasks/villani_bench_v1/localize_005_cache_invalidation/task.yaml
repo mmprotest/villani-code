@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- 'PYTHONPATH=src python -c "from app.c import entry; assert entry(0) == \"0\""'
+- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve())); from app.c import entry; assert entry(0) == '0'"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

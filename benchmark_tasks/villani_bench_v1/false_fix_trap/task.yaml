@@ -10,7 +10,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q tests/test_config_loading.py
 hidden_verification:
-- cd repo && PYTHONPATH=src python -c "from config.loader import load_config; assert load_config(dict(port='0'))['port'] == 0; assert load_config(dict(port=0))['port'] == 0"
+- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve())); from config.loader import load_config; assert load_config(dict(port='0'))['port'] == 0; assert load_config(dict(port=0))['port'] == 0"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

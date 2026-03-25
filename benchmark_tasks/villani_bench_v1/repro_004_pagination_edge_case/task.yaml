@@ -7,10 +7,10 @@ max_files_touched: 4
 expected_artifacts:
 - patch
 visible_verification:
-- PYTHONPATH=src pytest -q tests/test_pagination_edge_case_regression.py && exit 1
+- python -c "import pathlib, sys, pytest; sys.path.insert(0, str(pathlib.Path('src').resolve())); raise SystemExit(0 if pytest.main(['-q', 'tests/test_pagination_edge_case_regression.py']) != 0 else 1)"
   || exit 0
 hidden_verification:
-- PYTHONPATH=src pytest -q tests/test_pagination_edge_case_regression.py
+- python -c "import pathlib, sys, pytest; sys.path.insert(0, str(pathlib.Path('src').resolve())); raise SystemExit(pytest.main(['-q', 'tests/test_pagination_edge_case_regression.py']))"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

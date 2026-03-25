@@ -15,6 +15,15 @@ def list_touched_files(repo: Path) -> list[str]:
     return sorted(path for path in (tracked | untracked) if path)
 
 
+def _count_utf8_lines(path: Path) -> int | None:
+    try:
+        if not path.is_file():
+            return None
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except (FileNotFoundError, PermissionError, IsADirectoryError, OSError, UnicodeDecodeError):
+        return None
+
+
 def line_stats(repo: Path) -> tuple[int, int]:
     proc = subprocess.run(["git", "diff", "--numstat"], cwd=repo, text=True, capture_output=True, check=False)
     added = 0
@@ -28,12 +37,9 @@ def line_stats(repo: Path) -> tuple[int, int]:
         if parts[1].isdigit():
             deleted += int(parts[1])
     for path in _run(repo, ["git", "ls-files", "--others", "--exclude-standard"]).splitlines():
-        full = repo / path
-        if full.exists():
-            try:
-                added += len(full.read_text(encoding="utf-8").splitlines())
-            except UnicodeDecodeError:
-                continue
+        count = _count_utf8_lines(repo / path)
+        if count is not None:
+            added += count
     return added, deleted
 
 

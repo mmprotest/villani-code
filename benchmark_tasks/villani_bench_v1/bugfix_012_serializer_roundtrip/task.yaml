@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- cd repo && PYTHONPATH=src python -c "from app.core import paginate; data=[1,2,3,4,5]; pages=paginate(data, 2); assert [x for p in pages for x in p] == data"
+- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve())); from app.core import paginate; data=[1,2,3,4,5]; pages=paginate(data, 2); assert [x for p in pages for x in p] == data"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true

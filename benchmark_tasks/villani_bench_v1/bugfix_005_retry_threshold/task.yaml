@@ -9,7 +9,7 @@ expected_artifacts:
 visible_verification:
 - pytest -q
 hidden_verification:
-- cd repo && PYTHONPATH=src python -c "from app.core import should_retry; assert should_retry(500); assert should_retry(599); assert not should_retry(499)"
+- python -c "import pathlib, sys; sys.path.insert(0, str(pathlib.Path('src').resolve())); from app.core import should_retry; assert should_retry(500); assert should_retry(599); assert not should_retry(499)"
 success_policy:
   require_visible_pass: true
   require_hidden_pass: true
