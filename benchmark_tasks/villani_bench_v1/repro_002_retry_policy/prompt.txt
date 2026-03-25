@@ -1,1 +1,0 @@
-Add a regression test showing that client errors below 429 should not be retried by the API client.

@@ -1,1 +1,0 @@
-Add a regression test reproducing the bug where backslashes are not normalized in paths.

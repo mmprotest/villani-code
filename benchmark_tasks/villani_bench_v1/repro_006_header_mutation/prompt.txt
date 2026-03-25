@@ -1,1 +1,0 @@
-Add a regression test reproducing the bug where header normalization mutates the caller input.
