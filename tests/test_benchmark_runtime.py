@@ -5,8 +5,13 @@ from pathlib import Path
 
 
 from villani_code.benchmark.models import (
+    BENCHMARK_VERSION,
+    BenchmarkRunResult,
     BenchmarkTask,
     BenchmarkTrack,
+    FairnessClassification,
+    ReproducibilityManifest,
+    TelemetryQuality,
     SuccessPolicy,
     TaskDifficulty,
     TaskFamily,
@@ -987,3 +992,152 @@ def test_shared_contract_section_matches_villani_and_claude(tmp_path: Path) -> N
     claude_prompt = render_benchmark_prompt(task, repo_c)
 
     assert extract_shared_contract_section(villani_prompt).replace(str(repo_v), "<repo>") == extract_shared_contract_section(claude_prompt).replace(str(repo_c), "<repo>")
+
+
+def _resume_result(task_id: str, repeat_index: int, checksum: str, provider_label: str | None = None) -> BenchmarkRunResult:
+    return BenchmarkRunResult(
+        benchmark_version=BENCHMARK_VERSION,
+        benchmark_track=BenchmarkTrack.CORE,
+        task_id=task_id,
+        task_version="1.0",
+        task_family=TaskFamily.BUGFIX,
+        task_difficulty=TaskDifficulty.EASY,
+        task_language="python",
+        task_checksum=checksum,
+        agent_name="villani",
+        adapter_name="villani",
+        adapter_version="1",
+        adapter_capability="x",
+        fairness_classification=FairnessClassification.EXACT_COMPARABLE,
+        fairness_notes="",
+        telemetry_capability="x",
+        model_name="m",
+        provider_label=provider_label,
+        success=1,
+        pass_rate=1.0,
+        failed=0,
+        timed_out=0,
+        visible_pass=True,
+        hidden_pass=True,
+        runtime_seconds=0.1,
+        wall_clock_seconds=0.1,
+        timeout=False,
+        touched_file_paths=["src/app.py"],
+        files_touched=1,
+        lines_added=1,
+        lines_deleted=0,
+        verifications_run=[],
+        telemetry_quality=TelemetryQuality.INFERRED,
+        repeat_index=repeat_index,
+    )
+
+
+def _resume_manifest(task: BenchmarkTask, repeat_index: int, provider: str | None = None) -> ReproducibilityManifest:
+    return ReproducibilityManifest(
+        benchmark_version=BENCHMARK_VERSION,
+        task_id=task.id,
+        task_version=task.task_version,
+        task_checksum=task.task_checksum or "",
+        repo_checksum="repo",
+        visible_check_checksum="visible",
+        hidden_check_checksum="hidden",
+        adapter_name="villani",
+        adapter_version="1",
+        timeout_seconds=60,
+        repeat_index=repeat_index,
+        platform="linux",
+        python_version="3.12",
+        agent_name="villani",
+        model_name="m",
+        provider=provider,
+    )
+
+
+def test_runner_resume_from_manifest_and_task_result(tmp_path: Path, monkeypatch) -> None:
+    task_one = _minimal_task(tmp_path / "t1", id="task_one", task_checksum="ck1")
+    task_two = _minimal_task(tmp_path / "t2", id="task_two", task_checksum="ck2")
+    tasks = [task_one, task_two]
+    runner = BenchmarkRunner(output_dir=tmp_path / "out")
+    runner._task_result_dir().mkdir(parents=True, exist_ok=True)
+    manifest_path = runner.output_dir / "manifest_task_one_0_1.json"
+    manifest_path.write_text(_resume_manifest(task_one, repeat_index=0).model_dump_json(indent=2), encoding="utf-8")
+    runner._task_result_path("task_one", 0).write_text(_resume_result("task_one", 0, "ck1").model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr("villani_code.benchmark.runner.load_tasks", lambda *args, **kwargs: tasks)
+    executed: list[tuple[str, int]] = []
+
+    def fake_run_task(task: BenchmarkTask, **kwargs) -> BenchmarkRunResult:
+        repeat_index = int(kwargs["repeat_index"])
+        executed.append((task.id, repeat_index))
+        return _resume_result(task.id, repeat_index, task.task_checksum or "")
+
+    monkeypatch.setattr(runner, "_run_task", fake_run_task)
+    data = runner.run(suite_dir=tmp_path / "suite", agent="villani", model="m", base_url=None, api_key=None, provider=None, repeat=1)
+
+    assert executed == [("task_two", 0)]
+    rows = [BenchmarkRunResult.model_validate_json(line) for line in Path(data["results_path"]).read_text(encoding="utf-8").splitlines() if line]
+    assert [(row.repeat_index, row.task_id) for row in rows] == [(0, "task_one"), (0, "task_two")]
+    assert (runner.output_dir / "summary.json").exists()
+    assert (runner.output_dir / "aggregates.json").exists()
+    assert (runner.output_dir / "results.csv").exists()
+    assert (runner.output_dir / "report.md").exists()
+
+
+def test_runner_resume_reruns_for_corrupt_manifest_or_missing_or_mismatch(tmp_path: Path, monkeypatch) -> None:
+    task_valid = _minimal_task(tmp_path / "valid", id="task_valid", task_checksum="ck-valid")
+    task_corrupt = _minimal_task(tmp_path / "corrupt", id="task_corrupt", task_checksum="ck-corrupt")
+    task_missing = _minimal_task(tmp_path / "missing", id="task_missing", task_checksum="ck-missing")
+    task_changed = _minimal_task(tmp_path / "changed", id="task_changed", task_checksum="ck-current")
+    tasks = [task_valid, task_corrupt, task_missing, task_changed]
+    runner = BenchmarkRunner(output_dir=tmp_path / "out")
+    runner._task_result_dir().mkdir(parents=True, exist_ok=True)
+
+    (runner.output_dir / "manifest_task_valid_0_1.json").write_text(_resume_manifest(task_valid, 0).model_dump_json(indent=2), encoding="utf-8")
+    runner._task_result_path("task_valid", 0).write_text(_resume_result("task_valid", 0, "ck-valid").model_dump_json(indent=2), encoding="utf-8")
+
+    (runner.output_dir / "manifest_task_corrupt_0_1.json").write_text("{bad", encoding="utf-8")
+
+    (runner.output_dir / "manifest_task_missing_0_1.json").write_text(_resume_manifest(task_missing, 0).model_dump_json(indent=2), encoding="utf-8")
+
+    changed_manifest = _resume_manifest(task_changed, 0).model_copy(update={"task_checksum": "old-checksum"})
+    (runner.output_dir / "manifest_task_changed_0_1.json").write_text(changed_manifest.model_dump_json(indent=2), encoding="utf-8")
+    runner._task_result_path("task_changed", 0).write_text(_resume_result("task_changed", 0, "old-checksum").model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr("villani_code.benchmark.runner.load_tasks", lambda *args, **kwargs: tasks)
+    executed: list[tuple[str, int]] = []
+
+    def fake_run_task(task: BenchmarkTask, **kwargs) -> BenchmarkRunResult:
+        repeat_index = int(kwargs["repeat_index"])
+        executed.append((task.id, repeat_index))
+        return _resume_result(task.id, repeat_index, task.task_checksum or "")
+
+    monkeypatch.setattr(runner, "_run_task", fake_run_task)
+    runner.run(suite_dir=tmp_path / "suite", agent="villani", model="m", base_url=None, api_key=None, provider=None, repeat=1)
+
+    assert ("task_valid", 0) not in executed
+    assert ("task_corrupt", 0) in executed
+    assert ("task_missing", 0) in executed
+    assert ("task_changed", 0) in executed
+
+
+def test_runner_resume_repeat_indexes_independent(tmp_path: Path, monkeypatch) -> None:
+    task = _minimal_task(tmp_path / "task", id="task_repeat", task_checksum="ck")
+    runner = BenchmarkRunner(output_dir=tmp_path / "out")
+    runner._task_result_dir().mkdir(parents=True, exist_ok=True)
+    (runner.output_dir / "manifest_task_repeat_0_1.json").write_text(_resume_manifest(task, 0).model_dump_json(indent=2), encoding="utf-8")
+    runner._task_result_path("task_repeat", 0).write_text(_resume_result("task_repeat", 0, "ck").model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr("villani_code.benchmark.runner.load_tasks", lambda *args, **kwargs: [task])
+    executed: list[tuple[str, int]] = []
+
+    def fake_run_task(task_arg: BenchmarkTask, **kwargs) -> BenchmarkRunResult:
+        repeat_index = int(kwargs["repeat_index"])
+        executed.append((task_arg.id, repeat_index))
+        return _resume_result(task_arg.id, repeat_index, task_arg.task_checksum or "")
+
+    monkeypatch.setattr(runner, "_run_task", fake_run_task)
+    data = runner.run(suite_dir=tmp_path / "suite", agent="villani", model="m", base_url=None, api_key=None, provider=None, repeat=2)
+
+    assert executed == [("task_repeat", 1)]
+    rows = [BenchmarkRunResult.model_validate_json(line) for line in Path(data["results_path"]).read_text(encoding="utf-8").splitlines() if line]
+    assert [(row.repeat_index, row.task_id) for row in rows] == [(0, "task_repeat"), (1, "task_repeat")]

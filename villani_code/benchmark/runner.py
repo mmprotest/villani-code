@@ -140,26 +140,41 @@ class BenchmarkRunner:
         tasks = load_tasks(suite_dir, task_id=task_id, **filters)
         if include_private and self.private_suite_dir and self.private_suite_dir.exists():
             tasks.extend(load_tasks(self.private_suite_dir, task_id=task_id, **filters))
-        results: list[BenchmarkRunResult] = []
+        existing_results = self._load_existing_task_results_from_manifests(
+            tasks=tasks,
+            repeat=repeat,
+            agent=agent,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+        )
+        results: list[BenchmarkRunResult] = list(existing_results.values())
         self._log(
             f"start suite={suite_dir} tasks={len(tasks)} agent={agent} model={model or '-'} provider={provider or '-'} base_url={base_url or '-'} output_dir={self.output_dir}"
         )
         for repeat_index in range(repeat):
             for index, task in enumerate(tasks, start=1):
+                task_key = (repeat_index, task.id)
+                if task_key in existing_results:
+                    self._log(
+                        f"{index}/{len(tasks)} agent={agent} task={task.id} repeat={repeat_index} skip=resume_manifest"
+                    )
+                    continue
                 self._log(
                     f"{index}/{len(tasks)} agent={agent} task={task.id} bucket={task.metadata.benchmark_bucket} type={task.metadata.task_type or '-'}"
                 )
-                results.append(
-                    self._run_task(
-                        task,
-                        agent=agent,
-                        model=model,
-                        base_url=base_url,
-                        api_key=api_key,
-                        provider=provider,
-                        repeat_index=repeat_index,
-                    )
+                result = self._run_task(
+                    task,
+                    agent=agent,
+                    model=model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    provider=provider,
+                    repeat_index=repeat_index,
                 )
+                self._write_task_result(result)
+                results.append(result)
+        results.sort(key=lambda item: (item.repeat_index, item.task_id))
         result_path = write_results(results, self.output_dir)
         write_markdown_report(results, self.output_dir / "report.md")
         summary = summarize(results).model_dump()
@@ -172,6 +187,105 @@ class BenchmarkRunner:
             "human_summary": render_summary_table(results),
             "repeat": repeat,
         }
+
+    def _discover_manifests(self) -> list[Path]:
+        if not self.output_dir.exists():
+            return []
+        return sorted(self.output_dir.glob("manifest_*.json"))
+
+    @staticmethod
+    def _provider_for_run(provider: str | None, base_url: str | None) -> str | None:
+        return provider or ("openai" if base_url else None)
+
+    def _manifest_matches_current_run(
+        self,
+        manifest: ReproducibilityManifest,
+        *,
+        task: BenchmarkTask,
+        repeat_index: int,
+        agent: str,
+        model: str | None,
+        base_url: str | None,
+        provider: str | None,
+    ) -> bool:
+        return (
+            manifest.task_id == task.id
+            and manifest.repeat_index == repeat_index
+            and manifest.task_checksum == (task.task_checksum or "")
+            and manifest.benchmark_version == BENCHMARK_VERSION
+            and manifest.agent_name == agent
+            and manifest.model_name == model
+            and manifest.provider == self._provider_for_run(provider, base_url)
+        )
+
+    def _task_result_dir(self) -> Path:
+        return self.output_dir / "task_results"
+
+    def _task_result_path(self, task_id: str, repeat_index: int) -> Path:
+        return self._task_result_dir() / f"{task_id}__r{repeat_index}.json"
+
+    def _write_task_result(self, result: BenchmarkRunResult) -> None:
+        task_result_dir = self._task_result_dir()
+        task_result_dir.mkdir(parents=True, exist_ok=True)
+        path = self._task_result_path(result.task_id, result.repeat_index)
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+
+    def _load_existing_task_results_from_manifests(
+        self,
+        *,
+        tasks: list[BenchmarkTask],
+        repeat: int,
+        agent: str,
+        model: str | None,
+        base_url: str | None,
+        provider: str | None,
+    ) -> dict[tuple[int, str], BenchmarkRunResult]:
+        expected = {(repeat_index, task.id): task for repeat_index in range(repeat) for task in tasks}
+        loaded: dict[tuple[int, str], BenchmarkRunResult] = {}
+        for manifest_path in self._discover_manifests():
+            try:
+                manifest = ReproducibilityManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"ignoring corrupt manifest={manifest_path.name} reason={self._stderr_snippet(str(exc), max_len=160)}")
+                continue
+            key = (manifest.repeat_index, manifest.task_id)
+            task = expected.get(key)
+            if task is None:
+                continue
+            if not self._manifest_matches_current_run(
+                manifest,
+                task=task,
+                repeat_index=manifest.repeat_index,
+                agent=agent,
+                model=model,
+                base_url=base_url,
+                provider=provider,
+            ):
+                continue
+            task_result_path = self._task_result_path(manifest.task_id, manifest.repeat_index)
+            if not task_result_path.exists():
+                self._log(f"resume miss task={manifest.task_id} repeat={manifest.repeat_index} reason=missing_task_result")
+                continue
+            try:
+                row = BenchmarkRunResult.model_validate_json(task_result_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                self._log(
+                    f"ignoring corrupt task_result={task_result_path.name} reason={self._stderr_snippet(str(exc), max_len=160)}"
+                )
+                continue
+            if (
+                row.task_id != manifest.task_id
+                or row.repeat_index != manifest.repeat_index
+                or row.task_checksum != manifest.task_checksum
+                or row.benchmark_version != BENCHMARK_VERSION
+                or row.agent_name != agent
+                or row.model_name != model
+                or row.provider_label != self._provider_for_run(provider, base_url)
+            ):
+                self._log(f"resume miss task={manifest.task_id} repeat={manifest.repeat_index} reason=task_result_mismatch")
+                continue
+            loaded[key] = row
+        return loaded
 
     def _event_metrics(self, events: list[object], started: float, expected_files: list[str], visible_commands: list[str], hidden_commands: list[str]) -> dict[str, object]:
         command_starts = 0
