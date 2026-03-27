@@ -204,7 +204,7 @@ The report emphasizes four outcome views:
 
 Villani Code led at every tested model size.
 
-![Overall success rate](overall_success.png)
+![Overall success rate](01_qwen35_combined_success_rate.png)
 
 Combined across the plotted task runs:
 - **Qwen3.5 4B:** Villani solved 33/40 vs Claude Code 28/40
@@ -217,7 +217,7 @@ That pattern matters for one reason: it is consistent. This is not a single luck
 
 The cleanest chart in the set is the frontier chart.
 
-![Success vs runtime frontier](frontier_reversed.png)
+![Success vs runtime frontier](03_qwen35_combined_frontier_success_vs_total_runtime_reversed_x.png)
 
 This chart shows the real story:
 - at **4B** and **9B**, Villani is more effective overall, though often slower
@@ -243,7 +243,7 @@ That is a much more serious result.
 
 The task-family chart shows where the runner advantage is concentrated.
 
-![Solved tasks by task type](task_type_counts.png)
+![Solved tasks by task type](01_solved_tasks_by_type_fixed.png)
 
 Key reads:
 - **27B:** Villani wins Bugfix, Localize, and Terminal
