@@ -75,7 +75,9 @@ class VillaniTranscript(VerticalScroll):
     def append_plain(self, text: str, follow_tail: bool) -> None:
         self._content_text += text
         container = self.query_one("#log-content", Vertical)
-        container.mount(Static(Text(text), classes="log-plain", markup=False))
+        for chunk in text.splitlines(keepends=True):
+            line = chunk[:-1] if chunk.endswith("\n") else chunk
+            container.mount(Static(Text(line), classes="log-plain", markup=False))
         if follow_tail:
             self.scroll_end(animate=False)
 

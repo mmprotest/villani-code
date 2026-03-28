@@ -36,6 +36,23 @@ def test_plain_and_markdown_blocks_are_separate(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_plain_lines_do_not_get_extra_blank_spacing(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        async with app.run_test() as pilot:
+            log = app.query_one("#log")
+            before = len(log.query("Static.log-plain"))
+            app.on_log_append(LogAppend("alpha", kind="meta"))
+            app.on_log_append(LogAppend("beta", kind="meta"))
+            await pilot.pause()
+
+            rendered = [str(widget.render()) for widget in log.query("Static.log-plain")]
+            new_lines = [line for line in rendered[before:] if line in {"alpha", "beta", ""}]
+            assert new_lines[:2] == ["alpha", "beta"]
+
+    asyncio.run(run())
+
+
 def test_streaming_finalizes_into_markdown_block(tmp_path: Path) -> None:
     async def run() -> None:
         app = VillaniTUI(DummyRunner(), tmp_path)
