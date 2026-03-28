@@ -39,8 +39,8 @@ class LocalizationEngine:
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
 
-    def localize_from_goal(self, goal: str, repo_signals: dict[str, Any] | None = None) -> LocalizationResult:
-        ranked = self.rank_candidate_files(goal, repo_signals=repo_signals)
+    def localize_from_goal(self, goal: str, repo_signals: dict[str, Any] | None = None, structured_signals: dict[str, Any] | None = None) -> LocalizationResult:
+        ranked = self.rank_candidate_files(goal, repo_signals=repo_signals, structured_signals=structured_signals)
         bug_class = self.derive_bug_class(goal)
         top = ranked[:6]
         return LocalizationResult(
@@ -53,11 +53,11 @@ class LocalizationEngine:
             ranked_candidates=ranked[:12],
         )
 
-    def localize_from_failure_output(self, stdout: str, stderr: str, repo_signals: dict[str, Any] | None = None) -> LocalizationResult:
+    def localize_from_failure_output(self, stdout: str, stderr: str, repo_signals: dict[str, Any] | None = None, structured_signals: dict[str, Any] | None = None) -> LocalizationResult:
         combined = f"{stdout}\n{stderr}"[:7000]
         file_hits = list(dict.fromkeys(re.findall(r"([\w./-]+\.py)", combined)))
         seed = " ".join(file_hits + self._extract_trace_symbols(combined))
-        ranked = self.rank_candidate_files(seed, failure_output=combined, repo_signals=repo_signals)
+        ranked = self.rank_candidate_files(seed, failure_output=combined, repo_signals=repo_signals, structured_signals=structured_signals)
         trace = re.search(r'File "([^"]+)", line (\d+)', combined)
         direct_trace = [trace.group(1)] if trace else []
         merged = list(dict.fromkeys(direct_trace + file_hits + [c.file_path for c in ranked]))[:10]
@@ -92,12 +92,18 @@ class LocalizationEngine:
         signal_text: str,
         failure_output: str = "",
         repo_signals: dict[str, Any] | None = None,
+        structured_signals: dict[str, Any] | None = None,
     ) -> list[RankedLocalizationCandidate]:
         terms = [t for t in re.findall(r"[a-zA-Z_]{3,}", signal_text.lower()) if t not in STOP_WORDS]
         mentioned_paths = set(re.findall(r"([\w./-]+\.(?:py|toml|yaml|yml|json|ini|cfg))", signal_text + "\n" + failure_output))
         test_refs = set(re.findall(r"(?:tests?/[^\s:]+\.py)", signal_text + "\n" + failure_output))
         symbol_refs = set(self._extract_trace_symbols(signal_text + "\n" + failure_output))
         repo_signals = repo_signals or {}
+        structured_signals = structured_signals or {}
+        command_targets = set(re.findall(r"([\w./-]+\.py(?:::[\w\[\]-]+)?)", " ".join(str(c) for c in structured_signals.get("validation_commands", []))))
+        changed_files = {str(p) for p in structured_signals.get("changed_files", []) if str(p)}
+        failed_commands = [str(c).lower() for c in structured_signals.get("failed_commands", [])]
+        failure_hint_text = " ".join(failed_commands)
 
         candidates: list[RankedLocalizationCandidate] = []
         for path in self.repo_root.rglob("*"):
@@ -130,6 +136,16 @@ class LocalizationEngine:
             elif any(str(ref).endswith(path.name) for ref in test_refs):
                 evidence.append(LocalizationEvidence("test_proximity", "failure_output", path.name, 0.5))
                 score += 0.5
+
+            if rel in changed_files:
+                evidence.append(LocalizationEvidence("recent_change", "structured_execution", rel, 0.42))
+                score += 0.42
+            if rel in {target.split("::", 1)[0] for target in command_targets}:
+                evidence.append(LocalizationEvidence("validation_target", "structured_execution", rel, 0.65))
+                score += 0.65
+            if any(token in rel_low for token in re.findall(r"[a-z_]{4,}", failure_hint_text)[:20]):
+                evidence.append(LocalizationEvidence("failed_command_term", "structured_execution", path.name, 0.25))
+                score += 0.25
 
             if rel.startswith("tests/"):
                 score -= 0.1

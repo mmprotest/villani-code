@@ -19,7 +19,7 @@ from villani_code.project_memory import SessionState, ensure_project_memory, loa
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
 from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
-from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
+from villani_code.shells import baseline_import_validation_command, run_portable_shell_command, shell_command_for_platform, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
@@ -153,12 +153,7 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
             isolated_repo = Path(temp_root) / "repo"
             shutil.copytree(runner.repo, isolated_repo)
             runner.event_callback({"type": "pre_edit_failure_signal_isolated", "isolated": True})
-            proc = subprocess.run(
-                ["bash", "-lc", visible_command],
-                cwd=isolated_repo,
-                capture_output=True,
-                text=True,
-            )
+            proc = run_portable_shell_command(visible_command, cwd=isolated_repo)
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback(
             {
@@ -870,7 +865,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         commands.append(["pytest", "-q", *touched_tests])
     elif touched_sources:
         family = shell_family_for_platform(sys.platform)
-        commands.append(["bash", "-lc", baseline_import_validation_command(family)])
+        commands.append(shell_command_for_platform(baseline_import_validation_command(family), platform_name=sys.platform))
     elif task_mode in {TaskMode.DOCS_UPDATE_SAFE, TaskMode.INSPECT_AND_PLAN}:
         pass
 

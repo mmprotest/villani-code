@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from villani_code.evidence import normalize_artifact, parse_command_evidence
@@ -46,3 +47,31 @@ def collect_runner_failures(transcript: dict[str, Any]) -> list[str]:
         if tool_result.get("is_error"):
             failures.append(f"tool_failure: {str(tool_result.get('content', ''))[:220]}")
     return failures
+
+
+def collect_structured_command_results(transcript: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    tool_results = list(transcript.get("tool_results", []) or [])
+    for item in tool_results:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content", "") or "")
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = None
+        if not isinstance(parsed, dict):
+            continue
+        cmd = str(parsed.get("command", "")).strip()
+        if not cmd:
+            continue
+        out.append(
+            {
+                "command": cmd,
+                "exit": int(parsed.get("exit_code", parsed.get("exit", 1)) or 1),
+                "stdout": str(parsed.get("stdout", ""))[:4000],
+                "stderr": str(parsed.get("stderr", ""))[:4000],
+                "timed_out": bool(parsed.get("timed_out", False)),
+            }
+        )
+    return out

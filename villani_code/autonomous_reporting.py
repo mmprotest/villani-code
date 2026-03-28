@@ -173,7 +173,30 @@ def build_mission_summary(
                 "localization": asdict(node.localization),
             }
         )
-    validations = execution_state.verification_history[-20:]
+    validations = execution_state.verification_history[-30:]
+    validation_timeline = [
+        {
+            "node_id": item.get("node_id", ""),
+            "failed": int((item.get("validation_summary", {}) or {}).get("failed", 0) or 0),
+            "passed": int((item.get("validation_summary", {}) or {}).get("passed", 0) or 0),
+            "delta": (item.get("validation_delta", {}) or {}).get("status", "unchanged"),
+            "fingerprint": item.get("failure_fingerprint", ""),
+        }
+        for item in validations
+    ]
+    localization_evolution = [
+        {
+            "targets": list(snapshot.target_files[:6]),
+            "confidence": float(snapshot.confidence),
+            "bug_class": snapshot.likely_bug_class,
+            "intent": snapshot.repair_intent,
+        }
+        for snapshot in execution_state.localization_history[-12:]
+    ]
+    changed_by_status = {
+        "succeeded": sorted({p for n in mission.nodes if n.status.value == "succeeded" for p in n.last_outcome.changed_files}),
+        "failed": sorted({p for n in mission.nodes if n.status.value == "failed" for p in n.last_outcome.changed_files}),
+    }
     return {
         "mission_id": mission.mission_id,
         "mission_goal": mission.user_goal,
@@ -183,6 +206,10 @@ def build_mission_summary(
         "files_touched": sorted(set(files_touched)),
         "evidence": execution_state.evidence_log[-40:],
         "validation_results": validations,
+        "validation_timeline": validation_timeline,
+        "localization_evolution": localization_evolution,
+        "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
+        "changed_files_by_attempt_outcome": changed_by_status,
         "final_outcome": outcome,
         "stop_reason": stop_reason,
         "blocked_reason": stop_reason if outcome == "blocked" else "",
