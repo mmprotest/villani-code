@@ -8,8 +8,8 @@ from typing import Any, Callable
 from villani_code.autonomous_reporting import build_mission_summary
 from villani_code.autonomous_stop import evaluate_mission_stop
 from villani_code.change_containment import build_change_containment_context, create_regression_containment_nodes
-from villani_code.localization import LocalizationEngine
-from villani_code.mission import Mission, MissionExecutionState, MissionType, NodeStatus
+from villani_code.localization import LocalizationEngine, LocalizationResult
+from villani_code.mission import LocalizationSnapshot, Mission, MissionExecutionState, MissionType, NodePhase, NodeStatus, NodeOutcomeRecord
 from villani_code.mission_bridge import execute_mission_node_with_runner
 from villani_code.mission_planner import MissionPlanner
 from villani_code.mission_store import append_mission_event, save_final_mission_report, save_mission_snapshot
@@ -21,6 +21,7 @@ from villani_code.verification import (
     evaluate_mission_status,
     run_static_verification,
     run_validation_commands,
+    summarize_validation_results,
 )
 
 
@@ -95,6 +96,7 @@ class VillaniModeController:
 
     def _select_next_node(self, execution_state: MissionExecutionState):
         mission = execution_state.mission
+        self._hydrate_nodes_from_localization(execution_state)
         for node in mission.nodes:
             if node.status == NodeStatus.PENDING and all(self._node_by_id(mission, dep).status == NodeStatus.SUCCEEDED for dep in node.depends_on if self._node_by_id(mission, dep)):
                 node.status = NodeStatus.READY
@@ -107,32 +109,141 @@ class VillaniModeController:
         node.status = NodeStatus.RUNNING
         node.attempts += 1
         execution_state.active_node_id = node.node_id
+
+        localization_result = None
+        if node.phase == NodePhase.LOCALIZE:
+            localization_result = self._run_localization_node(execution_state, node)
+
         mission_result = execute_mission_node_with_runner(self.runner, execution_state.mission, node, execution_state)
-        append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "node_executed", "node_id": node.node_id, "changed_files": mission_result.changed_files})
+
+        if node.phase == NodePhase.LOCALIZE and mission_result.failures:
+            loc_from_output = self.localization.localize_from_failure_output("\n".join(x.get("command", "") for x in mission_result.commands), "\n".join(mission_result.failures), self._repo_signals)
+            localization_result = self._merge_localization_results(localization_result, loc_from_output)
+            self._apply_localization(execution_state, node, localization_result)
+
+        append_mission_event(
+            str(self.repo),
+            execution_state.mission.mission_id,
+            {
+                "type": "node_executed",
+                "node_id": node.node_id,
+                "changed_files": mission_result.changed_files,
+                "localization_files": list(localization_result.target_files[:8]) if localization_result else [],
+            },
+        )
         return {
             "runner_result": mission_result,
             "changed_files": mission_result.changed_files,
             "commands": mission_result.commands,
             "failures": mission_result.failures,
             "prose_only": mission_result.prose_only,
+            "localization": localization_result,
         }
+
+    def _run_localization_node(self, execution_state: MissionExecutionState, node: Any) -> LocalizationResult:
+        seed = "\n".join([execution_state.mission.user_goal, node.objective, " ".join(execution_state.evidence_log[-10:])])
+        loc = self.localization.localize_from_goal(seed, self._repo_signals)
+        self._apply_localization(execution_state, node, loc)
+        return loc
+
+    def _apply_localization(self, execution_state: MissionExecutionState, node: Any, result: LocalizationResult | None) -> None:
+        if not result:
+            return
+        snapshot = LocalizationSnapshot(
+            target_files=list(result.target_files),
+            likely_bug_class=result.likely_bug_class,
+            repair_intent=result.repair_intent,
+            confidence=float(result.confidence),
+            evidence=list(result.evidence),
+            suggested_validation_commands=list(result.suggested_validation_commands),
+        )
+        node.localization = snapshot
+        node.candidate_files = list(dict.fromkeys(snapshot.target_files + node.candidate_files))[:20]
+        node.validation_commands = list(dict.fromkeys(snapshot.suggested_validation_commands + node.validation_commands))[:6]
+        node.confidence = max(node.confidence, snapshot.confidence)
+        execution_state.last_localization = snapshot
+        execution_state.localization_history.append(snapshot)
+        execution_state.evidence_log.extend([f"localize:{e}" for e in snapshot.evidence])
+
+    def _merge_localization_results(self, base: LocalizationResult | None, extra: LocalizationResult) -> LocalizationResult:
+        if base is None:
+            return extra
+        merged = LocalizationResult(
+            target_files=list(dict.fromkeys(base.target_files + extra.target_files)),
+            likely_bug_class=extra.likely_bug_class if extra.confidence >= base.confidence else base.likely_bug_class,
+            repair_intent=extra.repair_intent or base.repair_intent,
+            confidence=max(base.confidence, extra.confidence),
+            evidence=list(dict.fromkeys(base.evidence + extra.evidence)),
+            suggested_validation_commands=list(dict.fromkeys(base.suggested_validation_commands + extra.suggested_validation_commands)),
+        )
+        return merged
+
+    def _hydrate_nodes_from_localization(self, execution_state: MissionExecutionState) -> None:
+        loc = execution_state.last_localization
+        if not loc.target_files:
+            return
+        for node in execution_state.mission.nodes:
+            if node.status not in {NodeStatus.PENDING, NodeStatus.READY}:
+                continue
+            if node.phase in {NodePhase.INSPECT, NodePhase.REPRODUCE, NodePhase.NARROW_FIX, NodePhase.BROAD_FIX, NodePhase.VALIDATE, NodePhase.RECOVER}:
+                node.candidate_files = list(dict.fromkeys(loc.target_files + node.candidate_files))[:20]
+                node.validation_commands = list(dict.fromkeys(loc.suggested_validation_commands + node.validation_commands))[:6]
+                node.confidence = max(node.confidence, min(0.95, loc.confidence + 0.05))
+                if loc.repair_intent and loc.repair_intent not in node.evidence:
+                    node.evidence.append(f"localized_intent:{loc.repair_intent}")
 
     def _evaluate_node(self, execution_state: MissionExecutionState, node: Any, node_result: dict[str, Any]) -> dict[str, Any]:
         changed_files = list(node_result.get("changed_files", []))
         static_result = run_static_verification(str(self.repo), changed_files)
         commands = node.validation_commands or self._repo_signals.get("likely_validation_commands", ["pytest -q"])
-        command_results = run_validation_commands(str(self.repo), commands[:2]) if commands else []
-        outcome = classify_node_outcome(node.contract_type, static_result, command_results, changed_files, prose_only=bool(node_result.get("prose_only")))
+        command_results = run_validation_commands(str(self.repo), commands[:3]) if commands else []
+        validation_summary = summarize_validation_results(command_results)
+        localization_payload = self._localization_payload(node, node_result, execution_state)
+        previous_loc = execution_state.localization_history[-2] if len(execution_state.localization_history) > 1 else LocalizationSnapshot()
 
-        if command_results:
-            for cr in command_results:
-                if cr.get("failure_fingerprint"):
-                    node.failure_fingerprint = str(cr.get("failure_fingerprint"))
-                    break
+        outcome = classify_node_outcome(
+            node.contract_type,
+            static_result,
+            command_results,
+            changed_files,
+            prose_only=bool(node_result.get("prose_only")),
+            localization=localization_payload,
+            prior_fingerprints=execution_state.failure_fingerprint_history,
+            previous_localization={
+                "target_files": previous_loc.target_files,
+                "confidence": previous_loc.confidence,
+            },
+        )
+
+        failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
+        if failure_fingerprint:
+            node.failure_fingerprint = failure_fingerprint
+            execution_state.failure_fingerprint_history.append(failure_fingerprint)
+
+        node.last_outcome = NodeOutcomeRecord(
+            status=str(outcome.get("status", "unknown")),
+            changed_files=list(changed_files),
+            patch_detected=bool(outcome.get("patch_exists")),
+            meaningful_patch=bool(outcome.get("meaningful_patch")),
+            validation_summary=validation_summary,
+            failure_fingerprint=failure_fingerprint,
+            localization_evidence=list(localization_payload.get("evidence", [])),
+        )
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
-        execution_state.verification_history.append({"node_id": node.node_id, "static": static_result, "commands": command_results, "outcome": outcome})
+        execution_state.verification_history.append(
+            {
+                "node_id": node.node_id,
+                "static": static_result,
+                "commands": command_results,
+                "validation_summary": validation_summary,
+                "outcome": outcome,
+                "changed_files": changed_files,
+                "failure_fingerprint": failure_fingerprint,
+                "localization": localization_payload,
+            }
+        )
 
         if outcome["status"] == "passed":
             node.status = NodeStatus.SUCCEEDED
@@ -145,11 +256,40 @@ class VillaniModeController:
             node.status = NodeStatus.FAILED
             execution_state.consecutive_no_progress += 1
 
-        append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "node_evaluated", "node_id": node.node_id, "status": node.status.value, "outcome": outcome})
-        return outcome
+        append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "node_evaluated", "node_id": node.node_id, "status": node.status.value, "outcome": outcome, "changed_files": changed_files, "validation": validation_summary})
+        return {
+            **outcome,
+            "changed_files": changed_files,
+            "patch_detected": bool(outcome.get("patch_exists")),
+            "meaningful_patch": bool(outcome.get("meaningful_patch")),
+            "validation_summary": validation_summary,
+            "failure_fingerprint": failure_fingerprint,
+            "localization_evidence": list(localization_payload.get("evidence", [])),
+        }
+
+    def _localization_payload(self, node: Any, node_result: dict[str, Any], execution_state: MissionExecutionState) -> dict[str, Any]:
+        loc_result = node_result.get("localization")
+        if isinstance(loc_result, LocalizationResult):
+            return {
+                "target_files": loc_result.target_files,
+                "likely_bug_class": loc_result.likely_bug_class,
+                "repair_intent": loc_result.repair_intent,
+                "confidence": loc_result.confidence,
+                "evidence": loc_result.evidence,
+                "suggested_validation_commands": loc_result.suggested_validation_commands,
+            }
+        loc = node.localization if node.localization.target_files else execution_state.last_localization
+        return {
+            "target_files": list(loc.target_files),
+            "likely_bug_class": loc.likely_bug_class,
+            "repair_intent": loc.repair_intent,
+            "confidence": loc.confidence,
+            "evidence": list(loc.evidence),
+            "suggested_validation_commands": list(loc.suggested_validation_commands),
+        }
 
     def _handle_recovery(self, execution_state: MissionExecutionState, node: Any, outcome: dict[str, Any]) -> None:
-        outcome["localization_weak"] = node.phase.value == "localize" and node.confidence < 0.55
+        outcome["localization_weak"] = bool(outcome.get("localization_weak")) or (node.phase.value == "localize" and node.confidence < 0.55)
         decision = self.recovery.plan_recovery(execution_state, node, outcome)
         if decision.mark_blocked:
             node.status = NodeStatus.BLOCKED
