@@ -305,6 +305,13 @@ class RunnerController:
         if etype == "autonomous_phase":
             phase = str(event.get("phase", "working"))
             self.app.post_message(StatusUpdate(phase))
+            self.app.post_message(LogAppend(f"[villani-mode] {phase}", kind="meta"))
+            return
+        if etype == "villani_activity":
+            message = str(event.get("message", "")).strip()
+            if message:
+                self.app.post_message(LogAppend(f"[villani-mode] {message}", kind="meta"))
+                self.app.post_message(StatusUpdate(message))
             return
         if etype == "stream_text":
             self._assistant_stream_saw_text = True
