@@ -26,28 +26,37 @@ class RecoveryPlanner:
         node: MissionNode,
         node_outcome: dict[str, Any],
     ) -> RecoveryDecision:
-        no_changes = not bool(node_outcome.get("changed_files"))
+        changed_files = list(node_outcome.get("changed_files", []) or [])
+        no_changes = not changed_files
         worsened = bool(node_outcome.get("validation_worsened"))
+        no_improvement = bool(node_outcome.get("patch_no_improvement"))
         repeated_failure = bool(node_outcome.get("same_failure_repeated"))
         too_broad = bool(node_outcome.get("suspicious_breadth"))
         tool_denied = bool(node_outcome.get("tool_denied"))
         prose_only = bool(node_outcome.get("prose_only"))
         weak_localization = bool(node_outcome.get("localization_weak"))
+        stale_localization = bool(node_outcome.get("localization_stale"))
 
         if tool_denied:
             return RecoveryDecision("blocked", "Tooling or permission denial encountered.", mark_blocked=True)
         if repeated_failure:
-            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "broaden", "Repeated failure fingerprint")
-            return RecoveryDecision("branch_broaden", "Same failure repeated; branching strategy.", nodes=nodes)
+            if node.phase.value == "validate":
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "broaden", "Repeated validation fingerprint")
+                return RecoveryDecision("branch_broaden", "Same failure repeated; branch away from same validation loop.", nodes=nodes)
+            return RecoveryDecision("exhausted", "Repeated same failure fingerprint without delta.", mark_exhausted=True)
         if too_broad:
             nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "narrow", "Patch breadth too broad")
             return RecoveryDecision("retry_narrow", "Large blast radius detected.", nodes=nodes)
-        if worsened:
+        if worsened and changed_files:
             nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "narrow", "Validation worsened after patch")
-            return RecoveryDecision("repair_repair", "Repair-of-repair needed.", nodes=nodes)
+            return RecoveryDecision("repair_repair", "Patch worsened state; execute repair-of-repair.", nodes=nodes)
+        if no_improvement and changed_files:
+            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "broaden", "Patch had no measurable improvement")
+            return RecoveryDecision("alternate_strategy", "Patch changed files but no measurable improvement; change strategy.", nodes=nodes)
         if no_changes:
-            strategy = "relocalize" if weak_localization else "broaden"
-            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "No file changes produced")
+            strategy = "relocalize" if (weak_localization or stale_localization) else "broaden"
+            reason = "No file changes produced and localization weak/stale" if strategy == "relocalize" else "No file changes produced"
+            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, reason)
             return RecoveryDecision(strategy, "No effectful progress; re-branch.", nodes=nodes)
         if prose_only:
             if mission_state.consecutive_no_model_activity >= 2:

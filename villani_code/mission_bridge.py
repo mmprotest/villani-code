@@ -27,12 +27,20 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
     ]
     if node.candidate_files:
         lines.append("Candidate files: " + ", ".join(node.candidate_files[:12]))
+    if execution_state.last_localization.target_files:
+        lines.append("Localized targets: " + ", ".join(execution_state.last_localization.target_files[:12]))
+        lines.append(f"Localized bug class: {execution_state.last_localization.likely_bug_class}")
+        if execution_state.last_localization.repair_intent:
+            lines.append("Localized repair intent: " + execution_state.last_localization.repair_intent)
     if node.evidence:
         lines.append("Known evidence: " + " | ".join(node.evidence[-6:]))
     if contract_discourages_editing(node.contract_type):
         lines.append("IMPORTANT: Editing is strongly discouraged unless absolutely necessary.")
     if contract_requires_validation(node.contract_type):
-        plans = node.validation_commands or ["pytest -q"]
+        plans = list(node.validation_commands)
+        if execution_state.last_localization.suggested_validation_commands:
+            plans = execution_state.last_localization.suggested_validation_commands + plans
+        plans = list(dict.fromkeys([p for p in plans if p])) or ["pytest -q"]
         lines.append("Validation plan: " + "; ".join(plans[:4]))
     lines.append("Stop when node objective is satisfied or clearly blocked. Provide concrete evidence.")
     return "\n".join(lines)
