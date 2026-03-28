@@ -103,7 +103,11 @@ def _extract_execution_payload(result: dict[str, Any]) -> dict[str, Any]:
 
 def _extract_changed_files_from_result(result: dict[str, Any], before: set[str], after: set[str]) -> list[str]:
     execution = _extract_execution_payload(result)
-    from_execution = [str(p).strip() for p in list(execution.get("files_changed", []) or []) if str(p).strip()]
+    from_execution = [
+        str(p).strip()
+        for p in list(execution.get("changed_files", execution.get("files_changed", [])) or [])
+        if str(p).strip()
+    ]
     if from_execution:
         return sorted(dict.fromkeys(from_execution))
     return sorted(after - before)
@@ -141,7 +145,51 @@ def _parse_command_result_content(content: Any) -> list[CommandResult]:
     return records
 
 
-def _extract_tool_data(result: dict[str, Any]) -> tuple[list[CommandResult], list[str], dict[str, int]]:
+def _extract_command_results_from_execution(execution: dict[str, Any]) -> list[CommandResult]:
+    out: list[CommandResult] = []
+    for item in list(execution.get("command_results", []) or []):
+        if not isinstance(item, dict):
+            continue
+        cmd = str(item.get("command", "")).strip()
+        if not cmd:
+            continue
+        try:
+            exit_code = int(item.get("exit", 1))
+        except (TypeError, ValueError):
+            exit_code = 1
+        out.append(
+            CommandResult(
+                command=cmd,
+                exit=exit_code,
+                stdout=str(item.get("stdout", ""))[:4000],
+                stderr=str(item.get("stderr", ""))[:4000],
+                source="execution_payload",
+                timed_out=bool(item.get("timed_out")),
+            )
+        )
+    return out
+
+
+def _extract_failures_from_execution(execution: dict[str, Any]) -> list[str]:
+    return [
+        str(item).strip()
+        for item in list(execution.get("tool_failures", execution.get("runner_failures", [])) or [])
+        if str(item).strip()
+    ]
+
+
+def _extract_model_activity_from_execution(execution: dict[str, Any]) -> dict[str, int]:
+    provided = dict(execution.get("model_activity", {}) or {})
+    return {
+        "tool_invocations": int(provided.get("tool_invocations", 0) or 0),
+        "tool_results": int(provided.get("tool_results", 0) or 0),
+        "tool_errors": int(provided.get("tool_errors", 0) or 0),
+        "responses": int(provided.get("responses", 0) or 0),
+        "requests": int(provided.get("requests", 0) or 0),
+    }
+
+
+def _extract_structured_tool_data_from_transcript(result: dict[str, Any]) -> tuple[list[CommandResult], list[str], dict[str, int]]:
     transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
     tool_results = list(transcript.get("tool_results", []) or [])
     tool_invocations = list(transcript.get("tool_invocations", []) or [])
@@ -162,12 +210,11 @@ def _extract_tool_data(result: dict[str, Any]) -> tuple[list[CommandResult], lis
             model_activity["tool_errors"] += 1
             failures.append(str(tr.get("content", ""))[:320])
         tool_name = str(inv.get("name", "")).lower()
-        parsed: list[CommandResult] = []
-        if tool_name == "bash" or "exit_code" in str(tr.get("content", "")):
+        if tool_name in {"bash", "powershell", "shell", "cmd"}:
             parsed = _parse_command_result_content(tr.get("content", ""))
-            commands.extend(parsed)
-        if not parsed:
-            if tool_name in {"bash", "powershell", "shell", "cmd"}:
+            if parsed:
+                commands.extend(parsed)
+            else:
                 command_text = str((inv.get("input") or {}).get("command", "")).strip()
                 if command_text:
                     commands.append(CommandResult(command=command_text, exit=1 if is_error else 0, source="tool_invocation"))
@@ -175,6 +222,19 @@ def _extract_tool_data(result: dict[str, Any]) -> tuple[list[CommandResult], lis
     for record in commands:
         dedup[(record.command, record.exit)] = record
     return list(dedup.values()), failures, model_activity
+
+
+def _fallback_parse_command_results_from_tool_text(result: dict[str, Any]) -> list[CommandResult]:
+    transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
+    commands: list[CommandResult] = []
+    for tr in list(transcript.get("tool_results", []) or []):
+        if not isinstance(tr, dict):
+            continue
+        commands.extend(_parse_command_result_content(tr.get("content", "")))
+    dedup: dict[tuple[str, int], CommandResult] = {}
+    for record in commands:
+        dedup[(record.command, record.exit)] = record
+    return list(dedup.values())
 
 
 def execute_mission_node_with_runner(
@@ -191,35 +251,28 @@ def execute_mission_node_with_runner(
     execution = _extract_execution_payload(normalized)
     changed = _extract_changed_files_from_result(normalized, before, after)
     execution_commands = list(execution.get("validation_artifacts", []) or [])
-    command_results, failures, model_activity = _extract_tool_data(normalized)
-    if isinstance(execution.get("runner_failures"), list):
-        failures = list(dict.fromkeys(failures + [str(v) for v in execution.get("runner_failures", [])]))
-    structured_validation = list(execution.get("structured_validation_results", []) or [])
-    for item in structured_validation:
-        if not isinstance(item, dict):
-            continue
-        cmd = str(item.get("command", "")).strip()
-        if not cmd:
-            continue
-        command_results.append(
-            CommandResult(
-                command=cmd,
-                exit=int(item.get("exit", 1)),
-                stdout=str(item.get("stdout", ""))[:4000],
-                stderr=str(item.get("stderr", ""))[:4000],
-                source="execution_validation",
-                timed_out=bool(item.get("timed_out")),
-            )
-        )
+    command_results = _extract_command_results_from_execution(execution)
+    failures = _extract_failures_from_execution(execution)
+    model_activity = _extract_model_activity_from_execution(execution)
+    if not command_results or not failures:
+        transcript_commands, transcript_failures, transcript_activity = _extract_structured_tool_data_from_transcript(normalized)
+        if not command_results:
+            command_results = transcript_commands
+        if not failures:
+            failures = transcript_failures
+        if not any(model_activity.values()):
+            model_activity = transcript_activity
+    if not command_results:
+        command_results = _fallback_parse_command_results_from_tool_text(normalized)
     commands_run = [c.command for c in command_results]
     if not commands_run:
         commands_run = [str(x).split(" (exit=", 1)[0] for x in execution_commands if str(x).strip()]
     text_blocks = (normalized.get("response", {}) or {}).get("content", []) if isinstance(normalized, dict) else []
     text = "\n".join(str(b.get("text", "")) for b in text_blocks if isinstance(b, dict))
-    prose_only = (not changed) and (not command_results) and model_activity.get("tool_results", 0) == 0 and bool(text.strip())
-    patch_detected = bool(changed)
-    meaningful_patch = bool(execution.get("intentional_changes")) or bool(changed)
-    acted = patch_detected or bool(command_results) or model_activity.get("tool_invocations", 0) > 0
+    patch_detected = bool(execution.get("patch_detected", bool(changed)))
+    meaningful_patch = bool(execution.get("meaningful_patch", bool(execution.get("intentional_changes")) or bool(changed)))
+    prose_only = bool(execution.get("prose_only", (not changed) and (not command_results) and model_activity.get("tool_results", 0) == 0 and bool(text.strip())))
+    acted = bool(execution.get("acted", patch_detected or bool(command_results) or model_activity.get("tool_invocations", 0) > 0))
     transcript_summary = (
         f"tools={model_activity.get('tool_results', 0)} "
         f"errors={model_activity.get('tool_errors', 0)} "
@@ -238,13 +291,17 @@ def execute_mission_node_with_runner(
         prose_only=prose_only,
         acted=acted,
         execution_payload={
-            "files_changed": list(changed),
+            "changed_files": list(changed),
+            "patch_detected": patch_detected,
+            "meaningful_patch": meaningful_patch,
             "intentional_changes": list(execution.get("intentional_changes", []) or []),
             "incidental_changes": list(execution.get("incidental_changes", []) or []),
+            "command_results": [asdict(item) for item in command_results],
+            "tool_failures": list(failures),
             "validation_artifacts": list(execution.get("validation_artifacts", []) or []),
-            "runner_failures": list(execution.get("runner_failures", []) or []),
             "terminated_reason": str(execution.get("terminated_reason", "")),
-            "tool_invocations": int(model_activity.get("tool_invocations", 0)),
-            "tool_errors": int(model_activity.get("tool_errors", 0)),
+            "model_activity": dict(model_activity),
+            "prose_only": prose_only,
+            "acted": acted,
         },
     )

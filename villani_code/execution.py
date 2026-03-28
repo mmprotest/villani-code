@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -18,17 +19,22 @@ class ExecutionResult:
     turns_used: int
     tool_calls_used: int
     elapsed_seconds: float
-    files_changed: list[str]
+    changed_files: list[str]
     intentional_changes: list[str]
     incidental_changes: list[str]
     all_changes: list[str]
     intended_targets: list[str]
     before_contents: dict[str, str]
     validation_artifacts: list[str]
-    structured_validation_results: list[dict[str, object]]
+    command_results: list[dict[str, Any]]
     inspection_summary: str
-    runner_failures: list[str]
+    tool_failures: list[str]
     terminated_reason: str
+    patch_detected: bool
+    meaningful_patch: bool
+    model_activity: dict[str, int]
+    prose_only: bool
+    acted: bool
     completed: bool
 
     def to_dict(self) -> dict[str, object]:
