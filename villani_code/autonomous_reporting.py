@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from pathlib import Path
 from typing import Any
 
@@ -167,6 +169,8 @@ def build_mission_summary(
                 "candidate_files": node.candidate_files,
                 "evidence": node.evidence[-6:],
                 "blockers": node.blockers,
+                "last_outcome": asdict(node.last_outcome),
+                "localization": asdict(node.localization),
             }
         )
     validations = execution_state.verification_history[-20:]

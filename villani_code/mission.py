@@ -52,6 +52,27 @@ class MissionOutcome(StrEnum):
 
 
 @dataclass(slots=True)
+class LocalizationSnapshot:
+    target_files: list[str] = field(default_factory=list)
+    likely_bug_class: str = "unknown"
+    repair_intent: str = ""
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+    suggested_validation_commands: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class NodeOutcomeRecord:
+    status: str = "unknown"
+    changed_files: list[str] = field(default_factory=list)
+    patch_detected: bool = False
+    meaningful_patch: bool = False
+    validation_summary: dict[str, Any] = field(default_factory=dict)
+    failure_fingerprint: str = ""
+    localization_evidence: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class MissionNode:
     node_id: str
     title: str
@@ -69,6 +90,8 @@ class MissionNode:
     blockers: list[str] = field(default_factory=list)
     created_from_node_id: str = ""
     failure_fingerprint: str = ""
+    localization: LocalizationSnapshot = field(default_factory=LocalizationSnapshot)
+    last_outcome: NodeOutcomeRecord = field(default_factory=NodeOutcomeRecord)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -95,6 +118,8 @@ class MissionNode:
             blockers=[str(x) for x in (data.get("blockers", []) or [])],
             created_from_node_id=str(data.get("created_from_node_id", "")),
             failure_fingerprint=str(data.get("failure_fingerprint", "")),
+            localization=LocalizationSnapshot(**dict(data.get("localization", {}) or {})),
+            last_outcome=NodeOutcomeRecord(**dict(data.get("last_outcome", {}) or {})),
         )
 
 
@@ -156,6 +181,9 @@ class MissionExecutionState:
     changed_files_baseline: list[str] = field(default_factory=list)
     consecutive_no_progress: int = 0
     consecutive_no_model_activity: int = 0
+    last_localization: LocalizationSnapshot = field(default_factory=LocalizationSnapshot)
+    localization_history: list[LocalizationSnapshot] = field(default_factory=list)
+    failure_fingerprint_history: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +197,9 @@ class MissionExecutionState:
             "changed_files_baseline": list(self.changed_files_baseline),
             "consecutive_no_progress": self.consecutive_no_progress,
             "consecutive_no_model_activity": self.consecutive_no_model_activity,
+            "last_localization": asdict(self.last_localization),
+            "localization_history": [asdict(x) for x in self.localization_history],
+            "failure_fingerprint_history": list(self.failure_fingerprint_history),
         }
 
     @classmethod
@@ -184,4 +215,7 @@ class MissionExecutionState:
             changed_files_baseline=[str(x) for x in (data.get("changed_files_baseline", []) or [])],
             consecutive_no_progress=int(data.get("consecutive_no_progress", 0)),
             consecutive_no_model_activity=int(data.get("consecutive_no_model_activity", 0)),
+            last_localization=LocalizationSnapshot(**dict(data.get("last_localization", {}) or {})),
+            localization_history=[LocalizationSnapshot(**dict(x or {})) for x in (data.get("localization_history", []) or [])],
+            failure_fingerprint_history=[str(x) for x in (data.get("failure_fingerprint_history", []) or [])],
         )
