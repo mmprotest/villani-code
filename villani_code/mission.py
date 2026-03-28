@@ -51,6 +51,14 @@ class MissionOutcome(StrEnum):
     BUDGET_EXHAUSTED = "budget_exhausted"
 
 
+class DeltaClassification(StrEnum):
+    STRONG_IMPROVEMENT = "strong_improvement"
+    WEAK_IMPROVEMENT = "weak_improvement"
+    NO_IMPROVEMENT = "no_improvement"
+    REGRESSION = "regression"
+    AMBIGUOUS = "ambiguous"
+
+
 @dataclass(slots=True)
 class LocalizationSnapshot:
     target_files: list[str] = field(default_factory=list)
@@ -64,6 +72,8 @@ class LocalizationSnapshot:
 @dataclass(slots=True)
 class NodeOutcomeRecord:
     status: str = "unknown"
+    delta_classification: str = DeltaClassification.AMBIGUOUS.value
+    delta_reason: str = ""
     changed_files: list[str] = field(default_factory=list)
     patch_detected: bool = False
     meaningful_patch: bool = False
@@ -184,6 +194,9 @@ class MissionExecutionState:
     last_localization: LocalizationSnapshot = field(default_factory=LocalizationSnapshot)
     localization_history: list[LocalizationSnapshot] = field(default_factory=list)
     failure_fingerprint_history: list[str] = field(default_factory=list)
+    latest_validation_summary: dict[str, Any] = field(default_factory=dict)
+    latest_changed_files: list[str] = field(default_factory=list)
+    repeated_delta_states: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,6 +213,9 @@ class MissionExecutionState:
             "last_localization": asdict(self.last_localization),
             "localization_history": [asdict(x) for x in self.localization_history],
             "failure_fingerprint_history": list(self.failure_fingerprint_history),
+            "latest_validation_summary": dict(self.latest_validation_summary),
+            "latest_changed_files": list(self.latest_changed_files),
+            "repeated_delta_states": self.repeated_delta_states,
         }
 
     @classmethod
@@ -218,4 +234,7 @@ class MissionExecutionState:
             last_localization=LocalizationSnapshot(**dict(data.get("last_localization", {}) or {})),
             localization_history=[LocalizationSnapshot(**dict(x or {})) for x in (data.get("localization_history", []) or [])],
             failure_fingerprint_history=[str(x) for x in (data.get("failure_fingerprint_history", []) or [])],
+            latest_validation_summary=dict(data.get("latest_validation_summary", {}) or {}),
+            latest_changed_files=[str(x) for x in (data.get("latest_changed_files", []) or [])],
+            repeated_delta_states=int(data.get("repeated_delta_states", 0)),
         )

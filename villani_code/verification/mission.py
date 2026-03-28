@@ -12,6 +12,8 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
 
     if state.consecutive_no_progress >= max_no_progress:
         return MissionOutcome.STAGNATED, "Repeated no-progress cycles exceeded threshold."
+    if state.repeated_delta_states >= 3:
+        return MissionOutcome.STAGNATED, "Repeated no/ambiguous delta outcomes exceeded threshold."
     if state.consecutive_no_model_activity >= max_no_activity:
         return MissionOutcome.EXHAUSTED, "Repeated no-activity cycles exceeded threshold."
 
