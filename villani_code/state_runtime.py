@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
+from villani_code.localization import LocalizationEngine
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
@@ -285,6 +286,21 @@ def run_pre_edit_diagnosis(
             excerpt = str(failure_evidence["raw_failure_excerpt"]).strip()
             if excerpt:
                 evidence_lines.append("Raw failure excerpt:\n" + excerpt[:1200])
+        try:
+            engine = LocalizationEngine(runner.repo)
+            loc = engine.localize_from_failure_output(
+                str(failure_evidence.get("raw_failure_excerpt", "")),
+                str(failure_evidence.get("error_summary", "")),
+            )
+            if loc.target_files:
+                evidence_lines.append("Localization candidates: " + ", ".join(loc.target_files[:5]))
+            if loc.suggested_validation_commands:
+                evidence_lines.append(
+                    "Localization suggested validation: "
+                    + "; ".join(loc.suggested_validation_commands[:3])
+                )
+        except Exception:
+            pass
 
     system_prompt = (
         "Return strict JSON only with exactly these string keys: "

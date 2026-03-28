@@ -5,6 +5,7 @@ from typing import Any
 
 from villani_code.evidence import parse_command_evidence
 from villani_code.repo_rules import is_ignored_repo_path
+from villani_code.mission import Mission, MissionExecutionState
 
 
 def extract_runner_failures(result: dict[str, Any]) -> list[str]:
@@ -142,4 +143,43 @@ def build_takeover_summary(
         "completed_waves": state.completed_waves,
         "recommended_next_steps": recommended_next_steps_value,
         "working_memory": working_memory,
+    }
+
+
+def build_mission_summary(
+    mission: Mission,
+    execution_state: MissionExecutionState,
+    *,
+    files_touched: list[str],
+    outcome: str,
+    stop_reason: str,
+) -> dict[str, Any]:
+    nodes = []
+    for node in mission.nodes:
+        nodes.append(
+            {
+                "node_id": node.node_id,
+                "title": node.title,
+                "phase": node.phase.value,
+                "status": node.status.value,
+                "attempts": node.attempts,
+                "contract_type": node.contract_type,
+                "candidate_files": node.candidate_files,
+                "evidence": node.evidence[-6:],
+                "blockers": node.blockers,
+            }
+        )
+    validations = execution_state.verification_history[-20:]
+    return {
+        "mission_id": mission.mission_id,
+        "mission_goal": mission.user_goal,
+        "mission_type": mission.mission_type.value,
+        "nodes_executed": nodes,
+        "files_inspected": sorted(set(execution_state.inspected_files)),
+        "files_touched": sorted(set(files_touched)),
+        "evidence": execution_state.evidence_log[-40:],
+        "validation_results": validations,
+        "final_outcome": outcome,
+        "stop_reason": stop_reason,
+        "blocked_reason": stop_reason if outcome == "blocked" else "",
     }

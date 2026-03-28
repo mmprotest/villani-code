@@ -466,10 +466,12 @@ class Runner:
             steering_objective=self.villani_objective,
             event_callback=self.event_callback,
         )
-        summary = controller.run()
-        text = VillaniModeController.format_summary(summary)
+        result = controller.run()
+        if isinstance(result, dict) and "response" in result:
+            return result
+        text = VillaniModeController.format_summary(result if isinstance(result, dict) else {})
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
-        return {"response": response, "summary": summary}
+        return {"response": response, "summary": result}
 
     def run(
         self,

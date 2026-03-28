@@ -37,6 +37,78 @@ class TaskContract(str, Enum):
     EFFECTFUL = "effectful"
     VALIDATION = "validation"
     INSPECTION = "inspection"
+    LOCALIZE = "localize"
+    INSPECT = "inspect"
+    REPRODUCE = "reproduce"
+    NARROW_FIX = "narrow_fix"
+    BROAD_FIX = "broad_fix"
+    VALIDATE = "validate"
+    IMPLEMENT = "implement"
+    CONTAIN_CHANGE = "contain_change"
+    CLEANUP = "cleanup"
+    SUMMARIZE = "summarize"
+
+
+def normalize_task_contract(value: str | TaskContract | None) -> TaskContract:
+    if isinstance(value, TaskContract):
+        return value
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "inspection": TaskContract.INSPECT,
+        "inspect": TaskContract.INSPECT,
+        "validation": TaskContract.VALIDATE,
+        "validate": TaskContract.VALIDATE,
+        "effectful": TaskContract.NARROW_FIX,
+    }
+    if raw in aliases:
+        return aliases[raw]
+    for c in TaskContract:
+        if c.value == raw:
+            return c
+    return TaskContract.INSPECT
+
+
+def is_effectful_contract(value: str | TaskContract | None) -> bool:
+    contract = normalize_task_contract(value)
+    return contract in {
+        TaskContract.EFFECTFUL,
+        TaskContract.NARROW_FIX,
+        TaskContract.BROAD_FIX,
+        TaskContract.IMPLEMENT,
+        TaskContract.CLEANUP,
+        TaskContract.CONTAIN_CHANGE,
+    }
+
+
+def contract_allows_edits(value: str | TaskContract | None) -> bool:
+    return is_effectful_contract(value)
+
+
+def contract_requires_validation(value: str | TaskContract | None) -> bool:
+    contract = normalize_task_contract(value)
+    return contract in {
+        TaskContract.VALIDATION,
+        TaskContract.VALIDATE,
+        TaskContract.REPRODUCE,
+        TaskContract.NARROW_FIX,
+        TaskContract.BROAD_FIX,
+        TaskContract.IMPLEMENT,
+        TaskContract.CONTAIN_CHANGE,
+        TaskContract.CLEANUP,
+    }
+
+
+def contract_discourages_editing(value: str | TaskContract | None) -> bool:
+    contract = normalize_task_contract(value)
+    return contract in {
+        TaskContract.INSPECTION,
+        TaskContract.INSPECT,
+        TaskContract.LOCALIZE,
+        TaskContract.REPRODUCE,
+        TaskContract.VALIDATION,
+        TaskContract.VALIDATE,
+        TaskContract.SUMMARIZE,
+    }
 
 
 @dataclass(slots=True)
