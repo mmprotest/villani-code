@@ -300,8 +300,9 @@ class VillaniModeController:
         runner_command_results = list(node_result.get("command_results", []) or [])
         command_results = run_validation_commands(str(self.repo), commands[:3]) if commands else []
         execution_payload = dict(node_result.get("execution_payload", {}) or {})
-        if execution_payload.get("structured_validation_results"):
-            command_results = list(execution_payload.get("structured_validation_results", [])) + command_results
+        payload_command_results = list(execution_payload.get("command_results", []) or [])
+        if payload_command_results:
+            command_results = payload_command_results + command_results
         if runner_command_results:
             command_results = runner_command_results + command_results
         validation_summary = summarize_validation_results(command_results)
@@ -555,11 +556,11 @@ class VillaniModeController:
         execution = (result or {}).get("execution", {}) if isinstance(result, dict) else {}
         task.terminated_reason = str(execution.get("terminated_reason", ""))
         task.validation_artifacts = list(execution.get("validation_artifacts", []) or [])
-        task.runner_failures = list(execution.get("runner_failures", []) or [])
+        task.runner_failures = list(execution.get("tool_failures", execution.get("runner_failures", [])) or [])
         task.inspection_summary = str(execution.get("inspection_summary", "") or "")
         task.intentional_changes = list(execution.get("intentional_changes", []) or [])
         task.incidental_changes = list(execution.get("incidental_changes", []) or [])
-        task.files_changed = list(execution.get("files_changed", []) or task.intentional_changes)
+        task.files_changed = list(execution.get("changed_files", execution.get("files_changed", [])) or task.intentional_changes)
         task.produced_effect = bool(task.intentional_changes)
         task.produced_validation = self._has_real_validation_artifact(task)
         task.produced_inspection_conclusion = bool(task.inspection_summary.strip())

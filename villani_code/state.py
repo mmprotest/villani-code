@@ -748,6 +748,15 @@ class Runner:
         ) -> dict[str, Any]:
             elapsed = time.monotonic() - start
             intentional_changes, incidental_changes, all_changes = _change_summary()
+            command_results = collect_structured_command_results(transcript)
+            tool_failures = collect_runner_failures(transcript)
+            model_activity = {
+                "tool_invocations": len(list(transcript.get("tool_invocations", []) or [])),
+                "tool_results": len(list(transcript.get("tool_results", []) or [])),
+                "tool_errors": sum(1 for item in list(transcript.get("tool_results", []) or []) if isinstance(item, dict) and item.get("is_error")),
+                "responses": len(list(transcript.get("responses", []) or [])),
+                "requests": len(list(transcript.get("requests", []) or [])),
+            }
             final_text = "\n".join(
                 block.get("text", "")
                 for block in response.get("content", [])
@@ -758,17 +767,22 @@ class Runner:
                 turns_used=turns_used,
                 tool_calls_used=tool_calls_used,
                 elapsed_seconds=elapsed,
-                files_changed=all_changes,
+                changed_files=all_changes,
                 intentional_changes=intentional_changes,
                 incidental_changes=incidental_changes,
                 all_changes=all_changes,
                 intended_targets=sorted(self._intended_targets),
                 before_contents=dict(self._before_contents),
                 validation_artifacts=collect_validation_artifacts(transcript),
-                structured_validation_results=collect_structured_command_results(transcript),
+                command_results=command_results,
                 inspection_summary="",
-                runner_failures=collect_runner_failures(transcript),
+                tool_failures=tool_failures,
                 terminated_reason=reason,
+                patch_detected=bool(all_changes),
+                meaningful_patch=bool(intentional_changes),
+                model_activity=model_activity,
+                prose_only=not all_changes and not command_results and bool(final_text.strip()),
+                acted=bool(all_changes) or bool(command_results) or model_activity["tool_invocations"] > 0,
                 completed=completed,
             )
             transcript["execution"] = execution.to_dict()

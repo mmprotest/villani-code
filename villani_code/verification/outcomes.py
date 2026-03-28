@@ -59,8 +59,14 @@ def _classify_delta(
     val_delta = _validation_delta(baseline, validation_summary)
     prior_fps = set(baseline.failure_fingerprints)
     new_fps = [fp for fp in failure_fingerprints if fp and fp not in prior_fps]
-    prior_tool_errors = int((baseline.execution_snapshot or {}).get("tool_errors", 0) or 0)
-    current_tool_errors = int((execution_payload or {}).get("tool_errors", 0) or 0)
+    prior_activity = dict((baseline.execution_snapshot or {}).get("model_activity", {}) or {})
+    current_activity = dict((execution_payload or {}).get("model_activity", {}) or {})
+    prior_tool_errors = int(
+        (prior_activity.get("tool_errors", (baseline.execution_snapshot or {}).get("tool_errors", 0)) or 0)
+    )
+    current_tool_errors = int(
+        (current_activity.get("tool_errors", (execution_payload or {}).get("tool_errors", 0)) or 0)
+    )
     tool_error_delta = prior_tool_errors - current_tool_errors
 
     has_localization = _has_useful_localization(localization)
