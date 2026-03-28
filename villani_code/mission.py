@@ -196,6 +196,8 @@ class MissionExecutionState:
     failure_fingerprint_history: list[str] = field(default_factory=list)
     latest_validation_summary: dict[str, Any] = field(default_factory=dict)
     latest_changed_files: list[str] = field(default_factory=list)
+    latest_execution_payload: dict[str, Any] = field(default_factory=dict)
+    latest_command_results: list[dict[str, Any]] = field(default_factory=list)
     repeated_delta_states: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -215,6 +217,8 @@ class MissionExecutionState:
             "failure_fingerprint_history": list(self.failure_fingerprint_history),
             "latest_validation_summary": dict(self.latest_validation_summary),
             "latest_changed_files": list(self.latest_changed_files),
+            "latest_execution_payload": dict(self.latest_execution_payload),
+            "latest_command_results": list(self.latest_command_results),
             "repeated_delta_states": self.repeated_delta_states,
         }
 
@@ -236,5 +240,7 @@ class MissionExecutionState:
             failure_fingerprint_history=[str(x) for x in (data.get("failure_fingerprint_history", []) or [])],
             latest_validation_summary=dict(data.get("latest_validation_summary", {}) or {}),
             latest_changed_files=[str(x) for x in (data.get("latest_changed_files", []) or [])],
+            latest_execution_payload=dict(data.get("latest_execution_payload", {}) or {}),
+            latest_command_results=list(data.get("latest_command_results", []) or []),
             repeated_delta_states=int(data.get("repeated_delta_states", 0)),
         )

@@ -33,6 +33,7 @@ from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.state_execution import (
+    collect_structured_command_results,
     collect_runner_failures,
     collect_validation_artifacts,
     summarize_changes,
@@ -764,6 +765,7 @@ class Runner:
                 intended_targets=sorted(self._intended_targets),
                 before_contents=dict(self._before_contents),
                 validation_artifacts=collect_validation_artifacts(transcript),
+                structured_validation_results=collect_structured_command_results(transcript),
                 inspection_summary="",
                 runner_failures=collect_runner_failures(transcript),
                 terminated_reason=reason,

@@ -19,6 +19,7 @@ from villani_code.repo_signal_planner import collect_repo_signals
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.verification import (
     classify_node_outcome,
+    compute_validation_delta,
     evaluate_mission_status,
     run_static_verification,
     run_validation_commands,
@@ -170,7 +171,16 @@ class VillaniModeController:
         mission_result = execute_mission_node_with_runner(self.runner, execution_state.mission, node, execution_state)
 
         if node.phase == NodePhase.LOCALIZE and mission_result.failures:
-            loc_from_output = self.localization.localize_from_failure_output("\n".join(x.get("command", "") for x in mission_result.commands), "\n".join(mission_result.failures), self._repo_signals)
+            loc_from_output = self.localization.localize_from_failure_output(
+                "\n".join(x.get("command", "") for x in mission_result.commands),
+                "\n".join(mission_result.failures),
+                self._repo_signals,
+                structured_signals={
+                    "changed_files": mission_result.changed_files,
+                    "validation_commands": mission_result.commands_run,
+                    "failed_commands": [x.get("command", "") for x in mission_result.commands if int(x.get("exit", 0)) != 0],
+                },
+            )
             localization_result = self._merge_localization_results(localization_result, loc_from_output)
             self._apply_localization(execution_state, node, localization_result)
 
@@ -198,13 +208,26 @@ class VillaniModeController:
             "model_activity": mission_result.model_activity,
             "acted": mission_result.acted,
             "prose_only": mission_result.prose_only,
+            "execution_payload": mission_result.execution_payload,
             "localization": localization_result,
         }
 
     def _run_localization_node(self, execution_state: MissionExecutionState, node: Any) -> LocalizationResult:
         self._activity("Running first-class localization before runner execution.")
         seed = "\n".join([execution_state.mission.user_goal, node.objective, " ".join(execution_state.evidence_log[-10:])])
-        loc = self.localization.localize_from_goal(seed, self._repo_signals)
+        loc = self.localization.localize_from_goal(
+            seed,
+            self._repo_signals,
+            structured_signals={
+                "changed_files": execution_state.latest_changed_files,
+                "validation_commands": execution_state.latest_validation_summary.get("commands", []),
+                "failed_commands": [
+                    str(item.get("command", ""))
+                    for item in execution_state.latest_command_results
+                    if int(item.get("exit", 1)) != 0
+                ],
+            },
+        )
         self._apply_localization(execution_state, node, loc)
         return loc
 
@@ -269,11 +292,24 @@ class VillaniModeController:
                 "likely_bug_class": execution_state.last_localization.likely_bug_class,
                 "repair_intent": execution_state.last_localization.repair_intent,
             },
+            execution_snapshot=dict(execution_state.latest_execution_payload),
+            previous_command_results=list(execution_state.latest_command_results),
         )
         static_result = run_static_verification(str(self.repo), changed_files)
         commands = node.validation_commands or self._repo_signals.get("likely_validation_commands", ["pytest -q"])
+        runner_command_results = list(node_result.get("command_results", []) or [])
         command_results = run_validation_commands(str(self.repo), commands[:3]) if commands else []
+        execution_payload = dict(node_result.get("execution_payload", {}) or {})
+        if execution_payload.get("structured_validation_results"):
+            command_results = list(execution_payload.get("structured_validation_results", [])) + command_results
+        if runner_command_results:
+            command_results = runner_command_results + command_results
         validation_summary = summarize_validation_results(command_results)
+        validation_delta = compute_validation_delta(
+            baseline.validation_summary,
+            baseline.previous_command_results,
+            command_results,
+        ).to_dict()
         localization_payload = self._localization_payload(node, node_result, execution_state)
         previous_loc = execution_state.localization_history[-2] if len(execution_state.localization_history) > 1 else LocalizationSnapshot()
 
@@ -291,6 +327,8 @@ class VillaniModeController:
             },
             baseline=baseline,
             validation_summary=validation_summary,
+            execution_payload=execution_payload,
+            validation_delta=validation_delta,
         )
 
         failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
@@ -311,6 +349,8 @@ class VillaniModeController:
         )
         execution_state.latest_validation_summary = dict(validation_summary)
         execution_state.latest_changed_files = list(changed_files)
+        execution_state.latest_execution_payload = dict(execution_payload)
+        execution_state.latest_command_results = list(command_results)
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
@@ -324,6 +364,8 @@ class VillaniModeController:
                 "changed_files": changed_files,
                 "failure_fingerprint": failure_fingerprint,
                 "localization": localization_payload,
+                "execution_payload": execution_payload,
+                "validation_delta": validation_delta,
             }
         )
 
@@ -555,5 +597,24 @@ class VillaniModeController:
             "- Node results:",
         ]
         for node in report.get("nodes_executed", [])[:30]:
-            lines.append(f"  * {node.get('title')} [{node.get('status')}] attempts={node.get('attempts')}")
+            outcome = (node.get("last_outcome", {}) or {})
+            lines.append(
+                f"  * {node.get('title')} [{node.get('status')}] attempts={node.get('attempts')} "
+                f"delta={outcome.get('delta_classification', 'n/a')} changed={len(outcome.get('changed_files', []) or [])}"
+            )
+        timeline = report.get("validation_timeline", []) or []
+        if timeline:
+            lines.append("- Validation delta timeline:")
+            for item in timeline[-12:]:
+                lines.append(
+                    f"  * {item.get('node_id')}: failed={item.get('failed')} passed={item.get('passed')} "
+                    f"delta={item.get('delta')} fp={item.get('fingerprint') or 'none'}"
+                )
+        if report.get("localization_evolution"):
+            lines.append("- Localization evolution:")
+            for item in (report.get("localization_evolution", []) or [])[-8:]:
+                lines.append(
+                    f"  * conf={item.get('confidence'):.2f} bug_class={item.get('bug_class')} "
+                    f"targets={', '.join(item.get('targets', [])[:4])}"
+                )
         return "\n".join(lines)

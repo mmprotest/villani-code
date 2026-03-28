@@ -13,6 +13,8 @@ class VerificationBaseline:
     validation_summary: dict[str, Any] = field(default_factory=dict)
     failure_fingerprints: list[str] = field(default_factory=list)
     localization: dict[str, Any] = field(default_factory=dict)
+    execution_snapshot: dict[str, Any] = field(default_factory=dict)
+    previous_command_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -49,12 +51,17 @@ def _classify_delta(
     validation_summary: dict[str, Any],
     failure_fingerprints: list[str],
     suspicious_breadth: bool,
+    execution_payload: dict[str, Any],
+    validation_delta: dict[str, Any],
 ) -> VerificationDelta:
     score = 0.0
     reasons: list[str] = []
     val_delta = _validation_delta(baseline, validation_summary)
     prior_fps = set(baseline.failure_fingerprints)
     new_fps = [fp for fp in failure_fingerprints if fp and fp not in prior_fps]
+    prior_tool_errors = int((baseline.execution_snapshot or {}).get("tool_errors", 0) or 0)
+    current_tool_errors = int((execution_payload or {}).get("tool_errors", 0) or 0)
+    tool_error_delta = prior_tool_errors - current_tool_errors
 
     has_localization = _has_useful_localization(localization)
     prev_conf = float(previous_localization.get("confidence", 0.0) or 0.0)
@@ -70,6 +77,13 @@ def _classify_delta(
         score -= min(2.0, 0.7 + (0.4 * abs(val_delta)))
         reasons.append(f"validation_regressed:{val_delta}")
 
+    if int(validation_delta.get("failed_delta", 0) or 0) > 0:
+        score += 0.35
+        reasons.append("validation_failed_count_down")
+    elif int(validation_delta.get("failed_delta", 0) or 0) < 0:
+        score -= 0.35
+        reasons.append("validation_failed_count_up")
+
     if patch_exists and meaningful_patch:
         score += 0.7
         reasons.append("meaningful_patch")
@@ -84,6 +98,12 @@ def _classify_delta(
     if new_fps:
         score += 0.2
         reasons.append("failure_fingerprint_shift")
+    if tool_error_delta > 0:
+        score += 0.25
+        reasons.append("tool_failures_reduced")
+    elif tool_error_delta < 0:
+        score -= 0.25
+        reasons.append("tool_failures_increased")
 
     if contract == TaskContract.LOCALIZE:
         if sharper_localization:
@@ -134,6 +154,8 @@ def _classify_delta(
             "validation_delta": val_delta,
             "new_failure_fingerprints": new_fps,
             "sharper_localization": sharper_localization,
+            "validation_delta_status": str(validation_delta.get("status", "unchanged")),
+            "tool_error_delta": tool_error_delta,
         },
     )
 
@@ -149,12 +171,16 @@ def classify_node_outcome(
     previous_localization: dict[str, Any] | None = None,
     baseline: VerificationBaseline | None = None,
     validation_summary: dict[str, Any] | None = None,
+    execution_payload: dict[str, Any] | None = None,
+    validation_delta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     contract = normalize_task_contract(contract_type)
     localization = localization or {}
     prior_fingerprints = prior_fingerprints or []
     previous_localization = previous_localization or {}
     validation_summary = validation_summary or {}
+    execution_payload = execution_payload or {}
+    validation_delta = validation_delta or {"status": "unchanged"}
     baseline = baseline or VerificationBaseline()
 
     command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
@@ -181,6 +207,8 @@ def classify_node_outcome(
         validation_summary=validation_summary,
         failure_fingerprints=failure_fingerprints,
         suspicious_breadth=suspicious_breadth,
+        execution_payload=execution_payload,
+        validation_delta=validation_delta,
     )
 
     status = "partial"
@@ -225,6 +253,8 @@ def classify_node_outcome(
             status, reason = "failed", "validate node ran no commands"
         elif delta.classification == DeltaClassification.REGRESSION:
             status, reason = "failed", "validation outcomes regressed"
+        elif validation_delta.get("status") == "partially_improved":
+            status, reason = "partial", "validation partially improved"
         elif delta.classification in {DeltaClassification.STRONG_IMPROVEMENT, DeltaClassification.WEAK_IMPROVEMENT}:
             status, reason = "passed", "validation state improved"
         elif command_fail:
@@ -263,4 +293,5 @@ def classify_node_outcome(
         "delta_score": delta.score,
         "delta_reason": delta.reason,
         "delta_details": delta.details,
+        "validation_delta": validation_delta,
     }

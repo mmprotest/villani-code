@@ -25,6 +25,7 @@ class ExecutionResult:
     intended_targets: list[str]
     before_contents: dict[str, str]
     validation_artifacts: list[str]
+    structured_validation_results: list[dict[str, object]]
     inspection_summary: str
     runner_failures: list[str]
     terminated_reason: str
