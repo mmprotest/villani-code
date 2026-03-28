@@ -52,7 +52,9 @@ class MissionPlanner:
     def build_initial_nodes(self, mission: Mission, repo_signals: dict[str, Any] | None = None) -> list[MissionNode]:
         repo_signals = repo_signals or {}
         validation = list(repo_signals.get("likely_validation_commands", []) or [])
+        maintenance_cmds = list(repo_signals.get("maintenance_commands", []) or [])
         nodes: list[MissionNode] = []
+
         def _n(suffix: str, title: str, phase: NodePhase, contract: str, objective: str, deps: list[str] | None = None) -> MissionNode:
             return MissionNode(
                 node_id=f"{mission.mission_id}-{suffix}",
@@ -70,36 +72,50 @@ class MissionPlanner:
             n2 = _n("repro", "Reproduce failure", NodePhase.REPRODUCE, TaskContract.REPRODUCE.value, "Reproduce and capture failing signal", [n1.node_id])
             n3 = _n("fix", "Apply minimal fix", NodePhase.NARROW_FIX, TaskContract.NARROW_FIX.value, "Implement smallest safe change", [n2.node_id])
             n4 = _n("validate", "Validate fix", NodePhase.VALIDATE, TaskContract.VALIDATE.value, "Run targeted validation", [n3.node_id])
-            nodes = [n1, n2, n3, n4]
+            n5 = _n("summary", "Summarize mission outcome", NodePhase.SUMMARIZE, TaskContract.SUMMARIZE.value, "Summarize evidence and remaining risks", [n4.node_id])
+            nodes = [n1, n2, n3, n4, n5]
         elif mission.mission_type == MissionType.FEATURE:
             n1 = _n("inspect", "Inspect current implementation", NodePhase.INSPECT, TaskContract.INSPECT.value, mission.user_goal)
             n2 = _n("impl", "Implement feature", NodePhase.BROAD_FIX, TaskContract.IMPLEMENT.value, "Implement objective and related tests", [n1.node_id])
             n3 = _n("validate", "Validate feature", NodePhase.VALIDATE, TaskContract.VALIDATE.value, "Run feature-focused validation", [n2.node_id])
-            nodes = [n1, n2, n3]
+            n4 = _n("summary", "Summarize feature rollout", NodePhase.SUMMARIZE, TaskContract.SUMMARIZE.value, "Summarize feature and verification evidence", [n3.node_id])
+            nodes = [n1, n2, n3, n4]
         elif mission.mission_type == MissionType.REGRESSION_CONTAINMENT:
-            n1 = _n("diff", "Localize change impact", NodePhase.LOCALIZE, TaskContract.CONTAIN_CHANGE.value, "Analyze diff and likely blast radius")
-            n2 = _n("contain", "Contain regression risk", NodePhase.VALIDATE, TaskContract.CONTAIN_CHANGE.value, "Execute targeted impacted validations", [n1.node_id])
-            nodes = [n1, n2]
+            n1 = _n("localize", "Localize change impact", NodePhase.LOCALIZE, TaskContract.LOCALIZE.value, "Analyze diff and likely blast radius")
+            n2 = _n("inspect", "Inspect blast radius", NodePhase.INSPECT, TaskContract.INSPECT.value, "Inspect impacted files and neighboring paths", [n1.node_id])
+            n3 = _n("repair", "Contain regression fallout", NodePhase.NARROW_FIX, TaskContract.CONTAIN_CHANGE.value, "Implement smallest containment repair", [n2.node_id])
+            n4 = _n("validate", "Run containment validation", NodePhase.VALIDATE, TaskContract.VALIDATE.value, "Run impacted tests and critical checks", [n3.node_id])
+            n5 = _n("summary", "Summarize containment status", NodePhase.SUMMARIZE, TaskContract.SUMMARIZE.value, "Summarize stabilized vs. blocked fallout", [n4.node_id])
+            nodes = [n1, n2, n3, n4, n5]
         elif mission.mission_type == MissionType.VALIDATION_ONLY:
             n1 = _n("validate", "Run validation", NodePhase.VALIDATE, TaskContract.VALIDATE.value, mission.user_goal)
-            nodes = [n1]
+            n2 = _n("summary", "Summarize validation", NodePhase.SUMMARIZE, TaskContract.SUMMARIZE.value, "Summarize validation evidence", [n1.node_id])
+            nodes = [n1, n2]
         else:  # maintenance
-            n1 = _n("inspect", "Inspect repository health", NodePhase.INSPECT, TaskContract.INSPECT.value, "Find highest-leverage maintenance opportunity")
-            n2 = _n("cleanup", "Apply narrow maintenance change", NodePhase.NARROW_FIX, TaskContract.CLEANUP.value, "Apply one focused maintenance improvement", [n1.node_id])
-            n3 = _n("validate", "Validate maintenance change", NodePhase.VALIDATE, TaskContract.VALIDATE.value, "Run targeted validation", [n2.node_id])
-            nodes = [n1, n2, n3]
+            n1 = _n("inspect-repo", "Inspect repository health", NodePhase.INSPECT, TaskContract.INSPECT.value, "Map docs/test/config/tooling risk signals")
+            n2 = _n("localize", "Localize maintenance target", NodePhase.LOCALIZE, TaskContract.LOCALIZE.value, "Localize highest-leverage maintenance target", [n1.node_id])
+            n3 = _n("inspect-target", "Inspect localized area", NodePhase.INSPECT, TaskContract.INSPECT.value, "Inspect localized files for cleanup and reliability opportunities", [n2.node_id])
+            n4 = _n("cleanup", "Apply narrow maintenance change", NodePhase.NARROW_FIX, TaskContract.CLEANUP.value, "Apply one focused maintenance improvement", [n3.node_id])
+            n5 = _n("baseline", "Validate importability baseline", NodePhase.VALIDATE, TaskContract.VALIDATE.value, "Run importability and smoke validation", [n4.node_id])
+            n5.validation_commands = list(dict.fromkeys((maintenance_cmds + validation)[:4]))
+            n6 = _n("followup", "Light maintenance follow-up", NodePhase.NARROW_FIX, TaskContract.NARROW_FIX.value, "Optional follow-up touch-up if verification indicates", [n5.node_id])
+            n7 = _n("validate-final", "Final maintenance validation", NodePhase.VALIDATE, TaskContract.VALIDATE.value, "Run final targeted validation", [n6.node_id])
+            n8 = _n("summary", "Summarize maintenance pass", NodePhase.SUMMARIZE, TaskContract.SUMMARIZE.value, "Summarize completed maintenance and residual risks", [n7.node_id])
+            nodes = [n1, n2, n3, n4, n5, n6, n7, n8]
 
         return nodes
 
     def spawn_recovery_nodes(self, mission: Mission, failed_node: MissionNode, strategy: str, reason: str) -> list[MissionNode]:
         base_id = f"{mission.mission_id}-recovery-{uuid.uuid4().hex[:6]}"
+        validation = list(failed_node.validation_commands[:3])
+        candidate_files = list(failed_node.candidate_files[:20])
         if strategy == "broaden":
-            node = MissionNode(base_id, "Broaden inspection", NodePhase.INSPECT, f"Recover from: {reason}", TaskContract.INSPECT.value, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
+            node = MissionNode(base_id, "Broaden inspection", NodePhase.INSPECT, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
             return [node]
         if strategy == "relocalize":
-            node = MissionNode(base_id, "Re-localize root cause", NodePhase.LOCALIZE, f"Recover from: {reason}", TaskContract.LOCALIZE.value, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
+            node = MissionNode(base_id, "Re-localize root cause", NodePhase.LOCALIZE, f"Recover from: {reason}", TaskContract.LOCALIZE.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
             return [node]
-        node = MissionNode(base_id, "Narrow repair", NodePhase.NARROW_FIX, f"Recover from: {reason}", TaskContract.NARROW_FIX.value, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
+        node = MissionNode(base_id, "Narrow repair", NodePhase.NARROW_FIX, f"Recover from: {reason}", TaskContract.NARROW_FIX.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
         return [node]
 
     def expand_mission_graph(self, mission: Mission, extra_nodes: list[MissionNode]) -> Mission:
