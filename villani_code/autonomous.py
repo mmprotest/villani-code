@@ -10,7 +10,7 @@ from villani_code.autonomous_reporting import build_mission_summary
 from villani_code.autonomous_stop import evaluate_mission_stop
 from villani_code.change_containment import build_change_containment_context, create_regression_containment_nodes
 from villani_code.localization import LocalizationEngine, LocalizationResult
-from villani_code.mission import LocalizationSnapshot, Mission, MissionExecutionState, MissionType, NodePhase, NodeStatus, NodeOutcomeRecord
+from villani_code.mission import DeltaClassification, LocalizationSnapshot, Mission, MissionExecutionState, MissionType, NodePhase, NodeStatus, NodeOutcomeRecord
 from villani_code.mission_bridge import execute_mission_node_with_runner
 from villani_code.mission_planner import MissionPlanner
 from villani_code.mission_store import append_mission_event, save_final_mission_report, save_mission_snapshot
@@ -23,6 +23,7 @@ from villani_code.verification import (
     run_static_verification,
     run_validation_commands,
     summarize_validation_results,
+    VerificationBaseline,
 )
 
 
@@ -187,7 +188,15 @@ class VillaniModeController:
             "runner_result": mission_result,
             "changed_files": mission_result.changed_files,
             "commands": mission_result.commands,
+            "commands_run": mission_result.commands_run,
+            "command_results": mission_result.commands,
             "failures": mission_result.failures,
+            "tool_failures": mission_result.tool_failures,
+            "patch_detected": mission_result.patch_detected,
+            "meaningful_patch": mission_result.meaningful_patch,
+            "transcript_summary": mission_result.transcript_summary,
+            "model_activity": mission_result.model_activity,
+            "acted": mission_result.acted,
             "prose_only": mission_result.prose_only,
             "localization": localization_result,
         }
@@ -217,6 +226,8 @@ class VillaniModeController:
         execution_state.last_localization = snapshot
         execution_state.localization_history.append(snapshot)
         execution_state.evidence_log.extend([f"localize:{e}" for e in snapshot.evidence])
+        for ranked in result.ranked_candidates[:3]:
+            execution_state.evidence_log.append(f"localize_rank:{ranked.file_path}:{ranked.score}")
 
     def _merge_localization_results(self, base: LocalizationResult | None, extra: LocalizationResult) -> LocalizationResult:
         if base is None:
@@ -248,6 +259,17 @@ class VillaniModeController:
     def _evaluate_node(self, execution_state: MissionExecutionState, node: Any, node_result: dict[str, Any]) -> dict[str, Any]:
         self._activity(f"Evaluating node outcome for {node.node_id} with contract-aware verification.")
         changed_files = list(node_result.get("changed_files", []))
+        baseline = VerificationBaseline(
+            changed_files=list(execution_state.latest_changed_files),
+            validation_summary=dict(execution_state.latest_validation_summary),
+            failure_fingerprints=list(execution_state.failure_fingerprint_history[-6:]),
+            localization={
+                "target_files": list(execution_state.last_localization.target_files),
+                "confidence": execution_state.last_localization.confidence,
+                "likely_bug_class": execution_state.last_localization.likely_bug_class,
+                "repair_intent": execution_state.last_localization.repair_intent,
+            },
+        )
         static_result = run_static_verification(str(self.repo), changed_files)
         commands = node.validation_commands or self._repo_signals.get("likely_validation_commands", ["pytest -q"])
         command_results = run_validation_commands(str(self.repo), commands[:3]) if commands else []
@@ -267,6 +289,8 @@ class VillaniModeController:
                 "target_files": previous_loc.target_files,
                 "confidence": previous_loc.confidence,
             },
+            baseline=baseline,
+            validation_summary=validation_summary,
         )
 
         failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
@@ -276,6 +300,8 @@ class VillaniModeController:
 
         node.last_outcome = NodeOutcomeRecord(
             status=str(outcome.get("status", "unknown")),
+            delta_classification=str(outcome.get("delta_classification", DeltaClassification.AMBIGUOUS.value)),
+            delta_reason=str(outcome.get("delta_reason", "")),
             changed_files=list(changed_files),
             patch_detected=bool(outcome.get("patch_exists")),
             meaningful_patch=bool(outcome.get("meaningful_patch")),
@@ -283,6 +309,8 @@ class VillaniModeController:
             failure_fingerprint=failure_fingerprint,
             localization_evidence=list(localization_payload.get("evidence", [])),
         )
+        execution_state.latest_validation_summary = dict(validation_summary)
+        execution_state.latest_changed_files = list(changed_files)
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
@@ -302,6 +330,7 @@ class VillaniModeController:
         if outcome["status"] == "passed":
             node.status = NodeStatus.SUCCEEDED
             execution_state.consecutive_no_progress = 0
+            execution_state.repeated_delta_states = 0
         elif outcome["status"] == "stale":
             node.status = NodeStatus.FAILED
             execution_state.consecutive_no_model_activity += 1
@@ -309,6 +338,13 @@ class VillaniModeController:
         else:
             node.status = NodeStatus.FAILED
             execution_state.consecutive_no_progress += 1
+            if outcome.get("delta_classification") in {
+                DeltaClassification.NO_IMPROVEMENT.value,
+                DeltaClassification.AMBIGUOUS.value,
+            }:
+                execution_state.repeated_delta_states += 1
+            else:
+                execution_state.repeated_delta_states = 0
 
         append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "node_evaluated", "node_id": node.node_id, "status": node.status.value, "outcome": outcome, "changed_files": changed_files, "validation": validation_summary})
         return {

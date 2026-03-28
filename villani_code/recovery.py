@@ -36,6 +36,10 @@ class RecoveryPlanner:
         prose_only = bool(node_outcome.get("prose_only"))
         weak_localization = bool(node_outcome.get("localization_weak"))
         stale_localization = bool(node_outcome.get("localization_stale"))
+        delta = str(node_outcome.get("delta_classification", "ambiguous"))
+        delta_reason = str(node_outcome.get("delta_reason", ""))
+        localization_improved = bool(node_outcome.get("delta_details", {}).get("sharper_localization"))
+        repeated_delta_state = mission_state.repeated_delta_states >= 2
 
         if tool_denied:
             return RecoveryDecision("blocked", "Tooling or permission denial encountered.", mark_blocked=True)
@@ -47,12 +51,21 @@ class RecoveryPlanner:
         if too_broad:
             nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "narrow", "Patch breadth too broad")
             return RecoveryDecision("retry_narrow", "Large blast radius detected.", nodes=nodes)
+        if delta == "regression":
+            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "narrow", "Regression after node execution")
+            return RecoveryDecision("rollback_direction", f"Delta indicates regression ({delta_reason}); retry with narrower strategy.", nodes=nodes)
         if worsened and changed_files:
             nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "narrow", "Validation worsened after patch")
             return RecoveryDecision("repair_repair", "Patch worsened state; execute repair-of-repair.", nodes=nodes)
         if no_improvement and changed_files:
             nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "broaden", "Patch had no measurable improvement")
             return RecoveryDecision("alternate_strategy", "Patch changed files but no measurable improvement; change strategy.", nodes=nodes)
+        if localization_improved and no_improvement:
+            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "narrow", "Localization improved; focus repair")
+            return RecoveryDecision("focused_repair", "Localization sharpened despite failed node; retry with tighter file focus.", nodes=nodes)
+        if repeated_delta_state and (stale_localization or weak_localization):
+            nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "broaden", "Repeated identical low-delta state")
+            return RecoveryDecision("force_broaden", "Repeated no/ambiguous improvement; force broader evidence collection.", nodes=nodes)
         if no_changes:
             strategy = "relocalize" if (weak_localization or stale_localization) else "broaden"
             reason = "No file changes produced and localization weak/stale" if strategy == "relocalize" else "No file changes produced"
