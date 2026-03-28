@@ -12,7 +12,22 @@
 #log-content {
   width: 100%;
   height: auto;
-  text-wrap: wrap;
+}
+
+.log-plain {
+  width: 100%;
+  height: auto;
+}
+
+.log-assistant-stream {
+  width: 100%;
+  height: auto;
+}
+
+.log-assistant-markdown {
+  width: 100%;
+  height: auto;
+  margin: 0 0 1 0;
 }
 
 #approval-bar {

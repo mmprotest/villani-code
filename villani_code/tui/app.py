@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Key, MouseScrollDown, MouseScrollUp
 from textual.timer import Timer
-from textual.widgets import Input, Static
+from textual.widgets import Input, Markdown, Static
 
 from villani_code.interrupts import InterruptController
 from villani_code.plan_session import PlanAnswer, PlanQuestion, PlanSessionResult
@@ -51,9 +51,11 @@ class VillaniTranscript(VerticalScroll):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._content_text = ""
+        self._stream_text = ""
+        self._stream_widget: Static | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static(Text(""), id="log-content", markup=False)
+        yield Vertical(id="log-content")
 
     @property
     def plain_text(self) -> str:
@@ -68,8 +70,44 @@ class VillaniTranscript(VerticalScroll):
         return base
 
     def append_text(self, text: str, follow_tail: bool) -> None:
+        self.append_plain(text, follow_tail=follow_tail)
+
+    def append_plain(self, text: str, follow_tail: bool) -> None:
         self._content_text += text
-        self.query_one("#log-content", Static).update(Text(self._content_text))
+        container = self.query_one("#log-content", Vertical)
+        container.mount(Static(Text(text), classes="log-plain", markup=False))
+        if follow_tail:
+            self.scroll_end(animate=False)
+
+    def append_assistant_markdown(self, text: str, follow_tail: bool) -> None:
+        self._content_text += f"{text}\n"
+        container = self.query_one("#log-content", Vertical)
+        container.mount(Markdown(text, classes="log-assistant-markdown"))
+        if follow_tail:
+            self.scroll_end(animate=False)
+
+    def append_assistant_stream(self, text: str, follow_tail: bool) -> None:
+        self._content_text += text
+        self._stream_text += text
+        container = self.query_one("#log-content", Vertical)
+        if self._stream_widget is None:
+            self._stream_widget = Static(Text(""), classes="log-assistant-stream", markup=False)
+            container.mount(self._stream_widget)
+        self._stream_widget.update(Text(self._stream_text))
+        if follow_tail:
+            self.scroll_end(animate=False)
+
+    def finalize_assistant_stream(self, follow_tail: bool) -> None:
+        if self._stream_widget is None:
+            return
+        stream_widget = self._stream_widget
+        stream_text = self._stream_text
+        self._stream_widget = None
+        self._stream_text = ""
+        stream_widget.remove()
+        self._content_text += "\n"
+        container = self.query_one("#log-content", Vertical)
+        container.mount(Markdown(stream_text, classes="log-assistant-markdown"))
         if follow_tail:
             self.scroll_end(animate=False)
 
@@ -215,11 +253,11 @@ class VillaniTUI(App[None]):
         return self.last_ready_plan
 
     def _append_log(self, log: VillaniTranscript, text: str) -> None:
-        log.append_text(text, follow_tail=self.follow_tail)
+        log.append_plain(text, follow_tail=self.follow_tail)
         self._log_plain_text += text
 
     def _append_log_line(self, log: VillaniTranscript, text: str) -> None:
-        log.append_text(f"{text}\n", follow_tail=self.follow_tail)
+        log.append_plain(f"{text}\n", follow_tail=self.follow_tail)
         self._log_plain_text += f"{text}\n"
 
     def _copy_to_clipboard(self, text: str) -> None:
@@ -397,7 +435,8 @@ class VillaniTUI(App[None]):
     def _end_ai_stream_if_open(self, log: VillaniTranscript) -> None:
         self._flush_stream_buffer(log)
         if self._ai_streaming:
-            self._append_log(log, "\n")
+            log.finalize_assistant_stream(follow_tail=self.follow_tail)
+            self._log_plain_text += "\n"
             self._ai_streaming = False
 
     def set_follow_tail(self, enabled: bool) -> None:
@@ -416,10 +455,8 @@ class VillaniTUI(App[None]):
     def _flush_stream_buffer(self, log: VillaniTranscript) -> None:
         if not self._stream_buffer:
             return
-        parts = self._stream_buffer.split("\n")
-        self._append_log(log, parts[0])
-        for line in parts[1:]:
-            self._append_log_line(log, line)
+        log.append_assistant_stream(self._stream_buffer, follow_tail=self.follow_tail)
+        self._log_plain_text += self._stream_buffer
         self._stream_buffer = ""
 
     def _start_ai_boundary(self, log: VillaniTranscript) -> None:
@@ -441,8 +478,8 @@ class VillaniTUI(App[None]):
         if kind == "ai":
             self._end_ai_stream_if_open(log)
             self._start_ai_boundary(log)
-            for line in text.rstrip("\n").split("\n"):
-                self._append_log_line(log, line)
+            log.append_assistant_markdown(text.rstrip("\n"), follow_tail=self.follow_tail)
+            self._log_plain_text += f"{text.rstrip('\n')}\n"
             self._ai_streaming = False
             return
 
