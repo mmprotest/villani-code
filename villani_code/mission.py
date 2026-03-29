@@ -57,6 +57,9 @@ class MissionScratchpad:
     has_runnable_entrypoint: bool = False
     path_authority: dict[str, str] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
     def update_from_greenfield_selection(self, selection: dict[str, Any], candidates: list[dict[str, Any]] | None = None) -> None:
         chosen = str(selection.get("project_type", "")).strip()
         if chosen and not self.chosen_project_direction:
@@ -327,7 +330,7 @@ class MissionExecutionState:
             "greenfield_candidates": list(self.greenfield_candidates),
             "greenfield_selection": dict(self.greenfield_selection),
             "greenfield_progress": dict(self.greenfield_progress),
-            "scratchpad": asdict(self.scratchpad),
+            "scratchpad": self.scratchpad.to_dict(),
         }
 
     @classmethod
