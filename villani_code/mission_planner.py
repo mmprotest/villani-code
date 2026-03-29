@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import replace
 from typing import Any
@@ -24,26 +25,37 @@ class MissionPlanner:
     def classify_mission_type(self, objective: str, repo_signals: dict[str, Any] | None = None) -> MissionType:
         low = (objective or "").lower()
         repo_signals = repo_signals or {}
-        greenfield_prompt = any(
-            phrase in low
-            for phrase in [
-                "build something",
-                "make something",
-                "create something",
-                "start a project",
-                "empty sandbox",
-                "build a tool",
-                "local tool",
-                "something interesting",
-                "something useful",
-                "something cool",
-            ]
+        greenfield_prompt = bool(
+            re.search(r"\b(build|create|make)\s+(me|a|an)\b", low)
+            or any(
+                phrase in low
+                for phrase in [
+                    "build something",
+                    "make something",
+                    "create something",
+                    "start a project",
+                    "empty sandbox",
+                    "build a tool",
+                    "local tool",
+                    "something interesting",
+                    "something useful",
+                    "something cool",
+                ]
+            )
+            or re.search(r"\b(game|app|tool|utility|project)\b", low)
         )
-        if greenfield_prompt and (
+        bugfix_or_regression_prompt = bool(
+            re.search(
+                r"\b(bug|fix|bugfix|defect|broken|regression|incident|error|failing|failure|stack trace|traceback|crash)\b",
+                low,
+            )
+        )
+        workspace_greenfield_eligible = (
             bool(repo_signals.get("workspace_empty_or_internal_only"))
             or bool(repo_signals.get("workspace_lightweight_hints_only"))
             or not bool(repo_signals.get("existing_project_detected"))
-        ):
+        )
+        if workspace_greenfield_eligible and greenfield_prompt and not bugfix_or_regression_prompt:
             return MissionType.GREENFIELD_BUILD
         if not low.strip():
             return MissionType.MAINTENANCE

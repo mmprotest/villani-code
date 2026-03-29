@@ -182,9 +182,27 @@ def build_mission_summary(
             "passed": int((item.get("validation_summary", {}) or {}).get("passed", 0) or 0),
             "delta": (item.get("validation_delta", {}) or {}).get("status", "unchanged"),
             "fingerprint": item.get("failure_fingerprint", ""),
+            "evidence_kind": item.get("validation_evidence_kind", "none"),
+            "self_reported_unverified": bool(item.get("self_reported_validation_without_evidence", False)),
         }
         for item in validations
     ]
+    validation_evidence = {
+        "real_validation_evidence_nodes": sorted(
+            {
+                str(item.get("node_id", ""))
+                for item in validations
+                if str(item.get("validation_evidence_kind", "")) == "real_command_results"
+            }
+        ),
+        "self_reported_unverified_nodes": sorted(
+            {
+                str(item.get("node_id", ""))
+                for item in validations
+                if bool(item.get("self_reported_validation_without_evidence", False))
+            }
+        ),
+    }
     localization_evolution = [
         {
             "targets": list(snapshot.target_files[:6]),
@@ -238,9 +256,11 @@ def build_mission_summary(
         "nodes_executed": nodes,
         "files_inspected": sorted(set(execution_state.inspected_files)),
         "files_touched": sorted(set(files_touched)),
+        "changed_count": len(sorted(set(files_touched))),
         "evidence": execution_state.evidence_log[-40:],
         "validation_results": validations,
         "validation_timeline": validation_timeline,
+        "validation_evidence": validation_evidence,
         "localization_evolution": localization_evolution,
         "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
         "changed_files_by_attempt_outcome": changed_by_status,

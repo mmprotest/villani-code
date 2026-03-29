@@ -37,7 +37,6 @@ from villani_code.verification import (
     compute_validation_delta,
     evaluate_mission_status,
     run_static_verification,
-    run_validation_commands,
     summarize_validation_results,
     VerificationBaseline,
 )
@@ -83,6 +82,12 @@ class AutonomousTask:
 
 class VillaniModeController:
     """Mission-driven autonomous Villani mode that uses the existing runner as execution engine."""
+
+    _GREENFIELD_READ_ONLY_PHASES = {
+        NodePhase.INSPECT_WORKSPACE,
+        NodePhase.CHOOSE_PROJECT_DIRECTION,
+        NodePhase.SUMMARIZE_OUTCOME,
+    }
 
     def __init__(
         self,
@@ -469,7 +474,6 @@ class VillaniModeController:
             previous_command_results=list(execution_state.latest_command_results),
         )
         static_result = run_static_verification(str(self.repo), changed_files)
-        commands = node.validation_commands or self._repo_signals.get("likely_validation_commands", ["pytest -q"])
         runner_command_results = list(node_result.get("command_results", []) or [])
         command_results: list[dict[str, Any]] = []
         execution_payload = dict(node_result.get("execution_payload", {}) or {})
@@ -478,8 +482,6 @@ class VillaniModeController:
             command_results = list(runner_command_results)
         elif payload_command_results:
             command_results = list(payload_command_results)
-        elif commands:
-            command_results = run_validation_commands(str(self.repo), commands[:3])
         normalized_command_results: dict[str, dict[str, Any]] = {}
         for record in command_results:
             cmd_key = str(record.get("command", "")).strip() or f"__index_{len(normalized_command_results)}"
@@ -515,6 +517,10 @@ class VillaniModeController:
             clarification_requested=bool(node_result.get("clarification_requested")),
             scratchpad=execution_state.scratchpad,
         )
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase in self._GREENFIELD_READ_ONLY_PHASES and changed_files:
+            outcome["status"] = "failed"
+            outcome["reason"] = f"contract violation: {node.phase.value} is read-only but wrote files"
+            outcome["contract_violation"] = True
         user_deliverables = self._extract_user_space_deliverables(changed_files, execution_payload)
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
@@ -589,6 +595,12 @@ class VillaniModeController:
                 "execution_payload": execution_payload,
                 "validation_delta": validation_delta,
                 "greenfield_deliverables": persisted_deliverables,
+                "self_reported_validation_without_evidence": bool(outcome.get("self_reported_validation_without_evidence")),
+                "validation_evidence_kind": (
+                    "real_command_results"
+                    if command_results
+                    else ("self_reported_unverified" if outcome.get("self_reported_validation_claim") else "none")
+                ),
             }
         )
 
@@ -612,6 +624,18 @@ class VillaniModeController:
                 execution_state.repeated_delta_states = 0
 
         append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "node_evaluated", "node_id": node.node_id, "status": node.status.value, "outcome": outcome, "changed_files": changed_files, "validation": validation_summary})
+        if outcome.get("contract_violation"):
+            append_mission_event(
+                str(self.repo),
+                execution_state.mission.mission_id,
+                {
+                    "type": "contract_violation",
+                    "node_id": node.node_id,
+                    "phase": node.phase.value,
+                    "reason": outcome.get("reason", ""),
+                    "changed_files": changed_files,
+                },
+            )
         return {
             **outcome,
             "changed_files": changed_files,
@@ -695,7 +719,24 @@ class VillaniModeController:
     def _finalize_mission(self, execution_state: MissionExecutionState) -> dict[str, Any]:
         self._activity("Finalizing mission report and summarizing outcomes.")
         mission = execution_state.mission
-        touched = sorted(set(self._git_changed_files()) - set(execution_state.changed_files_baseline))
+        touched_from_git = sorted(set(self._git_changed_files()) - set(execution_state.changed_files_baseline))
+        touched_from_nodes = sorted(
+            {
+                str(path)
+                for node in mission.nodes
+                for path in list(node.last_outcome.changed_files or [])
+                if str(path).strip()
+            }
+        )
+        touched_from_payloads = sorted(
+            {
+                str(path)
+                for item in execution_state.verification_history
+                for path in list((item.get("execution_payload", {}) or {}).get("write_tool_paths", []) or [])
+                if str(path).strip()
+            }
+        )
+        touched = sorted(dict.fromkeys(touched_from_git + touched_from_nodes + touched_from_payloads))
         touched, internal_touched = split_internal_paths(touched)
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             persisted = list(dict(execution_state.greenfield_progress or {}).get("deliverable_paths", []) or [])

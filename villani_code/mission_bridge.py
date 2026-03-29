@@ -105,18 +105,24 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
         lines.append("Do NOT ask the user for confirmation/approval/options. Act autonomously unless a true hard block exists.")
         if node.phase.value == "inspect_workspace":
             lines.append("Inspect workspace for constraints, sample data, README/notes hints, and feasible local project directions.")
+            lines.append("WRITE POLICY: READ-ONLY PHASE. Do not use Write/Patch/edit tools and do not run full builds.")
         elif node.phase.value == "choose_project_direction":
             lines.append("Produce 2-4 plausible runnable utility candidates, then choose one deterministic direction with rationale.")
             lines.append("Docs-only, README-only, and suggestion-only directions are invalid unless the user explicitly asked for docs only.")
+            lines.append("WRITE POLICY: READ-ONLY PHASE. Do not use Write/Patch/edit tools and do not run full builds.")
         elif node.phase.value == "scaffold_project":
             lines.append("Scaffold only the chosen project structure in user-facing paths. Avoid .villani/ outputs.")
             lines.append("This phase must create at least one real user-space file (for example README.md, pyproject.toml, src/*, app/*, tests/*).")
+            lines.append("WRITE POLICY: WRITE-ALLOWED PHASE for scaffolding only.")
         elif node.phase.value == "implement_vertical_slice":
             lines.append("Implement one minimal but usable vertical slice with a real entrypoint.")
+            lines.append("WRITE POLICY: WRITE-ALLOWED PHASE for targeted implementation.")
         elif node.phase.value == "validate_project":
             lines.append("Run targeted smoke/test validation and capture concrete command evidence.")
+            lines.append("WRITE POLICY: validation-focused phase; do not claim passing validation without real command results.")
         elif node.phase.value == "summarize_outcome":
             lines.append("Summarize what was built, where files live, how to run, and validation outcomes.")
+            lines.append("WRITE POLICY: READ-ONLY PHASE. No file edits.")
     lines.append("Avoid asking the user clarifying/confirmation questions; pick a reasonable default and continue autonomously.")
     lines.append("Stop when node objective is satisfied or clearly blocked. Provide concrete evidence.")
     return "\n".join(lines)
@@ -179,6 +185,40 @@ def _extract_changed_files_from_result(result: dict[str, Any], before: set[str],
     if from_execution:
         return sorted(dict.fromkeys(from_execution))
     return sorted(after - before)
+
+
+def _extract_write_paths_from_transcript(result: dict[str, Any]) -> list[str]:
+    transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
+    tool_invocations = list(transcript.get("tool_invocations", []) or [])
+    write_like_tools = {"write", "patch", "apply_patch"}
+    path_keys = ("file_path", "path", "target_file", "filename")
+    touched: list[str] = []
+    for invocation in tool_invocations:
+        if not isinstance(invocation, dict):
+            continue
+        tool_name = str(invocation.get("name", "")).strip().lower()
+        if tool_name not in write_like_tools:
+            continue
+        payload = invocation.get("input")
+        payload = payload if isinstance(payload, dict) else {}
+        for key in path_keys:
+            value = str(payload.get(key, "")).strip()
+            if value:
+                touched.append(value)
+    return sorted(dict.fromkeys(touched))
+
+
+_SELF_REPORTED_VALIDATION_PATTERNS: tuple[str, ...] = (
+    r"\btests?\s+passed\b",
+    r"\bverification\s+complete\b",
+    r"\bsmoke\s+tests?\s+passed\b",
+    r"\b\d+\s*/\s*\d+\s+passed\b",
+)
+
+
+def _detect_self_reported_validation_claim(text: str) -> bool:
+    low = (text or "").lower()
+    return any(re.search(pattern, low) for pattern in _SELF_REPORTED_VALIDATION_PATTERNS)
 
 
 def _parse_command_result_content(content: Any) -> list[CommandResult]:
@@ -318,6 +358,9 @@ def execute_mission_node_with_runner(
     normalized = result if isinstance(result, dict) else {}
     execution = _extract_execution_payload(normalized)
     changed_all = _extract_changed_files_from_result(normalized, before, after)
+    write_paths = _extract_write_paths_from_transcript(normalized)
+    if write_paths:
+        changed_all = sorted(dict.fromkeys(list(changed_all) + write_paths))
     changed, internal_changed = split_internal_paths(changed_all)
     execution_commands = list(execution.get("validation_artifacts", []) or [])
     command_results = _extract_command_results_from_execution(execution)
@@ -339,6 +382,7 @@ def execute_mission_node_with_runner(
     text_blocks = (normalized.get("response", {}) or {}).get("content", []) if isinstance(normalized, dict) else []
     text = "\n".join(str(b.get("text", "")) for b in text_blocks if isinstance(b, dict))
     clarification_requested = _detect_clarification_request(text)
+    self_reported_validation_claim = _detect_self_reported_validation_claim(text)
     patch_detected = bool(execution.get("patch_detected", bool(changed)))
     meaningful_patch = bool(execution.get("meaningful_patch", bool(execution.get("intentional_changes")) or bool(changed)))
     prose_only = bool(execution.get("prose_only", (not changed) and (not command_results) and model_activity.get("tool_results", 0) == 0 and bool(text.strip())))
@@ -378,5 +422,8 @@ def execute_mission_node_with_runner(
             "prose_only": prose_only,
             "acted": acted,
             "clarification_requested": clarification_requested,
+            "self_reported_validation_claim": self_reported_validation_claim,
+            "self_reported_validation_without_evidence": bool(self_reported_validation_claim and not command_results),
+            "write_tool_paths": list(write_paths),
         },
     )
