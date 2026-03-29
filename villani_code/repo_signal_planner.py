@@ -4,30 +4,16 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-INTERNAL_PREFIXES = (".villani/", ".villani_code/")
-SESSION_RESIDUE_MARKERS = (
-    "session",
-    "transcript",
-    "context_state",
-    "tool_inventory",
-    "interrupted",
-    "stale",
+from villani_code.path_authority import (
+    is_internal_villani_path,
+    should_ignore_for_greenfield_context,
 )
-
-
-def _is_internal_artifact(path: str) -> bool:
-    return str(path).startswith(INTERNAL_PREFIXES)
-
-
-def _looks_like_session_residue(path: str) -> bool:
-    low = str(path).lower()
-    return any(m in low for m in SESSION_RESIDUE_MARKERS)
 
 
 def classify_path_authority(path: str) -> str:
     rel = str(path)
-    if _is_internal_artifact(rel) or _looks_like_session_residue(rel):
-        if rel.startswith((".villani/", ".villani_code/")):
+    if should_ignore_for_greenfield_context(rel):
+        if is_internal_villani_path(rel):
             return "internal_artifact_ignored"
         return "internal_artifact_low_authority"
     if rel.startswith(("src/", "lib/", "app/", "tests/", "test/")) or Path(rel).name in {
@@ -106,7 +92,7 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
         "sample_data_files": [x for x in hint_files if x.lower().endswith((".csv", ".tsv", ".json"))][:20],
         "existing_project_detected": bool(code_files or config_files or source_roots),
         "likely_project_directions": _likely_project_directions(tooling_hints, hint_files, non_internal),
-        "internal_artifact_paths": [x for x in rel if _is_internal_artifact(x)],
+        "internal_artifact_paths": [x for x in rel if is_internal_villani_path(x)],
         "ignored_context_paths": [x for x in rel if path_authority.get(x) in {"internal_artifact_ignored", "internal_artifact_low_authority"}],
         "path_authority": path_authority,
     }

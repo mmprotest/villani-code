@@ -27,7 +27,8 @@ class RecoveryPlanner:
         node_outcome: dict[str, Any],
     ) -> RecoveryDecision:
         changed_files = list(node_outcome.get("changed_files", []) or [])
-        no_changes = not changed_files
+        user_changed_files = list(node_outcome.get("user_space_changed_files", []) or [])
+        no_changes = not user_changed_files
         worsened = bool(node_outcome.get("validation_worsened"))
         no_improvement = bool(node_outcome.get("patch_no_improvement"))
         repeated_failure = bool(node_outcome.get("same_failure_repeated"))

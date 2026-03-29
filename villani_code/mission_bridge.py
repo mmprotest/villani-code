@@ -9,12 +9,7 @@ from typing import Any
 from villani_code.autonomy import contract_discourages_editing, contract_requires_validation
 from villani_code.evidence import parse_command_evidence
 from villani_code.mission import Mission, MissionExecutionState, MissionNode
-
-INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
-
-
-def _is_internal_artifact(path: str) -> bool:
-    return str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+from villani_code.path_authority import split_internal_paths
 
 
 @dataclass(slots=True)
@@ -31,6 +26,7 @@ class CommandResult:
 class MissionNodeResult:
     response: dict[str, Any]
     changed_files: list[str] = field(default_factory=list)
+    internal_changed_files: list[str] = field(default_factory=list)
     commands_run: list[str] = field(default_factory=list)
     command_results: list[CommandResult] = field(default_factory=list)
     tool_failures: list[str] = field(default_factory=list)
@@ -321,7 +317,8 @@ def execute_mission_node_with_runner(
     after = set(_git_changed_files(Path(mission.repo_root)))
     normalized = result if isinstance(result, dict) else {}
     execution = _extract_execution_payload(normalized)
-    changed = _extract_changed_files_from_result(normalized, before, after)
+    changed_all = _extract_changed_files_from_result(normalized, before, after)
+    changed, internal_changed = split_internal_paths(changed_all)
     execution_commands = list(execution.get("validation_artifacts", []) or [])
     command_results = _extract_command_results_from_execution(execution)
     failures = _extract_failures_from_execution(execution)
@@ -349,11 +346,12 @@ def execute_mission_node_with_runner(
     transcript_summary = (
         f"tools={model_activity.get('tool_results', 0)} "
         f"errors={model_activity.get('tool_errors', 0)} "
-        f"commands={len(command_results)} changed={len(changed)} clarification={1 if clarification_requested else 0}"
+        f"commands={len(command_results)} changed={len(changed)} internal_changed={len(internal_changed)} clarification={1 if clarification_requested else 0}"
     )
     return MissionNodeResult(
         response=normalized,
         changed_files=changed,
+        internal_changed_files=internal_changed,
         commands_run=commands_run,
         command_results=command_results,
         tool_failures=failures,
@@ -366,6 +364,8 @@ def execute_mission_node_with_runner(
         clarification_requested=clarification_requested,
         execution_payload={
             "changed_files": list(changed),
+            "all_changed_files": list(changed_all),
+            "internal_changed_files": list(internal_changed),
             "patch_detected": patch_detected,
             "meaningful_patch": meaningful_patch,
             "intentional_changes": list(execution.get("intentional_changes", []) or []),

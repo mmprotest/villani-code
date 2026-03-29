@@ -24,6 +24,11 @@ from villani_code.mission import (
 from villani_code.mission_bridge import execute_mission_node_with_runner
 from villani_code.mission_planner import MissionPlanner
 from villani_code.mission_store import append_mission_event, save_final_mission_report, save_mission_snapshot
+from villani_code.path_authority import (
+    INTERNAL_VILLANI_ROOTS,
+    is_internal_villani_path,
+    split_internal_paths,
+)
 from villani_code.recovery import RecoveryPlanner
 from villani_code.repo_signal_planner import collect_repo_signals
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
@@ -99,21 +104,12 @@ class VillaniModeController:
         self.takeover_config = takeover_config
         self.verifier = VerificationEngine(self.repo)
 
-    @staticmethod
-    def _is_internal_artifact(path: str) -> bool:
-        return str(path).startswith((".villani/", ".villani_code/"))
-
     def _extract_user_space_deliverables(self, changed_files: list[str], execution_payload: dict[str, Any]) -> list[str]:
         candidates = list(changed_files)
         for key in ("intentional_changes", "incidental_changes", "changed_files"):
             candidates.extend(str(x) for x in list(execution_payload.get(key, []) or []))
-        deliverables: list[str] = []
-        for item in candidates:
-            value = str(item or "").strip()
-            if not value or self._is_internal_artifact(value):
-                continue
-            deliverables.append(value)
-        return sorted(dict.fromkeys(deliverables))
+        user_deliverables, _internal = split_internal_paths([str(item or "").strip() for item in candidates])
+        return user_deliverables
 
     def _record_greenfield_progress(
         self,
@@ -150,7 +146,7 @@ class VillaniModeController:
             current_phase=mission.nodes[0].phase.value if mission.nodes else "",
             hard_constraints=list(mission.success_criteria),
             allowed_output_locations=["workspace_user_paths_only"],
-            ignored_internal_paths=list(repo_signals.get("ignored_context_paths", [".villani/", ".villani_code/"])),
+            ignored_internal_paths=list(repo_signals.get("ignored_context_paths", [f"{root}/" for root in INTERNAL_VILLANI_ROOTS])),
             validation_intent="run_targeted_validation_after_changes",
             no_confirmation_required=True,
             no_internal_artifact_deliverables=mission.mission_type == MissionType.GREENFIELD_BUILD,
@@ -412,8 +408,8 @@ class VillaniModeController:
             suggested_validation_commands=list(result.suggested_validation_commands),
         )
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
-            snapshot.target_files = [p for p in snapshot.target_files if not self._is_internal_artifact(p)]
-            snapshot.evidence = [e for e in snapshot.evidence if ".villani/" not in e and ".villani_code/" not in e]
+            snapshot.target_files, _internal_targets = split_internal_paths(snapshot.target_files)
+            snapshot.evidence = [e for e in snapshot.evidence if not any(f"{root}/" in e for root in INTERNAL_VILLANI_ROOTS)]
         node.localization = snapshot
         node.candidate_files = list(dict.fromkeys(snapshot.target_files + node.candidate_files))[:20]
         node.validation_commands = list(dict.fromkeys(snapshot.suggested_validation_commands + node.validation_commands))[:6]
@@ -458,6 +454,7 @@ class VillaniModeController:
     def _evaluate_node(self, execution_state: MissionExecutionState, node: Any, node_result: dict[str, Any]) -> dict[str, Any]:
         self._activity(f"Evaluating node outcome for {node.node_id} with contract-aware verification.")
         changed_files = list(node_result.get("changed_files", []))
+        internal_changed_files = list(node_result.get("internal_changed_files", []))
         baseline = VerificationBaseline(
             changed_files=list(execution_state.latest_changed_files),
             validation_summary=dict(execution_state.latest_validation_summary),
@@ -586,6 +583,7 @@ class VillaniModeController:
                 "validation_summary": validation_summary,
                 "outcome": outcome,
                 "changed_files": changed_files,
+                "internal_changed_files": internal_changed_files,
                 "failure_fingerprint": failure_fingerprint,
                 "localization": localization_payload,
                 "execution_payload": execution_payload,
@@ -617,6 +615,7 @@ class VillaniModeController:
         return {
             **outcome,
             "changed_files": changed_files,
+            "internal_changed_files": internal_changed_files,
             "patch_detected": bool(outcome.get("patch_exists")),
             "meaningful_patch": bool(outcome.get("meaningful_patch")),
             "validation_summary": validation_summary,
@@ -697,6 +696,7 @@ class VillaniModeController:
         self._activity("Finalizing mission report and summarizing outcomes.")
         mission = execution_state.mission
         touched = sorted(set(self._git_changed_files()) - set(execution_state.changed_files_baseline))
+        touched, internal_touched = split_internal_paths(touched)
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             persisted = list(dict(execution_state.greenfield_progress or {}).get("deliverable_paths", []) or [])
             touched = sorted(dict.fromkeys(touched + [str(p) for p in persisted if str(p).strip()]))
@@ -707,6 +707,12 @@ class VillaniModeController:
             outcome=mission.final_outcome or "exhausted",
             stop_reason=mission.stop_reason or "Mission ended without explicit stop reason.",
         )
+        if internal_touched:
+            report.setdefault("greenfield_report", {})
+            if isinstance(report["greenfield_report"], dict):
+                report["greenfield_report"]["internal_artifacts"] = sorted(
+                    dict.fromkeys(list(report["greenfield_report"].get("internal_artifacts", [])) + internal_touched)
+                )
         save_final_mission_report(str(self.repo), mission, report)
         append_mission_event(str(self.repo), mission.mission_id, {"type": "mission_finalized", "outcome": mission.final_outcome, "stop_reason": mission.stop_reason})
         text = self.format_summary(report)
@@ -750,7 +756,10 @@ class VillaniModeController:
         files: list[str] = []
         for path in self.repo.rglob("*"):
             if path.is_file() and ".git" not in path.parts:
-                files.append(path.relative_to(self.repo).as_posix())
+                rel = path.relative_to(self.repo).as_posix()
+                if is_internal_villani_path(rel):
+                    continue
+                files.append(rel)
         return RepoSnapshot(repo_root=str(self.repo), tooling_commands=list(signals.get("likely_validation_commands", [])), files=files[:200])
 
     def generate_candidates(self, snapshot: RepoSnapshot) -> list[AutonomousTask]:
