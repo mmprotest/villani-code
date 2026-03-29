@@ -200,9 +200,14 @@ def classify_node_outcome(
     execution_payload = execution_payload or {}
     validation_delta = validation_delta or {"status": "unchanged"}
     baseline = baseline or VerificationBaseline()
+    self_reported_validation_without_evidence = bool(execution_payload.get("self_reported_validation_without_evidence", False))
 
     command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
     any_command = bool(command_results)
+    build_like_command = any(
+        any(token in str(record.get("command", "")).lower() for token in ("npm run build", "python -m build", "cargo build", "mvn ", "gradle build", "make "))
+        for record in command_results
+    )
     repeated_in_run = any(bool(r.get("repeated_failure")) for r in command_results)
     failure_fingerprints = [str(r.get("failure_fingerprint", "")) for r in command_results if r.get("failure_fingerprint")]
     repeated_across_history = any(fp in prior_fingerprints for fp in failure_fingerprints)
@@ -273,7 +278,9 @@ def classify_node_outcome(
         else:
             status, reason = "failed", "patch failed validation"
     elif contract == TaskContract.VALIDATE:
-        if not any_command:
+        if not any_command and self_reported_validation_without_evidence:
+            status, reason = "failed", "validate node claimed success in prose without command evidence"
+        elif not any_command:
             status, reason = "failed", "validate node ran no commands"
         elif delta.classification == DeltaClassification.REGRESSION:
             status, reason = "failed", "validation outcomes regressed"
@@ -323,6 +330,13 @@ def classify_node_outcome(
                 status, reason = "partial", "summary too thin"
             else:
                 status, reason = "passed", "greenfield outcome summarized"
+        read_only_phases = {"inspect_workspace", "choose_project_direction", "summarize_outcome"}
+        if node_phase in read_only_phases and patch_exists:
+            status, reason = "failed", f"contract violation: {node_phase} is read-only but wrote files"
+        if node_phase in {"inspect_workspace", "choose_project_direction"} and build_like_command:
+            status, reason = "failed", f"contract violation: {node_phase} should not run full build commands"
+        if node_phase == "validate_project" and self_reported_validation_without_evidence:
+            status, reason = "failed", "greenfield validation claimed success without command evidence"
     if scratchpad:
         confirmed = list(scratchpad.confirmed_deliverables or [])
         if confirmed and not user_space_changes and status == "failed":
@@ -359,4 +373,6 @@ def classify_node_outcome(
         "delta_reason": delta.reason,
         "delta_details": delta.details,
         "validation_delta": validation_delta,
+        "self_reported_validation_without_evidence": self_reported_validation_without_evidence,
+        "self_reported_validation_claim": bool(execution_payload.get("self_reported_validation_claim", False)),
     }
