@@ -228,6 +228,55 @@ def execute_tool_with_policy(
             return {"content": "SubmitPlan is available only in planning mode", "is_error": True}
         return {"content": "Plan artifact accepted", "is_error": False}
 
+    phase_policy = dict(getattr(runner, "_villani_phase_tool_policy", {}) or {})
+    if str(phase_policy.get("mission_type", "")) == "greenfield_build":
+        phase = str(phase_policy.get("node_phase", "")).strip()
+        allow_mutating_tools = bool(phase_policy.get("allow_mutating_tools", False))
+        allow_shell_commands = bool(phase_policy.get("allow_shell_commands", False))
+        allow_validation_shell = bool(phase_policy.get("allow_validation_shell", False))
+        if tool_name in {"Write", "Patch", "Edit"} and not allow_mutating_tools:
+            return {
+                "content": f"Greenfield phase policy blocked mutation tool '{tool_name}' during {phase or 'unknown_phase'}",
+                "is_error": True,
+            }
+        if tool_name == "Bash":
+            command = str(tool_input.get("command", "")).strip().lower()
+            if not allow_shell_commands:
+                return {
+                    "content": f"Greenfield phase policy blocked shell usage during {phase or 'unknown_phase'}",
+                    "is_error": True,
+                }
+            readonly_prefixes = (
+                "pwd", "ls", "cat", "rg", "grep", "find", "head", "tail", "wc",
+                "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "git ls-files",
+            )
+            validation_prefixes = (
+                "pytest", "python -m pytest", "uv run pytest", "poetry run pytest",
+                "python ", "python3 ", "npm test", "npm run test", "make test", "make check",
+                "cargo test", "go test", "pnpm test", "yarn test",
+            )
+            mutating_markers = (
+                " >", " >>", "| tee", "sed -i", " mv ", " cp ", " rm ", " chmod ", " chown ", " touch ", " mkdir ",
+                "git add", "git commit", "git push", "git pull", "git merge", "git rebase", "git checkout", "git switch", "git restore", "git reset", "git clean", "git tag", "git cherry-pick",
+                "npm run build", "python -m build", "cargo build", "gradle build", "mvn ", "make ",
+            )
+            if any(marker in f" {command} " for marker in mutating_markers):
+                return {
+                    "content": f"Greenfield phase policy blocked effectful shell command during {phase or 'unknown_phase'}",
+                    "is_error": True,
+                }
+            if allow_validation_shell:
+                if not any(command.startswith(prefix) for prefix in validation_prefixes + readonly_prefixes):
+                    return {
+                        "content": f"Greenfield validate policy blocked non-validation shell command during {phase or 'unknown_phase'}",
+                        "is_error": True,
+                    }
+            elif not any(command.startswith(prefix) for prefix in readonly_prefixes):
+                return {
+                    "content": f"Greenfield read-only policy blocked shell command outside read-only allowlist during {phase or 'unknown_phase'}",
+                    "is_error": True,
+                }
+
     if getattr(runner, "_planning_read_only", False):
         if tool_name in {"Write", "Patch", "Edit"}:
             return {"content": "Planning mode is read-only: file mutation tools are blocked", "is_error": True}

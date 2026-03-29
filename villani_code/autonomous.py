@@ -144,6 +144,26 @@ class VillaniModeController:
         execution_state.mission.mission_context["greenfield_progress"] = dict(progress)
         return deliverables
 
+    def _sync_greenfield_direction_from_artifacts(self, execution_state: MissionExecutionState, deliverables: list[str]) -> None:
+        if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
+            return
+        if not deliverables:
+            return
+        joined = " ".join(str(x).lower() for x in deliverables)
+        inferred = ""
+        if any(token in joined for token in ("game", "adventure", "pygame")):
+            inferred = "game"
+        elif any(token in joined for token in ("cli", "command", "console")):
+            inferred = "python_cli_utility"
+        if not inferred:
+            return
+        current = str(execution_state.scratchpad.chosen_project_direction or execution_state.greenfield_selection.get("project_type", "")).strip()
+        if inferred != current:
+            execution_state.scratchpad.chosen_project_direction = inferred
+            execution_state.scratchpad.chosen_product_shape = inferred
+            execution_state.greenfield_selection["project_type"] = inferred
+            execution_state.mission.mission_context["greenfield_selection"] = dict(execution_state.greenfield_selection)
+
     def _initialize_scratchpad(self, mission: Mission, repo_signals: dict[str, Any]) -> MissionScratchpad:
         scratchpad = MissionScratchpad(
             mission_goal=mission.user_goal,
@@ -191,6 +211,47 @@ class VillaniModeController:
             outcome["status"] = "partial"
             outcome["reason"] = "no-regression guard: prior deliverables confirmed in scratchpad"
 
+    def _greenfield_completion_gate(self, execution_state: MissionExecutionState) -> dict[str, Any]:
+        if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
+            return {"ready": False}
+        progress = dict(execution_state.greenfield_progress or {})
+        deliverables = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
+        has_deliverables = bool(deliverables)
+        has_entrypoint = bool(execution_state.scratchpad.has_runnable_entrypoint)
+        has_validation_evidence = bool(execution_state.latest_command_results)
+        unresolved_critical = bool(progress.get("unresolved_critical_contract_violation", False))
+        return {
+            "ready": has_deliverables and has_entrypoint and has_validation_evidence and not unresolved_critical,
+            "has_deliverables": has_deliverables,
+            "has_entrypoint": has_entrypoint,
+            "has_validation_evidence": has_validation_evidence,
+            "unresolved_critical_contract_violation": unresolved_critical,
+        }
+
+    def _promote_greenfield_conclusion(self, execution_state: MissionExecutionState) -> None:
+        gate = self._greenfield_completion_gate(execution_state)
+        if not gate.get("ready"):
+            return
+        summarize_nodes = [n for n in execution_state.mission.nodes if n.phase == NodePhase.SUMMARIZE_OUTCOME]
+        if summarize_nodes:
+            summary_node = summarize_nodes[0]
+            if summary_node.status in {NodeStatus.PENDING, NodeStatus.FAILED, NodeStatus.READY}:
+                summary_node.status = NodeStatus.READY
+            append_mission_event(
+                str(self.repo),
+                execution_state.mission.mission_id,
+                {"type": "greenfield_completion_gate_open", "node_id": summary_node.node_id, "gate": gate},
+            )
+            return
+        recovery_nodes = self.planner.spawn_recovery_nodes(
+            execution_state.mission,
+            execution_state.mission.nodes[-1],
+            "advance_summarize",
+            "Greenfield completion gate met",
+        )
+        self.planner.expand_mission_graph(execution_state.mission, recovery_nodes)
+        append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "greenfield_completion_gate_open", "gate": gate, "spawned_nodes": [n.node_id for n in recovery_nodes]})
+
     def run(self) -> dict[str, Any]:
         if not (self.steering_objective or "").strip():
             snapshot = self.inspect_repo()
@@ -218,6 +279,7 @@ class VillaniModeController:
                 continue
             result = self._execute_node(mission_state, node)
             outcome = self._evaluate_node(mission_state, node, result)
+            self._promote_greenfield_conclusion(mission_state)
             if outcome.get("status") in {"failed", "stale", "partial"}:
                 self._handle_recovery(mission_state, node, outcome)
 
@@ -559,6 +621,7 @@ class VillaniModeController:
             execution_payload,
             str(outcome.get("status", "")),
         )
+        self._sync_greenfield_direction_from_artifacts(execution_state, persisted_deliverables)
         execution_state.scratchpad.update_from_execution_result(
             node.phase.value,
             str(outcome.get("status", "")),
@@ -576,6 +639,17 @@ class VillaniModeController:
                 node.phase in {NodePhase.IMPLEMENT_VERTICAL_SLICE, NodePhase.VALIDATE_PROJECT}
                 and str(outcome.get("status", "")) == "passed"
             )
+            progress = dict(execution_state.greenfield_progress or {})
+            critical_violation = bool(outcome.get("contract_violation")) and not bool(
+                outcome.get("user_deliverable_patch") and node.phase in self._GREENFIELD_READ_ONLY_PHASES
+            )
+            if bool(outcome.get("contract_violation")):
+                progress["last_contract_violation_phase"] = node.phase.value
+            progress["unresolved_critical_contract_violation"] = bool(
+                progress.get("unresolved_critical_contract_violation", False) or critical_violation
+            )
+            execution_state.greenfield_progress = progress
+            execution_state.mission.mission_context["greenfield_progress"] = dict(progress)
         self._apply_no_regression_guards(execution_state, outcome)
         execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
 
@@ -596,11 +670,8 @@ class VillaniModeController:
                 "validation_delta": validation_delta,
                 "greenfield_deliverables": persisted_deliverables,
                 "self_reported_validation_without_evidence": bool(outcome.get("self_reported_validation_without_evidence")),
-                "validation_evidence_kind": (
-                    "real_command_results"
-                    if command_results
-                    else ("self_reported_unverified" if outcome.get("self_reported_validation_claim") else "none")
-                ),
+                "validation_evidence_kind": "real_command_results" if command_results else "none",
+                "verification_status": str(outcome.get("verification_status", "validation_unproven")),
             }
         )
 
@@ -673,8 +744,32 @@ class VillaniModeController:
         outcome["authoritative_direction"] = execution_state.scratchpad.chosen_project_direction
         outcome["ignored_internal_paths"] = list(execution_state.scratchpad.ignored_internal_paths)
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
+            gate = self._greenfield_completion_gate(execution_state)
+            if gate.get("ready"):
+                append_mission_event(
+                    str(self.repo),
+                    execution_state.mission.mission_id,
+                    {"type": "recovery_suppressed", "node_id": node.node_id, "reason": "greenfield completion gate satisfied", "gate": gate},
+                )
+                return
             progress = dict(execution_state.greenfield_progress or {})
             has_scaffold_success = bool(progress.get("successful_greenfield_scaffold"))
+            salvageable_contract_violation = bool(outcome.get("contract_violation")) and bool(outcome.get("user_deliverable_patch"))
+            if salvageable_contract_violation:
+                strategy = "advance_validate" if execution_state.scratchpad.has_runnable_entrypoint else "rescope"
+                nodes = self.planner.spawn_recovery_nodes(
+                    execution_state.mission,
+                    node,
+                    strategy,
+                    "salvage deliverables created during read-only phase contract violation",
+                )
+                self.planner.expand_mission_graph(execution_state.mission, nodes)
+                append_mission_event(
+                    str(self.repo),
+                    execution_state.mission.mission_id,
+                    {"type": "contract_violation_salvaged", "node_id": node.node_id, "strategy": strategy, "spawned_nodes": [n.node_id for n in nodes]},
+                )
+                return
             if has_scaffold_success and node.phase in {
                 NodePhase.INSPECT_WORKSPACE,
                 NodePhase.CHOOSE_PROJECT_DIRECTION,
@@ -919,6 +1014,11 @@ class VillaniModeController:
                     f"  * {item.get('node_id')}: failed={item.get('failed')} passed={item.get('passed')} "
                     f"delta={item.get('delta')} fp={item.get('fingerprint') or 'none'}"
                 )
+        verification_timeline = report.get("verification_status_timeline", []) or []
+        if verification_timeline:
+            lines.append("- Verification status timeline (command-evidence authoritative):")
+            for item in verification_timeline[-12:]:
+                lines.append(f"  * {item.get('node_id')}: {item.get('verification_status', 'validation_unproven')}")
         if report.get("localization_evolution"):
             lines.append("- Localization evolution:")
             for item in (report.get("localization_evolution", []) or [])[-8:]:

@@ -16,11 +16,19 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
     if any(n.status == NodeStatus.BLOCKED for n in mission.nodes):
         return MissionOutcome.BLOCKED, "A mission node is blocked."
 
-    if state.consecutive_no_progress >= max_no_progress:
+    greenfield_gate_open = False
+    if mission.mission_type.value == "greenfield_build":
+        progress = dict(state.greenfield_progress or {})
+        persisted_deliverables = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if _is_user_space_path(str(x))]
+        has_validation_evidence = bool(state.latest_command_results)
+        unresolved_critical = bool(progress.get("unresolved_critical_contract_violation", False))
+        greenfield_gate_open = bool(persisted_deliverables) and bool(state.scratchpad.has_runnable_entrypoint) and has_validation_evidence and not unresolved_critical
+
+    if state.consecutive_no_progress >= max_no_progress and not greenfield_gate_open:
         return MissionOutcome.STAGNATED, "Repeated no-progress cycles exceeded threshold."
-    if state.repeated_delta_states >= 3:
+    if state.repeated_delta_states >= 3 and not greenfield_gate_open:
         return MissionOutcome.STAGNATED, "Repeated no/ambiguous delta outcomes exceeded threshold."
-    if state.consecutive_no_model_activity >= max_no_activity:
+    if state.consecutive_no_model_activity >= max_no_activity and not greenfield_gate_open:
         return MissionOutcome.EXHAUSTED, "Repeated no-activity cycles exceeded threshold."
 
     total_attempts = sum(n.attempts for n in mission.nodes)
@@ -44,6 +52,11 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
 
     if any("suspicious_breadth" in " ".join(n.evidence) for n in mission.nodes):
         return MissionOutcome.UNSAFE, "Suspicious patch breadth detected."
+
+    if greenfield_gate_open:
+        summaries = [n for n in mission.nodes if n.phase.value == "summarize_outcome"]
+        if summaries and all(n.status == NodeStatus.SUCCEEDED for n in summaries):
+            return MissionOutcome.SOLVED, "Greenfield completion gate satisfied and outcome summarized."
 
     if mission.nodes and all(n.status in terminal for n in mission.nodes):
         if mission.mission_type.value == "greenfield_build":
