@@ -9,6 +9,12 @@ from villani_code.evidence import parse_command_evidence
 from villani_code.repo_rules import is_ignored_repo_path
 from villani_code.mission import Mission, MissionExecutionState
 
+INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
+
+
+def _is_internal_artifact(path: str) -> bool:
+    return str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+
 
 def extract_runner_failures(result: dict[str, Any]) -> list[str]:
     failures: list[str] = []
@@ -200,13 +206,13 @@ def build_mission_summary(
     greenfield = {}
     if mission.mission_type.value == "greenfield_build":
         files_touched = sorted(set(files_touched))
-        user_deliverables = [p for p in files_touched if not p.startswith(".villani/")]
+        user_deliverables = [p for p in files_touched if not _is_internal_artifact(p)]
         greenfield = {
             "chosen_project_direction": (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
             "selection_rationale": (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
-            "internal_artifacts": [p for p in files_touched if p.startswith(".villani/")],
+            "internal_artifacts": [p for p in files_touched if _is_internal_artifact(p)],
             "runnable_slice": bool(user_deliverables),
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }

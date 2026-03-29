@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import re
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ class MissionNodeResult:
     model_activity: dict[str, int] = field(default_factory=dict)
     prose_only: bool = False
     acted: bool = False
+    clarification_requested: bool = False
     execution_payload: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -85,20 +87,42 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
         lines.append("GREENFIELD RULES: Build a real runnable deliverable in user workspace paths.")
         lines.append("Do not treat this as bugfix/localization-first work unless a build-generated bug appears.")
         lines.append("Files under .villani/ are internal artifacts only and do not count as project deliverables.")
+        lines.append("Do NOT ask the user for confirmation/approval/options. Act autonomously unless a true hard block exists.")
         if node.phase.value == "inspect_workspace":
             lines.append("Inspect workspace for constraints, sample data, README/notes hints, and feasible local project directions.")
         elif node.phase.value == "choose_project_direction":
-            lines.append("Produce 2-4 plausible project candidates, then choose one deterministic direction with rationale.")
+            lines.append("Produce 2-4 plausible runnable utility candidates, then choose one deterministic direction with rationale.")
+            lines.append("Docs-only, README-only, and suggestion-only directions are invalid unless the user explicitly asked for docs only.")
         elif node.phase.value == "scaffold_project":
             lines.append("Scaffold only the chosen project structure in user-facing paths. Avoid .villani/ outputs.")
+            lines.append("This phase must create at least one real user-space file (for example README.md, pyproject.toml, src/*, app/*, tests/*).")
         elif node.phase.value == "implement_vertical_slice":
             lines.append("Implement one minimal but usable vertical slice with a real entrypoint.")
         elif node.phase.value == "validate_project":
             lines.append("Run targeted smoke/test validation and capture concrete command evidence.")
         elif node.phase.value == "summarize_outcome":
             lines.append("Summarize what was built, where files live, how to run, and validation outcomes.")
+    lines.append("Avoid asking the user clarifying/confirmation questions; pick a reasonable default and continue autonomously.")
     lines.append("Stop when node objective is satisfied or clearly blocked. Provide concrete evidence.")
     return "\n".join(lines)
+
+
+_CLARIFICATION_PATTERNS: tuple[str, ...] = (
+    r"\bplease confirm\b",
+    r"\bdo you want me to proceed\b",
+    r"\bshould i continue\b",
+    r"\bwould you like me to\b",
+    r"\bwait for verification or continue\b",
+    r"\boption\s+[a-z0-9]\b",
+    r"\bconfirm\b.*\bproceed\b",
+)
+
+
+def _detect_clarification_request(text: str) -> bool:
+    low = (text or "").lower()
+    if "?" not in low:
+        return False
+    return any(re.search(pattern, low) for pattern in _CLARIFICATION_PATTERNS)
 
 
 def _git_changed_files(repo: Path) -> list[str]:
@@ -287,6 +311,7 @@ def execute_mission_node_with_runner(
         commands_run = [str(x).split(" (exit=", 1)[0] for x in execution_commands if str(x).strip()]
     text_blocks = (normalized.get("response", {}) or {}).get("content", []) if isinstance(normalized, dict) else []
     text = "\n".join(str(b.get("text", "")) for b in text_blocks if isinstance(b, dict))
+    clarification_requested = _detect_clarification_request(text)
     patch_detected = bool(execution.get("patch_detected", bool(changed)))
     meaningful_patch = bool(execution.get("meaningful_patch", bool(execution.get("intentional_changes")) or bool(changed)))
     prose_only = bool(execution.get("prose_only", (not changed) and (not command_results) and model_activity.get("tool_results", 0) == 0 and bool(text.strip())))
@@ -294,7 +319,7 @@ def execute_mission_node_with_runner(
     transcript_summary = (
         f"tools={model_activity.get('tool_results', 0)} "
         f"errors={model_activity.get('tool_errors', 0)} "
-        f"commands={len(command_results)} changed={len(changed)}"
+        f"commands={len(command_results)} changed={len(changed)} clarification={1 if clarification_requested else 0}"
     )
     return MissionNodeResult(
         response=normalized,
@@ -308,6 +333,7 @@ def execute_mission_node_with_runner(
         model_activity=model_activity,
         prose_only=prose_only,
         acted=acted,
+        clarification_requested=clarification_requested,
         execution_payload={
             "changed_files": list(changed),
             "patch_detected": patch_detected,
@@ -321,5 +347,6 @@ def execute_mission_node_with_runner(
             "model_activity": dict(model_activity),
             "prose_only": prose_only,
             "acted": acted,
+            "clarification_requested": clarification_requested,
         },
     )

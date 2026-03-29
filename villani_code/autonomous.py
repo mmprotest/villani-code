@@ -175,13 +175,27 @@ class VillaniModeController:
             if "interesting" in prompt or "cool" in prompt:
                 c["fit"] = round(min(1.0, float(c["fit"]) + 0.03), 2)
             c["score"] = round((0.3 * c["utility"]) + (0.25 * c["feasibility"]) + (0.2 * c["fit"]) + (0.15 * c["validation"]) + (0.1 * c["bounded_scope"]), 3)
-        ranked = sorted(candidates, key=lambda item: item["score"], reverse=True)
+        deterministic_preference = {
+            "python_cli_utility": 0,
+            "file_report_generator": 1,
+            "data_quality_checker": 2,
+            "csv_analysis_cli": 3,
+        }
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -float(item.get("score", 0.0)),
+                deterministic_preference.get(str(item.get("project_type", "")), 99),
+                str(item.get("project_type", "")),
+            ),
+        )
         chosen = dict(ranked[0]) if ranked else {"project_type": "python_cli_utility", "rationale": "default fallback"}
         selection = {
             "project_type": chosen.get("project_type", "python_cli_utility"),
             "selection_rationale": chosen.get("rationale", ""),
             "constraints": {
                 "avoid_internal_deliverables": True,
+                "docs_only_invalid_for_open_greenfield": True,
                 "target_paths": "workspace_user_paths_only",
                 "single_mission_scope": True,
             },
@@ -251,6 +265,7 @@ class VillaniModeController:
             "model_activity": mission_result.model_activity,
             "acted": mission_result.acted,
             "prose_only": mission_result.prose_only,
+            "clarification_requested": mission_result.clarification_requested,
             "execution_payload": mission_result.execution_payload,
             "localization": localization_result,
         }
@@ -379,6 +394,7 @@ class VillaniModeController:
             validation_delta=validation_delta,
             mission_type=execution_state.mission.mission_type.value,
             node_phase=node.phase.value,
+            clarification_requested=bool(node_result.get("clarification_requested")),
         )
 
         failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
