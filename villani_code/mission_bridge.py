@@ -209,6 +209,25 @@ def _extract_write_paths_from_transcript(result: dict[str, Any]) -> list[str]:
     return sorted(dict.fromkeys(touched))
 
 
+def _extract_shell_commands_from_transcript(result: dict[str, Any]) -> list[str]:
+    transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
+    tool_invocations = list(transcript.get("tool_invocations", []) or [])
+    shell_tools = {"bash", "powershell", "shell", "cmd"}
+    commands: list[str] = []
+    for invocation in tool_invocations:
+        if not isinstance(invocation, dict):
+            continue
+        tool_name = str(invocation.get("name", "")).strip().lower()
+        if tool_name not in shell_tools:
+            continue
+        payload = invocation.get("input")
+        payload = payload if isinstance(payload, dict) else {}
+        command = str(payload.get("command", "")).strip()
+        if command:
+            commands.append(command)
+    return sorted(dict.fromkeys(commands))
+
+
 _SELF_REPORTED_VALIDATION_PATTERNS: tuple[str, ...] = (
     r"\btests?\s+passed\b",
     r"\bverification\s+complete\b",
@@ -373,9 +392,9 @@ def execute_mission_node_with_runner(
     execution = _extract_execution_payload(normalized)
     changed_all = _extract_changed_files_from_result(normalized, before, after)
     write_paths = _extract_write_paths_from_transcript(normalized)
-    if write_paths:
-        changed_all = sorted(dict.fromkeys(list(changed_all) + write_paths))
+    shell_invocations = _extract_shell_commands_from_transcript(normalized)
     changed, internal_changed = split_internal_paths(changed_all)
+    blocked_write_paths = [path for path in write_paths if path not in set(changed_all)]
     execution_commands = list(execution.get("validation_artifacts", []) or [])
     command_results = _extract_command_results_from_execution(execution)
     failures = _extract_failures_from_execution(execution)
@@ -438,6 +457,8 @@ def execute_mission_node_with_runner(
             "clarification_requested": clarification_requested,
             "self_reported_validation_claim": self_reported_validation_claim,
             "self_reported_validation_without_evidence": bool(self_reported_validation_claim and not command_results),
-            "write_tool_paths": list(write_paths),
+            "attempted_write_paths": list(write_paths),
+            "blocked_write_paths": list(blocked_write_paths),
+            "shell_invocations": list(shell_invocations),
         },
     )

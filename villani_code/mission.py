@@ -147,6 +147,9 @@ class NodeStatus(StrEnum):
 
 class MissionOutcome(StrEnum):
     SOLVED = "solved"
+    PARTIAL_SUCCESS_BUILT_UNVALIDATED = "partial_success_built_unvalidated"
+    PARTIAL_SUCCESS_BUILT_VALIDATION_FAILED = "partial_success_built_validation_failed"
+    PARTIAL_SUCCESS_SCAFFOLD_ONLY = "partial_success_scaffold_only"
     BLOCKED = "blocked"
     EXHAUSTED = "exhausted"
     STAGNATED = "stagnated"

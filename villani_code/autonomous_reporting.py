@@ -216,6 +216,22 @@ def build_mission_summary(
         "succeeded": sorted({p for n in mission.nodes if n.status.value == "succeeded" for p in n.last_outcome.changed_files}),
         "failed": sorted({p for n in mission.nodes if n.status.value == "failed" for p in n.last_outcome.changed_files}),
     }
+    blocked_write_attempts = sorted(
+        {
+            str(path)
+            for item in validations
+            for path in list((item.get("blocked_write_paths", []) or []))
+            if str(path).strip()
+        }
+    )
+    attempted_write_paths = sorted(
+        {
+            str(path)
+            for item in validations
+            for path in list((item.get("attempted_write_paths", []) or []))
+            if str(path).strip()
+        }
+    )
     greenfield = {}
     scratchpad = execution_state.scratchpad
     if mission.mission_type.value == "greenfield_build":
@@ -238,6 +254,15 @@ def build_mission_summary(
             "mission_completion_state": "complete" if bool(scratchpad.validation_proven and user_deliverables and scratchpad.has_runnable_entrypoint) else "partial",
             "remaining_next_action": "" if bool(scratchpad.validation_proven) else (scratchpad.next_required_action or "validate_project"),
             "no_regression_guard": bool(user_deliverables),
+            "validation_truth": {
+                "authoritative_command_evidence": bool(validation_evidence["real_validation_evidence_nodes"]),
+                "self_reported_unverified": bool(validation_evidence["self_reported_unverified_nodes"]),
+            },
+            "write_accounting": {
+                "actual_user_space_changes": sorted(set(files_touched)),
+                "attempted_write_paths": attempted_write_paths,
+                "blocked_write_paths": blocked_write_attempts,
+            },
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }
     return {
@@ -264,6 +289,11 @@ def build_mission_summary(
         "validation_results": validations,
         "validation_timeline": validation_timeline,
         "validation_evidence": validation_evidence,
+        "validation_truth_statement": (
+            "Validation backed by real command evidence."
+            if validation_evidence["real_validation_evidence_nodes"]
+            else "Validation not proven by command evidence; any prose claims are self-reported/unverified."
+        ),
         "verification_status_timeline": [
             {
                 "node_id": item.get("node_id", ""),
