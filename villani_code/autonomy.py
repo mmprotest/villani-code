@@ -59,6 +59,12 @@ def normalize_task_contract(value: str | TaskContract | None) -> TaskContract:
         "validation": TaskContract.VALIDATE,
         "validate": TaskContract.VALIDATE,
         "effectful": TaskContract.NARROW_FIX,
+        "inspect_workspace": TaskContract.INSPECT,
+        "choose_project_direction": TaskContract.INSPECT,
+        "scaffold_project": TaskContract.IMPLEMENT,
+        "implement_vertical_slice": TaskContract.IMPLEMENT,
+        "validate_project": TaskContract.VALIDATE,
+        "summarize_outcome": TaskContract.SUMMARIZE,
     }
     if raw in aliases:
         return aliases[raw]

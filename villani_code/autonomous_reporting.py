@@ -234,6 +234,9 @@ def build_mission_summary(
             "internal_artifacts": internal_artifacts,
             "runnable_slice": bool(user_deliverables),
             "successful_greenfield_scaffold": bool(progress.get("successful_greenfield_scaffold")),
+            "validation_state": "proven" if bool(scratchpad.validation_proven) else "unproven",
+            "mission_completion_state": "complete" if bool(scratchpad.validation_proven and user_deliverables and scratchpad.has_runnable_entrypoint) else "partial",
+            "remaining_next_action": "" if bool(scratchpad.validation_proven) else (scratchpad.next_required_action or "validate_project"),
             "no_regression_guard": bool(user_deliverables),
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }

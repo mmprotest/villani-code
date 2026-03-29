@@ -119,6 +119,7 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
             lines.append("WRITE POLICY: WRITE-ALLOWED PHASE for targeted implementation.")
         elif node.phase.value == "validate_project":
             lines.append("Run targeted smoke/test validation and capture concrete command evidence.")
+            lines.append("REQUIREMENT: Run at least one real shell command and report its exact exit status.")
             lines.append("WRITE POLICY: validation-focused phase; do not claim passing validation without real command results.")
         elif node.phase.value == "summarize_outcome":
             lines.append("Summarize what was built, where files live, how to run, and validation outcomes.")

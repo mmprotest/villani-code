@@ -20,7 +20,11 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
     if mission.mission_type.value == "greenfield_build":
         progress = dict(state.greenfield_progress or {})
         persisted_deliverables = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if _is_user_space_path(str(x))]
-        has_validation_evidence = bool(state.latest_command_results)
+        has_validation_evidence = any(
+            str(item.get("node_phase", "")) == "validate_project"
+            and str(item.get("validation_evidence_kind", "")) == "real_command_results"
+            for item in state.verification_history
+        )
         unresolved_critical = bool(progress.get("unresolved_critical_contract_violation", False))
         greenfield_gate_open = bool(persisted_deliverables) and bool(state.scratchpad.has_runnable_entrypoint) and has_validation_evidence and not unresolved_critical
 
