@@ -66,7 +66,8 @@ class MissionPlanner:
         if mission_type == MissionType.GREENFIELD_BUILD:
             return [
                 "Choose one feasible project direction with rationale.",
-                "Create runnable user-facing deliverables outside .villani/.",
+                "First effectful build phase must create real user-space scaffolding outside internal artifact folders.",
+                "Create runnable user-facing deliverables outside .villani/ and .villani_code/.",
                 "Implement one real vertical slice with a usable entrypoint.",
                 "Run targeted local validation and summarize run instructions.",
             ]
@@ -153,6 +154,8 @@ class MissionPlanner:
                 return [MissionNode(base_id, "Choose simpler project direction", NodePhase.CHOOSE_PROJECT_DIRECTION, f"Recover from: {reason}", "choose_project_direction", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "rescope":
                 return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_VERTICAL_SLICE, f"Recover from: {reason}", "implement_vertical_slice", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            if strategy == "force_scaffold":
+                return [MissionNode(base_id, "Force user-space scaffold", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             return [MissionNode(base_id, "Recover greenfield build", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
 
         if strategy == "broaden":

@@ -6,6 +6,19 @@ from typing import Any
 from villani_code.autonomy import TaskContract, contract_allows_edits, normalize_task_contract
 from villani_code.mission import DeltaClassification
 
+INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
+
+
+def _is_internal_artifact(path: str) -> bool:
+    return str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+
+
+def _is_docs_only_path(path: str) -> bool:
+    low = str(path).lower()
+    if low.startswith("docs/"):
+        return True
+    return low.endswith((".md", ".rst", ".txt")) or low.endswith("/readme")
+
 
 @dataclass(slots=True)
 class VerificationBaseline:
@@ -181,6 +194,7 @@ def classify_node_outcome(
     validation_delta: dict[str, Any] | None = None,
     mission_type: str = "",
     node_phase: str = "",
+    clarification_requested: bool = False,
 ) -> dict[str, Any]:
     contract = normalize_task_contract(contract_type)
     localization = localization or {}
@@ -197,7 +211,9 @@ def classify_node_outcome(
     failure_fingerprints = [str(r.get("failure_fingerprint", "")) for r in command_results if r.get("failure_fingerprint")]
     repeated_across_history = any(fp in prior_fingerprints for fp in failure_fingerprints)
     repeated_failure = repeated_in_run or repeated_across_history
-    user_space_changes = [p for p in changed_files if not str(p).startswith(".villani/")]
+    user_space_changes = [p for p in changed_files if not _is_internal_artifact(str(p))]
+    internal_only_patch = bool(changed_files) and not bool(user_space_changes)
+    docs_only_user_space = bool(user_space_changes) and all(_is_docs_only_path(p) for p in user_space_changes)
     patch_exists = bool(changed_files)
     user_deliverable_patch = bool(user_space_changes)
     meaningful_patch = bool(static_result.get("meaningful_patch"))
@@ -224,7 +240,9 @@ def classify_node_outcome(
     status = "partial"
     reason = "insufficient evidence"
 
-    if prose_only:
+    if clarification_requested:
+        status, reason = "failed", "autonomous node asked user for confirmation/clarification"
+    elif prose_only:
         status, reason = "stale", "runner produced prose-only output"
     elif contract == TaskContract.LOCALIZE:
         if delta.classification in {DeltaClassification.STRONG_IMPROVEMENT, DeltaClassification.WEAK_IMPROVEMENT}:
@@ -282,9 +300,15 @@ def classify_node_outcome(
         status, reason = ("passed", "non-edit contract satisfied") if (any_command or static_result.get("findings") == []) else ("partial", "non-edit node incomplete")
 
     if mission_type == "greenfield_build":
-        if node_phase in {"scaffold_project", "implement_vertical_slice"}:
+        if clarification_requested:
+            status, reason = "failed", "greenfield autonomous execution asked for confirmation"
+        elif internal_only_patch:
+            status, reason = "failed", "greenfield changes were internal artifacts only (.villani/.villani_code)"
+        elif node_phase in {"scaffold_project", "implement_vertical_slice"}:
             if not user_deliverable_patch:
-                status, reason = "failed", "no user-space deliverable created outside .villani/"
+                status, reason = "failed", "no user-space deliverable created outside internal artifact folders"
+            elif docs_only_user_space:
+                status, reason = "failed", "greenfield build produced docs-only output; runnable artifacts required"
             else:
                 status, reason = "passed", "user-space deliverable created for greenfield build"
         elif node_phase == "validate_project":
@@ -316,9 +340,12 @@ def classify_node_outcome(
         "patch_no_improvement": patch_no_improvement,
         "tool_denied": False,
         "prose_only": prose_only,
+        "clarification_requested": clarification_requested,
         "changed_files": list(changed_files),
         "user_space_changed_files": user_space_changes,
         "user_deliverable_patch": user_deliverable_patch,
+        "internal_only_patch": internal_only_patch,
+        "docs_only_user_space": docs_only_user_space,
         "failure_fingerprints": failure_fingerprints,
         "localization_weak": bool(localization) and not has_localization,
         "localization_stale": localization_stale,

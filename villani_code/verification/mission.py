@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from villani_code.mission import MissionExecutionState, MissionOutcome, NodeStatus
 
+INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
+
+
+def _is_user_space_path(path: str) -> bool:
+    return not str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+
 
 def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int = 3, max_no_activity: int = 3, budget_limit: int = 30) -> tuple[MissionOutcome | None, str]:
     mission = state.mission
@@ -43,13 +49,17 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
         if mission.mission_type.value == "greenfield_build":
             deliverable_nodes = [n for n in mission.nodes if n.phase.value in {"scaffold_project", "implement_vertical_slice"}]
             deliverables_ok = all(n.status == NodeStatus.SUCCEEDED for n in deliverable_nodes) and any(
-                any(not p.startswith(".villani/") for p in n.last_outcome.changed_files) for n in deliverable_nodes
+                any(_is_user_space_path(p) for p in n.last_outcome.changed_files) for n in deliverable_nodes
+            )
+            scaffold_nodes = [n for n in mission.nodes if n.phase.value == "scaffold_project"]
+            early_scaffold_ok = bool(scaffold_nodes) and all(
+                n.status == NodeStatus.SUCCEEDED and any(_is_user_space_path(p) for p in n.last_outcome.changed_files) for n in scaffold_nodes
             )
             validate_nodes = [n for n in mission.nodes if n.phase.value == "validate_project"]
             summaries = [n for n in mission.nodes if n.phase.value == "summarize_outcome"]
-            if deliverables_ok and all(n.status == NodeStatus.SUCCEEDED for n in validate_nodes + summaries):
+            if early_scaffold_ok and deliverables_ok and all(n.status == NodeStatus.SUCCEEDED for n in validate_nodes + summaries):
                 return MissionOutcome.SOLVED, "Greenfield mission completed with user-space runnable deliverable evidence."
-            return MissionOutcome.EXHAUSTED, "Greenfield graph finished without required user-space deliverable and validation evidence."
+            return MissionOutcome.EXHAUSTED, "Greenfield graph finished without required early user-space scaffold + deliverable + validation evidence."
         required = [n for n in mission.nodes if n.contract_type in {"validate", "contain_change", "narrow_fix", "broad_fix", "implement"}]
         required_ok = all(n.status == NodeStatus.SUCCEEDED for n in required) if required else any(n.status == NodeStatus.SUCCEEDED for n in mission.nodes)
         if required_ok:
