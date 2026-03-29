@@ -40,6 +40,16 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
         return MissionOutcome.UNSAFE, "Suspicious patch breadth detected."
 
     if mission.nodes and all(n.status in terminal for n in mission.nodes):
+        if mission.mission_type.value == "greenfield_build":
+            deliverable_nodes = [n for n in mission.nodes if n.phase.value in {"scaffold_project", "implement_vertical_slice"}]
+            deliverables_ok = all(n.status == NodeStatus.SUCCEEDED for n in deliverable_nodes) and any(
+                any(not p.startswith(".villani/") for p in n.last_outcome.changed_files) for n in deliverable_nodes
+            )
+            validate_nodes = [n for n in mission.nodes if n.phase.value == "validate_project"]
+            summaries = [n for n in mission.nodes if n.phase.value == "summarize_outcome"]
+            if deliverables_ok and all(n.status == NodeStatus.SUCCEEDED for n in validate_nodes + summaries):
+                return MissionOutcome.SOLVED, "Greenfield mission completed with user-space runnable deliverable evidence."
+            return MissionOutcome.EXHAUSTED, "Greenfield graph finished without required user-space deliverable and validation evidence."
         required = [n for n in mission.nodes if n.contract_type in {"validate", "contain_change", "narrow_fix", "broad_fix", "implement"}]
         required_ok = all(n.status == NodeStatus.SUCCEEDED for n in required) if required else any(n.status == NodeStatus.SUCCEEDED for n in mission.nodes)
         if required_ok:

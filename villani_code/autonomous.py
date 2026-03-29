@@ -128,6 +128,10 @@ class VillaniModeController:
         objective = (self.steering_objective or "").strip()
         self._repo_signals = self._collect_repo_signals()
         mission = self.planner.build_mission(objective, str(self.repo), repo_signals=self._repo_signals)
+        if mission.mission_type == MissionType.GREENFIELD_BUILD:
+            candidates, selection = self._plan_greenfield_direction(objective, self._repo_signals)
+            mission.mission_context["greenfield_candidates"] = candidates
+            mission.mission_context["greenfield_selection"] = selection
 
         if mission.mission_type == MissionType.REGRESSION_CONTAINMENT:
             context = build_change_containment_context(str(self.repo))
@@ -140,11 +144,50 @@ class VillaniModeController:
 
         baseline = self._git_changed_files()
         state = MissionExecutionState(mission=mission, changed_files_baseline=baseline)
+        if mission.mission_type == MissionType.GREENFIELD_BUILD:
+            state.greenfield_candidates = list(mission.mission_context.get("greenfield_candidates", []))
+            state.greenfield_selection = dict(mission.mission_context.get("greenfield_selection", {}))
         append_mission_event(str(self.repo), mission.mission_id, {"type": "mission_initialized", "goal": mission.user_goal, "mission_type": mission.mission_type.value})
         return state
 
     def _collect_repo_signals(self) -> dict[str, Any]:
         return collect_repo_signals(str(self.repo))
+
+    def _plan_greenfield_direction(self, objective: str, signals: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        prompt = (objective or "").lower()
+        hint_files = list(signals.get("workspace_hint_files", []) or [])
+        sample_data = list(signals.get("sample_data_files", []) or [])
+        language_hints = list(signals.get("language_hints", []) or [])
+        likely = list(signals.get("likely_project_directions", []) or [])
+        candidates: list[dict[str, Any]] = [
+            {"project_type": "python_cli_utility", "utility": 0.88, "feasibility": 0.9, "fit": 0.6, "validation": 0.9, "bounded_scope": 0.9, "rationale": "Fast local tool with clear smoke validation."},
+            {"project_type": "file_report_generator", "utility": 0.82, "feasibility": 0.88, "fit": 0.58, "validation": 0.88, "bounded_scope": 0.92, "rationale": "Produces concrete output artifact and easy run path."},
+        ]
+        if sample_data:
+            candidates.append({"project_type": "data_quality_checker", "utility": 0.92, "feasibility": 0.86, "fit": 0.94, "validation": 0.9, "bounded_scope": 0.82, "rationale": "Workspace includes sample data; quality checks are directly useful."})
+        if "python" in language_hints:
+            candidates.append({"project_type": "csv_analysis_cli", "utility": 0.87, "feasibility": 0.86, "fit": 0.78, "validation": 0.86, "bounded_scope": 0.84, "rationale": "Python tooling hints support a compact analysis CLI."})
+        for c in candidates:
+            if c["project_type"] in likely:
+                c["fit"] = round(min(1.0, float(c["fit"]) + 0.12), 2)
+            if "useful" in prompt:
+                c["utility"] = round(min(1.0, float(c["utility"]) + 0.05), 2)
+            if "interesting" in prompt or "cool" in prompt:
+                c["fit"] = round(min(1.0, float(c["fit"]) + 0.03), 2)
+            c["score"] = round((0.3 * c["utility"]) + (0.25 * c["feasibility"]) + (0.2 * c["fit"]) + (0.15 * c["validation"]) + (0.1 * c["bounded_scope"]), 3)
+        ranked = sorted(candidates, key=lambda item: item["score"], reverse=True)
+        chosen = dict(ranked[0]) if ranked else {"project_type": "python_cli_utility", "rationale": "default fallback"}
+        selection = {
+            "project_type": chosen.get("project_type", "python_cli_utility"),
+            "selection_rationale": chosen.get("rationale", ""),
+            "constraints": {
+                "avoid_internal_deliverables": True,
+                "target_paths": "workspace_user_paths_only",
+                "single_mission_scope": True,
+            },
+            "hint_files_considered": hint_files[:10],
+        }
+        return ranked[:4], selection
 
     def _select_next_node(self, execution_state: MissionExecutionState):
         self._activity("Selecting next ready mission node.")
@@ -278,6 +321,10 @@ class VillaniModeController:
                 node.confidence = max(node.confidence, min(0.95, loc.confidence + 0.05))
                 if loc.repair_intent and loc.repair_intent not in node.evidence:
                     node.evidence.append(f"localized_intent:{loc.repair_intent}")
+            if node.phase in {NodePhase.SCAFFOLD_PROJECT, NodePhase.IMPLEMENT_VERTICAL_SLICE} and execution_state.greenfield_selection:
+                chosen = str(execution_state.greenfield_selection.get("project_type", "")).strip()
+                if chosen:
+                    node.evidence.append(f"greenfield_selected:{chosen}")
 
     def _evaluate_node(self, execution_state: MissionExecutionState, node: Any, node_result: dict[str, Any]) -> dict[str, Any]:
         self._activity(f"Evaluating node outcome for {node.node_id} with contract-aware verification.")
@@ -330,6 +377,8 @@ class VillaniModeController:
             validation_summary=validation_summary,
             execution_payload=execution_payload,
             validation_delta=validation_delta,
+            mission_type=execution_state.mission.mission_type.value,
+            node_phase=node.phase.value,
         )
 
         failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
@@ -618,4 +667,10 @@ class VillaniModeController:
                     f"  * conf={item.get('confidence'):.2f} bug_class={item.get('bug_class')} "
                     f"targets={', '.join(item.get('targets', [])[:4])}"
                 )
+        if report.get("greenfield_report"):
+            greenfield = dict(report.get("greenfield_report", {}) or {})
+            lines.append("- Greenfield selection:")
+            lines.append(f"  * direction={greenfield.get('chosen_project_direction', '')}")
+            lines.append(f"  * rationale={greenfield.get('selection_rationale', '')}")
+            lines.append(f"  * deliverables={', '.join(greenfield.get('user_space_deliverables', [])[:10]) or 'none'}")
         return "\n".join(lines)

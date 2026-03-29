@@ -10,7 +10,7 @@ from villani_code.mission import Mission, MissionNode, MissionType, NodePhase, N
 
 class MissionPlanner:
     def build_mission(self, objective: str, repo_root: str, repo_signals: dict[str, Any] | None = None) -> Mission:
-        mission_type = self.classify_mission_type(objective)
+        mission_type = self.classify_mission_type(objective, repo_signals=repo_signals)
         mission = Mission(
             mission_id=f"mission-{uuid.uuid4().hex[:10]}",
             user_goal=objective.strip() or "maintenance patrol and stabilization",
@@ -21,8 +21,30 @@ class MissionPlanner:
         mission.nodes = self.build_initial_nodes(mission, repo_signals=repo_signals)
         return mission
 
-    def classify_mission_type(self, objective: str) -> MissionType:
+    def classify_mission_type(self, objective: str, repo_signals: dict[str, Any] | None = None) -> MissionType:
         low = (objective or "").lower()
+        repo_signals = repo_signals or {}
+        greenfield_prompt = any(
+            phrase in low
+            for phrase in [
+                "build something",
+                "make something",
+                "create something",
+                "start a project",
+                "empty sandbox",
+                "build a tool",
+                "local tool",
+                "something interesting",
+                "something useful",
+                "something cool",
+            ]
+        )
+        if greenfield_prompt and (
+            bool(repo_signals.get("workspace_empty_or_internal_only"))
+            or bool(repo_signals.get("workspace_lightweight_hints_only"))
+            or not bool(repo_signals.get("existing_project_detected"))
+        ):
+            return MissionType.GREENFIELD_BUILD
         if not low.strip():
             return MissionType.MAINTENANCE
         if any(k in low for k in ["contain", "regression", "fallout", "blast radius", "diff"]):
@@ -41,6 +63,13 @@ class MissionPlanner:
         base = ["Produce evidence-backed progress.", "Run targeted validation after each effectful change."]
         if mission_type == MissionType.FEATURE:
             return base + ["Feature behavior implemented.", "No obvious regressions in impacted area."]
+        if mission_type == MissionType.GREENFIELD_BUILD:
+            return [
+                "Choose one feasible project direction with rationale.",
+                "Create runnable user-facing deliverables outside .villani/.",
+                "Implement one real vertical slice with a usable entrypoint.",
+                "Run targeted local validation and summarize run instructions.",
+            ]
         if mission_type == MissionType.REGRESSION_CONTAINMENT:
             return base + ["Containment checks pass for changed surface.", "Blast radius validation is complete."]
         if mission_type == MissionType.MAINTENANCE:
@@ -67,7 +96,15 @@ class MissionPlanner:
                 status=NodeStatus.READY if not deps else NodeStatus.PENDING,
             )
 
-        if mission.mission_type in {MissionType.BUGFIX, MissionType.REPO_STABILIZATION, MissionType.NARROW_REFACTOR}:
+        if mission.mission_type == MissionType.GREENFIELD_BUILD:
+            n1 = _n("inspect-workspace", "Inspect workspace", NodePhase.INSPECT_WORKSPACE, TaskContract.INSPECT.value, "Inspect workspace hints, constraints, and feasible build targets")
+            n2 = _n("choose-direction", "Choose project direction", NodePhase.CHOOSE_PROJECT_DIRECTION, "choose_project_direction", "Generate candidates and choose one bounded, useful project direction", [n1.node_id])
+            n3 = _n("scaffold-project", "Scaffold project", NodePhase.SCAFFOLD_PROJECT, "scaffold_project", "Scaffold chosen project in user workspace paths (not .villani/)", [n2.node_id])
+            n4 = _n("vertical-slice", "Implement vertical slice", NodePhase.IMPLEMENT_VERTICAL_SLICE, "implement_vertical_slice", "Implement a minimal but real runnable slice", [n3.node_id])
+            n5 = _n("validate-project", "Validate project", NodePhase.VALIDATE_PROJECT, "validate_project", "Run targeted validation / smoke checks for the built slice", [n4.node_id])
+            n6 = _n("summarize-outcome", "Summarize outcome", NodePhase.SUMMARIZE_OUTCOME, "summarize_outcome", "Summarize what was built, why, and how to run it", [n5.node_id])
+            nodes = [n1, n2, n3, n4, n5, n6]
+        elif mission.mission_type in {MissionType.BUGFIX, MissionType.REPO_STABILIZATION, MissionType.NARROW_REFACTOR}:
             n1 = _n("localize", "Localize likely fault", NodePhase.LOCALIZE, TaskContract.LOCALIZE.value, mission.user_goal)
             n2 = _n("repro", "Reproduce failure", NodePhase.REPRODUCE, TaskContract.REPRODUCE.value, "Reproduce and capture failing signal", [n1.node_id])
             n3 = _n("fix", "Apply minimal fix", NodePhase.NARROW_FIX, TaskContract.NARROW_FIX.value, "Implement smallest safe change", [n2.node_id])
@@ -91,7 +128,7 @@ class MissionPlanner:
             n1 = _n("validate", "Run validation", NodePhase.VALIDATE, TaskContract.VALIDATE.value, mission.user_goal)
             n2 = _n("summary", "Summarize validation", NodePhase.SUMMARIZE, TaskContract.SUMMARIZE.value, "Summarize validation evidence", [n1.node_id])
             nodes = [n1, n2]
-        else:  # maintenance
+        else:
             n1 = _n("inspect-repo", "Inspect repository health", NodePhase.INSPECT, TaskContract.INSPECT.value, "Map docs/test/config/tooling risk signals")
             n2 = _n("localize", "Localize maintenance target", NodePhase.LOCALIZE, TaskContract.LOCALIZE.value, "Localize highest-leverage maintenance target", [n1.node_id])
             n3 = _n("inspect-target", "Inspect localized area", NodePhase.INSPECT, TaskContract.INSPECT.value, "Inspect localized files for cleanup and reliability opportunities", [n2.node_id])
@@ -109,14 +146,20 @@ class MissionPlanner:
         base_id = f"{mission.mission_id}-recovery-{uuid.uuid4().hex[:6]}"
         validation = list(failed_node.validation_commands[:3])
         candidate_files = list(failed_node.candidate_files[:20])
+        if mission.mission_type == MissionType.GREENFIELD_BUILD:
+            if strategy == "broaden":
+                return [MissionNode(base_id, "Broaden workspace inspection", NodePhase.INSPECT_WORKSPACE, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            if strategy == "simplify_direction":
+                return [MissionNode(base_id, "Choose simpler project direction", NodePhase.CHOOSE_PROJECT_DIRECTION, f"Recover from: {reason}", "choose_project_direction", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            if strategy == "rescope":
+                return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_VERTICAL_SLICE, f"Recover from: {reason}", "implement_vertical_slice", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            return [MissionNode(base_id, "Recover greenfield build", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+
         if strategy == "broaden":
-            node = MissionNode(base_id, "Broaden inspection", NodePhase.INSPECT, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
-            return [node]
+            return [MissionNode(base_id, "Broaden inspection", NodePhase.INSPECT, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
         if strategy == "relocalize":
-            node = MissionNode(base_id, "Re-localize root cause", NodePhase.LOCALIZE, f"Recover from: {reason}", TaskContract.LOCALIZE.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
-            return [node]
-        node = MissionNode(base_id, "Narrow repair", NodePhase.NARROW_FIX, f"Recover from: {reason}", TaskContract.NARROW_FIX.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)
-        return [node]
+            return [MissionNode(base_id, "Re-localize root cause", NodePhase.LOCALIZE, f"Recover from: {reason}", TaskContract.LOCALIZE.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+        return [MissionNode(base_id, "Narrow repair", NodePhase.NARROW_FIX, f"Recover from: {reason}", TaskContract.NARROW_FIX.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
 
     def expand_mission_graph(self, mission: Mission, extra_nodes: list[MissionNode]) -> Mission:
         existing_ids = {n.node_id for n in mission.nodes}

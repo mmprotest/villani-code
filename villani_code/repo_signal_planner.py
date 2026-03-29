@@ -9,11 +9,19 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
     repo = Path(repo_root)
     files = [p for p in repo.rglob("*") if p.is_file() and ".git" not in p.parts]
     rel = [p.relative_to(repo).as_posix() for p in files]
+    non_internal = [x for x in rel if not x.startswith(".villani/")]
 
     source_roots = sorted({x.split("/", 1)[0] for x in rel if x.startswith(("src/", "lib/", "app/", "villani_code/"))})
     test_roots = sorted({x.split("/", 1)[0] for x in rel if x.startswith(("tests/", "test/")) or "/tests/" in x})
     config_files = sorted([x for x in rel if Path(x).name in {"pyproject.toml", "package.json", "Makefile", "tox.ini", "setup.cfg", "setup.py", "requirements.txt", "ruff.toml", "mypy.ini"}])
     docs = [x for x in rel if x.lower().startswith("docs/") or Path(x).name.lower().startswith("readme")]
+    hint_files = [
+        x
+        for x in non_internal
+        if Path(x).name.lower().startswith(("readme", "notes", "constraints"))
+        or x.lower().endswith((".csv", ".tsv", ".json", ".yaml", ".yml", ".txt"))
+    ]
+    code_files = [x for x in non_internal if Path(x).suffix.lower() in {".py", ".js", ".ts", ".go", ".rs", ".java", ".rb"}]
 
     tooling_hints: list[str] = []
     likely_validation: list[str] = []
@@ -54,4 +62,25 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
         "git_available": shutil.which("git") is not None and (repo / ".git").exists(),
         "language_hints": tooling_hints,
         "repo_size_files": len(rel),
+        "non_internal_file_count": len(non_internal),
+        "workspace_empty_or_internal_only": len(non_internal) == 0,
+        "workspace_lightweight_hints_only": len(non_internal) > 0 and not code_files and bool(hint_files),
+        "workspace_hint_files": hint_files[:30],
+        "sample_data_files": [x for x in hint_files if x.lower().endswith((".csv", ".tsv", ".json"))][:20],
+        "existing_project_detected": bool(code_files or config_files or source_roots),
+        "likely_project_directions": _likely_project_directions(tooling_hints, hint_files, non_internal),
     }
+
+
+def _likely_project_directions(tooling_hints: list[str], hint_files: list[str], non_internal: list[str]) -> list[str]:
+    directions: list[str] = []
+    if any(x.lower().endswith((".csv", ".tsv")) for x in hint_files):
+        directions.append("data_quality_checker")
+        directions.append("csv_analysis_cli")
+    if "python" in tooling_hints:
+        directions.append("python_cli_utility")
+    if any(Path(x).name.lower().startswith("readme") for x in hint_files):
+        directions.append("local_automation_tool")
+    if not non_internal:
+        directions.extend(["python_cli_utility", "file_report_generator"])
+    return list(dict.fromkeys(directions))[:6]

@@ -179,6 +179,8 @@ def classify_node_outcome(
     validation_summary: dict[str, Any] | None = None,
     execution_payload: dict[str, Any] | None = None,
     validation_delta: dict[str, Any] | None = None,
+    mission_type: str = "",
+    node_phase: str = "",
 ) -> dict[str, Any]:
     contract = normalize_task_contract(contract_type)
     localization = localization or {}
@@ -195,7 +197,9 @@ def classify_node_outcome(
     failure_fingerprints = [str(r.get("failure_fingerprint", "")) for r in command_results if r.get("failure_fingerprint")]
     repeated_across_history = any(fp in prior_fingerprints for fp in failure_fingerprints)
     repeated_failure = repeated_in_run or repeated_across_history
+    user_space_changes = [p for p in changed_files if not str(p).startswith(".villani/")]
     patch_exists = bool(changed_files)
+    user_deliverable_patch = bool(user_space_changes)
     meaningful_patch = bool(static_result.get("meaningful_patch"))
     suspicious_breadth = bool(static_result.get("suspicious_breadth"))
     has_localization = _has_useful_localization(localization)
@@ -277,6 +281,27 @@ def classify_node_outcome(
     elif not contract_allows_edits(contract):
         status, reason = ("passed", "non-edit contract satisfied") if (any_command or static_result.get("findings") == []) else ("partial", "non-edit node incomplete")
 
+    if mission_type == "greenfield_build":
+        if node_phase in {"scaffold_project", "implement_vertical_slice"}:
+            if not user_deliverable_patch:
+                status, reason = "failed", "no user-space deliverable created outside .villani/"
+            else:
+                status, reason = "passed", "user-space deliverable created for greenfield build"
+        elif node_phase == "validate_project":
+            if not any_command:
+                status, reason = "failed", "greenfield validation ran no commands"
+            elif command_fail:
+                status, reason = "failed", "greenfield validation commands failed"
+            else:
+                status, reason = "passed", "greenfield validation evidence captured"
+        elif node_phase == "summarize_outcome":
+            if patch_exists:
+                status, reason = "failed", "greenfield summary node edited files"
+            elif prose_only:
+                status, reason = "partial", "summary too thin"
+            else:
+                status, reason = "passed", "greenfield outcome summarized"
+
     validation_worsened = delta.classification == DeltaClassification.REGRESSION and patch_exists
     patch_no_improvement = patch_exists and delta.classification in {DeltaClassification.NO_IMPROVEMENT, DeltaClassification.AMBIGUOUS, DeltaClassification.REGRESSION}
 
@@ -292,6 +317,8 @@ def classify_node_outcome(
         "tool_denied": False,
         "prose_only": prose_only,
         "changed_files": list(changed_files),
+        "user_space_changed_files": user_space_changes,
+        "user_deliverable_patch": user_deliverable_patch,
         "failure_fingerprints": failure_fingerprints,
         "localization_weak": bool(localization) and not has_localization,
         "localization_stale": localization_stale,
