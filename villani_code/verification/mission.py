@@ -47,13 +47,19 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
 
     if mission.nodes and all(n.status in terminal for n in mission.nodes):
         if mission.mission_type.value == "greenfield_build":
+            greenfield_progress = dict(state.greenfield_progress or {})
+            persisted_deliverables = [str(x) for x in list(greenfield_progress.get("deliverable_paths", []) or []) if _is_user_space_path(str(x))]
+            scaffold_success = bool(greenfield_progress.get("successful_greenfield_scaffold"))
             deliverable_nodes = [n for n in mission.nodes if n.phase.value in {"scaffold_project", "implement_vertical_slice"}]
-            deliverables_ok = all(n.status == NodeStatus.SUCCEEDED for n in deliverable_nodes) and any(
-                any(_is_user_space_path(p) for p in n.last_outcome.changed_files) for n in deliverable_nodes
+            deliverables_ok = all(n.status == NodeStatus.SUCCEEDED for n in deliverable_nodes) and (
+                bool(persisted_deliverables)
+                or any(any(_is_user_space_path(p) for p in n.last_outcome.changed_files) for n in deliverable_nodes)
             )
             scaffold_nodes = [n for n in mission.nodes if n.phase.value == "scaffold_project"]
-            early_scaffold_ok = bool(scaffold_nodes) and all(
-                n.status == NodeStatus.SUCCEEDED and any(_is_user_space_path(p) for p in n.last_outcome.changed_files) for n in scaffold_nodes
+            early_scaffold_ok = scaffold_success or (
+                bool(scaffold_nodes) and all(
+                    n.status == NodeStatus.SUCCEEDED and any(_is_user_space_path(p) for p in n.last_outcome.changed_files) for n in scaffold_nodes
+                )
             )
             validate_nodes = [n for n in mission.nodes if n.phase.value == "validate_project"]
             summaries = [n for n in mission.nodes if n.phase.value == "summarize_outcome"]

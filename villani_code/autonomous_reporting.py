@@ -205,15 +205,22 @@ def build_mission_summary(
     }
     greenfield = {}
     if mission.mission_type.value == "greenfield_build":
-        files_touched = sorted(set(files_touched))
-        user_deliverables = [p for p in files_touched if not _is_internal_artifact(p)]
+        progress = dict(execution_state.greenfield_progress or {})
+        persisted_deliverables = [str(p) for p in list(progress.get("deliverable_paths", []) or []) if str(p).strip()]
+        merged_touched = sorted(dict.fromkeys(list(files_touched) + persisted_deliverables))
+        files_touched = merged_touched
+        user_deliverables = [p for p in merged_touched if not _is_internal_artifact(p)]
+        if not user_deliverables and persisted_deliverables:
+            user_deliverables = [p for p in persisted_deliverables if not _is_internal_artifact(p)]
         greenfield = {
             "chosen_project_direction": (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
             "selection_rationale": (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
-            "internal_artifacts": [p for p in files_touched if _is_internal_artifact(p)],
+            "internal_artifacts": [p for p in merged_touched if _is_internal_artifact(p)],
             "runnable_slice": bool(user_deliverables),
+            "successful_greenfield_scaffold": bool(progress.get("successful_greenfield_scaffold")),
+            "no_regression_guard": bool(user_deliverables),
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }
     return {

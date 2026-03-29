@@ -211,6 +211,7 @@ class MissionExecutionState:
     repeated_delta_states: int = 0
     greenfield_candidates: list[dict[str, Any]] = field(default_factory=list)
     greenfield_selection: dict[str, Any] = field(default_factory=dict)
+    greenfield_progress: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -234,6 +235,7 @@ class MissionExecutionState:
             "repeated_delta_states": self.repeated_delta_states,
             "greenfield_candidates": list(self.greenfield_candidates),
             "greenfield_selection": dict(self.greenfield_selection),
+            "greenfield_progress": dict(self.greenfield_progress),
         }
 
     @classmethod
@@ -259,4 +261,5 @@ class MissionExecutionState:
             repeated_delta_states=int(data.get("repeated_delta_states", 0)),
             greenfield_candidates=list(data.get("greenfield_candidates", []) or []),
             greenfield_selection=dict(data.get("greenfield_selection", {}) or {}),
+            greenfield_progress=dict(data.get("greenfield_progress", {}) or {}),
         )
