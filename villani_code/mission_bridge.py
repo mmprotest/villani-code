@@ -353,7 +353,20 @@ def execute_mission_node_with_runner(
 ) -> MissionNodeResult:
     instruction = build_node_instruction(mission, node, execution_state)
     before = set(_git_changed_files(Path(mission.repo_root)))
-    result = runner.run(instruction)
+    prior_phase_policy = getattr(runner, "_villani_phase_tool_policy", None)
+    if mission.mission_type.value == "greenfield_build":
+        runner._villani_phase_tool_policy = {
+            "mission_type": "greenfield_build",
+            "node_phase": node.phase.value,
+            "read_only_phase": node.phase.value in {"inspect_workspace", "choose_project_direction", "summarize_outcome"},
+            "allow_shell_commands": node.phase.value in {"inspect_workspace", "choose_project_direction", "validate_project"},
+            "allow_mutating_tools": node.phase.value in {"scaffold_project", "implement_vertical_slice"},
+            "allow_validation_shell": node.phase.value == "validate_project",
+        }
+    try:
+        result = runner.run(instruction)
+    finally:
+        runner._villani_phase_tool_policy = prior_phase_policy
     after = set(_git_changed_files(Path(mission.repo_root)))
     normalized = result if isinstance(result, dict) else {}
     execution = _extract_execution_payload(normalized)

@@ -204,6 +204,11 @@ def classify_node_outcome(
 
     command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
     any_command = bool(command_results)
+    validation_status = "validation_unproven"
+    if any_command and command_fail:
+        validation_status = "validated_fail"
+    elif any_command and not command_fail:
+        validation_status = "validated_pass"
     build_like_command = any(
         any(token in str(record.get("command", "")).lower() for token in ("npm run build", "python -m build", "cargo build", "mvn ", "gradle build", "make "))
         for record in command_results
@@ -375,4 +380,5 @@ def classify_node_outcome(
         "validation_delta": validation_delta,
         "self_reported_validation_without_evidence": self_reported_validation_without_evidence,
         "self_reported_validation_claim": bool(execution_payload.get("self_reported_validation_claim", False)),
+        "verification_status": validation_status,
     }

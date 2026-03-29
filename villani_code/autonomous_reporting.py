@@ -227,8 +227,8 @@ def build_mission_summary(
         if not user_deliverables and persisted_deliverables:
             user_deliverables, _ = split_internal_paths(persisted_deliverables)
         greenfield = {
-            "chosen_project_direction": (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
-            "selection_rationale": (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
+            "chosen_project_direction": scratchpad.chosen_project_direction or (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
+            "selection_rationale": scratchpad.selection_rationale or (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
             "internal_artifacts": internal_artifacts,
@@ -261,6 +261,13 @@ def build_mission_summary(
         "validation_results": validations,
         "validation_timeline": validation_timeline,
         "validation_evidence": validation_evidence,
+        "verification_status_timeline": [
+            {
+                "node_id": item.get("node_id", ""),
+                "verification_status": item.get("verification_status", "validation_unproven"),
+            }
+            for item in validations
+        ],
         "localization_evolution": localization_evolution,
         "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
         "changed_files_by_attempt_outcome": changed_by_status,

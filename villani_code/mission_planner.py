@@ -168,6 +168,10 @@ class MissionPlanner:
                 return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_VERTICAL_SLICE, f"Recover from: {reason}", "implement_vertical_slice", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "force_scaffold":
                 return [MissionNode(base_id, "Force user-space scaffold", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            if strategy == "advance_validate":
+                return [MissionNode(base_id, "Validate existing greenfield artifact", NodePhase.VALIDATE_PROJECT, f"Recover from: {reason}", "validate_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            if strategy == "advance_summarize":
+                return [MissionNode(base_id, "Summarize greenfield outcome", NodePhase.SUMMARIZE_OUTCOME, f"Recover from: {reason}", "summarize_outcome", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             return [MissionNode(base_id, "Recover greenfield build", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
 
         if strategy == "broaden":
