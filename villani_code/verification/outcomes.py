@@ -5,12 +5,7 @@ from typing import Any
 
 from villani_code.autonomy import TaskContract, contract_allows_edits, normalize_task_contract
 from villani_code.mission import DeltaClassification
-
-INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
-
-
-def _is_internal_artifact(path: str) -> bool:
-    return str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+from villani_code.path_authority import is_internal_villani_path
 
 
 def _is_docs_only_path(path: str) -> bool:
@@ -212,7 +207,7 @@ def classify_node_outcome(
     failure_fingerprints = [str(r.get("failure_fingerprint", "")) for r in command_results if r.get("failure_fingerprint")]
     repeated_across_history = any(fp in prior_fingerprints for fp in failure_fingerprints)
     repeated_failure = repeated_in_run or repeated_across_history
-    user_space_changes = [p for p in changed_files if not _is_internal_artifact(str(p))]
+    user_space_changes = [p for p in changed_files if not is_internal_villani_path(str(p))]
     internal_only_patch = bool(changed_files) and not bool(user_space_changes)
     docs_only_user_space = bool(user_space_changes) and all(_is_docs_only_path(p) for p in user_space_changes)
     patch_exists = bool(changed_files)

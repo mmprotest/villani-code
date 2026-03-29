@@ -8,12 +8,7 @@ from typing import Any
 from villani_code.evidence import parse_command_evidence
 from villani_code.repo_rules import is_ignored_repo_path
 from villani_code.mission import Mission, MissionExecutionState
-
-INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
-
-
-def _is_internal_artifact(path: str) -> bool:
-    return str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+from villani_code.path_authority import split_internal_paths
 
 
 def extract_runner_failures(result: dict[str, Any]) -> list[str]:
@@ -209,16 +204,16 @@ def build_mission_summary(
         progress = dict(execution_state.greenfield_progress or {})
         persisted_deliverables = [str(p) for p in list(progress.get("deliverable_paths", []) or []) if str(p).strip()]
         merged_touched = sorted(dict.fromkeys(list(files_touched) + persisted_deliverables))
-        files_touched = merged_touched
-        user_deliverables = [p for p in merged_touched if not _is_internal_artifact(p)]
+        files_touched, internal_artifacts = split_internal_paths(merged_touched)
+        user_deliverables = list(files_touched)
         if not user_deliverables and persisted_deliverables:
-            user_deliverables = [p for p in persisted_deliverables if not _is_internal_artifact(p)]
+            user_deliverables, _ = split_internal_paths(persisted_deliverables)
         greenfield = {
             "chosen_project_direction": (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
             "selection_rationale": (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
-            "internal_artifacts": [p for p in merged_touched if _is_internal_artifact(p)],
+            "internal_artifacts": internal_artifacts,
             "runnable_slice": bool(user_deliverables),
             "successful_greenfield_scaffold": bool(progress.get("successful_greenfield_scaffold")),
             "no_regression_guard": bool(user_deliverables),
