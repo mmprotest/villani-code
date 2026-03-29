@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,7 +10,17 @@ from villani_code.autonomous_reporting import build_mission_summary
 from villani_code.autonomous_stop import evaluate_mission_stop
 from villani_code.change_containment import build_change_containment_context, create_regression_containment_nodes
 from villani_code.localization import LocalizationEngine, LocalizationResult
-from villani_code.mission import DeltaClassification, LocalizationSnapshot, Mission, MissionExecutionState, MissionType, NodePhase, NodeStatus, NodeOutcomeRecord
+from villani_code.mission import (
+    DeltaClassification,
+    LocalizationSnapshot,
+    Mission,
+    MissionExecutionState,
+    MissionScratchpad,
+    MissionType,
+    NodePhase,
+    NodeStatus,
+    NodeOutcomeRecord,
+)
 from villani_code.mission_bridge import execute_mission_node_with_runner
 from villani_code.mission_planner import MissionPlanner
 from villani_code.mission_store import append_mission_event, save_final_mission_report, save_mission_snapshot
@@ -133,6 +143,53 @@ class VillaniModeController:
         execution_state.mission.mission_context["greenfield_progress"] = dict(progress)
         return deliverables
 
+    def _initialize_scratchpad(self, mission: Mission, repo_signals: dict[str, Any]) -> MissionScratchpad:
+        scratchpad = MissionScratchpad(
+            mission_goal=mission.user_goal,
+            mission_type=mission.mission_type.value,
+            current_phase=mission.nodes[0].phase.value if mission.nodes else "",
+            hard_constraints=list(mission.success_criteria),
+            allowed_output_locations=["workspace_user_paths_only"],
+            ignored_internal_paths=list(repo_signals.get("ignored_context_paths", [".villani/", ".villani_code/"])),
+            validation_intent="run_targeted_validation_after_changes",
+            no_confirmation_required=True,
+            no_internal_artifact_deliverables=mission.mission_type == MissionType.GREENFIELD_BUILD,
+            workspace_classification=(
+                "empty"
+                if repo_signals.get("workspace_empty_or_internal_only")
+                else ("lightly_suggestive" if repo_signals.get("workspace_lightweight_hints_only") else "existing_project")
+            ),
+            minimal_vertical_slice_target="runnable_entrypoint_with_smoke_validation" if mission.mission_type == MissionType.GREENFIELD_BUILD else "",
+            path_authority=dict(repo_signals.get("path_authority", {})),
+        )
+        scratchpad.next_required_action = scratchpad.derive_next_action()
+        return scratchpad
+
+    def _refresh_scratchpad_pre_node(self, execution_state: MissionExecutionState, node: Any) -> None:
+        scratchpad = execution_state.scratchpad
+        scratchpad.current_phase = node.phase.value
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
+            scratchpad.mission_type = MissionType.GREENFIELD_BUILD.value
+            if execution_state.greenfield_selection:
+                scratchpad.update_from_greenfield_selection(execution_state.greenfield_selection, execution_state.greenfield_candidates)
+            if scratchpad.chosen_project_direction and node.phase == NodePhase.CHOOSE_PROJECT_DIRECTION:
+                node.objective = f"Refine and commit chosen direction ({scratchpad.chosen_project_direction}) with bounded scope."
+            if scratchpad.confirmed_deliverables and node.phase == NodePhase.INSPECT_WORKSPACE:
+                node.status = NodeStatus.SKIPPED
+                return
+        scratchpad.next_required_action = scratchpad.derive_next_action()
+
+    def _apply_no_regression_guards(self, execution_state: MissionExecutionState, outcome: dict[str, Any]) -> None:
+        scratchpad = execution_state.scratchpad
+        mission = execution_state.mission
+        if scratchpad.mission_type == MissionType.GREENFIELD_BUILD.value and mission.mission_type != MissionType.GREENFIELD_BUILD:
+            mission.mission_type = MissionType.GREENFIELD_BUILD
+        if scratchpad.chosen_project_direction and not execution_state.greenfield_selection.get("project_type"):
+            execution_state.greenfield_selection["project_type"] = scratchpad.chosen_project_direction
+        if scratchpad.confirmed_deliverables and not outcome.get("user_deliverable_patch") and outcome.get("status") == "failed":
+            outcome["status"] = "partial"
+            outcome["reason"] = "no-regression guard: prior deliverables confirmed in scratchpad"
+
     def run(self) -> dict[str, Any]:
         if not (self.steering_objective or "").strip():
             snapshot = self.inspect_repo()
@@ -187,11 +244,16 @@ class VillaniModeController:
             mission.mission_type = MissionType.MAINTENANCE
 
         baseline = self._git_changed_files()
-        state = MissionExecutionState(mission=mission, changed_files_baseline=baseline)
+        state = MissionExecutionState(
+            mission=mission,
+            changed_files_baseline=baseline,
+            scratchpad=self._initialize_scratchpad(mission, self._repo_signals),
+        )
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             state.greenfield_candidates = list(mission.mission_context.get("greenfield_candidates", []))
             state.greenfield_selection = dict(mission.mission_context.get("greenfield_selection", {}))
             state.greenfield_progress = dict(mission.mission_context.get("greenfield_progress", {}) or {})
+            state.scratchpad.update_from_greenfield_selection(state.greenfield_selection, state.greenfield_candidates)
         append_mission_event(str(self.repo), mission.mission_id, {"type": "mission_initialized", "goal": mission.user_goal, "mission_type": mission.mission_type.value})
         return state
 
@@ -258,7 +320,11 @@ class VillaniModeController:
         ready_nodes = [n for n in mission.nodes if n.status == NodeStatus.READY]
         if not ready_nodes:
             return None
-        return sorted(ready_nodes, key=lambda n: (n.priority, n.confidence), reverse=True)[0]
+        selected = sorted(ready_nodes, key=lambda n: (n.priority, n.confidence), reverse=True)[0]
+        self._refresh_scratchpad_pre_node(execution_state, selected)
+        if selected.status == NodeStatus.SKIPPED:
+            return None
+        return selected
 
     def _execute_node(self, execution_state: MissionExecutionState, node: Any) -> dict[str, Any]:
         self._activity(f"Executing node {node.node_id} ({node.phase.value}).")
@@ -345,6 +411,9 @@ class VillaniModeController:
             evidence=list(result.evidence),
             suggested_validation_commands=list(result.suggested_validation_commands),
         )
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
+            snapshot.target_files = [p for p in snapshot.target_files if not self._is_internal_artifact(p)]
+            snapshot.evidence = [e for e in snapshot.evidence if ".villani/" not in e and ".villani_code/" not in e]
         node.localization = snapshot
         node.candidate_files = list(dict.fromkeys(snapshot.target_files + node.candidate_files))[:20]
         node.validation_commands = list(dict.fromkeys(snapshot.suggested_validation_commands + node.validation_commands))[:6]
@@ -447,6 +516,7 @@ class VillaniModeController:
             mission_type=execution_state.mission.mission_type.value,
             node_phase=node.phase.value,
             clarification_requested=bool(node_result.get("clarification_requested")),
+            scratchpad=execution_state.scratchpad,
         )
         user_deliverables = self._extract_user_space_deliverables(changed_files, execution_payload)
         if (
@@ -486,6 +556,25 @@ class VillaniModeController:
             execution_payload,
             str(outcome.get("status", "")),
         )
+        execution_state.scratchpad.update_from_execution_result(
+            node.phase.value,
+            str(outcome.get("status", "")),
+            list(changed_files),
+            list(node.blockers),
+        )
+        execution_state.scratchpad.update_from_verification(
+            persisted_deliverables if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD else outcome.get("user_space_changed_files", []),
+            validation_summary,
+            next_action=execution_state.scratchpad.derive_next_action(),
+        )
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
+            execution_state.scratchpad.has_user_space_scaffolding = execution_state.scratchpad.has_user_space_scaffolding or bool(persisted_deliverables)
+            execution_state.scratchpad.has_runnable_entrypoint = execution_state.scratchpad.has_runnable_entrypoint or (
+                node.phase in {NodePhase.IMPLEMENT_VERTICAL_SLICE, NodePhase.VALIDATE_PROJECT}
+                and str(outcome.get("status", "")) == "passed"
+            )
+        self._apply_no_regression_guards(execution_state, outcome)
+        execution_state.mission.mission_context["scratchpad"] = asdict(execution_state.scratchpad)
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
@@ -558,6 +647,8 @@ class VillaniModeController:
 
     def _handle_recovery(self, execution_state: MissionExecutionState, node: Any, outcome: dict[str, Any]) -> None:
         self._activity(f"Planning recovery branch for node {node.node_id}.")
+        outcome["authoritative_direction"] = execution_state.scratchpad.chosen_project_direction
+        outcome["ignored_internal_paths"] = list(execution_state.scratchpad.ignored_internal_paths)
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
             progress = dict(execution_state.greenfield_progress or {})
             has_scaffold_success = bool(progress.get("successful_greenfield_scaffold"))

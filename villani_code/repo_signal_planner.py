@@ -4,17 +4,54 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+INTERNAL_PREFIXES = (".villani/", ".villani_code/")
+SESSION_RESIDUE_MARKERS = (
+    "session",
+    "transcript",
+    "context_state",
+    "tool_inventory",
+    "interrupted",
+    "stale",
+)
+
+
+def _is_internal_artifact(path: str) -> bool:
+    return str(path).startswith(INTERNAL_PREFIXES)
+
+
+def _looks_like_session_residue(path: str) -> bool:
+    low = str(path).lower()
+    return any(m in low for m in SESSION_RESIDUE_MARKERS)
+
+
+def classify_path_authority(path: str) -> str:
+    rel = str(path)
+    if _is_internal_artifact(rel) or _looks_like_session_residue(rel):
+        if rel.startswith((".villani/", ".villani_code/")):
+            return "internal_artifact_ignored"
+        return "internal_artifact_low_authority"
+    if rel.startswith(("src/", "lib/", "app/", "tests/", "test/")) or Path(rel).name in {
+        "pyproject.toml",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "Makefile",
+    }:
+        return "user_workspace_authoritative"
+    return "user_workspace_supporting"
+
 
 def collect_repo_signals(repo_root: str) -> dict[str, Any]:
     repo = Path(repo_root)
     files = [p for p in repo.rglob("*") if p.is_file() and ".git" not in p.parts]
     rel = [p.relative_to(repo).as_posix() for p in files]
-    non_internal = [x for x in rel if not x.startswith((".villani/", ".villani_code/"))]
+    path_authority = {x: classify_path_authority(x) for x in rel}
+    non_internal = [x for x in rel if path_authority.get(x) not in {"internal_artifact_ignored", "internal_artifact_low_authority"}]
 
-    source_roots = sorted({x.split("/", 1)[0] for x in rel if x.startswith(("src/", "lib/", "app/", "villani_code/"))})
-    test_roots = sorted({x.split("/", 1)[0] for x in rel if x.startswith(("tests/", "test/")) or "/tests/" in x})
-    config_files = sorted([x for x in rel if Path(x).name in {"pyproject.toml", "package.json", "Makefile", "tox.ini", "setup.cfg", "setup.py", "requirements.txt", "ruff.toml", "mypy.ini"}])
-    docs = [x for x in rel if x.lower().startswith("docs/") or Path(x).name.lower().startswith("readme")]
+    source_roots = sorted({x.split("/", 1)[0] for x in non_internal if x.startswith(("src/", "lib/", "app/", "villani_code/"))})
+    test_roots = sorted({x.split("/", 1)[0] for x in non_internal if x.startswith(("tests/", "test/")) or "/tests/" in x})
+    config_files = sorted([x for x in non_internal if Path(x).name in {"pyproject.toml", "package.json", "Makefile", "tox.ini", "setup.cfg", "setup.py", "requirements.txt", "ruff.toml", "mypy.ini"}])
+    docs = [x for x in non_internal if x.lower().startswith("docs/") or Path(x).name.lower().startswith("readme")]
     hint_files = [
         x
         for x in non_internal
@@ -26,25 +63,25 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
     tooling_hints: list[str] = []
     likely_validation: list[str] = []
     maintenance_checks: list[str] = []
-    if "pyproject.toml" in rel or any(x.endswith(".py") for x in rel):
+    if "pyproject.toml" in non_internal or any(x.endswith(".py") for x in non_internal):
         tooling_hints.append("python")
         likely_validation.extend(["pytest -q", "python -m pytest -q"])
         maintenance_checks.extend(["python -m compileall -q ."])
-    if "package.json" in rel:
+    if "package.json" in non_internal:
         tooling_hints.append("node")
         likely_validation.extend(["npm test", "npm run test"])
-    if "go.mod" in rel:
+    if "go.mod" in non_internal:
         tooling_hints.append("go")
         likely_validation.append("go test ./...")
-    if "Cargo.toml" in rel:
+    if "Cargo.toml" in non_internal:
         tooling_hints.append("rust")
         likely_validation.append("cargo test")
-    if "Makefile" in rel:
+    if "Makefile" in non_internal:
         likely_validation.extend(["make test", "make check"])
 
-    if "pyproject.toml" in rel:
+    if "pyproject.toml" in non_internal:
         maintenance_checks.extend(["python -m pip check"])
-    if any(Path(x).name == "__init__.py" for x in rel):
+    if any(Path(x).name == "__init__.py" for x in non_internal):
         maintenance_checks.append("python -c 'import villani_code' || true")
 
     likely_validation = list(dict.fromkeys([c.strip() for c in likely_validation if c.strip()]))
@@ -69,6 +106,9 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
         "sample_data_files": [x for x in hint_files if x.lower().endswith((".csv", ".tsv", ".json"))][:20],
         "existing_project_detected": bool(code_files or config_files or source_roots),
         "likely_project_directions": _likely_project_directions(tooling_hints, hint_files, non_internal),
+        "internal_artifact_paths": [x for x in rel if _is_internal_artifact(x)],
+        "ignored_context_paths": [x for x in rel if path_authority.get(x) in {"internal_artifact_ignored", "internal_artifact_low_authority"}],
+        "path_authority": path_authority,
     }
 
 

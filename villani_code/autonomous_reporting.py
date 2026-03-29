@@ -204,6 +204,7 @@ def build_mission_summary(
         "failed": sorted({p for n in mission.nodes if n.status.value == "failed" for p in n.last_outcome.changed_files}),
     }
     greenfield = {}
+    scratchpad = execution_state.scratchpad
     if mission.mission_type.value == "greenfield_build":
         progress = dict(execution_state.greenfield_progress or {})
         persisted_deliverables = [str(p) for p in list(progress.get("deliverable_paths", []) or []) if str(p).strip()]
@@ -227,6 +228,18 @@ def build_mission_summary(
         "mission_id": mission.mission_id,
         "mission_goal": mission.user_goal,
         "mission_type": mission.mission_type.value,
+        "mission_scratchpad": {
+            "mission_goal": scratchpad.mission_goal,
+            "mission_type": scratchpad.mission_type,
+            "chosen_project_direction": scratchpad.chosen_project_direction,
+            "selection_rationale": scratchpad.selection_rationale,
+            "ignored_internal_paths": list(scratchpad.ignored_internal_paths),
+            "confirmed_deliverables": list(scratchpad.confirmed_deliverables),
+            "current_phase": scratchpad.current_phase,
+            "last_successful_action": scratchpad.last_successful_action,
+            "next_required_action": scratchpad.next_required_action,
+            "current_blockers": list(scratchpad.current_blockers),
+        },
         "nodes_executed": nodes,
         "files_inspected": sorted(set(execution_state.inspected_files)),
         "files_touched": sorted(set(files_touched)),

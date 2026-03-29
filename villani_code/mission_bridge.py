@@ -10,6 +10,12 @@ from villani_code.autonomy import contract_discourages_editing, contract_require
 from villani_code.evidence import parse_command_evidence
 from villani_code.mission import Mission, MissionExecutionState, MissionNode
 
+INTERNAL_ARTIFACT_PREFIXES = (".villani/", ".villani_code/")
+
+
+def _is_internal_artifact(path: str) -> bool:
+    return str(path).startswith(INTERNAL_ARTIFACT_PREFIXES)
+
 
 @dataclass(slots=True)
 class CommandResult:
@@ -73,8 +79,21 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
             lines.append("Localized repair intent: " + execution_state.last_localization.repair_intent)
     if node.evidence:
         lines.append("Known evidence: " + " | ".join(node.evidence[-6:]))
-    if execution_state.greenfield_selection and mission.mission_type.value == "greenfield_build":
-        lines.append("Chosen project direction: " + str(execution_state.greenfield_selection.get("project_type", "")))
+    scratchpad = execution_state.scratchpad
+    if mission.mission_type.value == "greenfield_build":
+        direction = scratchpad.chosen_project_direction or str(execution_state.greenfield_selection.get("project_type", ""))
+        if direction:
+            lines.append("Chosen project direction: " + direction)
+        if scratchpad.current_phase:
+            lines.append("Authoritative mission phase: " + scratchpad.current_phase)
+        if scratchpad.next_required_action:
+            lines.append("Authoritative next action: " + scratchpad.next_required_action)
+        if scratchpad.confirmed_deliverables:
+            lines.append("Confirmed deliverables: " + ", ".join(scratchpad.confirmed_deliverables[:12]))
+        if scratchpad.ignored_internal_paths:
+            lines.append("Ignored internal paths: " + ", ".join(scratchpad.ignored_internal_paths[:8]))
+        if scratchpad.minimal_vertical_slice_target:
+            lines.append("Minimal vertical slice target: " + scratchpad.minimal_vertical_slice_target)
     if contract_discourages_editing(node.contract_type):
         lines.append("IMPORTANT: Editing is strongly discouraged unless absolutely necessary.")
     if contract_requires_validation(node.contract_type):
@@ -86,7 +105,7 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
     if mission.mission_type.value == "greenfield_build":
         lines.append("GREENFIELD RULES: Build a real runnable deliverable in user workspace paths.")
         lines.append("Do not treat this as bugfix/localization-first work unless a build-generated bug appears.")
-        lines.append("Files under .villani/ are internal artifacts only and do not count as project deliverables.")
+        lines.append("Files under .villani/ and .villani_code/ are internal artifacts only and do not count as project deliverables.")
         lines.append("Do NOT ask the user for confirmation/approval/options. Act autonomously unless a true hard block exists.")
         if node.phase.value == "inspect_workspace":
             lines.append("Inspect workspace for constraints, sample data, README/notes hints, and feasible local project directions.")
