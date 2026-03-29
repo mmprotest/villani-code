@@ -46,6 +46,7 @@ class RecoveryPlanner:
         is_greenfield = mission_state.mission.mission_type.value == "greenfield_build"
         greenfield_progress = dict(mission_state.greenfield_progress or {})
         scaffold_succeeded = bool(greenfield_progress.get("successful_greenfield_scaffold"))
+        sticky_direction = str(node_outcome.get("authoritative_direction", "") or mission_state.scratchpad.chosen_project_direction).strip()
 
         if is_greenfield:
             if scaffold_succeeded and node.phase.value in {"inspect_workspace", "choose_project_direction", "scaffold_project"}:
@@ -59,6 +60,9 @@ class RecoveryPlanner:
             if repeated_failure:
                 strategy = "rescope" if scaffold_succeeded else "simplify_direction"
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "Repeated greenfield failure fingerprint")
+                if sticky_direction:
+                    for n in nodes:
+                        n.evidence.append(f"sticky_direction:{sticky_direction}")
                 return RecoveryDecision(strategy, "Repeated failures; switch to simpler viable slice.", nodes=nodes)
             if too_broad:
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Greenfield scope too broad")
@@ -76,6 +80,9 @@ class RecoveryPlanner:
                 else:
                     strategy = "force_scaffold" if node.phase.value in {"inspect_workspace", "scaffold_project"} else "simplify_direction"
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "No concrete build progress")
+                if sticky_direction:
+                    for n in nodes:
+                        n.evidence.append(f"sticky_direction:{sticky_direction}")
                 return RecoveryDecision(strategy, "No effectful creation progress; force concrete user-space creation.", nodes=nodes)
             if no_improvement or worsened or delta == "regression":
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Build validation did not improve")

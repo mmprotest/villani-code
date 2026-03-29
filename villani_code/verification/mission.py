@@ -47,6 +47,8 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
 
     if mission.nodes and all(n.status in terminal for n in mission.nodes):
         if mission.mission_type.value == "greenfield_build":
+            if state.scratchpad.mission_type == "greenfield_build" and mission.mission_type.value != state.scratchpad.mission_type:
+                return MissionOutcome.STAGNATED, "Mission type regressed against authoritative scratchpad."
             greenfield_progress = dict(state.greenfield_progress or {})
             persisted_deliverables = [str(x) for x in list(greenfield_progress.get("deliverable_paths", []) or []) if _is_user_space_path(str(x))]
             scaffold_success = bool(greenfield_progress.get("successful_greenfield_scaffold"))

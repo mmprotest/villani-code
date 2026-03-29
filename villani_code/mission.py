@@ -21,6 +21,96 @@ class MissionType(StrEnum):
     MAINTENANCE = "maintenance"
 
 
+
+
+class PathAuthority(StrEnum):
+    USER_WORKSPACE_AUTHORITATIVE = "user_workspace_authoritative"
+    USER_WORKSPACE_SUPPORTING = "user_workspace_supporting"
+    INTERNAL_ARTIFACT_LOW_AUTHORITY = "internal_artifact_low_authority"
+    INTERNAL_ARTIFACT_IGNORED = "internal_artifact_ignored"
+
+
+@dataclass(slots=True)
+class MissionScratchpad:
+    mission_goal: str = ""
+    mission_type: str = MissionType.MAINTENANCE.value
+    current_phase: str = ""
+    chosen_project_direction: str = ""
+    selection_rationale: str = ""
+    hard_constraints: list[str] = field(default_factory=list)
+    allowed_output_locations: list[str] = field(default_factory=list)
+    ignored_internal_paths: list[str] = field(default_factory=list)
+    confirmed_deliverables: list[str] = field(default_factory=list)
+    files_created_so_far: list[str] = field(default_factory=list)
+    last_successful_action: str = ""
+    current_blockers: list[str] = field(default_factory=list)
+    next_required_action: str = ""
+    ruled_out_directions: list[str] = field(default_factory=list)
+    validation_intent: str = ""
+    validation_commands: list[str] = field(default_factory=list)
+    no_confirmation_required: bool = True
+    no_internal_artifact_deliverables: bool = True
+    workspace_classification: str = "unknown"
+    chosen_product_shape: str = ""
+    minimal_vertical_slice_target: str = ""
+    has_user_space_scaffolding: bool = False
+    has_runnable_entrypoint: bool = False
+    path_authority: dict[str, str] = field(default_factory=dict)
+
+    def update_from_greenfield_selection(self, selection: dict[str, Any], candidates: list[dict[str, Any]] | None = None) -> None:
+        chosen = str(selection.get("project_type", "")).strip()
+        if chosen and not self.chosen_project_direction:
+            self.chosen_project_direction = chosen
+            self.chosen_product_shape = chosen
+            self.selection_rationale = str(selection.get("selection_rationale", "")).strip()
+        elif chosen and self.chosen_project_direction and chosen != self.chosen_project_direction:
+            pool = list(candidates or [])
+            chosen_score = 0.0
+            current_score = 0.0
+            for c in pool:
+                if str(c.get("project_type", "")) == chosen:
+                    chosen_score = float(c.get("score", 0.0) or 0.0)
+                if str(c.get("project_type", "")) == self.chosen_project_direction:
+                    current_score = float(c.get("score", 0.0) or 0.0)
+            if chosen_score >= (current_score + 0.2):
+                self.ruled_out_directions.append(self.chosen_project_direction)
+                self.chosen_project_direction = chosen
+                self.chosen_product_shape = chosen
+                self.selection_rationale = str(selection.get("selection_rationale", "")).strip()
+            else:
+                self.ruled_out_directions.append(chosen)
+        self.ruled_out_directions = list(dict.fromkeys([x for x in self.ruled_out_directions if x]))[-20:]
+
+    def update_from_execution_result(self, node_phase: str, outcome_status: str, changed_files: list[str], blockers: list[str] | None = None) -> None:
+        if outcome_status == "passed":
+            self.last_successful_action = node_phase
+            self.current_phase = node_phase
+        if blockers:
+            self.current_blockers = list(dict.fromkeys(self.current_blockers + [str(x) for x in blockers if str(x).strip()]))[-10:]
+        created = [str(p) for p in changed_files if str(p).strip()]
+        self.files_created_so_far = list(dict.fromkeys(self.files_created_so_far + created))
+
+    def update_from_verification(self, deliverables: list[str], validation_summary: dict[str, Any], next_action: str = "") -> None:
+        merged = list(dict.fromkeys(self.confirmed_deliverables + [str(p) for p in deliverables if str(p).strip()]))
+        self.confirmed_deliverables = merged
+        self.has_user_space_scaffolding = self.has_user_space_scaffolding or bool(merged)
+        self.validation_commands = list(dict.fromkeys(self.validation_commands + [str(c) for c in list(validation_summary.get("commands", []) or []) if str(c).strip()]))
+        if next_action:
+            self.next_required_action = next_action
+
+    def derive_next_action(self) -> str:
+        if self.mission_type == MissionType.GREENFIELD_BUILD.value:
+            if not self.chosen_project_direction:
+                return NodePhase.CHOOSE_PROJECT_DIRECTION.value
+            if not self.has_user_space_scaffolding:
+                return NodePhase.SCAFFOLD_PROJECT.value
+            if not self.has_runnable_entrypoint:
+                return NodePhase.IMPLEMENT_VERTICAL_SLICE.value
+            if self.validation_commands:
+                return NodePhase.VALIDATE_PROJECT.value
+            return NodePhase.IMPLEMENT_VERTICAL_SLICE.value
+        return self.next_required_action or self.current_phase or NodePhase.INSPECT.value
+
 class NodePhase(StrEnum):
     INSPECT_WORKSPACE = "inspect_workspace"
     CHOOSE_PROJECT_DIRECTION = "choose_project_direction"
@@ -212,6 +302,7 @@ class MissionExecutionState:
     greenfield_candidates: list[dict[str, Any]] = field(default_factory=list)
     greenfield_selection: dict[str, Any] = field(default_factory=dict)
     greenfield_progress: dict[str, Any] = field(default_factory=dict)
+    scratchpad: MissionScratchpad = field(default_factory=MissionScratchpad)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -236,6 +327,7 @@ class MissionExecutionState:
             "greenfield_candidates": list(self.greenfield_candidates),
             "greenfield_selection": dict(self.greenfield_selection),
             "greenfield_progress": dict(self.greenfield_progress),
+            "scratchpad": asdict(self.scratchpad),
         }
 
     @classmethod
@@ -262,4 +354,5 @@ class MissionExecutionState:
             greenfield_candidates=list(data.get("greenfield_candidates", []) or []),
             greenfield_selection=dict(data.get("greenfield_selection", {}) or {}),
             greenfield_progress=dict(data.get("greenfield_progress", {}) or {}),
+            scratchpad=MissionScratchpad(**dict(data.get("scratchpad", {}) or {})),
         )
