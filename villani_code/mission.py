@@ -13,6 +13,7 @@ def _now_iso() -> str:
 class MissionType(StrEnum):
     BUGFIX = "bugfix"
     FEATURE = "feature"
+    GREENFIELD_BUILD = "greenfield_build"
     REGRESSION_CONTAINMENT = "regression_containment"
     REPO_STABILIZATION = "repo_stabilization"
     VALIDATION_ONLY = "validation_only"
@@ -21,6 +22,12 @@ class MissionType(StrEnum):
 
 
 class NodePhase(StrEnum):
+    INSPECT_WORKSPACE = "inspect_workspace"
+    CHOOSE_PROJECT_DIRECTION = "choose_project_direction"
+    SCAFFOLD_PROJECT = "scaffold_project"
+    IMPLEMENT_VERTICAL_SLICE = "implement_vertical_slice"
+    VALIDATE_PROJECT = "validate_project"
+    SUMMARIZE_OUTCOME = "summarize_outcome"
     LOCALIZE = "localize"
     INSPECT = "inspect"
     REPRODUCE = "reproduce"
@@ -146,6 +153,7 @@ class Mission:
     updated_at: str = field(default_factory=_now_iso)
     final_outcome: str = ""
     stop_reason: str = ""
+    mission_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,6 +168,7 @@ class Mission:
             "updated_at": self.updated_at,
             "final_outcome": self.final_outcome,
             "stop_reason": self.stop_reason,
+            "mission_context": dict(self.mission_context),
         }
 
     @classmethod
@@ -176,6 +185,7 @@ class Mission:
             updated_at=str(data.get("updated_at", _now_iso())),
             final_outcome=str(data.get("final_outcome", "")),
             stop_reason=str(data.get("stop_reason", "")),
+            mission_context=dict(data.get("mission_context", {}) or {}),
         )
 
 
@@ -199,6 +209,8 @@ class MissionExecutionState:
     latest_execution_payload: dict[str, Any] = field(default_factory=dict)
     latest_command_results: list[dict[str, Any]] = field(default_factory=list)
     repeated_delta_states: int = 0
+    greenfield_candidates: list[dict[str, Any]] = field(default_factory=list)
+    greenfield_selection: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +232,8 @@ class MissionExecutionState:
             "latest_execution_payload": dict(self.latest_execution_payload),
             "latest_command_results": list(self.latest_command_results),
             "repeated_delta_states": self.repeated_delta_states,
+            "greenfield_candidates": list(self.greenfield_candidates),
+            "greenfield_selection": dict(self.greenfield_selection),
         }
 
     @classmethod
@@ -243,4 +257,6 @@ class MissionExecutionState:
             latest_execution_payload=dict(data.get("latest_execution_payload", {}) or {}),
             latest_command_results=list(data.get("latest_command_results", []) or []),
             repeated_delta_states=int(data.get("repeated_delta_states", 0)),
+            greenfield_candidates=list(data.get("greenfield_candidates", []) or []),
+            greenfield_selection=dict(data.get("greenfield_selection", {}) or {}),
         )

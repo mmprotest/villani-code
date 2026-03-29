@@ -197,6 +197,19 @@ def build_mission_summary(
         "succeeded": sorted({p for n in mission.nodes if n.status.value == "succeeded" for p in n.last_outcome.changed_files}),
         "failed": sorted({p for n in mission.nodes if n.status.value == "failed" for p in n.last_outcome.changed_files}),
     }
+    greenfield = {}
+    if mission.mission_type.value == "greenfield_build":
+        files_touched = sorted(set(files_touched))
+        user_deliverables = [p for p in files_touched if not p.startswith(".villani/")]
+        greenfield = {
+            "chosen_project_direction": (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
+            "selection_rationale": (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
+            "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
+            "user_space_deliverables": user_deliverables,
+            "internal_artifacts": [p for p in files_touched if p.startswith(".villani/")],
+            "runnable_slice": bool(user_deliverables),
+            "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
+        }
     return {
         "mission_id": mission.mission_id,
         "mission_goal": mission.user_goal,
@@ -210,6 +223,7 @@ def build_mission_summary(
         "localization_evolution": localization_evolution,
         "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
         "changed_files_by_attempt_outcome": changed_by_status,
+        "greenfield_report": greenfield,
         "final_outcome": outcome,
         "stop_reason": stop_reason,
         "blocked_reason": stop_reason if outcome == "blocked" else "",

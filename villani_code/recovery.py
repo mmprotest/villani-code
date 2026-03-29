@@ -40,6 +40,27 @@ class RecoveryPlanner:
         delta_reason = str(node_outcome.get("delta_reason", ""))
         localization_improved = bool(node_outcome.get("delta_details", {}).get("sharper_localization"))
         repeated_delta_state = mission_state.repeated_delta_states >= 2
+        is_greenfield = mission_state.mission.mission_type.value == "greenfield_build"
+
+        if is_greenfield:
+            if tool_denied:
+                return RecoveryDecision("blocked", "Tooling or permission denial encountered.", mark_blocked=True)
+            if repeated_failure:
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "simplify_direction", "Repeated greenfield failure fingerprint")
+                return RecoveryDecision("simplify_direction", "Repeated failures; switch to simpler project direction.", nodes=nodes)
+            if too_broad:
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Greenfield scope too broad")
+                return RecoveryDecision("rescope", "Reduce scope to a smaller vertical slice.", nodes=nodes)
+            if no_changes or prose_only:
+                strategy = "broaden" if node.phase.value == "inspect_workspace" else "simplify_direction"
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "No concrete build progress")
+                return RecoveryDecision(strategy, "No effectful creation progress; recover within greenfield flow.", nodes=nodes)
+            if no_improvement or worsened or delta == "regression":
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Build validation did not improve")
+                return RecoveryDecision("rescope", "Validation/setup failed; pivot to a simpler viable slice.", nodes=nodes)
+            if repeated_delta_state:
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "simplify_direction", "Repeated ambiguous delta")
+                return RecoveryDecision("simplify_direction", "Repeated low-delta outcomes; pick a simpler direction.", nodes=nodes)
 
         if tool_denied:
             return RecoveryDecision("blocked", "Tooling or permission denial encountered.", mark_blocked=True)

@@ -71,6 +71,8 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
             lines.append("Localized repair intent: " + execution_state.last_localization.repair_intent)
     if node.evidence:
         lines.append("Known evidence: " + " | ".join(node.evidence[-6:]))
+    if execution_state.greenfield_selection and mission.mission_type.value == "greenfield_build":
+        lines.append("Chosen project direction: " + str(execution_state.greenfield_selection.get("project_type", "")))
     if contract_discourages_editing(node.contract_type):
         lines.append("IMPORTANT: Editing is strongly discouraged unless absolutely necessary.")
     if contract_requires_validation(node.contract_type):
@@ -79,6 +81,22 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
             plans = execution_state.last_localization.suggested_validation_commands + plans
         plans = list(dict.fromkeys([p for p in plans if p])) or ["pytest -q"]
         lines.append("Validation plan: " + "; ".join(plans[:4]))
+    if mission.mission_type.value == "greenfield_build":
+        lines.append("GREENFIELD RULES: Build a real runnable deliverable in user workspace paths.")
+        lines.append("Do not treat this as bugfix/localization-first work unless a build-generated bug appears.")
+        lines.append("Files under .villani/ are internal artifacts only and do not count as project deliverables.")
+        if node.phase.value == "inspect_workspace":
+            lines.append("Inspect workspace for constraints, sample data, README/notes hints, and feasible local project directions.")
+        elif node.phase.value == "choose_project_direction":
+            lines.append("Produce 2-4 plausible project candidates, then choose one deterministic direction with rationale.")
+        elif node.phase.value == "scaffold_project":
+            lines.append("Scaffold only the chosen project structure in user-facing paths. Avoid .villani/ outputs.")
+        elif node.phase.value == "implement_vertical_slice":
+            lines.append("Implement one minimal but usable vertical slice with a real entrypoint.")
+        elif node.phase.value == "validate_project":
+            lines.append("Run targeted smoke/test validation and capture concrete command evidence.")
+        elif node.phase.value == "summarize_outcome":
+            lines.append("Summarize what was built, where files live, how to run, and validation outcomes.")
     lines.append("Stop when node objective is satisfied or clearly blocked. Provide concrete evidence.")
     return "\n".join(lines)
 
