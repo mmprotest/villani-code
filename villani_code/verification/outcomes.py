@@ -201,6 +201,9 @@ def classify_node_outcome(
     validation_delta = validation_delta or {"status": "unchanged"}
     baseline = baseline or VerificationBaseline()
     self_reported_validation_without_evidence = bool(execution_payload.get("self_reported_validation_without_evidence", False))
+    attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
+    blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
+    shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
 
     command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
     any_command = bool(command_results)
@@ -331,6 +334,10 @@ def classify_node_outcome(
         elif node_phase == "summarize_outcome":
             if patch_exists:
                 status, reason = "failed", "greenfield summary node edited files"
+            elif attempted_write_paths:
+                status, reason = "failed", "greenfield summary node attempted write operations"
+            elif shell_invocations:
+                status, reason = "failed", "greenfield summary node attempted effectful shell actions"
             elif prose_only:
                 status, reason = "partial", "summary too thin"
             else:
@@ -359,11 +366,11 @@ def classify_node_outcome(
     elif status == "passed" and any_command and not command_fail:
         mission_progress_status = "validated_success"
     elif status == "failed" and patch_exists:
-        mission_progress_status = "contract_violation_but_useful_progress"
+        mission_progress_status = "useful_progress_with_contract_violation"
     elif status == "partial" and patch_exists:
         mission_progress_status = "useful_progress_unvalidated"
     elif status == "failed" and any_command:
-        mission_progress_status = "validated_failure"
+        mission_progress_status = "validated_fail"
     if status in {"failed", "stale"}:
         phase_contract_status = "contract_violation"
     elif status == "partial":
@@ -371,7 +378,9 @@ def classify_node_outcome(
     if mission_progress_status == "no_progress" and not patch_exists and not any_command:
         mission_progress_status = "no_progress"
     elif mission_progress_status == "no_progress" and any_command and command_fail:
-        mission_progress_status = "validated_failure"
+        mission_progress_status = "validated_fail"
+    if blocked_write_paths:
+        mission_progress_status = "blocked"
     if status == "passed" and delta.classification == DeltaClassification.REGRESSION:
         delta = VerificationDelta(
             classification=DeltaClassification.AMBIGUOUS,
@@ -410,5 +419,12 @@ def classify_node_outcome(
         "validation_delta": validation_delta,
         "self_reported_validation_without_evidence": self_reported_validation_without_evidence,
         "self_reported_validation_claim": bool(execution_payload.get("self_reported_validation_claim", False)),
-        "verification_status": validation_status,
+        "verification_status": (
+            "validation_self_reported_unverified"
+            if self_reported_validation_without_evidence
+            else validation_status
+        ),
+        "attempted_write_paths": attempted_write_paths,
+        "blocked_write_paths": blocked_write_paths,
+        "shell_invocations": shell_invocations,
     }

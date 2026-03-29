@@ -158,9 +158,13 @@ class VillaniModeController:
             return
         joined = " ".join(str(x).lower() for x in deliverables)
         inferred = ""
-        if "wordguess" in joined or ("word" in joined and "guess" in joined):
-            inferred = "word_guessing_game_cli"
-        elif any(token in joined for token in ("game", "adventure", "pygame")):
+        if "snake" in joined:
+            inferred = "snake_cli_game"
+        elif "wordguess" in joined or ("word" in joined and "guess" in joined):
+            inferred = "word_guess_game"
+        elif "adventure" in joined:
+            inferred = "text_adventure_cli"
+        elif any(token in joined for token in ("game", "pygame")):
             inferred = "game_cli"
         elif any(token in joined for token in ("cli", "command", "console")):
             inferred = "python_cli_utility"
@@ -281,7 +285,10 @@ class VillaniModeController:
 
     def _promote_greenfield_conclusion(self, execution_state: MissionExecutionState) -> None:
         gate = self._greenfield_completion_gate(execution_state)
-        if not gate.get("ready"):
+        progress = dict(execution_state.greenfield_progress or {})
+        deliverables = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
+        partial_ready = bool(deliverables) and bool(execution_state.scratchpad.has_runnable_entrypoint)
+        if not gate.get("ready") and not partial_ready:
             return
         summarize_nodes = [n for n in execution_state.mission.nodes if n.phase == NodePhase.SUMMARIZE_OUTCOME]
         if summarize_nodes:
@@ -639,11 +646,23 @@ class VillaniModeController:
             clarification_requested=bool(node_result.get("clarification_requested")),
             scratchpad=execution_state.scratchpad,
         )
+        attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
+        blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
+        shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase == NodePhase.SUMMARIZE_OUTCOME:
+            if changed_files or attempted_write_paths or shell_invocations:
+                outcome["status"] = "failed"
+                outcome["reason"] = "contract violation: summarize_outcome is read-only and cannot write/execute build actions"
+                outcome["contract_violation"] = True
+                outcome["phase_contract_status"] = "contract_violation"
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase in self._GREENFIELD_READ_ONLY_PHASES and changed_files:
             outcome["status"] = "failed"
             outcome["reason"] = f"contract violation: {node.phase.value} is read-only but wrote files"
             outcome["contract_violation"] = True
-        user_deliverables = self._extract_user_space_deliverables(changed_files, execution_payload)
+        effective_changed_files = list(changed_files)
+        if node.phase == NodePhase.SUMMARIZE_OUTCOME and bool(outcome.get("contract_violation")):
+            effective_changed_files = []
+        user_deliverables = self._extract_user_space_deliverables(effective_changed_files, execution_payload)
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
             and node.phase == NodePhase.SCAFFOLD_PROJECT
@@ -689,7 +708,7 @@ class VillaniModeController:
         persisted_deliverables = self._record_greenfield_progress(
             execution_state,
             node,
-            changed_files,
+            effective_changed_files,
             execution_payload,
             str(outcome.get("status", "")),
         )
@@ -743,6 +762,8 @@ class VillaniModeController:
                 "execution_payload": execution_payload,
                 "validation_delta": validation_delta,
                 "greenfield_deliverables": persisted_deliverables,
+                "attempted_write_paths": attempted_write_paths,
+                "blocked_write_paths": blocked_write_paths,
                 "self_reported_validation_without_evidence": bool(outcome.get("self_reported_validation_without_evidence")),
                 "validation_evidence_kind": "real_command_results" if command_results else "none",
                 "verification_status": str(outcome.get("verification_status", "validation_unproven")),
@@ -826,6 +847,18 @@ class VillaniModeController:
                     {"type": "recovery_suppressed", "node_id": node.node_id, "reason": "greenfield completion gate satisfied", "gate": gate},
                 )
                 return
+            if execution_state.scratchpad.has_runnable_entrypoint and execution_state.scratchpad.has_user_space_scaffolding and node.phase == NodePhase.VALIDATE_PROJECT:
+                append_mission_event(
+                    str(self.repo),
+                    execution_state.mission.mission_id,
+                    {
+                        "type": "recovery_suppressed",
+                        "node_id": node.node_id,
+                        "reason": "validation did not conclude but runnable artifact exists; converge to summary",
+                    },
+                )
+                self._promote_greenfield_conclusion(execution_state)
+                return
             progress = dict(execution_state.greenfield_progress or {})
             has_scaffold_success = bool(progress.get("successful_greenfield_scaffold"))
             salvageable_contract_violation = bool(outcome.get("contract_violation")) and bool(outcome.get("user_deliverable_patch"))
@@ -901,7 +934,7 @@ class VillaniModeController:
             {
                 str(path)
                 for item in execution_state.verification_history
-                for path in list((item.get("execution_payload", {}) or {}).get("write_tool_paths", []) or [])
+                for path in list((item.get("changed_files", []) or []))
                 if str(path).strip()
             }
         )
