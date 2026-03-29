@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from villani_code.autonomy import TaskContract, contract_allows_edits, normalize_task_contract
-from villani_code.mission import DeltaClassification
+from villani_code.mission import DeltaClassification, MissionScratchpad
 from villani_code.path_authority import is_internal_villani_path
 
 
@@ -190,7 +190,7 @@ def classify_node_outcome(
     mission_type: str = "",
     node_phase: str = "",
     clarification_requested: bool = False,
-    scratchpad: Any | None = None,
+    scratchpad: MissionScratchpad | None = None,
 ) -> dict[str, Any]:
     contract = normalize_task_contract(contract_type)
     localization = localization or {}
@@ -296,7 +296,7 @@ def classify_node_outcome(
         status, reason = ("passed", "non-edit contract satisfied") if (any_command or static_result.get("findings") == []) else ("partial", "non-edit node incomplete")
 
     if mission_type == "greenfield_build":
-        if str(scratchpad.get("mission_type", "")) == "greenfield_build" and mission_type != "greenfield_build":
+        if scratchpad and scratchpad.mission_type == "greenfield_build" and mission_type != "greenfield_build":
             mission_type = "greenfield_build"
         if clarification_requested:
             status, reason = "failed", "greenfield autonomous execution asked for confirmation"
@@ -324,11 +324,11 @@ def classify_node_outcome(
             else:
                 status, reason = "passed", "greenfield outcome summarized"
     if scratchpad:
-        confirmed = list(scratchpad.get("confirmed_deliverables", []) or [])
+        confirmed = list(scratchpad.confirmed_deliverables or [])
         if confirmed and not user_space_changes and status == "failed":
             status, reason = "partial", "scratchpad confirms prior deliverables; avoid false no-deliverable regression"
-        chosen = str(scratchpad.get("chosen_project_direction", "")).strip()
-        if mission_type == "greenfield_build" and chosen and bool(scratchpad.get("no_confirmation_required", True)) and clarification_requested:
+        chosen = str(scratchpad.chosen_project_direction).strip()
+        if mission_type == "greenfield_build" and chosen and scratchpad.no_confirmation_required and clarification_requested:
             status, reason = "failed", f"direction '{chosen}' is authoritative; confirmation prompts are invalid"
 
     validation_worsened = delta.classification == DeltaClassification.REGRESSION and patch_exists
@@ -360,6 +360,3 @@ def classify_node_outcome(
         "delta_details": delta.details,
         "validation_delta": validation_delta,
     }
-    if scratchpad and hasattr(scratchpad, "__dict__"):
-        scratchpad = dict(scratchpad.__dict__)
-    scratchpad = scratchpad or {}

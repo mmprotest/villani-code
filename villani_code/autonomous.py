@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -571,7 +571,7 @@ class VillaniModeController:
                 and str(outcome.get("status", "")) == "passed"
             )
         self._apply_no_regression_guards(execution_state, outcome)
-        execution_state.mission.mission_context["scratchpad"] = asdict(execution_state.scratchpad)
+        execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
