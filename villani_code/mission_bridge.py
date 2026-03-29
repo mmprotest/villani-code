@@ -128,10 +128,21 @@ def _detect_clarification_request(text: str) -> bool:
 def _git_changed_files(repo: Path) -> list[str]:
     import subprocess
 
-    proc = subprocess.run(["git", "diff", "--name-only"], cwd=repo, capture_output=True, text=True)
+    proc = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True)
     if proc.returncode != 0:
         return []
-    return [x.strip() for x in proc.stdout.splitlines() if x.strip()]
+    paths: list[str] = []
+    for raw in proc.stdout.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        path = line[3:] if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            paths.append(path)
+    return sorted(dict.fromkeys(paths))
 
 
 def _extract_execution_payload(result: dict[str, Any]) -> dict[str, Any]:

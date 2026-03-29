@@ -9,7 +9,7 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
     repo = Path(repo_root)
     files = [p for p in repo.rglob("*") if p.is_file() and ".git" not in p.parts]
     rel = [p.relative_to(repo).as_posix() for p in files]
-    non_internal = [x for x in rel if not x.startswith(".villani/")]
+    non_internal = [x for x in rel if not x.startswith((".villani/", ".villani_code/"))]
 
     source_roots = sorted({x.split("/", 1)[0] for x in rel if x.startswith(("src/", "lib/", "app/", "villani_code/"))})
     test_roots = sorted({x.split("/", 1)[0] for x in rel if x.startswith(("tests/", "test/")) or "/tests/" in x})

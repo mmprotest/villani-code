@@ -89,6 +89,50 @@ class VillaniModeController:
         self.takeover_config = takeover_config
         self.verifier = VerificationEngine(self.repo)
 
+    @staticmethod
+    def _is_internal_artifact(path: str) -> bool:
+        return str(path).startswith((".villani/", ".villani_code/"))
+
+    def _extract_user_space_deliverables(self, changed_files: list[str], execution_payload: dict[str, Any]) -> list[str]:
+        candidates = list(changed_files)
+        for key in ("intentional_changes", "incidental_changes", "changed_files"):
+            candidates.extend(str(x) for x in list(execution_payload.get(key, []) or []))
+        deliverables: list[str] = []
+        for item in candidates:
+            value = str(item or "").strip()
+            if not value or self._is_internal_artifact(value):
+                continue
+            deliverables.append(value)
+        return sorted(dict.fromkeys(deliverables))
+
+    def _record_greenfield_progress(
+        self,
+        execution_state: MissionExecutionState,
+        node: Any,
+        changed_files: list[str],
+        execution_payload: dict[str, Any],
+        node_status: str,
+    ) -> list[str]:
+        if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
+            return []
+        progress = dict(execution_state.greenfield_progress or {})
+        deliverables = self._extract_user_space_deliverables(changed_files, execution_payload)
+        current_paths = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
+        merged_paths = sorted(dict.fromkeys(current_paths + deliverables))
+        progress["deliverable_paths"] = merged_paths
+        progress["created_deliverables"] = merged_paths
+        scaffold_success = bool(progress.get("successful_greenfield_scaffold"))
+        if node.phase == NodePhase.SCAFFOLD_PROJECT and node_status == "passed" and deliverables:
+            scaffold_success = True
+        progress["successful_greenfield_scaffold"] = scaffold_success
+        source_nodes = [str(x) for x in list(progress.get("source_nodes", []) or []) if str(x).strip()]
+        if deliverables and node.node_id not in source_nodes:
+            source_nodes.append(node.node_id)
+        progress["source_nodes"] = source_nodes[-20:]
+        execution_state.greenfield_progress = progress
+        execution_state.mission.mission_context["greenfield_progress"] = dict(progress)
+        return deliverables
+
     def run(self) -> dict[str, Any]:
         if not (self.steering_objective or "").strip():
             snapshot = self.inspect_repo()
@@ -147,6 +191,7 @@ class VillaniModeController:
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             state.greenfield_candidates = list(mission.mission_context.get("greenfield_candidates", []))
             state.greenfield_selection = dict(mission.mission_context.get("greenfield_selection", {}))
+            state.greenfield_progress = dict(mission.mission_context.get("greenfield_progress", {}) or {})
         append_mission_event(str(self.repo), mission.mission_id, {"type": "mission_initialized", "goal": mission.user_goal, "mission_type": mission.mission_type.value})
         return state
 
@@ -360,13 +405,20 @@ class VillaniModeController:
         static_result = run_static_verification(str(self.repo), changed_files)
         commands = node.validation_commands or self._repo_signals.get("likely_validation_commands", ["pytest -q"])
         runner_command_results = list(node_result.get("command_results", []) or [])
-        command_results = run_validation_commands(str(self.repo), commands[:3]) if commands else []
+        command_results: list[dict[str, Any]] = []
         execution_payload = dict(node_result.get("execution_payload", {}) or {})
         payload_command_results = list(execution_payload.get("command_results", []) or [])
-        if payload_command_results:
-            command_results = payload_command_results + command_results
         if runner_command_results:
-            command_results = runner_command_results + command_results
+            command_results = list(runner_command_results)
+        elif payload_command_results:
+            command_results = list(payload_command_results)
+        elif commands:
+            command_results = run_validation_commands(str(self.repo), commands[:3])
+        normalized_command_results: dict[str, dict[str, Any]] = {}
+        for record in command_results:
+            cmd_key = str(record.get("command", "")).strip() or f"__index_{len(normalized_command_results)}"
+            normalized_command_results[cmd_key] = dict(record)
+        command_results = list(normalized_command_results.values())
         validation_summary = summarize_validation_results(command_results)
         validation_delta = compute_validation_delta(
             baseline.validation_summary,
@@ -396,6 +448,16 @@ class VillaniModeController:
             node_phase=node.phase.value,
             clarification_requested=bool(node_result.get("clarification_requested")),
         )
+        user_deliverables = self._extract_user_space_deliverables(changed_files, execution_payload)
+        if (
+            execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
+            and node.phase == NodePhase.SCAFFOLD_PROJECT
+            and user_deliverables
+        ):
+            outcome["status"] = "passed"
+            outcome["reason"] = "greenfield scaffold created user-space deliverables"
+            outcome["patch_no_improvement"] = False
+            outcome["validation_worsened"] = False
 
         failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
         if failure_fingerprint:
@@ -417,6 +479,13 @@ class VillaniModeController:
         execution_state.latest_changed_files = list(changed_files)
         execution_state.latest_execution_payload = dict(execution_payload)
         execution_state.latest_command_results = list(command_results)
+        persisted_deliverables = self._record_greenfield_progress(
+            execution_state,
+            node,
+            changed_files,
+            execution_payload,
+            str(outcome.get("status", "")),
+        )
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
@@ -432,6 +501,7 @@ class VillaniModeController:
                 "localization": localization_payload,
                 "execution_payload": execution_payload,
                 "validation_delta": validation_delta,
+                "greenfield_deliverables": persisted_deliverables,
             }
         )
 
@@ -488,6 +558,24 @@ class VillaniModeController:
 
     def _handle_recovery(self, execution_state: MissionExecutionState, node: Any, outcome: dict[str, Any]) -> None:
         self._activity(f"Planning recovery branch for node {node.node_id}.")
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
+            progress = dict(execution_state.greenfield_progress or {})
+            has_scaffold_success = bool(progress.get("successful_greenfield_scaffold"))
+            if has_scaffold_success and node.phase in {
+                NodePhase.INSPECT_WORKSPACE,
+                NodePhase.CHOOSE_PROJECT_DIRECTION,
+                NodePhase.SCAFFOLD_PROJECT,
+            }:
+                append_mission_event(
+                    str(self.repo),
+                    execution_state.mission.mission_id,
+                    {
+                        "type": "recovery_suppressed",
+                        "node_id": node.node_id,
+                        "reason": "authoritative scaffold success already captured",
+                    },
+                )
+                return
         outcome["localization_weak"] = bool(outcome.get("localization_weak")) or (node.phase.value == "localize" and node.confidence < 0.55)
         decision = self.recovery.plan_recovery(execution_state, node, outcome)
         if decision.mark_blocked:
@@ -518,6 +606,9 @@ class VillaniModeController:
         self._activity("Finalizing mission report and summarizing outcomes.")
         mission = execution_state.mission
         touched = sorted(set(self._git_changed_files()) - set(execution_state.changed_files_baseline))
+        if mission.mission_type == MissionType.GREENFIELD_BUILD:
+            persisted = list(dict(execution_state.greenfield_progress or {}).get("deliverable_paths", []) or [])
+            touched = sorted(dict.fromkeys(touched + [str(p) for p in persisted if str(p).strip()]))
         report = build_mission_summary(
             mission,
             execution_state,
@@ -541,10 +632,21 @@ class VillaniModeController:
         return None
 
     def _git_changed_files(self) -> list[str]:
-        proc = subprocess.run(["git", "diff", "--name-only"], cwd=self.repo, capture_output=True, text=True)
+        proc = subprocess.run(["git", "status", "--porcelain"], cwd=self.repo, capture_output=True, text=True)
         if proc.returncode != 0:
             return []
-        return [x.strip() for x in proc.stdout.splitlines() if x.strip()]
+        paths: list[str] = []
+        for raw in proc.stdout.splitlines():
+            line = raw.rstrip()
+            if not line:
+                continue
+            path = line[3:] if len(line) > 3 else ""
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            path = path.strip()
+            if path:
+                paths.append(path)
+        return sorted(dict.fromkeys(paths))
 
     def _activity(self, message: str) -> None:
         event = {"type": "villani_activity", "message": message}

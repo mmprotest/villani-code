@@ -44,35 +44,46 @@ class RecoveryPlanner:
         localization_improved = bool(node_outcome.get("delta_details", {}).get("sharper_localization"))
         repeated_delta_state = mission_state.repeated_delta_states >= 2
         is_greenfield = mission_state.mission.mission_type.value == "greenfield_build"
+        greenfield_progress = dict(mission_state.greenfield_progress or {})
+        scaffold_succeeded = bool(greenfield_progress.get("successful_greenfield_scaffold"))
 
         if is_greenfield:
+            if scaffold_succeeded and node.phase.value in {"inspect_workspace", "choose_project_direction", "scaffold_project"}:
+                return RecoveryDecision("advance_after_scaffold", "Authoritative greenfield scaffold success already captured; continue forward without recovery branch.")
             if tool_denied:
                 return RecoveryDecision("blocked", "Tooling or permission denial encountered.", mark_blocked=True)
             if clarification_requested:
-                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "force_scaffold", "Autonomous node asked for confirmation instead of acting")
+                strategy = "rescope" if scaffold_succeeded else "force_scaffold"
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "Autonomous node asked for confirmation instead of acting")
                 return RecoveryDecision("force_action", "Confirmation/clarification prompts are invalid in autonomous greenfield mode.", nodes=nodes)
             if repeated_failure:
-                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "simplify_direction", "Repeated greenfield failure fingerprint")
-                return RecoveryDecision("simplify_direction", "Repeated failures; switch to simpler project direction.", nodes=nodes)
+                strategy = "rescope" if scaffold_succeeded else "simplify_direction"
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "Repeated greenfield failure fingerprint")
+                return RecoveryDecision(strategy, "Repeated failures; switch to simpler viable slice.", nodes=nodes)
             if too_broad:
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Greenfield scope too broad")
                 return RecoveryDecision("rescope", "Reduce scope to a smaller vertical slice.", nodes=nodes)
             if internal_only_patch:
-                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "force_scaffold", "Only internal artifacts were changed")
-                return RecoveryDecision("force_scaffold", "Internal artifacts do not count; force user-space scaffold creation.", nodes=nodes)
+                strategy = "rescope" if scaffold_succeeded else "force_scaffold"
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "Only internal artifacts were changed")
+                return RecoveryDecision(strategy, "Internal artifacts do not count; force user-space deliverable progress.", nodes=nodes)
             if docs_only_user_space:
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Docs-only output in open-ended greenfield build")
                 return RecoveryDecision("rescope", "Docs-only output is insufficient; force runnable vertical slice.", nodes=nodes)
             if no_changes or prose_only:
-                strategy = "force_scaffold" if node.phase.value in {"inspect_workspace", "scaffold_project"} else "simplify_direction"
+                if scaffold_succeeded:
+                    strategy = "rescope"
+                else:
+                    strategy = "force_scaffold" if node.phase.value in {"inspect_workspace", "scaffold_project"} else "simplify_direction"
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "No concrete build progress")
                 return RecoveryDecision(strategy, "No effectful creation progress; force concrete user-space creation.", nodes=nodes)
             if no_improvement or worsened or delta == "regression":
                 nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Build validation did not improve")
                 return RecoveryDecision("rescope", "Validation/setup failed; pivot to a simpler viable slice.", nodes=nodes)
             if repeated_delta_state:
-                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "simplify_direction", "Repeated ambiguous delta")
-                return RecoveryDecision("simplify_direction", "Repeated low-delta outcomes; pick a simpler direction.", nodes=nodes)
+                strategy = "rescope" if scaffold_succeeded else "simplify_direction"
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, strategy, "Repeated ambiguous delta")
+                return RecoveryDecision(strategy, "Repeated low-delta outcomes; pick a simpler direction.", nodes=nodes)
 
         if tool_denied:
             return RecoveryDecision("blocked", "Tooling or permission denial encountered.", mark_blocked=True)
