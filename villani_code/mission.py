@@ -55,6 +55,7 @@ class MissionScratchpad:
     minimal_vertical_slice_target: str = ""
     has_user_space_scaffolding: bool = False
     has_runnable_entrypoint: bool = False
+    validation_proven: bool = False
     path_authority: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -98,6 +99,8 @@ class MissionScratchpad:
         self.confirmed_deliverables = merged
         self.has_user_space_scaffolding = self.has_user_space_scaffolding or bool(merged)
         self.validation_commands = list(dict.fromkeys(self.validation_commands + [str(c) for c in list(validation_summary.get("commands", []) or []) if str(c).strip()]))
+        if int(validation_summary.get("commands_run", 0) or 0) > 0:
+            self.validation_proven = True
         if next_action:
             self.next_required_action = next_action
 
@@ -109,9 +112,9 @@ class MissionScratchpad:
                 return NodePhase.SCAFFOLD_PROJECT.value
             if not self.has_runnable_entrypoint:
                 return NodePhase.IMPLEMENT_VERTICAL_SLICE.value
-            if self.validation_commands:
+            if not self.validation_proven:
                 return NodePhase.VALIDATE_PROJECT.value
-            return NodePhase.IMPLEMENT_VERTICAL_SLICE.value
+            return NodePhase.SUMMARIZE_OUTCOME.value
         return self.next_required_action or self.current_phase or NodePhase.INSPECT.value
 
 class NodePhase(StrEnum):
@@ -172,6 +175,8 @@ class LocalizationSnapshot:
 @dataclass(slots=True)
 class NodeOutcomeRecord:
     status: str = "unknown"
+    phase_contract_status: str = "unknown"
+    mission_progress_status: str = "no_progress"
     delta_classification: str = DeltaClassification.AMBIGUOUS.value
     delta_reason: str = ""
     changed_files: list[str] = field(default_factory=list)

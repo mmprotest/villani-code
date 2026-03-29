@@ -278,8 +278,8 @@ def classify_node_outcome(
             status, reason = "failed", "patch produced no measurable improvement"
         elif any_command and not command_fail:
             status, reason = "passed", "patch validated successfully"
-        elif meaningful_patch and delta.classification == DeltaClassification.WEAK_IMPROVEMENT:
-            status, reason = "partial", "patch exists with weak signal of improvement"
+        elif meaningful_patch and delta.classification in {DeltaClassification.WEAK_IMPROVEMENT, DeltaClassification.AMBIGUOUS}:
+            status, reason = "partial", "patch exists with useful progress but lacks decisive validation"
         else:
             status, reason = "failed", "patch failed validation"
     elif contract == TaskContract.VALIDATE:
@@ -352,10 +352,40 @@ def classify_node_outcome(
 
     validation_worsened = delta.classification == DeltaClassification.REGRESSION and patch_exists
     patch_no_improvement = patch_exists and delta.classification in {DeltaClassification.NO_IMPROVEMENT, DeltaClassification.AMBIGUOUS, DeltaClassification.REGRESSION}
+    phase_contract_status = "contract_clean_success"
+    mission_progress_status = "no_progress"
+    if status == "passed" and patch_exists and not any_command:
+        mission_progress_status = "useful_progress_unvalidated"
+    elif status == "passed" and any_command and not command_fail:
+        mission_progress_status = "validated_success"
+    elif status == "failed" and patch_exists:
+        mission_progress_status = "contract_violation_but_useful_progress"
+    elif status == "partial" and patch_exists:
+        mission_progress_status = "useful_progress_unvalidated"
+    elif status == "failed" and any_command:
+        mission_progress_status = "validated_failure"
+    if status in {"failed", "stale"}:
+        phase_contract_status = "contract_violation"
+    elif status == "partial":
+        phase_contract_status = "contract_partial"
+    if mission_progress_status == "no_progress" and not patch_exists and not any_command:
+        mission_progress_status = "no_progress"
+    elif mission_progress_status == "no_progress" and any_command and command_fail:
+        mission_progress_status = "validated_failure"
+    if status == "passed" and delta.classification == DeltaClassification.REGRESSION:
+        delta = VerificationDelta(
+            classification=DeltaClassification.AMBIGUOUS,
+            score=delta.score,
+            reason=f"{delta.reason}, normalized_from_regression_on_pass",
+            details=delta.details,
+        )
+        validation_worsened = False
 
     return {
         "status": status,
         "reason": reason,
+        "phase_contract_status": phase_contract_status,
+        "mission_progress_status": mission_progress_status,
         "patch_exists": patch_exists,
         "meaningful_patch": meaningful_patch,
         "same_failure_repeated": repeated_failure,

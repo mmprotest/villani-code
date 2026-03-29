@@ -42,6 +42,13 @@ from villani_code.verification import (
 )
 
 
+def _looks_like_runnable_python(path: str) -> bool:
+    low = str(path).strip().lower()
+    if not low.endswith(".py"):
+        return False
+    return not low.startswith(("tests/", "test_", ".villani/", ".villani_code/"))
+
+
 @dataclass(slots=True)
 class VillaniModeConfig:
     enabled: bool = False
@@ -151,8 +158,10 @@ class VillaniModeController:
             return
         joined = " ".join(str(x).lower() for x in deliverables)
         inferred = ""
-        if any(token in joined for token in ("game", "adventure", "pygame")):
-            inferred = "game"
+        if "wordguess" in joined or ("word" in joined and "guess" in joined):
+            inferred = "word_guessing_game_cli"
+        elif any(token in joined for token in ("game", "adventure", "pygame")):
+            inferred = "game_cli"
         elif any(token in joined for token in ("cli", "command", "console")):
             inferred = "python_cli_utility"
         if not inferred:
@@ -163,6 +172,41 @@ class VillaniModeController:
             execution_state.scratchpad.chosen_product_shape = inferred
             execution_state.greenfield_selection["project_type"] = inferred
             execution_state.mission.mission_context["greenfield_selection"] = dict(execution_state.greenfield_selection)
+
+    def _derive_greenfield_validation_commands(self, execution_state: MissionExecutionState) -> list[str]:
+        progress = dict(execution_state.greenfield_progress or {})
+        deliverables = [str(x).strip() for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
+        python_entries = [p for p in deliverables if _looks_like_runnable_python(p)]
+        commands: list[str] = []
+        for target in python_entries[:2]:
+            commands.append(f"python -m py_compile {target}")
+            commands.append(f"python {target} --help")
+        if not commands and python_entries:
+            commands.append(f"python -m py_compile {python_entries[0]}")
+        return list(dict.fromkeys(commands))[:4]
+
+    def _ensure_validate_node_ready(self, execution_state: MissionExecutionState) -> None:
+        if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
+            return
+        validate_nodes = [n for n in execution_state.mission.nodes if n.phase == NodePhase.VALIDATE_PROJECT]
+        if not validate_nodes:
+            return
+        validate_node = validate_nodes[0]
+        if validate_node.status in {NodeStatus.SUCCEEDED, NodeStatus.RUNNING}:
+            return
+        if execution_state.scratchpad.validation_proven:
+            return
+        commands = self._derive_greenfield_validation_commands(execution_state)
+        if commands:
+            validate_node.validation_commands = list(dict.fromkeys(commands + list(validate_node.validation_commands)))[:6]
+        if execution_state.scratchpad.has_runnable_entrypoint and validate_node.status in {
+            NodeStatus.PENDING,
+            NodeStatus.FAILED,
+            NodeStatus.BLOCKED,
+            NodeStatus.EXHAUSTED,
+            NodeStatus.SKIPPED,
+        }:
+            validate_node.status = NodeStatus.READY
 
     def _initialize_scratchpad(self, mission: Mission, repo_signals: dict[str, Any]) -> MissionScratchpad:
         scratchpad = MissionScratchpad(
@@ -218,7 +262,14 @@ class VillaniModeController:
         deliverables = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
         has_deliverables = bool(deliverables)
         has_entrypoint = bool(execution_state.scratchpad.has_runnable_entrypoint)
-        has_validation_evidence = bool(execution_state.latest_command_results)
+        has_validation_evidence = any(
+            str(item.get("node_phase", "")) == NodePhase.VALIDATE_PROJECT.value
+            and str(item.get("validation_evidence_kind", "")) == "real_command_results"
+            for item in execution_state.verification_history
+        ) or (
+            bool(execution_state.latest_command_results)
+            and bool(execution_state.latest_validation_summary.get("commands_run", 0))
+        )
         unresolved_critical = bool(progress.get("unresolved_critical_contract_violation", False))
         return {
             "ready": has_deliverables and has_entrypoint and has_validation_evidence and not unresolved_critical,
@@ -376,6 +427,7 @@ class VillaniModeController:
     def _select_next_node(self, execution_state: MissionExecutionState):
         self._activity("Selecting next ready mission node.")
         mission = execution_state.mission
+        self._ensure_validate_node_ready(execution_state)
         self._hydrate_nodes_from_localization(execution_state)
         for node in mission.nodes:
             if node.status == NodeStatus.PENDING and all(self._node_by_id(mission, dep).status == NodeStatus.SUCCEEDED for dep in node.depends_on if self._node_by_id(mission, dep)):
@@ -383,6 +435,14 @@ class VillaniModeController:
         ready_nodes = [n for n in mission.nodes if n.status == NodeStatus.READY]
         if not ready_nodes:
             return None
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and not execution_state.scratchpad.validation_proven:
+            validate_ready = [n for n in ready_nodes if n.phase == NodePhase.VALIDATE_PROJECT]
+            if validate_ready:
+                selected = validate_ready[0]
+                self._refresh_scratchpad_pre_node(execution_state, selected)
+                if selected.status == NodeStatus.SKIPPED:
+                    return None
+                return selected
         selected = sorted(ready_nodes, key=lambda n: (n.priority, n.confidence), reverse=True)[0]
         self._refresh_scratchpad_pre_node(execution_state, selected)
         if selected.status == NodeStatus.SKIPPED:
@@ -593,6 +653,16 @@ class VillaniModeController:
             outcome["reason"] = "greenfield scaffold created user-space deliverables"
             outcome["patch_no_improvement"] = False
             outcome["validation_worsened"] = False
+        if (
+            execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
+            and node.phase == NodePhase.IMPLEMENT_VERTICAL_SLICE
+            and user_deliverables
+            and str(outcome.get("status", "")) not in {"failed"}
+        ):
+            outcome["status"] = "passed"
+            outcome["reason"] = "greenfield vertical slice created runnable user-space artifact; validation deferred to validate_project"
+            outcome["patch_no_improvement"] = False
+            outcome["validation_worsened"] = False
 
         failure_fingerprint = validation_summary.get("failure_fingerprints", [""])[0] if validation_summary.get("failure_fingerprints") else ""
         if failure_fingerprint:
@@ -601,6 +671,8 @@ class VillaniModeController:
 
         node.last_outcome = NodeOutcomeRecord(
             status=str(outcome.get("status", "unknown")),
+            phase_contract_status=str(outcome.get("phase_contract_status", "unknown")),
+            mission_progress_status=str(outcome.get("mission_progress_status", "no_progress")),
             delta_classification=str(outcome.get("delta_classification", DeltaClassification.AMBIGUOUS.value)),
             delta_reason=str(outcome.get("delta_reason", "")),
             changed_files=list(changed_files),
@@ -636,8 +708,8 @@ class VillaniModeController:
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
             execution_state.scratchpad.has_user_space_scaffolding = execution_state.scratchpad.has_user_space_scaffolding or bool(persisted_deliverables)
             execution_state.scratchpad.has_runnable_entrypoint = execution_state.scratchpad.has_runnable_entrypoint or (
-                node.phase in {NodePhase.IMPLEMENT_VERTICAL_SLICE, NodePhase.VALIDATE_PROJECT}
-                and str(outcome.get("status", "")) == "passed"
+                (node.phase in {NodePhase.IMPLEMENT_VERTICAL_SLICE, NodePhase.VALIDATE_PROJECT} and str(outcome.get("status", "")) in {"passed", "partial"})
+                or any(_looks_like_runnable_python(p) for p in persisted_deliverables)
             )
             progress = dict(execution_state.greenfield_progress or {})
             critical_violation = bool(outcome.get("contract_violation")) and not bool(
@@ -650,6 +722,7 @@ class VillaniModeController:
             )
             execution_state.greenfield_progress = progress
             execution_state.mission.mission_context["greenfield_progress"] = dict(progress)
+            self._ensure_validate_node_ready(execution_state)
         self._apply_no_regression_guards(execution_state, outcome)
         execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
 
@@ -658,6 +731,7 @@ class VillaniModeController:
         execution_state.verification_history.append(
             {
                 "node_id": node.node_id,
+                "node_phase": node.phase.value,
                 "static": static_result,
                 "commands": command_results,
                 "validation_summary": validation_summary,
