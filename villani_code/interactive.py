@@ -30,7 +30,7 @@ class InteractiveShell:
         self.repo = repo
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
-        self.LAUNCH_BANNER = _load_tui_assets()
+        self.LAUNCH_BANNER = f"villani-fying your terminal...\n{_load_tui_assets()}"
 
     def run(self) -> None:
         tui_app = _load_tui_app()

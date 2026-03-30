@@ -9,6 +9,7 @@
     "pytest"
   ],
   "name": "bugfix_005_retry_threshold",
+  "description": "Retry should include 429 and 500-class responses, but exclude 400-class errors below 429.",
   "difficulty": "medium",
   "runtime_stressors": [
     "fault_localization",

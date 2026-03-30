@@ -140,14 +140,16 @@ class BenchmarkRunner:
         tasks = load_tasks(suite_dir, task_id=task_id, **filters)
         if include_private and self.private_suite_dir and self.private_suite_dir.exists():
             tasks.extend(load_tasks(self.private_suite_dir, task_id=task_id, **filters))
-        existing_results = self._load_existing_task_results_from_manifests(
-            tasks=tasks,
-            repeat=repeat,
-            agent=agent,
-            model=model,
-            base_url=base_url,
-            provider=provider,
-        )
+        existing_results: dict[tuple[int, str], BenchmarkRunResult] = {}
+        if task_id is None:
+            existing_results = self._load_existing_task_results_from_manifests(
+                tasks=tasks,
+                repeat=repeat,
+                agent=agent,
+                model=model,
+                base_url=base_url,
+                provider=provider,
+            )
         results: list[BenchmarkRunResult] = list(existing_results.values())
         self._log(
             f"start suite={suite_dir} tasks={len(tasks)} agent={agent} model={model or '-'} provider={provider or '-'} base_url={base_url or '-'} output_dir={self.output_dir}"
@@ -767,7 +769,7 @@ class BenchmarkRunner:
                 and not timeout
                 and not error
                 and not policy_result.violating_paths
-                and failure_reason in {None, FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED, FailureReason.MISSING_ARTIFACT}
+                and failure_reason in {None, FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED}
             ):
                 failure_reason = FailureReason.BENCHMARK_NO_PATCH_ATTEMPT
 

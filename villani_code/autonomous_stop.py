@@ -13,11 +13,25 @@ class StopDecision(StrEnum):
     PLANNER_CHURN = "planner_churn"
     STAGNATION = "stagnation"
 
+    @classmethod
+    def parse(cls, value: str) -> "StopDecision":
+        for item in cls:
+            if item.value == str(value):
+                return item
+        raise ValueError(f"Unknown StopDecision: {value}")
+
 
 class DoneReason(StrEnum):
     NO_OPPORTUNITIES = "No opportunities discovered."
     PLANNER_CHURN = "Stopped: planner loop with no model activity."
     BUDGET_EXHAUSTED = "Villani mode budget exhausted."
+
+    @classmethod
+    def parse(cls, value: str) -> "DoneReason":
+        for item in cls:
+            if item.value == str(value):
+                return item
+        raise ValueError(f"Unknown DoneReason: {value}")
 
 
 @dataclass(slots=True)
