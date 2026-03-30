@@ -264,10 +264,71 @@ def _is_explicit_write_denial(content: str) -> bool:
             "constraint",
             "outside workspace",
             "outside repo",
+            "path escapes repository",
+            "escapes repository",
+            "outside allowed scope",
+            "outside allowed workspace",
+            "path outside",
+            "cannot write outside",
+            "write forbidden",
             "permission denied",
             "read-only",
         )
     )
+
+
+def _extract_write_paths_from_text(text: str) -> list[str]:
+    touched: list[str] = []
+    for match in re.finditer(r"(?im)^\s*(?:write|patch)\s+(.+?)\s*$", str(text or "")):
+        path = match.group(1).strip().strip("'\"")
+        if path:
+            touched.append(path)
+    return sorted(dict.fromkeys(touched))
+
+
+def _extract_read_paths_from_text(text: str) -> list[str]:
+    touched: list[str] = []
+    for match in re.finditer(r"(?im)^\s*read\s+(.+?)\s*$", str(text or "")):
+        path = match.group(1).strip().strip("'\"")
+        if path:
+            touched.append(path)
+    return sorted(dict.fromkeys(touched))
+
+
+def _collect_textual_transcript_blocks(result: dict[str, Any]) -> list[str]:
+    blocks: list[str] = []
+    response = result.get("response") if isinstance(result.get("response"), dict) else {}
+    for item in list(response.get("content", []) or []):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if text:
+            blocks.append(text)
+    transcript = result.get("transcript") if isinstance(result.get("transcript"), dict) else {}
+    for item in list(transcript.get("final_assistant_content", []) or []):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if text:
+            blocks.append(text)
+    for response_item in list(transcript.get("responses", []) or []):
+        if not isinstance(response_item, dict):
+            continue
+        for content_item in list(response_item.get("content", []) or []):
+            if not isinstance(content_item, dict):
+                continue
+            text = str(content_item.get("text", "")).strip()
+            if text:
+                blocks.append(text)
+    for key in ("event_log", "events", "stream", "stream_events"):
+        for event in list(transcript.get(key, []) or []):
+            if not isinstance(event, dict):
+                continue
+            for text_key in ("text", "message", "content", "delta", "output_text"):
+                value = event.get(text_key)
+                if isinstance(value, str) and value.strip():
+                    blocks.append(value.strip())
+    return blocks
 
 
 def _extract_successful_write_paths_from_transcript(result: dict[str, Any]) -> list[str]:
@@ -733,10 +794,17 @@ def execute_mission_node_with_runner(
     execution = _extract_execution_payload(normalized)
     changed_all = _extract_changed_files_from_result(normalized, before, after)
     write_paths = _extract_write_paths_from_transcript(normalized)
-    observed_write_paths = _extract_successful_write_paths_from_transcript(normalized)
+    structured_observed_write_paths = _extract_successful_write_paths_from_transcript(normalized)
+    textual_blocks = _collect_textual_transcript_blocks(normalized)
+    fallback_observed_write_paths: set[str] = set()
+    for block in textual_blocks:
+        fallback_observed_write_paths.update(_extract_write_paths_from_text(block))
     shell_invocations = _extract_shell_commands_from_transcript(normalized)
     changed, internal_changed = split_internal_paths(changed_all)
     blocked_write_paths = _extract_blocked_write_paths_from_transcript(normalized)
+    observed_write_paths = sorted(
+        (set(structured_observed_write_paths) | fallback_observed_write_paths) - set(blocked_write_paths)
+    )
     execution_commands = list(execution.get("validation_artifacts", []) or [])
     command_results = _extract_command_results_from_execution(execution)
     failures = _extract_failures_from_execution(execution)

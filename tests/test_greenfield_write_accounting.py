@@ -5,8 +5,10 @@ from pathlib import Path
 from villani_code.autonomous import VillaniModeController
 from villani_code.mission import Mission, MissionExecutionState, MissionNode, MissionScratchpad, MissionType, NodePhase, NodeStatus
 from villani_code.mission_bridge import (
+    _extract_write_paths_from_text,
     _extract_blocked_write_paths_from_transcript,
     _extract_successful_write_paths_from_transcript,
+    execute_mission_node_with_runner,
 )
 from villani_code.verification.outcomes import classify_node_outcome
 
@@ -71,6 +73,45 @@ def test_explicit_denied_write_is_blocked_not_observed() -> None:
     blocked = _extract_blocked_write_paths_from_transcript({"transcript": transcript})
     assert observed == []
     assert blocked == ["/tmp/outside.txt"]
+
+
+def test_explicit_denied_write_path_escapes_repository_is_blocked_not_observed() -> None:
+    transcript = {
+        "tool_invocations": [{"name": "write", "input": {"file_path": "/tmp/outside.txt"}}],
+        "tool_results": [{"is_error": True, "content": "Path escapes repository"}],
+    }
+    observed = _extract_successful_write_paths_from_transcript({"transcript": transcript})
+    blocked = _extract_blocked_write_paths_from_transcript({"transcript": transcript})
+    assert observed == []
+    assert blocked == ["/tmp/outside.txt"]
+
+
+def test_streamed_text_only_writes_are_accounted_for_greenfield_scaffold() -> None:
+    text = "\n".join(
+        [
+            r"write C:\sandbox\README.md",
+            r"write C:\sandbox\game.py",
+        ]
+    )
+    observed = _extract_write_paths_from_text(text)
+    assert observed == [r"C:\sandbox\README.md", r"C:\sandbox\game.py"]
+
+    outcome = classify_node_outcome(
+        contract_type="scaffold_project",
+        static_result={"findings": []},
+        command_results=[],
+        changed_files=[],
+        mission_type="greenfield_build",
+        node_phase="scaffold_project",
+        execution_payload={
+            "observed_write_paths": observed,
+            "blocked_write_paths": [],
+            "attempted_write_paths": [],
+        },
+        scratchpad=MissionScratchpad(mission_type="greenfield_build"),
+    )
+    assert outcome["status"] == "passed"
+    assert outcome["user_deliverable_patch"] is True
 
 
 def test_repo_local_changed_files_behavior_is_preserved() -> None:
@@ -148,3 +189,41 @@ def test_read_only_phase_blocked_write_remains_recoverable_contract_violation() 
     )
     assert outcome["user_deliverable_patch"] is False
     assert outcome["phase_contract_status"] == "contract_violation_recovered"
+
+
+def test_structured_transcript_write_accounting_still_works_as_before() -> None:
+    transcript = {
+        "tool_invocations": [{"name": "write", "input": {"file_path": "README.md"}}],
+        "tool_results": [{"is_error": False, "content": "ok"}],
+    }
+    observed = _extract_successful_write_paths_from_transcript({"transcript": transcript})
+    blocked = _extract_blocked_write_paths_from_transcript({"transcript": transcript})
+    assert observed == ["README.md"]
+    assert blocked == []
+
+
+class _FallbackBlockedRunner:
+    def run(self, _prompt: str, **_kwargs):
+        return {
+            "response": {"content": [{"type": "text", "text": "write /tmp/outside.txt"}]},
+            "transcript": {
+                "tool_invocations": [{"name": "write", "input": {"file_path": "/tmp/outside.txt"}}],
+                "tool_results": [{"is_error": True, "content": "Path escapes repository"}],
+            },
+        }
+
+
+def test_blocked_write_removes_same_path_from_fallback_observed_writes(tmp_path: Path) -> None:
+    mission = _greenfield_mission(tmp_path)
+    node = MissionNode(
+        node_id="n1",
+        title="Scaffold",
+        phase=NodePhase.SCAFFOLD_PROJECT,
+        objective="Create starter files",
+        contract_type="scaffold_project",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(mission=mission, scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value))
+    result = execute_mission_node_with_runner(_FallbackBlockedRunner(), mission, node, state)
+    assert result.execution_payload["blocked_write_paths"] == ["/tmp/outside.txt"]
+    assert result.execution_payload["observed_write_paths"] == []
