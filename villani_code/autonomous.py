@@ -161,7 +161,7 @@ class VillaniModeController:
         if "snake" in joined:
             inferred = "snake_cli_game"
         elif "wordguess" in joined or ("word" in joined and "guess" in joined):
-            inferred = "word_guess_game"
+            inferred = "word_guessing_game_cli"
         elif "adventure" in joined:
             inferred = "text_adventure_cli"
         elif any(token in joined for token in ("game", "pygame")):
@@ -442,14 +442,23 @@ class VillaniModeController:
         ready_nodes = [n for n in mission.nodes if n.status == NodeStatus.READY]
         if not ready_nodes:
             return None
-        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and not execution_state.scratchpad.validation_proven:
-            validate_ready = [n for n in ready_nodes if n.phase == NodePhase.VALIDATE_PROJECT]
-            if validate_ready:
-                selected = validate_ready[0]
-                self._refresh_scratchpad_pre_node(execution_state, selected)
-                if selected.status == NodeStatus.SKIPPED:
-                    return None
-                return selected
+        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
+            if not execution_state.scratchpad.validation_proven:
+                validate_ready = [n for n in ready_nodes if n.phase == NodePhase.VALIDATE_PROJECT]
+                if validate_ready:
+                    selected = validate_ready[0]
+                    self._refresh_scratchpad_pre_node(execution_state, selected)
+                    if selected.status == NodeStatus.SKIPPED:
+                        return None
+                    return selected
+            if execution_state.scratchpad.has_runnable_entrypoint and execution_state.scratchpad.has_user_space_scaffolding:
+                summarize_ready = [n for n in ready_nodes if n.phase == NodePhase.SUMMARIZE_OUTCOME]
+                if summarize_ready:
+                    selected = summarize_ready[0]
+                    self._refresh_scratchpad_pre_node(execution_state, selected)
+                    if selected.status == NodeStatus.SKIPPED:
+                        return None
+                    return selected
         selected = sorted(ready_nodes, key=lambda n: (n.priority, n.confidence), reverse=True)[0]
         self._refresh_scratchpad_pre_node(execution_state, selected)
         if selected.status == NodeStatus.SKIPPED:
@@ -649,6 +658,7 @@ class VillaniModeController:
         attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
         blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
         shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
+        inferred_command_results = list(execution_payload.get("inferred_command_results", []) or [])
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase == NodePhase.SUMMARIZE_OUTCOME:
             if changed_files or attempted_write_paths or shell_invocations:
                 outcome["status"] = "failed"
@@ -765,7 +775,12 @@ class VillaniModeController:
                 "attempted_write_paths": attempted_write_paths,
                 "blocked_write_paths": blocked_write_paths,
                 "self_reported_validation_without_evidence": bool(outcome.get("self_reported_validation_without_evidence")),
-                "validation_evidence_kind": "real_command_results" if command_results else "none",
+                "validation_evidence_kind": (
+                    "real_command_results"
+                    if command_results
+                    else ("inferred_non_authoritative" if inferred_command_results else "none")
+                ),
+                "inferred_command_results": inferred_command_results,
                 "verification_status": str(outcome.get("verification_status", "validation_unproven")),
             }
         )
@@ -1139,4 +1154,13 @@ class VillaniModeController:
             lines.append(f"  * direction={greenfield.get('chosen_project_direction', '')}")
             lines.append(f"  * rationale={greenfield.get('selection_rationale', '')}")
             lines.append(f"  * deliverables={', '.join(greenfield.get('user_space_deliverables', [])[:10]) or 'none'}")
+            lines.append(f"  * validation_state={greenfield.get('validation_state', 'unproven')}")
+            lines.append(f"  * mission_completion_state={greenfield.get('mission_completion_state', 'partial')}")
+            lines.append(f"  * remaining_next_action={greenfield.get('remaining_next_action', '')}")
+            write_accounting = dict(greenfield.get("write_accounting", {}) or {})
+            blocked = ", ".join(write_accounting.get("attempted_but_blocked_only", [])[:8]) or "none"
+            lines.append(f"  * blocked_write_attempts={blocked}")
+        truth = str(report.get("validation_truth_statement", "")).strip()
+        if truth:
+            lines.append(f"- Validation truth: {truth}")
         return "\n".join(lines)
