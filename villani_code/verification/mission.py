@@ -16,11 +16,16 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
     )
     if not normalized.node_outcomes:
         return None, ""
-    if state.consecutive_no_progress >= max_no_progress and not normalized.deliverable_paths and not ready_greenfield_recovery:
+    controller_forward_progress = bool(
+        mission.mission_type.value == "greenfield_build"
+        and normalized.terminal_state == "in_progress"
+        and str(normalized.next_recommended_action or "").strip()
+    )
+    if state.consecutive_no_progress >= max_no_progress and not normalized.deliverable_paths and not ready_greenfield_recovery and not controller_forward_progress:
         return MissionOutcome.STAGNATED, "Repeated no-progress cycles exceeded threshold."
-    if state.repeated_delta_states >= 3 and not normalized.deliverable_paths and not ready_greenfield_recovery:
+    if state.repeated_delta_states >= 3 and not normalized.deliverable_paths and not ready_greenfield_recovery and not controller_forward_progress:
         return MissionOutcome.STAGNATED, "Repeated no/ambiguous delta outcomes exceeded threshold."
-    if state.consecutive_no_model_activity >= max_no_activity and not normalized.deliverable_paths and not ready_greenfield_recovery:
+    if state.consecutive_no_model_activity >= max_no_activity and not normalized.deliverable_paths and not ready_greenfield_recovery and not controller_forward_progress:
         return MissionOutcome.EXHAUSTED, "Repeated no-activity cycles exceeded threshold."
     if normalized.terminal_state == "success":
         if mission.mission_type.value == "greenfield_build":

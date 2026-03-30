@@ -45,6 +45,12 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
         or x.lower().endswith((".csv", ".tsv", ".json", ".yaml", ".yml", ".txt"))
     ]
     code_files = [x for x in non_internal if Path(x).suffix.lower() in {".py", ".js", ".ts", ".go", ".rs", ".java", ".rb"}]
+    entrypoint_like_files = [
+        x
+        for x in code_files
+        if Path(x).name in {"main.py", "app.py", "run.py", "__main__.py", "index.js", "main.ts"}
+        or x.startswith(("src/main.", "app/main.", "bin/"))
+    ]
 
     tooling_hints: list[str] = []
     likely_validation: list[str] = []
@@ -89,8 +95,16 @@ def collect_repo_signals(repo_root: str) -> dict[str, Any]:
         "workspace_empty_or_internal_only": len(non_internal) == 0,
         "workspace_lightweight_hints_only": len(non_internal) > 0 and not code_files and bool(hint_files),
         "workspace_hint_files": hint_files[:30],
+        "entrypoint_like_files": entrypoint_like_files[:20],
         "sample_data_files": [x for x in hint_files if x.lower().endswith((".csv", ".tsv", ".json"))][:20],
         "existing_project_detected": bool(code_files or config_files or source_roots),
+        "workspace_sparse_greenfield_like": bool(
+            len(non_internal) <= 8
+            and (
+                not bool(code_files or config_files or source_roots)
+                or (len(code_files) <= 3 and not test_roots and not entrypoint_like_files)
+            )
+        ),
         "likely_project_directions": _likely_project_directions(tooling_hints, hint_files, non_internal),
         "internal_artifact_paths": [x for x in rel if is_internal_villani_path(x)],
         "ignored_context_paths": [x for x in rel if path_authority.get(x) in {"internal_artifact_ignored", "internal_artifact_low_authority"}],

@@ -253,6 +253,20 @@ class VillaniModeController:
                 return
         scratchpad.next_required_action = scratchpad.derive_next_action()
 
+    def _enforce_greenfield_direction_consistency(self, execution_state: MissionExecutionState) -> str:
+        objective = execution_state.mission.objective
+        scratchpad = execution_state.scratchpad
+        selected = str(execution_state.greenfield_selection.get("project_type", "")).strip()
+        canonical = str(objective.direction or scratchpad.chosen_project_direction or selected).strip()
+        if not canonical:
+            return ""
+        objective.direction = canonical
+        scratchpad.chosen_project_direction = canonical
+        scratchpad.chosen_product_shape = canonical
+        execution_state.greenfield_selection["project_type"] = canonical
+        execution_state.mission.mission_context["greenfield_selection"] = dict(execution_state.greenfield_selection)
+        return canonical
+
     def _synthesize_greenfield_phase_state(self, execution_state: MissionExecutionState, node: Any) -> None:
         if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
             return
@@ -272,22 +286,24 @@ class VillaniModeController:
         if node.phase != NodePhase.DEFINE_OBJECTIVE:
             return
         objective = execution_state.mission.objective
-        direction = str(
-            execution_state.greenfield_selection.get("project_type", "")
-            or execution_state.scratchpad.chosen_project_direction
-            or objective.direction
-        ).strip()
+        direction = self._enforce_greenfield_direction_consistency(execution_state)
         if not direction:
             direction = "python_cli_utility"
-        objective.repo_state_type = str(objective.repo_state_type or ("empty_sandbox" if repo_signals.get("workspace_empty_or_internal_only") else "unknown"))
+            objective.direction = direction
+        fallback_repo_state = "unknown"
+        if repo_signals.get("workspace_empty_or_internal_only"):
+            fallback_repo_state = "empty_sandbox"
+        elif repo_signals.get("workspace_lightweight_hints_only"):
+            fallback_repo_state = "lightweight_hints"
+        elif repo_signals.get("workspace_sparse_greenfield_like"):
+            fallback_repo_state = "sparse_scaffold"
+        objective.repo_state_type = str(objective.repo_state_type or fallback_repo_state)
         objective.task_shape = str(objective.task_shape or "greenfield_build")
         objective.deliverable_kind = list(objective.deliverable_kind or ["unknown"])
         objective.direction = direction
         objective.initial_validation_strategy = list(objective.initial_validation_strategy or repo_signals.get("likely_validation_commands", []) or ["python -m py_compile <entrypoint>"])[:4]
-        execution_state.scratchpad.chosen_project_direction = direction
-        execution_state.scratchpad.chosen_product_shape = direction
         execution_state.scratchpad.next_required_action = NodePhase.SCAFFOLD_PROJECT.value
-        execution_state.greenfield_selection["project_type"] = direction
+        self._enforce_greenfield_direction_consistency(execution_state)
         execution_state.mission.mission_context["objective"] = {k: getattr(objective, k) for k in objective.__dataclass_fields__.keys()}
         execution_state.mission.mission_context["greenfield_selection"] = dict(execution_state.greenfield_selection)
         execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
@@ -297,8 +313,7 @@ class VillaniModeController:
         mission = execution_state.mission
         if scratchpad.mission_type == MissionType.GREENFIELD_BUILD.value and mission.mission_type != MissionType.GREENFIELD_BUILD:
             mission.mission_type = MissionType.GREENFIELD_BUILD
-        if scratchpad.chosen_project_direction and not execution_state.greenfield_selection.get("project_type"):
-            execution_state.greenfield_selection["project_type"] = scratchpad.chosen_project_direction
+        self._enforce_greenfield_direction_consistency(execution_state)
         if scratchpad.confirmed_deliverables and not outcome.get("user_deliverable_patch") and outcome.get("status") == "failed":
             outcome["status"] = "partial"
             outcome["reason"] = "no-regression guard: prior deliverables confirmed in scratchpad"

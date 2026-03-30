@@ -15,6 +15,7 @@ from villani_code.mission import (
     NormalizedNodeOutcome,
     reduce_normalized_mission_progress,
 )
+from villani_code.repo_signal_planner import collect_repo_signals
 from villani_code.verification.mission import evaluate_mission_status
 from villani_code.verification.outcomes import classify_node_outcome
 
@@ -31,6 +32,15 @@ class _ThinRunner:
     def run(self, _prompt: str, **_kwargs):
         self.calls += 1
         return {"response": {"content": [{"type": "text", "text": "<task>inspect_workspace</task><objective>Understand workspace structure...</objective>"}]}}
+
+
+class _EmptyReplyRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, _prompt: str, **_kwargs):
+        self.calls += 1
+        return {"response": {"content": []}}
 
 
 class _FlowRunner:
@@ -81,6 +91,23 @@ def test_greenfield_next_action_prefers_validation_after_runnable_entrypoint() -
         validation_proven=False,
     )
     assert scratchpad.derive_next_action() == "validate_project"
+
+
+def test_repo_signals_mark_readme_only_workspace_as_sparse_greenfield(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# notes\n", encoding="utf-8")
+    signals = collect_repo_signals(str(tmp_path))
+    assert signals["workspace_lightweight_hints_only"] is True
+    assert signals["workspace_sparse_greenfield_like"] is True
+
+
+def test_repo_signals_mark_partial_non_runnable_skeleton_as_sparse_greenfield(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "engine.py").write_text("def tick():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# game skeleton\n", encoding="utf-8")
+    signals = collect_repo_signals(str(tmp_path))
+    assert signals["existing_project_detected"] is True
+    assert signals["workspace_sparse_greenfield_like"] is True
+    assert signals["entrypoint_like_files"] == []
 
 
 def test_greenfield_validate_without_commands_stays_unproven() -> None:
@@ -206,6 +233,67 @@ def test_greenfield_empty_sandbox_inspect_passes_with_thin_reply(tmp_path: Path)
     assert mission_outcome is None
 
 
+def test_greenfield_sparse_readme_inspect_uses_controller_native_path(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.mission_context["repo_signals"] = {
+        "workspace_empty_or_internal_only": False,
+        "workspace_lightweight_hints_only": True,
+        "workspace_sparse_greenfield_like": True,
+        "existing_project_detected": False,
+        "language_hints": ["python"],
+    }
+    node = MissionNode(
+        node_id="n1",
+        title="Inspect workspace",
+        phase=NodePhase.INSPECT_WORKSPACE,
+        objective="inspect",
+        contract_type="inspect_workspace",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(mission=mission, scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value))
+    runner = _EmptyReplyRunner()
+    result = execute_mission_node_with_runner(runner, mission, node, state)
+    outcome = classify_node_outcome(
+        contract_type=node.contract_type,
+        static_result={"findings": list(result.execution_payload.get("controller_findings", []))},
+        command_results=result.commands,
+        changed_files=result.changed_files,
+        prose_only=result.prose_only,
+        mission_type="greenfield_build",
+        node_phase="inspect_workspace",
+        execution_payload=result.execution_payload,
+        scratchpad=state.scratchpad,
+    )
+    assert runner.calls == 0
+    assert outcome["status"] == "passed"
+    assert "sparse/partial scaffold" in " ".join(result.execution_payload.get("controller_findings", []))
+
+
+def test_greenfield_sparse_partial_skeleton_inspect_still_passes(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.mission_context["repo_signals"] = {
+        "workspace_empty_or_internal_only": False,
+        "workspace_lightweight_hints_only": False,
+        "workspace_sparse_greenfield_like": True,
+        "existing_project_detected": True,
+        "language_hints": ["python"],
+        "entrypoint_like_files": [],
+    }
+    node = MissionNode(
+        node_id="n1",
+        title="Inspect workspace",
+        phase=NodePhase.INSPECT_WORKSPACE,
+        objective="inspect",
+        contract_type="inspect_workspace",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(mission=mission, scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value))
+    runner = _ThinRunner()
+    result = execute_mission_node_with_runner(runner, mission, node, state)
+    assert runner.calls == 0
+    assert result.execution_payload.get("controller_native") is True
+
+
 def test_greenfield_define_objective_thin_reply_uses_controller_state(tmp_path: Path) -> None:
     mission = _mission(tmp_path)
     mission.mission_context["repo_signals"] = {"workspace_empty_or_internal_only": True, "language_hints": ["python"]}
@@ -246,6 +334,54 @@ def test_greenfield_define_objective_thin_reply_uses_controller_state(tmp_path: 
     assert outcome["status"] == "passed"
 
 
+def test_greenfield_define_objective_empty_reply_uses_controller_state(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.mission_context["repo_signals"] = {
+        "workspace_sparse_greenfield_like": True,
+        "workspace_empty_or_internal_only": False,
+        "language_hints": ["python"],
+    }
+    mission.objective.direction = "snake_cli_game"
+    mission.objective.repo_state_type = "sparse_scaffold"
+    mission.objective.task_shape = "greenfield_build"
+    mission.objective.deliverable_kind = ["game"]
+    mission.objective.initial_validation_strategy = ["python -m py_compile game.py"]
+    node = MissionNode(
+        node_id="n2",
+        title="Define objective",
+        phase=NodePhase.DEFINE_OBJECTIVE,
+        objective="define",
+        contract_type="define_objective",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(
+        mission=mission,
+        scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value, chosen_project_direction="snake_cli_game"),
+    )
+    runner = _EmptyReplyRunner()
+    result = execute_mission_node_with_runner(runner, mission, node, state)
+    outcome = classify_node_outcome(
+        contract_type=node.contract_type,
+        static_result={"findings": []},
+        command_results=result.commands,
+        changed_files=result.changed_files,
+        prose_only=True,
+        mission_type="greenfield_build",
+        node_phase="define_objective",
+        execution_payload=result.execution_payload,
+        scratchpad=state.scratchpad,
+        mission_objective={
+            "repo_state_type": mission.objective.repo_state_type,
+            "task_shape": mission.objective.task_shape,
+            "deliverable_kind": mission.objective.deliverable_kind,
+            "direction": mission.objective.direction,
+            "initial_validation_strategy": mission.objective.initial_validation_strategy,
+        },
+    )
+    assert runner.calls == 0
+    assert outcome["status"] == "passed"
+
+
 def test_ready_greenfield_recovery_node_keeps_mission_in_progress(tmp_path: Path) -> None:
     mission = _mission(tmp_path)
     mission.nodes.append(
@@ -277,6 +413,33 @@ def test_ready_greenfield_recovery_node_keeps_mission_in_progress(tmp_path: Path
     outcome, _reason = evaluate_mission_status(state)
     assert reduced.terminal_state == "in_progress"
     assert outcome is None
+
+
+def test_mission_stays_in_progress_with_known_next_action_despite_no_progress_counters(tmp_path: Path) -> None:
+    state = MissionExecutionState(
+        mission=_mission(tmp_path),
+        scratchpad=MissionScratchpad(
+            mission_type=MissionType.GREENFIELD_BUILD.value,
+            chosen_project_direction="snake_cli_game",
+            next_required_action="scaffold_project",
+        ),
+        consecutive_no_progress=8,
+        repeated_delta_states=4,
+        consecutive_no_model_activity=6,
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n1",
+            node_phase="inspect_workspace",
+            contract_status="contract_clean_success",
+            mission_progress_status="state_progress",
+            next_recommended_action="scaffold_project",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    mission_outcome, _reason = evaluate_mission_status(state)
+    assert reduced.terminal_state == "in_progress"
+    assert mission_outcome is None
 
 
 def test_prompt_empty_sandbox_fun_python_game_expected_greenfield_flow(tmp_path: Path) -> None:
