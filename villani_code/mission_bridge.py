@@ -828,13 +828,31 @@ def execute_mission_node_with_runner(
     if hasattr(runner, "set_active_tool_root"):
         runner.set_active_tool_root(active_root)
     if mission.mission_type.value == "greenfield_build":
+        phase = node.phase.value
+        if phase == "scaffold_project":
+            max_new_files = 8
+            max_distinct_paths = 10
+            max_total_write_bytes = 120_000
+        elif phase == "implement_increment":
+            max_new_files = 10
+            max_distinct_paths = 12
+            max_total_write_bytes = 180_000
+        else:
+            max_new_files = 0
+            max_distinct_paths = 0
+            max_total_write_bytes = 0
         runner._villani_phase_tool_policy = {
             "mission_type": "greenfield_build",
-            "node_phase": node.phase.value,
-            "read_only_phase": node.phase.value in {"inspect_workspace", "define_objective", "summarize_outcome"},
-            "allow_shell_commands": node.phase.value in {"validate_project"},
-            "allow_mutating_tools": node.phase.value in {"scaffold_project", "implement_increment"},
-            "allow_validation_shell": node.phase.value == "validate_project",
+            "node_phase": phase,
+            "node_id": node.node_id,
+            "read_only_phase": phase in {"inspect_workspace", "define_objective", "summarize_outcome"},
+            "allow_shell_commands": phase in {"scaffold_project", "implement_increment", "validate_project"},
+            "allow_mutating_tools": phase in {"scaffold_project", "implement_increment"},
+            "allow_validation_shell": phase in {"scaffold_project", "implement_increment", "validate_project"},
+            "max_new_files_per_node": max_new_files,
+            "max_distinct_paths_per_node": max_distinct_paths,
+            "max_total_write_bytes_per_node": max_total_write_bytes,
+            "new_file_whole_write_max_bytes": 100_000,
         }
     try:
         result = runner.run(instruction)

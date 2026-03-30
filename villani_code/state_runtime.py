@@ -491,6 +491,11 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:
         return None
+    phase_policy = dict(getattr(runner, "_villani_phase_tool_policy", {}) or {})
+    greenfield_mutation_phase = (
+        str(phase_policy.get("mission_type", "")) == "greenfield_build"
+        and str(phase_policy.get("node_phase", "")) in {"scaffold_project", "implement_increment"}
+    )
     if tool_name in {"Write", "Patch"}:
         fp = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
         if fp:
@@ -508,7 +513,7 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 runner._files_read.add(fp)
 
             intended = set(getattr(runner, "_intended_targets", set()))
-            if intended and fp not in intended:
+            if intended and fp not in intended and not greenfield_mutation_phase:
                 explicit_allowlisted = runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp)
                 benchmark_scope_ok = (not runner.benchmark_config.enabled) or explicit_allowlisted
                 has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(fp, intended)
@@ -551,6 +556,11 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
     if tool_name == "Write":
         file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
         path = (runner.repo / file_path).resolve()
+        if (not path.exists()) and greenfield_mutation_phase:
+            max_new_file_write = int(phase_policy.get("new_file_whole_write_max_bytes", 100_000) or 100_000)
+            proposed = str(tool_input.get("content", ""))
+            if len(proposed.encode("utf-8")) <= max_new_file_write:
+                return None
         if path.exists() and path.is_file():
             text = path.read_text(encoding="utf-8", errors="replace")
             if len(text) > 10_000 or len(text.splitlines()) > 200:
