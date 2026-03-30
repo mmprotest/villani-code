@@ -385,6 +385,12 @@ def _greenfield_unrestricted_within_sandbox(phase_policy: dict[str, Any]) -> boo
     )
 
 
+def _villani_unrestricted_mode(runner: Any, phase_policy: dict[str, Any]) -> bool:
+    if bool(getattr(runner, "villani_unrestricted_mode", False)):
+        return True
+    return _greenfield_unrestricted_within_sandbox(phase_policy)
+
+
 def _validate_sandbox_boundary_for_mutation(
     runner: Any,
     tool_name: str,
@@ -425,7 +431,7 @@ def execute_tool_with_policy(
         return {"content": "Plan artifact accepted", "is_error": False}
 
     phase_policy = dict(getattr(runner, "_villani_phase_tool_policy", {}) or {})
-    unrestricted_within_sandbox = _greenfield_unrestricted_within_sandbox(phase_policy)
+    unrestricted_within_sandbox = _villani_unrestricted_mode(runner, phase_policy)
     if str(phase_policy.get("mission_type", "")) == "greenfield_build":
         phase = str(phase_policy.get("node_phase", "")).strip()
         allow_mutating_tools = bool(phase_policy.get("allow_mutating_tools", False))
@@ -478,7 +484,7 @@ def execute_tool_with_policy(
             if not any(command.startswith(prefix) for prefix in readonly_prefixes):
                 return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
-    if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
+    if (runner.small_model or runner.villani_mode or runner.benchmark_config.enabled) and not unrestricted_within_sandbox:
         policy_error = runner._small_model_tool_guard(tool_name, tool_input)
         if policy_error:
             return {"content": policy_error, "is_error": True}
@@ -487,65 +493,70 @@ def execute_tool_with_policy(
     if runner.benchmark_config.enabled and tool_name in {"Write", "Patch"}:
         _normalize_mutation_payload_for_code_files(tool_name, tool_input)
 
-    policy = runner.permissions.evaluate_with_reason(
-        tool_name,
-        tool_input,
-        bypass=runner.bypass_permissions,
-        auto_accept_edits=runner.auto_accept_edits,
-    )
-    runner._emit_policy_event(tool_name, tool_input, policy.decision, policy.reason)
-    if policy.decision == Decision.DENY:
-        return {"content": "Denied by permission policy", "is_error": True}
-    if policy.decision == Decision.ASK:
-        if runner.villani_mode:
-            runner.event_callback(
-                {
-                    "type": "approval_auto_resolved",
-                    "name": tool_name,
-                    "input": tool_input,
-                }
-            )
-        else:
-            runner.event_callback(
-                {
-                    "type": "approval_required",
-                    "name": tool_name,
-                    "input": tool_input,
-                }
-            )
-            if not runner.approval_callback(tool_name, tool_input):
-                return {"content": "User denied tool execution", "is_error": True}
-    elif runner.plan_mode != "off" and tool_name in {"Write", "Patch"}:
-        return {"content": "Plan mode: edit not executed", "is_error": False}
-
-    first_attempt_lock_violation = _validate_first_attempt_locked_target_mutation(runner, tool_name, tool_input)
-    if first_attempt_lock_violation:
-        return {"content": first_attempt_lock_violation, "is_error": True}
-
-    benchmark_violation = _validate_benchmark_mutation(runner, tool_name, tool_input)
-    if benchmark_violation:
-        paths = _benchmark_mutation_targets(tool_name, tool_input)
-        reason_code, denied_path = _parse_benchmark_denial_message(benchmark_violation)
-        correction = _benchmark_denial_feedback(runner, benchmark_violation, paths)
-        event_type = "benchmark_write_blocked" if tool_name == "Write" else "benchmark_patch_blocked"
-        runner.event_callback(
-            {
-                "type": event_type,
-                "task_id": runner.benchmark_config.task_id,
-                "tool": tool_name,
-                "input": tool_input,
-                "reason": benchmark_violation,
-                "reason_code": reason_code,
-                "denied_path": denied_path,
-                "paths": paths,
-                "allowed_expected_files": list(runner.benchmark_config.expected_files),
-                "allowed_support_files": list(runner.benchmark_config.allowed_support_files),
-                "feedback": correction,
-            }
+    if unrestricted_within_sandbox:
+        runner._emit_policy_event(tool_name, tool_input, Decision.ALLOW, "Villani unrestricted mode: boundary-only policy")
+    else:
+        policy = runner.permissions.evaluate_with_reason(
+            tool_name,
+            tool_input,
+            bypass=runner.bypass_permissions,
+            auto_accept_edits=runner.auto_accept_edits,
         )
-        return {"content": correction, "is_error": True}
+        runner._emit_policy_event(tool_name, tool_input, policy.decision, policy.reason)
+        if policy.decision == Decision.DENY:
+            return {"content": "Denied by permission policy", "is_error": True}
+        if policy.decision == Decision.ASK:
+            if runner.villani_mode:
+                runner.event_callback(
+                    {
+                        "type": "approval_auto_resolved",
+                        "name": tool_name,
+                        "input": tool_input,
+                    }
+                )
+            else:
+                runner.event_callback(
+                    {
+                        "type": "approval_required",
+                        "name": tool_name,
+                        "input": tool_input,
+                    }
+                )
+                if not runner.approval_callback(tool_name, tool_input):
+                    return {"content": "User denied tool execution", "is_error": True}
+        elif runner.plan_mode != "off" and tool_name in {"Write", "Patch"}:
+            return {"content": "Plan mode: edit not executed", "is_error": False}
 
-    if runner.villani_mode and tool_name in {"Write", "Patch"}:
+    if not unrestricted_within_sandbox:
+        first_attempt_lock_violation = _validate_first_attempt_locked_target_mutation(runner, tool_name, tool_input)
+        if first_attempt_lock_violation:
+            return {"content": first_attempt_lock_violation, "is_error": True}
+
+    if not unrestricted_within_sandbox:
+        benchmark_violation = _validate_benchmark_mutation(runner, tool_name, tool_input)
+        if benchmark_violation:
+            paths = _benchmark_mutation_targets(tool_name, tool_input)
+            reason_code, denied_path = _parse_benchmark_denial_message(benchmark_violation)
+            correction = _benchmark_denial_feedback(runner, benchmark_violation, paths)
+            event_type = "benchmark_write_blocked" if tool_name == "Write" else "benchmark_patch_blocked"
+            runner.event_callback(
+                {
+                    "type": event_type,
+                    "task_id": runner.benchmark_config.task_id,
+                    "tool": tool_name,
+                    "input": tool_input,
+                    "reason": benchmark_violation,
+                    "reason_code": reason_code,
+                    "denied_path": denied_path,
+                    "paths": paths,
+                    "allowed_expected_files": list(runner.benchmark_config.expected_files),
+                    "allowed_support_files": list(runner.benchmark_config.allowed_support_files),
+                    "feedback": correction,
+                }
+            )
+            return {"content": correction, "is_error": True}
+
+    if runner.villani_mode and tool_name in {"Write", "Patch"} and not unrestricted_within_sandbox:
         target = str(tool_input.get("file_path", ""))
         if target:
             classification = classify_repo_path(target)

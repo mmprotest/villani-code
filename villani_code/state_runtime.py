@@ -488,6 +488,18 @@ def _is_strongly_adjacent_path(candidate: str, locked_paths: set[str]) -> bool:
 
 
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    villani_unrestricted_mode = bool(getattr(runner, "villani_unrestricted_mode", False))
+    if villani_unrestricted_mode and tool_name in {"Write", "Patch"}:
+        fp = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if fp:
+            root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+            path = (root / fp).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                return f"sandbox_boundary_blocked: path escapes sandbox_root ({path})"
+        return None
+
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:
         return None
