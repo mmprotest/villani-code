@@ -191,6 +191,163 @@ class NodeOutcomeRecord:
 
 
 @dataclass(slots=True)
+class NormalizedNodeOutcome:
+    node_id: str
+    node_phase: str
+    contract_status: str
+    mission_progress_status: str
+    successful_user_writes: list[str] = field(default_factory=list)
+    blocked_write_attempts: list[str] = field(default_factory=list)
+    internal_artifact_writes: list[str] = field(default_factory=list)
+    actual_changed_files_count: int = 0
+    deliverable_paths: list[str] = field(default_factory=list)
+    command_results: list[dict[str, Any]] = field(default_factory=list)
+    validation_truth_status: str = "unproven"
+    validation_summary: dict[str, Any] = field(default_factory=dict)
+    realized_artifact_direction: str = ""
+    next_recommended_action: str = ""
+    terminal_candidate_state: str = ""
+    blocked_reason: str = ""
+
+
+@dataclass(slots=True)
+class NormalizedMissionProgress:
+    node_outcomes: list[NormalizedNodeOutcome] = field(default_factory=list)
+    files_touched: list[str] = field(default_factory=list)
+    deliverable_paths: list[str] = field(default_factory=list)
+    blocked_write_attempts: list[str] = field(default_factory=list)
+    internal_artifact_writes: list[str] = field(default_factory=list)
+    validation_truth_status: str = "unproven"
+    validation_summary: dict[str, Any] = field(default_factory=dict)
+    realized_artifact_direction: str = ""
+    mission_completion_state: str = "partial"
+    terminal_state: str = "stagnated"
+    next_recommended_action: str = ""
+    blocked_reason: str = ""
+
+
+def reduce_validation_truth(command_results: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    total = len(command_results)
+    if total <= 0:
+        return "unproven", {"commands_run": 0, "passed": 0, "failed": 0, "evidence": "none"}
+    failed = sum(1 for item in command_results if int(item.get("exit", 1) or 1) != 0)
+    passed = max(0, total - failed)
+    if failed > 0:
+        return "failed", {"commands_run": total, "passed": passed, "failed": failed, "evidence": "real_command_results"}
+    return "proven", {"commands_run": total, "passed": passed, "failed": 0, "evidence": "real_command_results"}
+
+
+def infer_realized_artifact_direction(deliverables: list[str], fallback: str = "") -> str:
+    joined = " ".join(str(path).lower() for path in deliverables if str(path).strip())
+    if not joined:
+        return fallback
+    if "wordle" in joined or ("word" in joined and "guess" in joined):
+        return "wordle_clone_game_cli"
+    if "snake" in joined:
+        return "snake_cli_game"
+    if "adventure" in joined:
+        return "text_adventure_cli"
+    if any(token in joined for token in ("cli", "command", "console")):
+        return "python_cli_utility"
+    return fallback
+
+
+def reduce_terminal_state(
+    *,
+    has_deliverables: bool,
+    has_meaningful_progress: bool,
+    validation_truth_status: str,
+    blocked_write_attempts: list[str],
+    explicit_blocked_reason: str = "",
+) -> tuple[str, str]:
+    blocked_reason = explicit_blocked_reason.strip()
+    if blocked_reason or (blocked_write_attempts and not has_deliverables):
+        return "blocked", blocked_reason or "write operations were blocked before deliverables were produced"
+    if has_deliverables:
+        if validation_truth_status == "proven":
+            return "success", ""
+        if validation_truth_status in {"failed", "unproven"}:
+            return "partial_success", ""
+    if not has_meaningful_progress:
+        return "stagnated", ""
+    if validation_truth_status == "failed":
+        return "failed", ""
+    return "stagnated", ""
+
+
+def reduce_normalized_mission_progress(state: "MissionExecutionState") -> NormalizedMissionProgress:
+    outcomes = list(state.normalized_node_outcomes or [])
+    successful_user_writes = sorted(
+        {
+            str(path)
+            for item in outcomes
+            for path in list(item.successful_user_writes or [])
+            if str(path).strip()
+        }
+    )
+    deliverables = sorted(
+        {
+            str(path)
+            for item in outcomes
+            for path in list(item.deliverable_paths or [])
+            if str(path).strip()
+        }
+    )
+    blocked_writes = sorted(
+        {
+            str(path)
+            for item in outcomes
+            for path in list(item.blocked_write_attempts or [])
+            if str(path).strip()
+        }
+    )
+    internal_writes = sorted(
+        {
+            str(path)
+            for item in outcomes
+            for path in list(item.internal_artifact_writes or [])
+            if str(path).strip()
+        }
+    )
+    all_commands = [dict(cmd) for item in outcomes for cmd in list(item.command_results or []) if isinstance(cmd, dict)]
+    validation_truth_status, validation_summary = reduce_validation_truth(all_commands)
+    fallback_direction = str(state.scratchpad.chosen_project_direction or state.greenfield_selection.get("project_type", "")).strip()
+    realized_direction = infer_realized_artifact_direction(deliverables or successful_user_writes, fallback=fallback_direction)
+    has_meaningful_progress = any(
+        str(item.mission_progress_status) in {
+            "validated_success",
+            "useful_progress_unvalidated",
+            "useful_progress_with_contract_violation",
+        }
+        for item in outcomes
+    ) or bool(deliverables)
+    blocked_reason = next((str(item.blocked_reason).strip() for item in reversed(outcomes) if str(item.blocked_reason).strip()), "")
+    terminal_state, reduced_blocked_reason = reduce_terminal_state(
+        has_deliverables=bool(deliverables),
+        has_meaningful_progress=has_meaningful_progress,
+        validation_truth_status=validation_truth_status,
+        blocked_write_attempts=blocked_writes,
+        explicit_blocked_reason=blocked_reason,
+    )
+    next_action = next((str(item.next_recommended_action).strip() for item in reversed(outcomes) if str(item.next_recommended_action).strip()), "")
+    mission_completion_state = "complete" if terminal_state == "success" else ("partial" if terminal_state == "partial_success" else "incomplete")
+    return NormalizedMissionProgress(
+        node_outcomes=outcomes,
+        files_touched=successful_user_writes,
+        deliverable_paths=deliverables,
+        blocked_write_attempts=blocked_writes,
+        internal_artifact_writes=internal_writes,
+        validation_truth_status=validation_truth_status,
+        validation_summary=validation_summary,
+        realized_artifact_direction=realized_direction,
+        mission_completion_state=mission_completion_state,
+        terminal_state=terminal_state,
+        next_recommended_action="" if terminal_state in {"success", "failed", "stagnated", "blocked"} else next_action,
+        blocked_reason=reduced_blocked_reason,
+    )
+
+
+@dataclass(slots=True)
 class MissionNode:
     node_id: str
     title: str
@@ -314,6 +471,7 @@ class MissionExecutionState:
     greenfield_selection: dict[str, Any] = field(default_factory=dict)
     greenfield_progress: dict[str, Any] = field(default_factory=dict)
     scratchpad: MissionScratchpad = field(default_factory=MissionScratchpad)
+    normalized_node_outcomes: list[NormalizedNodeOutcome] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -339,6 +497,7 @@ class MissionExecutionState:
             "greenfield_selection": dict(self.greenfield_selection),
             "greenfield_progress": dict(self.greenfield_progress),
             "scratchpad": self.scratchpad.to_dict(),
+            "normalized_node_outcomes": [asdict(item) for item in self.normalized_node_outcomes],
         }
 
     @classmethod
@@ -366,4 +525,8 @@ class MissionExecutionState:
             greenfield_selection=dict(data.get("greenfield_selection", {}) or {}),
             greenfield_progress=dict(data.get("greenfield_progress", {}) or {}),
             scratchpad=MissionScratchpad(**dict(data.get("scratchpad", {}) or {})),
+            normalized_node_outcomes=[
+                NormalizedNodeOutcome(**dict(item or {}))
+                for item in (data.get("normalized_node_outcomes", []) or [])
+            ],
         )
