@@ -829,29 +829,22 @@ def execute_mission_node_with_runner(
         runner.set_active_tool_root(active_root)
     if mission.mission_type.value == "greenfield_build":
         phase = node.phase.value
-        if phase == "scaffold_project":
-            max_new_files = 8
-            max_distinct_paths = 10
-            max_total_write_bytes = 120_000
-        elif phase == "implement_increment":
-            max_new_files = 10
-            max_distinct_paths = 12
-            max_total_write_bytes = 180_000
-        else:
-            max_new_files = 0
-            max_distinct_paths = 0
-            max_total_write_bytes = 0
+        unrestricted_within_sandbox = active_root != repo_root
         runner._villani_phase_tool_policy = {
             "mission_type": "greenfield_build",
             "node_phase": phase,
             "node_id": node.node_id,
+            "unrestricted_within_sandbox": unrestricted_within_sandbox,
             "read_only_phase": phase in {"inspect_workspace", "define_objective", "summarize_outcome"},
-            "allow_shell_commands": phase in {"scaffold_project", "implement_increment", "validate_project"},
-            "allow_mutating_tools": phase in {"scaffold_project", "implement_increment"},
-            "allow_validation_shell": phase in {"scaffold_project", "implement_increment", "validate_project"},
-            "max_new_files_per_node": max_new_files,
-            "max_distinct_paths_per_node": max_distinct_paths,
-            "max_total_write_bytes_per_node": max_total_write_bytes,
+            "allow_shell_commands": unrestricted_within_sandbox
+            or phase in {"scaffold_project", "implement_increment", "validate_project"},
+            "allow_mutating_tools": unrestricted_within_sandbox
+            or phase in {"scaffold_project", "implement_increment"},
+            "allow_validation_shell": unrestricted_within_sandbox
+            or phase in {"scaffold_project", "implement_increment", "validate_project"},
+            "max_new_files_per_node": 0 if unrestricted_within_sandbox else (8 if phase == "scaffold_project" else 10 if phase == "implement_increment" else 0),
+            "max_distinct_paths_per_node": 0 if unrestricted_within_sandbox else (10 if phase == "scaffold_project" else 12 if phase == "implement_increment" else 0),
+            "max_total_write_bytes_per_node": 0 if unrestricted_within_sandbox else (120_000 if phase == "scaffold_project" else 180_000 if phase == "implement_increment" else 0),
             "new_file_whole_write_max_bytes": 100_000,
         }
     try:
