@@ -33,6 +33,23 @@ class SeqRunner:
             },
         }
 
+    def run_villani_action(
+        self,
+        *,
+        objective: str,
+        belief_state: dict,
+        chosen_action: dict,
+        expected_evidence: list[str],
+        focus_files: list[str] | None = None,
+        known_failures: list[str] | None = None,
+        execution_budget=None,
+    ):
+        assert objective
+        assert isinstance(belief_state, dict)
+        assert isinstance(chosen_action, dict)
+        assert isinstance(expected_evidence, list)
+        return self.run("villani action", execution_budget=execution_budget)
+
 
 def test_initial_observation_builds_sensible_beliefs(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
@@ -142,6 +159,28 @@ def test_repair_flow_happens_naturally(tmp_path: Path) -> None:
     assert any(kind in {"repair", "validate"} for kind in actions)
 
 
+def test_autonomous_path_bypasses_legacy_task_mode_and_uses_core(monkeypatch, tmp_path: Path) -> None:
+    from villani_code.state import Runner
+
+    class DummyClient:
+        def create_message(self, _payload, stream):
+            return {"content": [{"type": "text", "text": "done"}]}
+
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    monkeypatch.setattr("villani_code.state.classify_task_mode", lambda _s: (_ for _ in ()).throw(AssertionError("legacy classify called")))
+    monkeypatch.setattr(runner, "_ensure_project_memory_and_plan", lambda _s: (_ for _ in ()).throw(AssertionError("legacy project memory called")))
+    monkeypatch.setattr(runner, "_run_post_execution_validation", lambda _c: "validated")
+
+    out = runner.run_villani_action(
+        objective="fix",
+        belief_state={"x": 1},
+        chosen_action={"kind": "repair"},
+        expected_evidence=["pytest 0"],
+    )
+    assert "transcript" in out
+    assert "tool_results" in out["transcript"]
+
+
 def test_legacy_non_villani_controller_still_usable(tmp_path: Path) -> None:
     from villani_code.autonomous import VillaniModeController
 
@@ -154,3 +193,45 @@ def test_legacy_non_villani_controller_still_usable(tmp_path: Path) -> None:
 
     c = VillaniModeController(MinimalRunner(tmp_path), tmp_path)
     assert c is not None
+
+
+def test_non_villani_run_keeps_legacy_path(monkeypatch, tmp_path: Path) -> None:
+    from villani_code.state import Runner
+    from villani_code.planning import TaskMode
+
+    class DummyClient:
+        def create_message(self, _payload, stream):
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=False)
+    flags = {"ensure": 0}
+
+    monkeypatch.setattr(runner, "_ensure_project_memory_and_plan", lambda _s: flags.__setitem__("ensure", flags["ensure"] + 1))
+    monkeypatch.setattr("villani_code.state.classify_task_mode", lambda _s: TaskMode.GENERAL)
+    runner.run("do work")
+    assert flags["ensure"] == 1
+
+
+def test_belief_persistence_retains_evidence_relevant_memory(tmp_path: Path) -> None:
+    from villani_code.villani_state import load_beliefs
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('x')\n", encoding="utf-8")
+    runner = SeqRunner(
+        tmp_path,
+        [
+            {
+                "tool_results": [{"content": '{"command":"pytest -q","exit":1}', "is_error": False}],
+                "validation_artifacts": ['{"command":"pytest -q","exit":1}'],
+            },
+            {
+                "tool_results": [{"content": '{"command":"pytest -q","exit":0}', "is_error": False}],
+                "validation_artifacts": ['{"command":"pytest -q","exit":0}'],
+                "intentional_changes": ["src/app.py"],
+            },
+        ],
+    )
+    run_villani_loop(runner, tmp_path, "x")
+    loaded = load_beliefs(tmp_path, "x")
+    assert loaded is not None
+    assert any(v.command == "pytest -q" for v in loaded.validation_observations)

@@ -113,4 +113,19 @@ def update_beliefs(existing: WorkspaceBeliefState, observed: WorkspaceBeliefStat
     observed.action_history = existing.action_history
     observed.last_action_result = existing.last_action_result
     observed.repeated_patterns = existing.repeated_patterns
+    observed.validated_artifacts = sorted(
+        {
+            *existing.validated_artifacts,
+            *[v.command for v in observed.validation_observations if v.exit_code == 0 and v.command.strip()],
+        }
+    )[:30]
+    observed.recent_meaningful_changes = sorted(
+        {*(existing.recent_meaningful_changes[-10:]), *observed.recent_meaningful_changes}
+    )[-12:]
+    observed.repeated_action_kinds = dict(existing.repeated_action_kinds)
+    observed.repeated_failure_signatures = dict(existing.repeated_failure_signatures)
+    if observed.known_failures:
+        observed.known_failures = observed.known_failures[:16]
+    if observed.validation_observations:
+        observed.validation_observations = observed.validation_observations[-16:]
     return observed

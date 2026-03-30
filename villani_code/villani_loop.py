@@ -8,7 +8,13 @@ from villani_code.execution import ExecutionBudget
 from villani_code.villani_actions import ActionKind, VillaniAction, choose_best_action, propose_actions
 from villani_code.villani_cleanup import cleanup_candidates
 from villani_code.villani_observe import observe_workspace, update_beliefs
-from villani_code.villani_state import ActionResultSummary, FailureObservation, WorkspaceBeliefState, save_beliefs
+from villani_code.villani_state import (
+    ActionResultSummary,
+    FailureObservation,
+    WorkspaceBeliefState,
+    load_beliefs,
+    save_beliefs,
+)
 from villani_code.villani_stop import should_stop
 
 
@@ -36,6 +42,19 @@ def detect_loop_signals(beliefs: WorkspaceBeliefState) -> list[str]:
         signals.append("stable_failure_signature")
     if len(recent) >= 4 and all(not r.changed_files for r in recent):
         signals.append("no_meaningful_changes")
+    if beliefs.validated_artifacts and any(
+        r.action_kind == ActionKind.IMPLEMENT.value and not r.changed_files for r in recent[-3:]
+    ):
+        signals.append("repeated_implement_after_validation")
+    if len(recent) >= 3 and all(r.action_kind == ActionKind.SUMMARIZE.value for r in recent[-3:]):
+        signals.append("repeated_summaries")
+    scratch_only = [
+        r
+        for r in recent[-3:]
+        if r.changed_files and all(ch in beliefs.scratch_artifacts for ch in r.changed_files)
+    ]
+    if len(scratch_only) >= 2:
+        signals.append("scratch_only_progress")
     return signals
 
 
@@ -97,7 +116,7 @@ def run_villani_loop(
 ) -> dict[str, Any]:
     config = config or VillaniLoopConfig()
     event_callback = event_callback or (lambda _e: None)
-    beliefs = observe_workspace(repo, objective)
+    beliefs = load_beliefs(repo, objective) or observe_workspace(repo, objective)
 
     iterations = 0
     stop_reason = "Budget exhausted."
@@ -133,7 +152,15 @@ def run_villani_loop(
             stop_reason = "Action policy selected stop."
             break
 
-        run_result = runner.run(_build_action_prompt(beliefs, action), execution_budget=config.action_budget)
+        run_result = runner.run_villani_action(
+            objective=objective,
+            belief_state=beliefs.to_snapshot(),
+            chosen_action=asdict(action),
+            expected_evidence=list(action.expected_evidence),
+            focus_files=list(action.target_files),
+            known_failures=[f.signature for f in beliefs.known_failures[:8]],
+            execution_budget=config.action_budget,
+        )
         observed = observe_workspace(repo, objective, run_result)
         beliefs = update_beliefs(beliefs, observed)
         summary = _result_summary(action, run_result, beliefs)
