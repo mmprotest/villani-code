@@ -547,6 +547,8 @@ class MissionExecutionState:
     greenfield_progress: dict[str, Any] = field(default_factory=dict)
     scratchpad: MissionScratchpad = field(default_factory=MissionScratchpad)
     normalized_node_outcomes: list[NormalizedNodeOutcome] = field(default_factory=list)
+    recovery_state_note: str = ""
+    recovery_nodes_inserted_last: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -573,6 +575,8 @@ class MissionExecutionState:
             "greenfield_progress": dict(self.greenfield_progress),
             "scratchpad": self.scratchpad.to_dict(),
             "normalized_node_outcomes": [asdict(item) for item in self.normalized_node_outcomes],
+            "recovery_state_note": self.recovery_state_note,
+            "recovery_nodes_inserted_last": self.recovery_nodes_inserted_last,
         }
 
     @classmethod
@@ -604,4 +608,6 @@ class MissionExecutionState:
                 NormalizedNodeOutcome(**dict(item or {}))
                 for item in (data.get("normalized_node_outcomes", []) or [])
             ],
+            recovery_state_note=str(data.get("recovery_state_note", "")),
+            recovery_nodes_inserted_last=int(data.get("recovery_nodes_inserted_last", 0)),
         )

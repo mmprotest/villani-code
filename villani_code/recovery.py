@@ -48,6 +48,7 @@ class RecoveryPlanner:
         greenfield_progress = dict(mission_state.greenfield_progress or {})
         scaffold_succeeded = bool(greenfield_progress.get("successful_greenfield_scaffold"))
         sticky_direction = str(node_outcome.get("authoritative_direction", "") or mission_state.scratchpad.chosen_project_direction).strip()
+        repair_focus = str(node_outcome.get("repair_focus", "")).strip()
 
         if is_greenfield:
             if scaffold_succeeded and node.phase.value in {"inspect_workspace", "choose_project_direction", "scaffold_project"}:
@@ -86,7 +87,8 @@ class RecoveryPlanner:
                         n.evidence.append(f"sticky_direction:{sticky_direction}")
                 return RecoveryDecision(strategy, "No effectful creation progress; force concrete user-space creation.", nodes=nodes)
             if no_improvement or worsened or delta == "regression":
-                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", "Build validation did not improve")
+                reason = repair_focus or "Build validation did not improve"
+                nodes = self.planner.spawn_recovery_nodes(mission_state.mission, node, "rescope", reason)
                 return RecoveryDecision("rescope", "Validation/setup failed; pivot to a simpler viable slice.", nodes=nodes)
             if repeated_delta_state:
                 strategy = "rescope" if scaffold_succeeded else "simplify_direction"

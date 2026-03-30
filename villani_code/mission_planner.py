@@ -216,26 +216,27 @@ class MissionPlanner:
         base_id = f"{mission.mission_id}-recovery-{uuid.uuid4().hex[:6]}"
         validation = list(failed_node.validation_commands[:3])
         candidate_files = list(failed_node.candidate_files[:20])
+        recovery_deps: list[str] = []
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             if strategy == "broaden":
-                return [MissionNode(base_id, "Broaden workspace inspection", NodePhase.INSPECT_WORKSPACE, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Broaden workspace inspection", NodePhase.INSPECT_WORKSPACE, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "simplify_direction":
-                return [MissionNode(base_id, "Choose simpler project direction", NodePhase.DEFINE_OBJECTIVE, f"Recover from: {reason}", "define_objective", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Choose simpler project direction", NodePhase.DEFINE_OBJECTIVE, f"Recover from: {reason}", "define_objective", candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "rescope":
-                return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_INCREMENT, f"Recover from: {reason}", "implement_increment", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_INCREMENT, f"Recover from: {reason}", "implement_increment", candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "force_scaffold":
-                return [MissionNode(base_id, "Force user-space scaffold", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Force user-space scaffold", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "advance_validate":
-                return [MissionNode(base_id, "Validate existing greenfield artifact", NodePhase.VALIDATE_PROJECT, f"Recover from: {reason}", "validate_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Validate existing greenfield artifact", NodePhase.VALIDATE_PROJECT, f"Recover from: {reason}", "validate_project", candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "advance_summarize":
-                return [MissionNode(base_id, "Summarize greenfield outcome", NodePhase.SUMMARIZE_OUTCOME, f"Recover from: {reason}", "summarize_outcome", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
-            return [MissionNode(base_id, "Recover greenfield build", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Summarize greenfield outcome", NodePhase.SUMMARIZE_OUTCOME, f"Recover from: {reason}", "summarize_outcome", candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            return [MissionNode(base_id, "Recover greenfield build", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
 
         if strategy == "broaden":
-            return [MissionNode(base_id, "Broaden inspection", NodePhase.INSPECT, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            return [MissionNode(base_id, "Broaden inspection", NodePhase.INSPECT, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
         if strategy == "relocalize":
-            return [MissionNode(base_id, "Re-localize root cause", NodePhase.LOCALIZE, f"Recover from: {reason}", TaskContract.LOCALIZE.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
-        return [MissionNode(base_id, "Narrow repair", NodePhase.NARROW_FIX, f"Recover from: {reason}", TaskContract.NARROW_FIX.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+            return [MissionNode(base_id, "Re-localize root cause", NodePhase.LOCALIZE, f"Recover from: {reason}", TaskContract.LOCALIZE.value, candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+        return [MissionNode(base_id, "Narrow repair", NodePhase.NARROW_FIX, f"Recover from: {reason}", TaskContract.NARROW_FIX.value, candidate_files=candidate_files, validation_commands=validation, depends_on=recovery_deps, created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
 
     def expand_mission_graph(self, mission: Mission, extra_nodes: list[MissionNode]) -> Mission:
         existing_ids = {n.node_id for n in mission.nodes}

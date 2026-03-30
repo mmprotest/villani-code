@@ -437,9 +437,12 @@ class VillaniModeController:
                 break
             node = self._select_next_node(mission_state)
             if node is None:
+                if mission_state.recovery_nodes_inserted_last > 0:
+                    mission_state.recovery_state_note = "Recovery node inserted but no executable ready node was discovered after graph refresh."
                 self._activity("Waiting for ready node; incrementing no-progress counter.")
                 mission_state.consecutive_no_progress += 1
                 continue
+            mission_state.recovery_nodes_inserted_last = 0
             result = self._execute_node(mission_state, node)
             outcome = self._evaluate_node(mission_state, node, result)
             self._promote_greenfield_conclusion(mission_state)
@@ -1178,8 +1181,17 @@ class VillaniModeController:
 
     def _handle_recovery(self, execution_state: MissionExecutionState, node: Any, outcome: dict[str, Any]) -> None:
         self._activity(f"Planning recovery branch for node {node.node_id}.")
+        execution_state.recovery_nodes_inserted_last = 0
+        execution_state.recovery_state_note = ""
         outcome["authoritative_direction"] = execution_state.scratchpad.chosen_project_direction
         outcome["ignored_internal_paths"] = list(execution_state.scratchpad.ignored_internal_paths)
+        failed_commands = [str(cmd.get("command", "")) for cmd in list(outcome.get("validation_summary", {}).get("failed_commands", [])) if isinstance(cmd, dict)]
+        failed_blob = "\n".join(failed_commands).lower()
+        if node.phase == NodePhase.VALIDATE_PROJECT and any(tok in failed_blob for tok in {"unicodeencodeerror", "encoding", "cp1252", "emoji"}):
+            outcome["repair_focus"] = (
+                "Patch console/text output to be encoding-safe on Windows (avoid raw emoji-only output), "
+                "then rerun targeted validate_project commands."
+            )
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
             gate = self._greenfield_completion_gate(execution_state)
             if gate.get("ready"):
@@ -1213,6 +1225,7 @@ class VillaniModeController:
                     "salvage deliverables created during read-only phase contract violation",
                 )
                 self.planner.expand_mission_graph(execution_state.mission, nodes)
+                self._refresh_after_recovery_insertion(execution_state, nodes)
                 append_mission_event(
                     str(self.repo),
                     execution_state.mission.mission_id,
@@ -1239,11 +1252,43 @@ class VillaniModeController:
         if decision.mark_blocked:
             node.status = NodeStatus.BLOCKED
             node.blockers.append(decision.reason)
+            execution_state.recovery_state_note = f"Recovery branch not created: {decision.reason}"
         elif decision.mark_exhausted:
             node.status = NodeStatus.EXHAUSTED
+            execution_state.recovery_state_note = f"Recovery branch exhausted before insertion: {decision.reason}"
         else:
+            if not decision.nodes:
+                execution_state.recovery_state_note = f"Recovery planning failed: strategy '{decision.strategy}' produced no runnable nodes."
+                append_mission_event(
+                    str(self.repo),
+                    execution_state.mission.mission_id,
+                    {
+                        "type": "recovery_creation_failed",
+                        "node_id": node.node_id,
+                        "strategy": decision.strategy,
+                        "reason": execution_state.recovery_state_note,
+                    },
+                )
+                return
             self.planner.expand_mission_graph(execution_state.mission, decision.nodes)
+            self._refresh_after_recovery_insertion(execution_state, decision.nodes)
         append_mission_event(str(self.repo), execution_state.mission.mission_id, {"type": "recovery", "node_id": node.node_id, "strategy": decision.strategy, "reason": decision.reason, "spawned_nodes": [n.node_id for n in decision.nodes]})
+
+    def _refresh_after_recovery_insertion(self, execution_state: MissionExecutionState, nodes: list[Any]) -> None:
+        inserted_ids = {n.node_id for n in nodes}
+        mission = execution_state.mission
+        for inserted in nodes:
+            if inserted.status != NodeStatus.READY:
+                deps = [self._node_by_id(mission, dep) for dep in inserted.depends_on]
+                if all(dep is not None and dep.status == NodeStatus.SUCCEEDED for dep in deps):
+                    inserted.status = NodeStatus.READY
+        execution_state.recovery_nodes_inserted_last = len(inserted_ids)
+        execution_state.consecutive_no_progress = 0
+        ready_inserted = [n for n in mission.nodes if n.node_id in inserted_ids and n.status == NodeStatus.READY]
+        if not ready_inserted:
+            execution_state.recovery_state_note = "Recovery node inserted but dependencies are unsatisfied or node was filtered from READY selection."
+        else:
+            execution_state.recovery_state_note = ""
 
     def _mission_done(self, execution_state: MissionExecutionState):
         outcome, reason = evaluate_mission_status(execution_state)
