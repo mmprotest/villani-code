@@ -41,6 +41,26 @@ def _has_useful_localization(localization: dict[str, Any]) -> bool:
     return bool(files) and bug_class not in {"", "unknown"} and bool(intent) and confidence >= 0.45
 
 
+def _has_structured_objective(objective: dict[str, Any]) -> bool:
+    if not isinstance(objective, dict):
+        return False
+    required = (
+        "repo_state_type",
+        "task_shape",
+        "deliverable_kind",
+        "direction",
+        "initial_validation_strategy",
+    )
+    for key in required:
+        value = objective.get(key)
+        if key in {"deliverable_kind", "initial_validation_strategy"}:
+            if not list(value or []):
+                return False
+        elif not str(value or "").strip():
+            return False
+    return True
+
+
 def _validation_delta(baseline: VerificationBaseline, current_summary: dict[str, Any]) -> int:
     prior_failed = int((baseline.validation_summary or {}).get("failed", 0) or 0)
     now_failed = int((current_summary or {}).get("failed", 0) or 0)
@@ -191,6 +211,7 @@ def classify_node_outcome(
     node_phase: str = "",
     clarification_requested: bool = False,
     scratchpad: MissionScratchpad | None = None,
+    mission_objective: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     contract = normalize_task_contract(contract_type)
     localization = localization or {}
@@ -205,6 +226,8 @@ def classify_node_outcome(
     blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
     rejected_actions = list(execution_payload.get("rejected_actions", []) or [])
     shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
+    approved_actions = list(execution_payload.get("approved_actions", []) or [])
+    mission_objective = mission_objective or {}
 
     command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
     any_command = bool(command_results)
@@ -351,6 +374,33 @@ def classify_node_outcome(
                 status, reason = "partial", "summary too thin"
             else:
                 status, reason = "passed", "greenfield outcome summarized"
+        elif node_phase == "inspect_workspace":
+            inspection_signals = bool(has_localization or static_result.get("findings") or any_command or approved_actions)
+            if patch_exists:
+                status, reason = "failed", "contract violation: inspect_workspace is read-only but wrote files"
+                contract_violation = True
+            elif attempted_write_paths:
+                status, reason = "partial", "inspect gathered signals but attempted forbidden writes in read-only phase"
+                contract_violation = True
+            elif inspection_signals:
+                status, reason = "passed", "inspect captured workspace evidence and constraints for planning"
+            else:
+                status, reason = "partial", "inspect remained read-only but did not capture enough workspace evidence"
+        elif node_phase == "define_objective":
+            objective_complete = _has_structured_objective(mission_objective)
+            objective_partial = bool(mission_objective.get("direction") or mission_objective.get("deliverable_kind"))
+            if patch_exists:
+                status, reason = "failed", "contract violation: define_objective is read-only but wrote files"
+                contract_violation = True
+            elif attempted_write_paths:
+                status, reason = "partial", "objective synthesis attempted forbidden writes in read-only phase"
+                contract_violation = True
+            elif objective_complete:
+                status, reason = "passed", "structured authoritative objective synthesized and stored"
+            elif objective_partial:
+                status, reason = "partial", "objective exists but is missing required structured fields"
+            else:
+                status, reason = "partial", "objective synthesis did not produce required structured fields"
         read_only_phases = {"inspect_workspace", "define_objective", "summarize_outcome"}
         if node_phase in read_only_phases and patch_exists:
             status, reason = "failed", f"contract violation: {node_phase} is read-only but wrote files"
@@ -372,7 +422,47 @@ def classify_node_outcome(
     patch_no_improvement = patch_exists and delta.classification in {DeltaClassification.NO_IMPROVEMENT, DeltaClassification.AMBIGUOUS, DeltaClassification.REGRESSION}
     phase_contract_status = "contract_clean_success"
     mission_progress_status = "no_progress"
-    if status == "passed" and patch_exists and not any_command:
+    read_only_state_advanced = False
+    if node_phase == "inspect_workspace":
+        read_only_state_advanced = bool(status in {"passed", "partial"} and (has_localization or static_result.get("findings") or approved_actions or any_command))
+    elif node_phase == "define_objective":
+        read_only_state_advanced = bool(
+            status in {"passed", "partial"}
+            and (
+                _has_structured_objective(mission_objective)
+                or mission_objective.get("direction")
+                or mission_objective.get("initial_validation_strategy")
+                or (scratchpad and (scratchpad.chosen_project_direction or scratchpad.next_required_action))
+            )
+        )
+
+    if node_phase in {"inspect_workspace", "define_objective"}:
+        if status == "passed" and read_only_state_advanced:
+            mission_progress_status = "state_progress"
+        elif status == "partial" and read_only_state_advanced:
+            mission_progress_status = "state_progress_partial"
+        elif status == "failed" and (patch_exists or attempted_write_paths):
+            mission_progress_status = "useful_progress_with_contract_violation"
+    elif node_phase in {"scaffold_project", "implement_increment"}:
+        if status in {"passed", "partial"} and patch_exists:
+            mission_progress_status = "artifact_progress"
+        elif status == "failed" and patch_exists:
+            mission_progress_status = "useful_progress_with_contract_violation"
+    elif node_phase == "validate_project":
+        if status == "passed" and any_command and not command_fail:
+            mission_progress_status = "validated_success"
+        elif status == "partial" and any_command:
+            mission_progress_status = "validation_progress"
+        elif status == "failed" and any_command:
+            mission_progress_status = "validated_fail"
+    elif node_phase == "summarize_outcome":
+        if status == "passed":
+            mission_progress_status = "summary_completed"
+        elif status == "partial":
+            mission_progress_status = "summary_partial"
+        elif status == "failed" and (patch_exists or attempted_write_paths):
+            mission_progress_status = "useful_progress_with_contract_violation"
+    elif status == "passed" and patch_exists and not any_command:
         mission_progress_status = "useful_progress_unvalidated"
     elif status == "passed" and any_command and not command_fail:
         mission_progress_status = "validated_success"

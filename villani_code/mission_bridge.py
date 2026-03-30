@@ -105,6 +105,7 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
         lines.append("Operate autonomously; ask user only for true hard ambiguity or destructive-risk policy conflicts.")
         if node.phase.value == "inspect_workspace":
             lines.append("Inspect workspace for constraints, sample data, README/notes hints, and feasible local project directions.")
+            lines.append("Frame candidate files/concepts/validation as next-phase plans only; do not imply scaffold or implementation has already started.")
             lines.append("WRITE POLICY: READ-ONLY PHASE. Do not narrate writes and do not invoke write/patch/mkdir tools.")
         elif node.phase.value == "define_objective":
             lines.append("Produce 2-4 plausible runnable utility candidates, then choose one deterministic direction with rationale.")

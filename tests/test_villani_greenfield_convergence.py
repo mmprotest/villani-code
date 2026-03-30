@@ -3,7 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.autonomous import VillaniModeController
-from villani_code.mission import Mission, MissionExecutionState, MissionScratchpad, MissionType
+from villani_code.mission import (
+    Mission,
+    MissionExecutionState,
+    MissionScratchpad,
+    MissionType,
+    NormalizedNodeOutcome,
+    reduce_normalized_mission_progress,
+)
 from villani_code.verification.mission import evaluate_mission_status
 from villani_code.verification.outcomes import classify_node_outcome
 
@@ -77,3 +84,35 @@ def test_completion_gate_requires_validate_project_command_evidence(tmp_path: Pa
     ]
     outcome, _reason = evaluate_mission_status(state)
     assert outcome is None
+
+
+def test_read_only_state_progress_is_not_reduced_to_stagnated(tmp_path: Path) -> None:
+    state = MissionExecutionState(
+        mission=_mission(tmp_path),
+        scratchpad=MissionScratchpad(
+            mission_type=MissionType.GREENFIELD_BUILD.value,
+            chosen_project_direction="snake_cli_game",
+            next_required_action="scaffold_project",
+        ),
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n1",
+            node_phase="inspect_workspace",
+            contract_status="contract_clean_success",
+            mission_progress_status="state_progress",
+            next_recommended_action="define_objective",
+        )
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n2",
+            node_phase="define_objective",
+            contract_status="contract_clean_success",
+            mission_progress_status="state_progress",
+            next_recommended_action="scaffold_project",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    assert reduced.terminal_state == "in_progress"
+    assert reduced.next_recommended_action == "scaffold_project"
