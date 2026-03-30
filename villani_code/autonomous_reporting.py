@@ -202,6 +202,13 @@ def build_mission_summary(
                 if bool(item.get("self_reported_validation_without_evidence", False))
             }
         ),
+        "inferred_non_authoritative_nodes": sorted(
+            {
+                str(item.get("node_id", ""))
+                for item in validations
+                if str(item.get("validation_evidence_kind", "")) == "inferred_non_authoritative"
+            }
+        ),
     }
     localization_evolution = [
         {
@@ -229,6 +236,14 @@ def build_mission_summary(
             str(path)
             for item in validations
             for path in list((item.get("attempted_write_paths", []) or []))
+            if str(path).strip()
+        }
+    )
+    successful_write_paths = sorted(
+        {
+            str(path)
+            for item in validations
+            for path in list((item.get("changed_files", []) or []))
             if str(path).strip()
         }
     )
@@ -260,8 +275,10 @@ def build_mission_summary(
             },
             "write_accounting": {
                 "actual_user_space_changes": sorted(set(files_touched)),
+                "actual_successful_writes": successful_write_paths,
                 "attempted_write_paths": attempted_write_paths,
                 "blocked_write_paths": blocked_write_attempts,
+                "attempted_but_blocked_only": sorted(set(blocked_write_attempts) - set(successful_write_paths)),
             },
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }
@@ -292,7 +309,7 @@ def build_mission_summary(
         "validation_truth_statement": (
             "Validation backed by real command evidence."
             if validation_evidence["real_validation_evidence_nodes"]
-            else "Validation not proven by command evidence; any prose claims are self-reported/unverified."
+            else "Validation not proven by command evidence; prose/inferred claims are self-reported and non-authoritative."
         ),
         "verification_status_timeline": [
             {

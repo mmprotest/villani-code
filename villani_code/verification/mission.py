@@ -59,6 +59,10 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
                 MissionOutcome.PARTIAL_SUCCESS_SCAFFOLD_ONLY,
                 "Greenfield scaffold exists but runnable artifact is incomplete.",
             )
+        summaries = [n for n in mission.nodes if n.phase.value == "summarize_outcome"]
+        summary_complete = bool(summaries) and all(n.status in {NodeStatus.SUCCEEDED, NodeStatus.SKIPPED, NodeStatus.EXHAUSTED} for n in summaries)
+        if greenfield_partial_outcome is not None and summary_complete:
+            return greenfield_partial_outcome
 
     if state.consecutive_no_progress >= max_no_progress and not greenfield_gate_open:
         if greenfield_partial_outcome is not None:
@@ -69,6 +73,8 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
             return greenfield_partial_outcome
         return MissionOutcome.STAGNATED, "Repeated no/ambiguous delta outcomes exceeded threshold."
     if state.consecutive_no_model_activity >= max_no_activity and not greenfield_gate_open:
+        if greenfield_partial_outcome is not None:
+            return greenfield_partial_outcome
         return MissionOutcome.EXHAUSTED, "Repeated no-activity cycles exceeded threshold."
 
     total_attempts = sum(n.attempts for n in mission.nodes)
@@ -88,6 +94,8 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
         if cur.target_files == prev.target_files and cur.confidence <= prev.confidence:
             stale_localization += 1
     if stale_localization >= 2:
+        if greenfield_partial_outcome is not None:
+            return greenfield_partial_outcome
         return MissionOutcome.STAGNATED, "Localization repeated without stronger evidence."
 
     if any("suspicious_breadth" in " ".join(n.evidence) for n in mission.nodes):

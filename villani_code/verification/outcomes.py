@@ -246,6 +246,7 @@ def classify_node_outcome(
         validation_delta=validation_delta,
     )
 
+    contract_violation = False
     status = "partial"
     reason = "insufficient evidence"
 
@@ -303,6 +304,10 @@ def classify_node_outcome(
     elif contract == TaskContract.SUMMARIZE:
         if patch_exists:
             status, reason = "failed", "summarize node edited files"
+            contract_violation = True
+        elif attempted_write_paths or shell_invocations:
+            status, reason = "failed", "summarize node attempted effectful operations"
+            contract_violation = True
         elif prose_only:
             status, reason = "partial", "summary too thin"
         else:
@@ -334,10 +339,13 @@ def classify_node_outcome(
         elif node_phase == "summarize_outcome":
             if patch_exists:
                 status, reason = "failed", "greenfield summary node edited files"
+                contract_violation = True
             elif attempted_write_paths:
                 status, reason = "failed", "greenfield summary node attempted write operations"
+                contract_violation = True
             elif shell_invocations:
                 status, reason = "failed", "greenfield summary node attempted effectful shell actions"
+                contract_violation = True
             elif prose_only:
                 status, reason = "partial", "summary too thin"
             else:
@@ -345,8 +353,10 @@ def classify_node_outcome(
         read_only_phases = {"inspect_workspace", "choose_project_direction", "summarize_outcome"}
         if node_phase in read_only_phases and patch_exists:
             status, reason = "failed", f"contract violation: {node_phase} is read-only but wrote files"
+            contract_violation = True
         if node_phase in {"inspect_workspace", "choose_project_direction"} and build_like_command:
             status, reason = "failed", f"contract violation: {node_phase} should not run full build commands"
+            contract_violation = True
         if node_phase == "validate_project" and self_reported_validation_without_evidence:
             status, reason = "failed", "greenfield validation claimed success without command evidence"
     if scratchpad:
@@ -381,6 +391,8 @@ def classify_node_outcome(
         mission_progress_status = "validated_fail"
     if blocked_write_paths:
         mission_progress_status = "blocked"
+    if contract_violation and mission_progress_status == "useful_progress_unvalidated":
+        mission_progress_status = "useful_progress_with_contract_violation"
     if status == "passed" and delta.classification == DeltaClassification.REGRESSION:
         delta = VerificationDelta(
             classification=DeltaClassification.AMBIGUOUS,
@@ -427,4 +439,5 @@ def classify_node_outcome(
         "attempted_write_paths": attempted_write_paths,
         "blocked_write_paths": blocked_write_paths,
         "shell_invocations": shell_invocations,
+        "contract_violation": contract_violation,
     }
