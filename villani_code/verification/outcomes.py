@@ -223,6 +223,7 @@ def classify_node_outcome(
     baseline = baseline or VerificationBaseline()
     self_reported_validation_without_evidence = bool(execution_payload.get("self_reported_validation_without_evidence", False))
     attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
+    observed_write_paths = [str(p) for p in list(execution_payload.get("observed_write_paths", []) or []) if str(p).strip()]
     blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
     rejected_actions = list(execution_payload.get("rejected_actions", []) or [])
     shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
@@ -259,10 +260,15 @@ def classify_node_outcome(
     repeated_across_history = any(fp in prior_fingerprints for fp in failure_fingerprints)
     repeated_failure = repeated_in_run or repeated_across_history
     user_space_changes = [p for p in changed_files if not is_internal_villani_path(str(p))]
+    observed_user_space_writes = [p for p in observed_write_paths if not is_internal_villani_path(str(p))]
     internal_only_patch = bool(changed_files) and not bool(user_space_changes)
     docs_only_user_space = bool(user_space_changes) and all(_is_docs_only_path(p) for p in user_space_changes)
+    effective_user_space_deliverables = sorted(dict.fromkeys(user_space_changes + observed_user_space_writes))
+    effective_docs_only_user_space = bool(effective_user_space_deliverables) and all(
+        _is_docs_only_path(p) for p in effective_user_space_deliverables
+    )
     patch_exists = bool(changed_files)
-    user_deliverable_patch = bool(user_space_changes)
+    user_deliverable_patch = bool(user_space_changes) or bool(observed_user_space_writes)
     meaningful_patch = bool(static_result.get("meaningful_patch"))
     suspicious_breadth = bool(static_result.get("suspicious_breadth"))
     has_localization = _has_useful_localization(localization)
@@ -363,7 +369,7 @@ def classify_node_outcome(
         elif node_phase in {"scaffold_project", "implement_increment"}:
             if not user_deliverable_patch:
                 status, reason = "failed", "no user-space deliverable created outside internal artifact folders"
-            elif docs_only_user_space:
+            elif effective_docs_only_user_space:
                 status, reason = "failed", "greenfield build produced docs-only output; runnable artifacts required"
             else:
                 status, reason = "passed", "user-space deliverable created for greenfield build"
@@ -465,9 +471,9 @@ def classify_node_outcome(
         elif status == "failed" and (patch_exists or attempted_write_paths):
             mission_progress_status = "useful_progress_with_contract_violation"
     elif node_phase in {"scaffold_project", "implement_increment"}:
-        if status in {"passed", "partial"} and patch_exists:
+        if status in {"passed", "partial"} and (patch_exists or observed_user_space_writes):
             mission_progress_status = "artifact_progress"
-        elif status == "failed" and patch_exists:
+        elif status == "failed" and (patch_exists or observed_user_space_writes):
             mission_progress_status = "useful_progress_with_contract_violation"
     elif node_phase == "validate_project":
         if status == "passed" and any_command and not command_fail:
@@ -551,7 +557,9 @@ def classify_node_outcome(
             else validation_status
         ),
         "attempted_write_paths": attempted_write_paths,
+        "observed_write_paths": observed_write_paths,
         "blocked_write_paths": blocked_write_paths,
+        "observed_user_space_writes": observed_user_space_writes,
         "shell_invocations": shell_invocations,
         "contract_violation": contract_violation or bool(rejected_actions),
         "rejected_actions": rejected_actions,
