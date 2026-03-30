@@ -442,6 +442,123 @@ def test_mission_stays_in_progress_with_known_next_action_despite_no_progress_co
     assert mission_outcome is None
 
 
+def test_greenfield_scaffold_partial_success_not_blocked_when_deliverables_exist(tmp_path: Path) -> None:
+    state = MissionExecutionState(
+        mission=_mission(tmp_path),
+        scratchpad=MissionScratchpad(
+            mission_type=MissionType.GREENFIELD_BUILD.value,
+            chosen_project_direction="snake_cli_game",
+            has_user_space_scaffolding=True,
+            has_runnable_entrypoint=False,
+        ),
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n3",
+            node_phase="scaffold_project",
+            contract_status="contract_partial",
+            mission_progress_status="artifact_progress",
+            successful_user_writes=["README.md", "pyproject.toml"],
+            deliverable_paths=["README.md", "pyproject.toml"],
+            blocked_write_attempts=["src/game.py"],
+            command_results=[{"command": "python -m py_compile src/game.py", "exit": 1}],
+            validation_truth_status="failed",
+            next_recommended_action="implement_increment",
+            terminal_candidate_state="partial",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    mission_outcome, reason = evaluate_mission_status(state)
+    assert reduced.terminal_state == "in_progress"
+    assert reduced.mission_completion_state == "incomplete"
+    assert mission_outcome is None
+    assert "blocked" not in reason.lower()
+
+
+def test_greenfield_no_deliverables_with_blocked_writes_remains_blocked(tmp_path: Path) -> None:
+    state = MissionExecutionState(
+        mission=_mission(tmp_path),
+        scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value),
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n3",
+            node_phase="scaffold_project",
+            contract_status="contract_violation",
+            mission_progress_status="blocked",
+            blocked_write_attempts=["src/game.py"],
+            next_recommended_action="scaffold_project",
+            blocked_reason="write operations were blocked before deliverables were produced",
+            terminal_candidate_state="failed",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    mission_outcome, _reason = evaluate_mission_status(state)
+    assert reduced.terminal_state == "blocked"
+    assert mission_outcome is not None
+    assert mission_outcome.value == "blocked"
+
+
+def test_greenfield_full_completion_behavior_unchanged(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.nodes.append(
+        MissionNode(
+            node_id="summary",
+            title="Summarize",
+            phase=NodePhase.SUMMARIZE_OUTCOME,
+            objective="summary",
+            contract_type="summarize_outcome",
+            status=NodeStatus.SUCCEEDED,
+        )
+    )
+    state = MissionExecutionState(
+        mission=mission,
+        scratchpad=MissionScratchpad(
+            mission_type=MissionType.GREENFIELD_BUILD.value,
+            has_user_space_scaffolding=True,
+            has_runnable_entrypoint=True,
+            validation_proven=True,
+        ),
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n5",
+            node_phase="validate_project",
+            contract_status="contract_clean_success",
+            mission_progress_status="validated_success",
+            successful_user_writes=["src/game.py", "README.md"],
+            deliverable_paths=["src/game.py", "README.md"],
+            command_results=[{"command": "python -m py_compile src/game.py", "exit": 0}],
+            validation_truth_status="proven",
+            next_recommended_action="summarize_outcome",
+            terminal_candidate_state="passed",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    mission_outcome, _reason = evaluate_mission_status(state)
+    assert reduced.terminal_state == "partial_success"
+    assert reduced.mission_completion_state == "partial"
+    assert mission_outcome is None
+
+
+def test_repo_local_bugfix_flow_unchanged_with_blocked_writes(tmp_path: Path) -> None:
+    outcome = classify_node_outcome(
+        contract_type="narrow_fix",
+        static_result={"meaningful_patch": True},
+        command_results=[{"command": "pytest -q", "exit": 1}],
+        changed_files=[],
+        mission_type="bugfix",
+        node_phase="narrow_fix",
+        execution_payload={
+            "blocked_write_paths": ["src/core.py"],
+            "attempted_write_paths": ["src/core.py"],
+        },
+        scratchpad=MissionScratchpad(mission_type=MissionType.BUGFIX.value),
+    )
+    assert outcome["status"] == "failed"
+    assert outcome["mission_progress_status"] == "blocked"
+
+
 def test_prompt_empty_sandbox_fun_python_game_expected_greenfield_flow(tmp_path: Path) -> None:
     runner = _FlowRunner(tmp_path)
     controller = VillaniModeController(runner, tmp_path, steering_objective="Here is an empty sandbox. I want you to build me a fun python game. Go.")
