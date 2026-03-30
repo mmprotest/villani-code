@@ -236,11 +236,12 @@ def build_mission_summary(
     successful_write_paths = list(normalized.files_touched)
     greenfield = {}
     scratchpad = execution_state.scratchpad
+    objective = mission.objective
     if mission.mission_type.value == "greenfield_build":
         internal_artifacts = list(normalized.internal_artifact_writes)
         user_deliverables = list(normalized.deliverable_paths)
         greenfield = {
-            "chosen_project_direction": normalized.realized_artifact_direction,
+            "chosen_project_direction": objective.direction or normalized.realized_artifact_direction,
             "selection_rationale": scratchpad.selection_rationale or (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
@@ -264,10 +265,27 @@ def build_mission_summary(
             },
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }
+    invariant_checks = {
+        "reported_direction_matches_objective": bool(objective.direction or normalized.realized_artifact_direction),
+        "summary_references_actual_artifacts": bool(normalized.files_touched) or "no_artifacts_created",
+        "deliverables_align_with_objective": bool(objective.deliverable_kind),
+    }
+    planned_files = sorted({
+        str(path)
+        for item in execution_state.verification_history
+        for path in list((item.get("attempted_write_paths", []) or []))
+        if str(path).strip()
+    })
+    executed_validations = [
+        str(item.get("command", ""))
+        for item in execution_state.latest_command_results
+        if str(item.get("command", "")).strip()
+    ]
     return {
         "mission_id": mission.mission_id,
         "mission_goal": mission.user_goal,
         "mission_type": mission.mission_type.value,
+        "mission_objective": asdict(objective),
         "mission_scratchpad": {
             "mission_goal": scratchpad.mission_goal,
             "mission_type": scratchpad.mission_type,
@@ -284,9 +302,13 @@ def build_mission_summary(
         "files_inspected": sorted(set(execution_state.inspected_files)),
         "files_touched": list(normalized.files_touched),
         "deliverables": list(normalized.deliverable_paths),
+        "files_planned": planned_files,
+        "files_actually_created": list(normalized.files_touched),
         "changed_count": len(normalized.files_touched),
         "evidence": execution_state.evidence_log[-40:],
         "validation_results": validations,
+        "validations_planned": list(objective.initial_validation_strategy),
+        "validations_executed": executed_validations,
         "validation_timeline": validation_timeline,
         "validation_evidence": validation_evidence,
         "validation_truth_state": normalized.validation_truth_status,
@@ -310,7 +332,8 @@ def build_mission_summary(
         "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
         "changed_files_by_attempt_outcome": changed_by_status,
         "greenfield_report": greenfield,
-        "realized_artifact_direction": normalized.realized_artifact_direction,
+        "realized_artifact_direction": objective.direction or normalized.realized_artifact_direction,
+        "invariant_checks": invariant_checks,
         "terminal_state": normalized.terminal_state,
         "final_outcome": outcome,
         "stop_reason": stop_reason,

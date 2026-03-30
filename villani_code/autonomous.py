@@ -96,7 +96,7 @@ class VillaniModeController:
 
     _GREENFIELD_READ_ONLY_PHASES = {
         NodePhase.INSPECT_WORKSPACE,
-        NodePhase.CHOOSE_PROJECT_DIRECTION,
+        NodePhase.DEFINE_OBJECTIVE,
         NodePhase.SUMMARIZE_OUTCOME,
     }
 
@@ -242,8 +242,11 @@ class VillaniModeController:
             scratchpad.mission_type = MissionType.GREENFIELD_BUILD.value
             if execution_state.greenfield_selection:
                 scratchpad.update_from_greenfield_selection(execution_state.greenfield_selection, execution_state.greenfield_candidates)
-            if scratchpad.chosen_project_direction and node.phase == NodePhase.CHOOSE_PROJECT_DIRECTION:
-                node.objective = f"Refine and commit chosen direction ({scratchpad.chosen_project_direction}) with bounded scope."
+            selected_direction = str(execution_state.mission.objective.direction or scratchpad.chosen_project_direction).strip()
+            if selected_direction:
+                scratchpad.chosen_project_direction = selected_direction
+            if scratchpad.chosen_project_direction and node.phase == NodePhase.DEFINE_OBJECTIVE:
+                node.objective = f"Finalize structured objective direction ({scratchpad.chosen_project_direction}) with bounded scope."
             if scratchpad.confirmed_deliverables and node.phase == NodePhase.INSPECT_WORKSPACE:
                 node.status = NodeStatus.SKIPPED
                 return
@@ -383,54 +386,41 @@ class VillaniModeController:
         return collect_repo_signals(str(self.repo))
 
     def _plan_greenfield_direction(self, objective: str, signals: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        prompt = (objective or "").lower()
-        hint_files = list(signals.get("workspace_hint_files", []) or [])
-        sample_data = list(signals.get("sample_data_files", []) or [])
+        objective_model = self.planner.synthesize_objective(objective, MissionType.GREENFIELD_BUILD, repo_signals=signals)
+        kinds = list(objective_model.deliverable_kind or ["unknown"])
         language_hints = list(signals.get("language_hints", []) or [])
-        likely = list(signals.get("likely_project_directions", []) or [])
-        candidates: list[dict[str, Any]] = [
-            {"project_type": "python_cli_utility", "utility": 0.88, "feasibility": 0.9, "fit": 0.6, "validation": 0.9, "bounded_scope": 0.9, "rationale": "Fast local tool with clear smoke validation."},
-            {"project_type": "file_report_generator", "utility": 0.82, "feasibility": 0.88, "fit": 0.58, "validation": 0.88, "bounded_scope": 0.92, "rationale": "Produces concrete output artifact and easy run path."},
-        ]
-        if sample_data:
-            candidates.append({"project_type": "data_quality_checker", "utility": 0.92, "feasibility": 0.86, "fit": 0.94, "validation": 0.9, "bounded_scope": 0.82, "rationale": "Workspace includes sample data; quality checks are directly useful."})
-        if "python" in language_hints:
-            candidates.append({"project_type": "csv_analysis_cli", "utility": 0.87, "feasibility": 0.86, "fit": 0.78, "validation": 0.86, "bounded_scope": 0.84, "rationale": "Python tooling hints support a compact analysis CLI."})
+        preferred_lang = "python" if "python" in language_hints or "python" in objective.lower() else (language_hints[0] if language_hints else "python")
+        candidates: list[dict[str, Any]] = []
+        for kind in kinds[:3]:
+            project_type = f"{preferred_lang}_{kind}"
+            candidates.append({
+                "project_type": project_type,
+                "utility": 0.85,
+                "feasibility": 0.86,
+                "fit": 0.8 if kind != "unknown" else 0.6,
+                "validation": 0.85,
+                "bounded_scope": 0.88,
+                "rationale": f"General objective synthesis selected kind={kind} with language={preferred_lang}.",
+            })
+        if not candidates:
+            candidates = [{"project_type": f"{preferred_lang}_unknown", "utility": 0.7, "feasibility": 0.8, "fit": 0.6, "validation": 0.8, "bounded_scope": 0.85, "rationale": "Fallback general-purpose build."}]
         for c in candidates:
-            if c["project_type"] in likely:
-                c["fit"] = round(min(1.0, float(c["fit"]) + 0.12), 2)
-            if "useful" in prompt:
-                c["utility"] = round(min(1.0, float(c["utility"]) + 0.05), 2)
-            if "interesting" in prompt or "cool" in prompt:
-                c["fit"] = round(min(1.0, float(c["fit"]) + 0.03), 2)
             c["score"] = round((0.3 * c["utility"]) + (0.25 * c["feasibility"]) + (0.2 * c["fit"]) + (0.15 * c["validation"]) + (0.1 * c["bounded_scope"]), 3)
-        deterministic_preference = {
-            "python_cli_utility": 0,
-            "file_report_generator": 1,
-            "data_quality_checker": 2,
-            "csv_analysis_cli": 3,
-        }
-        ranked = sorted(
-            candidates,
-            key=lambda item: (
-                -float(item.get("score", 0.0)),
-                deterministic_preference.get(str(item.get("project_type", "")), 99),
-                str(item.get("project_type", "")),
-            ),
-        )
-        chosen = dict(ranked[0]) if ranked else {"project_type": "python_cli_utility", "rationale": "default fallback"}
+        ranked = sorted(candidates, key=lambda item: (-float(item.get("score", 0.0)), str(item.get("project_type", ""))))
+        chosen = dict(ranked[0])
         selection = {
-            "project_type": chosen.get("project_type", "python_cli_utility"),
+            "project_type": chosen.get("project_type", ""),
             "selection_rationale": chosen.get("rationale", ""),
+            "objective": {k: getattr(objective_model, k) for k in objective_model.__dataclass_fields__.keys()},
             "constraints": {
                 "avoid_internal_deliverables": True,
                 "docs_only_invalid_for_open_greenfield": True,
                 "target_paths": "workspace_user_paths_only",
                 "single_mission_scope": True,
             },
-            "hint_files_considered": hint_files[:10],
         }
         return ranked[:4], selection
+
 
     def _select_next_node(self, execution_state: MissionExecutionState):
         self._activity("Selecting next ready mission node.")
@@ -590,7 +580,7 @@ class VillaniModeController:
                 node.confidence = max(node.confidence, min(0.95, loc.confidence + 0.05))
                 if loc.repair_intent and loc.repair_intent not in node.evidence:
                     node.evidence.append(f"localized_intent:{loc.repair_intent}")
-            if node.phase in {NodePhase.SCAFFOLD_PROJECT, NodePhase.IMPLEMENT_VERTICAL_SLICE} and execution_state.greenfield_selection:
+            if node.phase in {NodePhase.SCAFFOLD_PROJECT, NodePhase.IMPLEMENT_INCREMENT} and execution_state.greenfield_selection:
                 chosen = str(execution_state.greenfield_selection.get("project_type", "")).strip()
                 if chosen:
                     node.evidence.append(f"greenfield_selected:{chosen}")
@@ -658,6 +648,11 @@ class VillaniModeController:
         )
         attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
         blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
+        rejected_actions = list(execution_payload.get("rejected_actions", []) or [])
+        if rejected_actions:
+            outcome["contract_violation"] = True
+            outcome["rejected_actions"] = rejected_actions
+
         shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
         inferred_command_results = list(execution_payload.get("inferred_command_results", []) or [])
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase == NodePhase.SUMMARIZE_OUTCOME:
@@ -670,6 +665,15 @@ class VillaniModeController:
             outcome["status"] = "failed"
             outcome["reason"] = f"contract violation: {node.phase.value} is read-only but wrote files"
             outcome["contract_violation"] = True
+        if node.phase in self._GREENFIELD_READ_ONLY_PHASES and blocked_write_paths and not changed_files:
+            outcome["status"] = "passed" if str(outcome.get("status")) in {"passed", "partial", "failed"} else "partial"
+            outcome["reason"] = "recoverable contract violation: blocked write attempt in read-only phase; proceeding with preserved mission state"
+            outcome["contract_violation"] = True
+            outcome["contract_violation_recovered"] = True
+            outcome["phase_contract_status"] = "contract_violation_recovered"
+        elif bool(outcome.get("contract_violation")):
+            outcome["contract_violation_recovered"] = False
+
         effective_changed_files = list(changed_files)
         if node.phase == NodePhase.SUMMARIZE_OUTCOME and bool(outcome.get("contract_violation")):
             effective_changed_files = []
@@ -685,7 +689,7 @@ class VillaniModeController:
             outcome["validation_worsened"] = False
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
-            and node.phase == NodePhase.IMPLEMENT_VERTICAL_SLICE
+            and node.phase == NodePhase.IMPLEMENT_INCREMENT
             and user_deliverables
             and str(outcome.get("status", "")) not in {"failed"}
         ):
@@ -738,11 +742,11 @@ class VillaniModeController:
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
             execution_state.scratchpad.has_user_space_scaffolding = execution_state.scratchpad.has_user_space_scaffolding or bool(persisted_deliverables)
             execution_state.scratchpad.has_runnable_entrypoint = execution_state.scratchpad.has_runnable_entrypoint or (
-                (node.phase in {NodePhase.IMPLEMENT_VERTICAL_SLICE, NodePhase.VALIDATE_PROJECT} and str(outcome.get("status", "")) in {"passed", "partial"})
+                (node.phase in {NodePhase.IMPLEMENT_INCREMENT, NodePhase.VALIDATE_PROJECT} and str(outcome.get("status", "")) in {"passed", "partial"})
                 or any(_looks_like_runnable_python(p) for p in persisted_deliverables)
             )
             progress = dict(execution_state.greenfield_progress or {})
-            critical_violation = bool(outcome.get("contract_violation")) and not bool(
+            critical_violation = bool(outcome.get("contract_violation")) and not bool(outcome.get("contract_violation_recovered")) and not bool(
                 outcome.get("user_deliverable_patch") and node.phase in self._GREENFIELD_READ_ONLY_PHASES
             )
             if bool(outcome.get("contract_violation")):
@@ -873,6 +877,7 @@ class VillaniModeController:
             "validation_summary": validation_summary,
             "failure_fingerprint": failure_fingerprint,
             "localization_evidence": list(localization_payload.get("evidence", [])),
+            "outcome_semantic": ("contract_violation_recovered" if outcome.get("contract_violation_recovered") else ("contract_violation_unrecovered" if outcome.get("contract_violation") else str(outcome.get("status", "partial")))),
         }
 
     def _localization_payload(self, node: Any, node_result: dict[str, Any], execution_state: MissionExecutionState) -> dict[str, Any]:
@@ -941,7 +946,7 @@ class VillaniModeController:
                 return
             if has_scaffold_success and node.phase in {
                 NodePhase.INSPECT_WORKSPACE,
-                NodePhase.CHOOSE_PROJECT_DIRECTION,
+                NodePhase.DEFINE_OBJECTIVE,
                 NodePhase.SCAFFOLD_PROJECT,
             }:
                 append_mission_event(

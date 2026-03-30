@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from villani_code.autonomy import TaskContract
-from villani_code.mission import Mission, MissionNode, MissionType, NodePhase, NodeStatus
+from villani_code.mission import Mission, MissionNode, MissionObjective, MissionType, NodePhase, NodeStatus
 
 
 class MissionPlanner:
@@ -19,6 +19,8 @@ class MissionPlanner:
             success_criteria=self.derive_success_criteria(objective, mission_type),
             repo_root=repo_root,
         )
+        mission.objective = self.synthesize_objective(objective, mission_type, repo_signals=repo_signals)
+        mission.mission_context["objective"] = {k: getattr(mission.objective, k) for k in mission.objective.__dataclass_fields__.keys()}
         mission.nodes = self.build_initial_nodes(mission, repo_signals=repo_signals)
         return mission
 
@@ -71,6 +73,61 @@ class MissionPlanner:
             return MissionType.REPO_STABILIZATION
         return MissionType.BUGFIX
 
+    def synthesize_objective(self, objective: str, mission_type: MissionType, repo_signals: dict[str, Any] | None = None) -> MissionObjective:
+        repo_signals = repo_signals or {}
+        low = (objective or "").lower()
+        if repo_signals.get("workspace_empty_or_internal_only"):
+            repo_state_type = "empty_sandbox"
+        elif repo_signals.get("existing_project_detected"):
+            repo_state_type = "existing_repo"
+        elif repo_signals.get("workspace_lightweight_hints_only"):
+            repo_state_type = "partial_project"
+        else:
+            repo_state_type = "unknown"
+        task_shape_map = {
+            MissionType.GREENFIELD_BUILD: "greenfield_build",
+            MissionType.FEATURE: "feature_addition",
+            MissionType.BUGFIX: "bugfix",
+            MissionType.NARROW_REFACTOR: "refactor",
+            MissionType.VALIDATION_ONLY: "investigation",
+        }
+        deliverable_kind: list[str] = []
+        keywords = {
+            "game": ["game"],
+            "cli_app": ["cli", "command"],
+            "service": ["api", "service", "server"],
+            "script": ["script", "scraper"],
+            "docs_update": ["docs", "readme"],
+            "test_fix": ["test", "pytest"],
+            "library": ["library", "package"],
+        }
+        for kind, tokens in keywords.items():
+            if any(tok in low for tok in tokens):
+                deliverable_kind.append(kind)
+        if not deliverable_kind:
+            deliverable_kind = ["unknown"]
+        language_hints = list(repo_signals.get("language_hints", []) or [])
+        if "python" in low and "python" not in language_hints:
+            language_hints.append("python")
+        constraints = ["workspace_user_paths_only", "controller_authoritative_state"]
+        if mission_type == MissionType.GREENFIELD_BUILD:
+            constraints.append("deliver_runnable_vertical_slice")
+        strategy = list(repo_signals.get("likely_validation_commands", []) or [])[:3]
+        if not strategy and "python" in language_hints:
+            strategy = ["python -m py_compile <entrypoint>", "python <entrypoint> --help"]
+        direction = ",".join(deliverable_kind[:2])
+        return MissionObjective(
+            user_goal=objective.strip(),
+            repo_state_type=repo_state_type,
+            task_shape=task_shape_map.get(mission_type, "mixed"),
+            deliverable_kind=deliverable_kind,
+            constraints=constraints,
+            success_signals=self.derive_success_criteria(objective, mission_type),
+            ambiguity_flags=[] if objective.strip() else ["missing_user_goal"],
+            initial_validation_strategy=strategy,
+            direction=direction,
+        )
+
     def derive_success_criteria(self, objective: str, mission_type: MissionType) -> list[str]:
         base = ["Produce evidence-backed progress.", "Run targeted validation after each effectful change."]
         if mission_type == MissionType.FEATURE:
@@ -111,9 +168,9 @@ class MissionPlanner:
 
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             n1 = _n("inspect-workspace", "Inspect workspace", NodePhase.INSPECT_WORKSPACE, TaskContract.INSPECT.value, "Inspect workspace hints, constraints, and feasible build targets")
-            n2 = _n("choose-direction", "Choose project direction", NodePhase.CHOOSE_PROJECT_DIRECTION, "choose_project_direction", "Generate candidates and choose one bounded, useful project direction", [n1.node_id])
+            n2 = _n("choose-direction", "Choose project direction", NodePhase.DEFINE_OBJECTIVE, "define_objective", "Generate candidates and choose one bounded, useful project direction", [n1.node_id])
             n3 = _n("scaffold-project", "Scaffold project", NodePhase.SCAFFOLD_PROJECT, "scaffold_project", "Scaffold chosen project in user workspace paths (not .villani/)", [n2.node_id])
-            n4 = _n("vertical-slice", "Implement vertical slice", NodePhase.IMPLEMENT_VERTICAL_SLICE, "implement_vertical_slice", "Implement a minimal but real runnable slice", [n3.node_id])
+            n4 = _n("vertical-slice", "Implement vertical slice", NodePhase.IMPLEMENT_INCREMENT, "implement_increment", "Implement a minimal but real runnable slice", [n3.node_id])
             n5 = _n("validate-project", "Validate project", NodePhase.VALIDATE_PROJECT, "validate_project", "Run targeted validation / smoke checks for the built slice", [n4.node_id])
             n6 = _n("summarize-outcome", "Summarize outcome", NodePhase.SUMMARIZE_OUTCOME, "summarize_outcome", "Summarize what was built, why, and how to run it", [n5.node_id])
             nodes = [n1, n2, n3, n4, n5, n6]
@@ -163,9 +220,9 @@ class MissionPlanner:
             if strategy == "broaden":
                 return [MissionNode(base_id, "Broaden workspace inspection", NodePhase.INSPECT_WORKSPACE, f"Recover from: {reason}", TaskContract.INSPECT.value, candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "simplify_direction":
-                return [MissionNode(base_id, "Choose simpler project direction", NodePhase.CHOOSE_PROJECT_DIRECTION, f"Recover from: {reason}", "choose_project_direction", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Choose simpler project direction", NodePhase.DEFINE_OBJECTIVE, f"Recover from: {reason}", "define_objective", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "rescope":
-                return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_VERTICAL_SLICE, f"Recover from: {reason}", "implement_vertical_slice", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
+                return [MissionNode(base_id, "Re-scope vertical slice", NodePhase.IMPLEMENT_INCREMENT, f"Recover from: {reason}", "implement_increment", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "force_scaffold":
                 return [MissionNode(base_id, "Force user-space scaffold", NodePhase.SCAFFOLD_PROJECT, f"Recover from: {reason}", "scaffold_project", candidate_files=candidate_files, validation_commands=validation, depends_on=[failed_node.node_id], created_from_node_id=failed_node.node_id, status=NodeStatus.READY)]
             if strategy == "advance_validate":

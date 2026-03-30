@@ -6,9 +6,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from villani_code.autonomy import contract_discourages_editing, contract_requires_validation
+from villani_code.autonomy import contract_discourages_editing, contract_requires_validation, get_phase_contract, validate_phase_action
 from villani_code.evidence import parse_command_evidence
-from villani_code.mission import Mission, MissionExecutionState, MissionNode
+from villani_code.mission import Mission, MissionExecutionState, MissionNode, ProposedAction
 from villani_code.path_authority import split_internal_paths
 
 
@@ -79,7 +79,7 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
     if mission.mission_type.value == "greenfield_build":
         direction = scratchpad.chosen_project_direction or str(execution_state.greenfield_selection.get("project_type", ""))
         if direction:
-            lines.append("Chosen project direction: " + direction)
+            lines.append("Authoritative selected objective direction: " + direction)
         if scratchpad.current_phase:
             lines.append("Authoritative mission phase: " + scratchpad.current_phase)
         if scratchpad.next_required_action:
@@ -102,25 +102,25 @@ def build_node_instruction(mission: Mission, node: MissionNode, execution_state:
         lines.append("GREENFIELD RULES: Build a real runnable deliverable in user workspace paths.")
         lines.append("Do not treat this as bugfix/localization-first work unless a build-generated bug appears.")
         lines.append("Files under .villani/ and .villani_code/ are internal artifacts only and do not count as project deliverables.")
-        lines.append("Do NOT ask the user for confirmation/approval/options. Act autonomously unless a true hard block exists.")
+        lines.append("Operate autonomously; ask user only for true hard ambiguity or destructive-risk policy conflicts.")
         if node.phase.value == "inspect_workspace":
             lines.append("Inspect workspace for constraints, sample data, README/notes hints, and feasible local project directions.")
-            lines.append("WRITE POLICY: READ-ONLY PHASE. Do not use Write/Patch/edit tools and do not run full builds.")
-        elif node.phase.value == "choose_project_direction":
+            lines.append("WRITE POLICY: READ-ONLY PHASE. Do not narrate writes and do not invoke write/patch/mkdir tools.")
+        elif node.phase.value == "define_objective":
             lines.append("Produce 2-4 plausible runnable utility candidates, then choose one deterministic direction with rationale.")
             lines.append("Docs-only, README-only, and suggestion-only directions are invalid unless the user explicitly asked for docs only.")
-            lines.append("WRITE POLICY: READ-ONLY PHASE. Do not use Write/Patch/edit tools and do not run full builds.")
+            lines.append("WRITE POLICY: READ-ONLY PHASE. Do not narrate writes and do not invoke write/patch/mkdir tools.")
         elif node.phase.value == "scaffold_project":
             lines.append("Scaffold only the chosen project structure in user-facing paths. Avoid .villani/ outputs.")
             lines.append("This phase must create at least one real user-space file (for example README.md, pyproject.toml, src/*, app/*, tests/*).")
             lines.append("WRITE POLICY: WRITE-ALLOWED PHASE for scaffolding only.")
-        elif node.phase.value == "implement_vertical_slice":
+        elif node.phase.value == "implement_increment":
             lines.append("Implement one minimal but usable vertical slice with a real entrypoint.")
             lines.append("WRITE POLICY: WRITE-ALLOWED PHASE for targeted implementation.")
         elif node.phase.value == "validate_project":
             lines.append("Run targeted smoke/test validation and capture concrete command evidence.")
             lines.append("REQUIREMENT: Run at least one real shell command and report its exact exit status.")
-            lines.append("WRITE POLICY: validation-focused phase; do not claim passing validation without real command results.")
+            lines.append("WRITE POLICY: validation-focused phase; success requires real command evidence.")
         elif node.phase.value == "summarize_outcome":
             lines.append("Summarize what was built, where files live, how to run, and validation outcomes.")
             lines.append("WRITE POLICY: READ-ONLY PHASE. No file edits.")
@@ -389,6 +389,58 @@ def _fallback_parse_command_results_from_tool_text(result: dict[str, Any]) -> li
     return list(dedup.values())
 
 
+
+
+def _map_tool_to_action_type(tool_name: str) -> str:
+    tool = str(tool_name or "").strip().lower()
+    if tool in {"read", "cat"}:
+        return "read_file"
+    if tool in {"write"}:
+        return "write_file"
+    if tool in {"patch", "apply_patch"}:
+        return "patch_file"
+    if tool in {"list", "glob", "ls"}:
+        return "list_files"
+    if tool in {"mkdir", "makedirs"}:
+        return "mkdir"
+    if tool in {"bash", "powershell", "shell", "cmd"}:
+        return "run_shell"
+    return "inspect_metadata"
+
+
+def _extract_proposed_actions(result: dict[str, Any], phase: str) -> list[ProposedAction]:
+    transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
+    out: list[ProposedAction] = []
+    for invocation in list(transcript.get("tool_invocations", []) or []):
+        if not isinstance(invocation, dict):
+            continue
+        action_type = _map_tool_to_action_type(str(invocation.get("name", "")))
+        payload = invocation.get("input") if isinstance(invocation.get("input"), dict) else {}
+        targets: list[str] = []
+        for key in ("file_path", "path", "target_file", "filename"):
+            value = str(payload.get(key, "")).strip()
+            if value:
+                targets.append(value)
+        out.append(ProposedAction(phase=phase, action_type=action_type, target_paths=sorted(set(targets))))
+    return out
+
+
+def _validate_actions_for_phase(phase: str, actions: list[ProposedAction]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    approved: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for action in actions:
+        ok, reason = validate_phase_action(phase, action.action_type)
+        payload = {
+            "phase": action.phase,
+            "action_type": action.action_type,
+            "target_paths": list(action.target_paths),
+        }
+        if ok:
+            approved.append(payload)
+        else:
+            payload["rejection_reason"] = reason
+            rejected.append(payload)
+    return approved, rejected
 def execute_mission_node_with_runner(
     runner: Any,
     mission: Mission,
@@ -396,15 +448,16 @@ def execute_mission_node_with_runner(
     execution_state: MissionExecutionState,
 ) -> MissionNodeResult:
     instruction = build_node_instruction(mission, node, execution_state)
+    phase_contract = get_phase_contract(node.phase.value)
     before = set(_git_changed_files(Path(mission.repo_root)))
     prior_phase_policy = getattr(runner, "_villani_phase_tool_policy", None)
     if mission.mission_type.value == "greenfield_build":
         runner._villani_phase_tool_policy = {
             "mission_type": "greenfield_build",
             "node_phase": node.phase.value,
-            "read_only_phase": node.phase.value in {"inspect_workspace", "choose_project_direction", "summarize_outcome"},
-            "allow_shell_commands": node.phase.value in {"inspect_workspace", "choose_project_direction", "validate_project"},
-            "allow_mutating_tools": node.phase.value in {"scaffold_project", "implement_vertical_slice"},
+            "read_only_phase": node.phase.value in {"inspect_workspace", "define_objective", "summarize_outcome"},
+            "allow_shell_commands": node.phase.value in {"inspect_workspace", "define_objective", "validate_project"},
+            "allow_mutating_tools": node.phase.value in {"scaffold_project", "implement_increment"},
             "allow_validation_shell": node.phase.value == "validate_project",
         }
     try:
@@ -413,6 +466,8 @@ def execute_mission_node_with_runner(
         runner._villani_phase_tool_policy = prior_phase_policy
     after = set(_git_changed_files(Path(mission.repo_root)))
     normalized = result if isinstance(result, dict) else {}
+    proposed_actions = _extract_proposed_actions(normalized, node.phase.value)
+    approved_actions, rejected_actions = _validate_actions_for_phase(node.phase.value, proposed_actions)
     execution = _extract_execution_payload(normalized)
     changed_all = _extract_changed_files_from_result(normalized, before, after)
     write_paths = _extract_write_paths_from_transcript(normalized)
@@ -493,5 +548,12 @@ def execute_mission_node_with_runner(
             "attempted_write_paths": list(write_paths),
             "blocked_write_paths": list(blocked_write_paths),
             "shell_invocations": list(shell_invocations),
+            "phase_contract": {
+                "phase": phase_contract.phase,
+                "allowed_actions": sorted(phase_contract.allowed_actions),
+                "forbidden_actions": sorted(phase_contract.forbidden_actions),
+            },
+            "approved_actions": approved_actions,
+            "rejected_actions": rejected_actions,
         },
     )
