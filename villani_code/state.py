@@ -9,6 +9,7 @@ from typing import Any, Callable, Literal
 from rich.console import Console
 
 from villani_code.autonomous import VillaniModeConfig, VillaniModeController
+from villani_code.villani_loop import format_villani_summary, run_villani_loop
 from villani_code.autonomy import (
     FailureClassifier,
     VerificationEngine,
@@ -460,14 +461,14 @@ class Runner:
 
     def run_villani_mode(self) -> dict[str, Any]:
         ensure_runtime_dependencies_not_shadowed(self.repo)
-        controller = VillaniModeController(
-            self,
-            self.repo,
-            steering_objective=self.villani_objective,
+        objective = self.villani_objective or "Autonomously satisfy the current user objective using workspace evidence."
+        summary = run_villani_loop(
+            runner=self,
+            repo=self.repo,
+            objective=objective,
             event_callback=self.event_callback,
         )
-        summary = controller.run()
-        text = VillaniModeController.format_summary(summary)
+        text = format_villani_summary(summary)
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
         return {"response": response, "summary": summary}
 
