@@ -906,17 +906,27 @@ class VillaniModeController:
 
         shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
         inferred_command_results = list(execution_payload.get("inferred_command_results", []) or [])
-        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase == NodePhase.SUMMARIZE_OUTCOME:
+        villani_unrestricted_mode = bool(getattr(self.runner, "villani_unrestricted_mode", False))
+        if (
+            not villani_unrestricted_mode
+            and execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
+            and node.phase == NodePhase.SUMMARIZE_OUTCOME
+        ):
             if changed_files or attempted_write_paths or shell_invocations:
                 outcome["status"] = "failed"
                 outcome["reason"] = "contract violation: summarize_outcome is read-only and cannot write/execute build actions"
                 outcome["contract_violation"] = True
                 outcome["phase_contract_status"] = "contract_violation"
-        if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD and node.phase in self._GREENFIELD_READ_ONLY_PHASES and changed_files:
+        if (
+            not villani_unrestricted_mode
+            and execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
+            and node.phase in self._GREENFIELD_READ_ONLY_PHASES
+            and changed_files
+        ):
             outcome["status"] = "failed"
             outcome["reason"] = f"contract violation: {node.phase.value} is read-only but wrote files"
             outcome["contract_violation"] = True
-        if node.phase in self._GREENFIELD_READ_ONLY_PHASES and blocked_write_paths and not changed_files:
+        if not villani_unrestricted_mode and node.phase in self._GREENFIELD_READ_ONLY_PHASES and blocked_write_paths and not changed_files:
             outcome["status"] = "passed" if str(outcome.get("status")) in {"passed", "partial", "failed"} else "partial"
             outcome["reason"] = "recoverable contract violation: blocked write attempt in read-only phase; proceeding with preserved mission state"
             outcome["contract_violation"] = True

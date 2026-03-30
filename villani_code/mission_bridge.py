@@ -829,7 +829,8 @@ def execute_mission_node_with_runner(
         runner.set_active_tool_root(active_root)
     if mission.mission_type.value == "greenfield_build":
         phase = node.phase.value
-        unrestricted_within_sandbox = active_root != repo_root
+        villani_unrestricted_mode = bool(getattr(runner, "villani_unrestricted_mode", False))
+        unrestricted_within_sandbox = villani_unrestricted_mode or (active_root != repo_root)
         runner._villani_phase_tool_policy = {
             "mission_type": "greenfield_build",
             "node_phase": phase,

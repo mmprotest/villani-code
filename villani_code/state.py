@@ -340,6 +340,7 @@ class Runner:
         self.event_callback = event_callback or (lambda _event: None)
         self.small_model = small_model
         self.villani_mode = villani_mode
+        self.villani_unrestricted_mode = bool(villani_mode)
         self.villani_objective = villani_objective
         self.villani_config = VillaniModeConfig(
             enabled=villani_mode, steering_objective=villani_objective
@@ -431,6 +432,9 @@ class Runner:
     def set_active_tool_root(self, root: Path | None) -> None:
         self._active_tool_root = (root or self.repo).resolve()
 
+
+    def is_villani_unrestricted_mode(self) -> bool:
+        return bool(getattr(self, "villani_unrestricted_mode", False))
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
         from villani_code.project_memory import load_repo_map, load_validation_config, scan_repo
