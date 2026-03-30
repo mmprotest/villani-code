@@ -203,6 +203,7 @@ def classify_node_outcome(
     self_reported_validation_without_evidence = bool(execution_payload.get("self_reported_validation_without_evidence", False))
     attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
     blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
+    rejected_actions = list(execution_payload.get("rejected_actions", []) or [])
     shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
 
     command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
@@ -322,7 +323,7 @@ def classify_node_outcome(
             status, reason = "failed", "greenfield autonomous execution asked for confirmation"
         elif internal_only_patch:
             status, reason = "failed", "greenfield changes were internal artifacts only (.villani/.villani_code)"
-        elif node_phase in {"scaffold_project", "implement_vertical_slice"}:
+        elif node_phase in {"scaffold_project", "implement_increment"}:
             if not user_deliverable_patch:
                 status, reason = "failed", "no user-space deliverable created outside internal artifact folders"
             elif docs_only_user_space:
@@ -350,11 +351,11 @@ def classify_node_outcome(
                 status, reason = "partial", "summary too thin"
             else:
                 status, reason = "passed", "greenfield outcome summarized"
-        read_only_phases = {"inspect_workspace", "choose_project_direction", "summarize_outcome"}
+        read_only_phases = {"inspect_workspace", "define_objective", "summarize_outcome"}
         if node_phase in read_only_phases and patch_exists:
             status, reason = "failed", f"contract violation: {node_phase} is read-only but wrote files"
             contract_violation = True
-        if node_phase in {"inspect_workspace", "choose_project_direction"} and build_like_command:
+        if node_phase in {"inspect_workspace", "define_objective"} and build_like_command:
             status, reason = "failed", f"contract violation: {node_phase} should not run full build commands"
             contract_violation = True
         if node_phase == "validate_project" and self_reported_validation_without_evidence:
@@ -391,6 +392,8 @@ def classify_node_outcome(
         mission_progress_status = "validated_fail"
     if blocked_write_paths:
         mission_progress_status = "blocked"
+    if rejected_actions and not changed_files:
+        phase_contract_status = "contract_violation_recovered"
     if contract_violation and mission_progress_status == "useful_progress_unvalidated":
         mission_progress_status = "useful_progress_with_contract_violation"
     if status == "passed" and delta.classification == DeltaClassification.REGRESSION:
@@ -439,5 +442,6 @@ def classify_node_outcome(
         "attempted_write_paths": attempted_write_paths,
         "blocked_write_paths": blocked_write_paths,
         "shell_invocations": shell_invocations,
-        "contract_violation": contract_violation,
+        "contract_violation": contract_violation or bool(rejected_actions),
+        "rejected_actions": rejected_actions,
     }

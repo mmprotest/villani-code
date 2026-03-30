@@ -61,8 +61,10 @@ def normalize_task_contract(value: str | TaskContract | None) -> TaskContract:
         "effectful": TaskContract.NARROW_FIX,
         "inspect_workspace": TaskContract.INSPECT,
         "choose_project_direction": TaskContract.INSPECT,
+        "define_objective": TaskContract.INSPECT,
         "scaffold_project": TaskContract.IMPLEMENT,
         "implement_vertical_slice": TaskContract.IMPLEMENT,
+        "implement_increment": TaskContract.IMPLEMENT,
         "validate_project": TaskContract.VALIDATE,
         "summarize_outcome": TaskContract.SUMMARIZE,
     }
@@ -117,6 +119,87 @@ def contract_discourages_editing(value: str | TaskContract | None) -> bool:
     }
 
 
+
+
+@dataclass(slots=True)
+class PhaseContract:
+    phase: str
+    purpose: str
+    allowed_actions: set[str]
+    forbidden_actions: set[str]
+    expected_outputs: list[str] = field(default_factory=list)
+    transition_criteria: list[str] = field(default_factory=list)
+
+
+_PHASE_CONTRACTS: dict[str, PhaseContract] = {
+    "inspect_workspace": PhaseContract(
+        phase="inspect_workspace",
+        purpose="Inspect repository and constraints without mutating files",
+        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell"},
+        forbidden_actions={"write_file", "patch_file", "mkdir", "delete_path"},
+        expected_outputs=["workspace_evidence", "constraints"],
+        transition_criteria=["workspace inspected"],
+    ),
+    "define_objective": PhaseContract(
+        phase="define_objective",
+        purpose="Produce structured objective and delivery plan",
+        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell"},
+        forbidden_actions={"write_file", "patch_file", "mkdir", "delete_path"},
+        expected_outputs=["mission_objective", "deliverable_plan", "validation_plan"],
+        transition_criteria=["objective selected"],
+    ),
+    "scaffold_project": PhaseContract(
+        phase="scaffold_project",
+        purpose="Create initial project layout",
+        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell", "write_file", "patch_file", "mkdir"},
+        forbidden_actions=set(),
+        expected_outputs=["scaffolded_files"],
+        transition_criteria=["at least one user-facing file created"],
+    ),
+    "implement_increment": PhaseContract(
+        phase="implement_increment",
+        purpose="Implement vertical slice or targeted change",
+        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell", "write_file", "patch_file", "mkdir"},
+        forbidden_actions=set(),
+        expected_outputs=["functional_increment"],
+        transition_criteria=["behavior implemented"],
+    ),
+    "validate_project": PhaseContract(
+        phase="validate_project",
+        purpose="Run real validation commands and optionally scoped repair",
+        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell", "write_file", "patch_file"},
+        forbidden_actions={"delete_path"},
+        expected_outputs=["command_evidence"],
+        transition_criteria=["validation evidence captured"],
+    ),
+    "summarize_outcome": PhaseContract(
+        phase="summarize_outcome",
+        purpose="Summarize actual outcomes without mutation",
+        allowed_actions={"list_files", "read_file", "inspect_metadata"},
+        forbidden_actions={"write_file", "patch_file", "mkdir", "delete_path", "run_shell"},
+        expected_outputs=["outcome_summary"],
+        transition_criteria=["summary generated"],
+    ),
+}
+
+
+def get_phase_contract(phase: str) -> PhaseContract:
+    normalized = str(phase or "").strip().lower()
+    if normalized == "choose_project_direction":
+        normalized = "define_objective"
+    if normalized == "implement_vertical_slice":
+        normalized = "implement_increment"
+    return _PHASE_CONTRACTS.get(normalized, _PHASE_CONTRACTS["inspect_workspace"])
+
+
+def validate_phase_action(phase: str, action_type: str) -> tuple[bool, str]:
+    contract = get_phase_contract(phase)
+    action = str(action_type or "").strip().lower()
+    if action in contract.forbidden_actions:
+        return False, f"action '{action}' forbidden in phase '{contract.phase}'"
+    if action not in contract.allowed_actions:
+        return False, f"action '{action}' not allowed in phase '{contract.phase}'"
+    return True, ""
 @dataclass(slots=True)
 class VerificationFinding:
     category: FindingCategory

@@ -119,9 +119,11 @@ class MissionScratchpad:
 
 class NodePhase(StrEnum):
     INSPECT_WORKSPACE = "inspect_workspace"
-    CHOOSE_PROJECT_DIRECTION = "choose_project_direction"
+    DEFINE_OBJECTIVE = "define_objective"
+    CHOOSE_PROJECT_DIRECTION = "define_objective"
     SCAFFOLD_PROJECT = "scaffold_project"
-    IMPLEMENT_VERTICAL_SLICE = "implement_vertical_slice"
+    IMPLEMENT_INCREMENT = "implement_increment"
+    IMPLEMENT_VERTICAL_SLICE = "implement_increment"
     VALIDATE_PROJECT = "validate_project"
     SUMMARIZE_OUTCOME = "summarize_outcome"
     LOCALIZE = "localize"
@@ -347,6 +349,38 @@ def reduce_normalized_mission_progress(state: "MissionExecutionState") -> Normal
     )
 
 
+class MissionExecutionOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    CONTRACT_VIOLATION_RECOVERED = "contract_violation_recovered"
+    CONTRACT_VIOLATION_UNRECOVERED = "contract_violation_unrecovered"
+
+
+@dataclass(slots=True)
+class MissionObjective:
+    user_goal: str = ""
+    repo_state_type: str = "unknown"
+    task_shape: str = "mixed"
+    deliverable_kind: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    success_signals: list[str] = field(default_factory=list)
+    ambiguity_flags: list[str] = field(default_factory=list)
+    initial_validation_strategy: list[str] = field(default_factory=list)
+    direction: str = ""
+
+
+@dataclass(slots=True)
+class ProposedAction:
+    phase: str
+    action_type: str
+    target_paths: list[str] = field(default_factory=list)
+    rationale: str = ""
+    expected_effect: str = ""
+    risk_level: str = "low"
+
+
 @dataclass(slots=True)
 class MissionNode:
     node_id: str
@@ -412,6 +446,7 @@ class Mission:
     final_outcome: str = ""
     stop_reason: str = ""
     mission_context: dict[str, Any] = field(default_factory=dict)
+    objective: MissionObjective = field(default_factory=MissionObjective)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -427,6 +462,7 @@ class Mission:
             "final_outcome": self.final_outcome,
             "stop_reason": self.stop_reason,
             "mission_context": dict(self.mission_context),
+            "objective": asdict(self.objective),
         }
 
     @classmethod
@@ -444,6 +480,7 @@ class Mission:
             final_outcome=str(data.get("final_outcome", "")),
             stop_reason=str(data.get("stop_reason", "")),
             mission_context=dict(data.get("mission_context", {}) or {}),
+            objective=MissionObjective(**dict(data.get("objective", {}) or {})),
         )
 
 
