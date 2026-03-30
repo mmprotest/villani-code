@@ -3,11 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.autonomous import VillaniModeController
+from villani_code.mission_bridge import execute_mission_node_with_runner
 from villani_code.mission import (
     Mission,
     MissionExecutionState,
+    MissionNode,
     MissionScratchpad,
     MissionType,
+    NodePhase,
+    NodeStatus,
     NormalizedNodeOutcome,
     reduce_normalized_mission_progress,
 )
@@ -18,6 +22,43 @@ from villani_code.verification.outcomes import classify_node_outcome
 class _NoopRunner:
     def run(self, _prompt: str, **_kwargs):
         return {"response": {"content": [{"type": "text", "text": "ok"}]}}
+
+
+class _ThinRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, _prompt: str, **_kwargs):
+        self.calls += 1
+        return {"response": {"content": [{"type": "text", "text": "<task>inspect_workspace</task><objective>Understand workspace structure...</objective>"}]}}
+
+
+class _FlowRunner:
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo
+
+    def run(self, _prompt: str, **_kwargs):
+        policy = getattr(self, "_villani_phase_tool_policy", {}) or {}
+        phase = str(policy.get("node_phase", ""))
+        if phase == "define_objective":
+            return {"response": {"content": [{"type": "text", "text": "<task>define_objective</task>"}]}}
+        if phase == "scaffold_project":
+            (self.repo / "README.md").write_text("# fun python game\n", encoding="utf-8")
+            (self.repo / "game.py").write_text("def main():\n    print('welcome')\n\nif __name__ == '__main__':\n    main()\n", encoding="utf-8")
+            return {"execution": {"changed_files": ["README.md", "game.py"], "meaningful_patch": True}}
+        if phase == "implement_increment":
+            (self.repo / "game.py").write_text(
+                "def main():\n    secret = 'cat'\n    print('guess the word')\n    guess = 'cat'\n    print('you win' if guess == secret else 'try again')\n\nif __name__ == '__main__':\n    main()\n",
+                encoding="utf-8",
+            )
+            return {"execution": {"changed_files": ["game.py"], "meaningful_patch": True}}
+        if phase == "validate_project":
+            return {
+                "execution": {
+                    "command_results": [{"command": "python -m py_compile game.py", "exit": 0, "stdout": "", "stderr": ""}]
+                }
+            }
+        return {"response": {"content": [{"type": "text", "text": "summary"}]}}
 
 
 def _mission(tmp_path: Path) -> Mission:
@@ -116,3 +157,140 @@ def test_read_only_state_progress_is_not_reduced_to_stagnated(tmp_path: Path) ->
     reduced = reduce_normalized_mission_progress(state)
     assert reduced.terminal_state == "in_progress"
     assert reduced.next_recommended_action == "scaffold_project"
+
+
+def test_greenfield_empty_sandbox_inspect_passes_with_thin_reply(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.mission_context["repo_signals"] = {
+        "workspace_empty_or_internal_only": True,
+        "existing_project_detected": False,
+        "language_hints": ["python"],
+    }
+    node = MissionNode(
+        node_id="n1",
+        title="Inspect workspace",
+        phase=NodePhase.INSPECT_WORKSPACE,
+        objective="inspect",
+        contract_type="inspect_workspace",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(mission=mission, scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value))
+    runner = _ThinRunner()
+    result = execute_mission_node_with_runner(runner, mission, node, state)
+    outcome = classify_node_outcome(
+        contract_type=node.contract_type,
+        static_result={"findings": list(result.execution_payload.get("controller_findings", []))},
+        command_results=result.commands,
+        changed_files=result.changed_files,
+        prose_only=result.prose_only,
+        mission_type="greenfield_build",
+        node_phase="inspect_workspace",
+        execution_payload=result.execution_payload,
+        scratchpad=state.scratchpad,
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n1",
+            node_phase="inspect_workspace",
+            contract_status=outcome["phase_contract_status"],
+            mission_progress_status=outcome["mission_progress_status"],
+            next_recommended_action="define_objective",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    mission_outcome, _reason = evaluate_mission_status(state)
+    assert runner.calls == 0
+    assert outcome["status"] == "passed"
+    assert outcome["mission_progress_status"] == "state_progress"
+    assert reduced.terminal_state == "in_progress"
+    assert mission_outcome is None
+
+
+def test_greenfield_define_objective_thin_reply_uses_controller_state(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.mission_context["repo_signals"] = {"workspace_empty_or_internal_only": True, "language_hints": ["python"]}
+    mission.objective.direction = "snake_cli_game"
+    mission.objective.deliverable_kind = ["game"]
+    mission.objective.initial_validation_strategy = ["python -m py_compile game.py"]
+    node = MissionNode(
+        node_id="n2",
+        title="Define objective",
+        phase=NodePhase.DEFINE_OBJECTIVE,
+        objective="define",
+        contract_type="define_objective",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(
+        mission=mission,
+        scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value, chosen_project_direction="snake_cli_game"),
+    )
+    result = execute_mission_node_with_runner(_ThinRunner(), mission, node, state)
+    outcome = classify_node_outcome(
+        contract_type=node.contract_type,
+        static_result={"findings": []},
+        command_results=result.commands,
+        changed_files=result.changed_files,
+        prose_only=True,
+        mission_type="greenfield_build",
+        node_phase="define_objective",
+        execution_payload=result.execution_payload,
+        scratchpad=MissionScratchpad(mission_type="greenfield_build", chosen_project_direction="snake_cli_game", next_required_action="scaffold_project"),
+        mission_objective={
+            "repo_state_type": "empty_sandbox",
+            "task_shape": "greenfield_build",
+            "deliverable_kind": ["game"],
+            "direction": "snake_cli_game",
+            "initial_validation_strategy": ["python -m py_compile game.py"],
+        },
+    )
+    assert outcome["status"] == "passed"
+
+
+def test_ready_greenfield_recovery_node_keeps_mission_in_progress(tmp_path: Path) -> None:
+    mission = _mission(tmp_path)
+    mission.nodes.append(
+        MissionNode(
+            node_id="recover-1",
+            title="Force user-space scaffold",
+            phase=NodePhase.SCAFFOLD_PROJECT,
+            objective="recover",
+            contract_type="scaffold_project",
+            status=NodeStatus.READY,
+            created_from_node_id="failed-node",
+        )
+    )
+    state = MissionExecutionState(
+        mission=mission,
+        scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value, next_required_action="scaffold_project"),
+        consecutive_no_progress=5,
+    )
+    state.normalized_node_outcomes.append(
+        NormalizedNodeOutcome(
+            node_id="n1",
+            node_phase="define_objective",
+            contract_status="contract_clean_success",
+            mission_progress_status="state_progress",
+            next_recommended_action="scaffold_project",
+        )
+    )
+    reduced = reduce_normalized_mission_progress(state)
+    outcome, _reason = evaluate_mission_status(state)
+    assert reduced.terminal_state == "in_progress"
+    assert outcome is None
+
+
+def test_prompt_empty_sandbox_fun_python_game_expected_greenfield_flow(tmp_path: Path) -> None:
+    runner = _FlowRunner(tmp_path)
+    controller = VillaniModeController(runner, tmp_path, steering_objective="Here is an empty sandbox. I want you to build me a fun python game. Go.")
+    run_payload = controller.run()
+    report = dict(run_payload.get("report", {}) or {})
+    phases = [str(item.get("node_phase", "")) for item in report.get("validation_results", [])]
+    assert phases[:6] == [
+        "inspect_workspace",
+        "define_objective",
+        "scaffold_project",
+        "implement_increment",
+        "validate_project",
+        "summarize_outcome",
+    ]
+    assert (tmp_path / "game.py").exists()

@@ -105,6 +105,25 @@ def test_greenfield_define_objective_passes_with_structured_objective_state() ->
     assert outcome["mission_progress_status"] == "state_progress"
 
 
+def test_greenfield_prose_only_does_not_fail_when_controller_evidence_exists() -> None:
+    outcome = classify_node_outcome(
+        contract_type="inspect_workspace",
+        static_result={"findings": []},
+        command_results=[],
+        changed_files=[],
+        prose_only=True,
+        mission_type="greenfield_build",
+        node_phase="inspect_workspace",
+        execution_payload={
+            "approved_actions": [{"phase": "inspect_workspace", "action_type": "inspect_metadata", "target_paths": []}],
+            "controller_findings": ["workspace empty or internal-only", "greenfield context confirmed"],
+        },
+        scratchpad=MissionScratchpad(mission_type="greenfield_build"),
+    )
+    assert outcome["status"] == "passed"
+    assert outcome["mission_progress_status"] == "state_progress"
+
+
 def test_autonomous_confirmation_prompt_is_sanitized_to_non_interrogative() -> None:
     sanitized, changed = _sanitize_autonomous_text_output("Would you like me to proceed with creating these files?")
     assert changed is True
