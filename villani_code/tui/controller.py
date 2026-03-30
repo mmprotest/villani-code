@@ -299,6 +299,10 @@ class RunnerController:
             self.app.post_message(SpinnerState(True, None))
             return
         if etype in {"tool_finished", "tool_result"}:
+            if etype == "tool_result" and bool(event.get("is_error")):
+                detail = str(event.get("content", "")).strip() or "tool call failed"
+                self.app.post_message(LogAppend(f"error {detail}", kind="meta"))
+                self.app.post_message(StatusUpdate("Tool error"))
             self.app.post_message(SpinnerState(False, None))
             self.app.post_message(StatusUpdate("Working"))
             return

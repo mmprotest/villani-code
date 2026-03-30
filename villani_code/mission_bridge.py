@@ -209,6 +209,53 @@ def _git_changed_files(repo: Path) -> list[str]:
     return sorted(dict.fromkeys(paths))
 
 
+def _resolve_active_root(mission: Mission, runner: Any) -> Path:
+    workspace_root = str((mission.mission_context or {}).get("workspace_root", "")).strip()
+    if mission.mission_type.value == "greenfield_build" and workspace_root:
+        return Path(workspace_root).resolve()
+    runner_workspace = getattr(runner, "workspace_root", None)
+    if mission.mission_type.value == "greenfield_build" and runner_workspace:
+        return Path(str(runner_workspace)).resolve()
+    return Path(mission.repo_root).resolve()
+
+
+def _normalized_rel_to_root(path: str, active_root: Path) -> str | None:
+    raw = str(path or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    resolved = candidate.resolve() if candidate.is_absolute() else (active_root / candidate).resolve()
+    try:
+        return resolved.relative_to(active_root).as_posix()
+    except ValueError:
+        return None
+
+
+def _collect_verified_file_inventory(active_root: Path) -> list[str]:
+    files: list[str] = []
+    if not active_root.exists():
+        return files
+    for path in active_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if ".git" in path.parts:
+            continue
+        files.append(path.relative_to(active_root).as_posix())
+    return sorted(dict.fromkeys(files))
+
+
+def _verify_existing_paths(paths: list[str], active_root: Path) -> list[str]:
+    verified: list[str] = []
+    for item in paths:
+        rel = _normalized_rel_to_root(item, active_root)
+        if not rel:
+            continue
+        target = (active_root / rel).resolve()
+        if target.exists() and target.is_file():
+            verified.append(rel)
+    return sorted(dict.fromkeys(verified))
+
+
 def _extract_execution_payload(result: dict[str, Any]) -> dict[str, Any]:
     execution = result.get("execution")
     if isinstance(execution, dict):
@@ -270,6 +317,7 @@ def _is_explicit_write_denial(content: str) -> bool:
             "outside allowed workspace",
             "path outside",
             "cannot write outside",
+            "path escapes workspace",
             "write forbidden",
             "permission denied",
             "read-only",
@@ -771,8 +819,14 @@ def execute_mission_node_with_runner(
 
     instruction = build_node_instruction(mission, node, execution_state)
     phase_contract = get_phase_contract(node.phase.value)
-    before = set(_git_changed_files(Path(mission.repo_root)))
+    repo_root = Path(mission.repo_root).resolve()
+    active_root = _resolve_active_root(mission, runner)
+    before = set(_git_changed_files(repo_root)) if active_root == repo_root else set()
+    before_inventory = set(_collect_verified_file_inventory(active_root))
     prior_phase_policy = getattr(runner, "_villani_phase_tool_policy", None)
+    prior_active_tool_root = getattr(runner, "active_tool_root", repo_root)
+    if hasattr(runner, "set_active_tool_root"):
+        runner.set_active_tool_root(active_root)
     if mission.mission_type.value == "greenfield_build":
         runner._villani_phase_tool_policy = {
             "mission_type": "greenfield_build",
@@ -786,13 +840,18 @@ def execute_mission_node_with_runner(
         result = runner.run(instruction)
     finally:
         runner._villani_phase_tool_policy = prior_phase_policy
-    after = set(_git_changed_files(Path(mission.repo_root)))
+        if hasattr(runner, "set_active_tool_root"):
+            runner.set_active_tool_root(prior_active_tool_root)
+    after = set(_git_changed_files(repo_root)) if active_root == repo_root else set()
+    after_inventory = set(_collect_verified_file_inventory(active_root))
+    verified_files_present = sorted(after_inventory)
+    new_verified_files = sorted(after_inventory - before_inventory)
     normalized = result if isinstance(result, dict) else {}
     normalized = _sanitize_autonomous_response_payload(normalized, mission.mission_type.value)
     proposed_actions = _extract_proposed_actions(normalized, node.phase.value)
     approved_actions, rejected_actions = _validate_actions_for_phase(node.phase.value, proposed_actions)
     execution = _extract_execution_payload(normalized)
-    changed_all = _extract_changed_files_from_result(normalized, before, after)
+    changed_all = _extract_changed_files_from_result(normalized, before, after) if active_root == repo_root else []
     write_paths = _extract_write_paths_from_transcript(normalized)
     structured_observed_write_paths = _extract_successful_write_paths_from_transcript(normalized)
     textual_blocks = _collect_textual_transcript_blocks(normalized)
@@ -800,11 +859,28 @@ def execute_mission_node_with_runner(
     for block in textual_blocks:
         fallback_observed_write_paths.update(_extract_write_paths_from_text(block))
     shell_invocations = _extract_shell_commands_from_transcript(normalized)
-    changed, internal_changed = split_internal_paths(changed_all)
     blocked_write_paths = _extract_blocked_write_paths_from_transcript(normalized)
     observed_write_paths = sorted(
         (set(structured_observed_write_paths) | fallback_observed_write_paths) - set(blocked_write_paths)
     )
+    verified_successful_write_paths = _verify_existing_paths(observed_write_paths, active_root)
+    blocked_write_paths = sorted(
+        {
+            _normalized_rel_to_root(path, active_root) or str(path).strip()
+            for path in blocked_write_paths
+            if str(path).strip()
+        }
+    )
+    attempted_write_paths = sorted(
+        {
+            rel
+            for rel in (_normalized_rel_to_root(path, active_root) for path in write_paths)
+            if rel
+        }
+    )
+    if active_root != repo_root:
+        changed_all = list(verified_successful_write_paths or new_verified_files)
+    changed, internal_changed = split_internal_paths(changed_all)
     execution_commands = list(execution.get("validation_artifacts", []) or [])
     command_results = _extract_command_results_from_execution(execution)
     failures = _extract_failures_from_execution(execution)
@@ -892,8 +968,11 @@ def execute_mission_node_with_runner(
             "self_reported_validation_without_evidence": bool(
                 self_reported_validation_claim and not command_results
             ),
-            "attempted_write_paths": list(write_paths),
+            "attempted_write_paths": list(attempted_write_paths),
             "observed_write_paths": list(observed_write_paths),
+            "verified_successful_write_paths": list(verified_successful_write_paths),
+            "verified_files_present": list(verified_files_present),
+            "new_verified_files": list(new_verified_files),
             "blocked_write_paths": list(blocked_write_paths),
             "shell_invocations": list(shell_invocations),
             "phase_contract": {
@@ -903,6 +982,7 @@ def execute_mission_node_with_runner(
             },
             "approved_actions": approved_actions,
             "rejected_actions": rejected_actions,
+            "active_root": str(active_root),
             "controller_native": bool(controller_result is not None),
             "controller_findings": list(execution.get("controller_findings", []) or []),
             "controller_objective": dict(execution.get("controller_objective", {}) or {}),

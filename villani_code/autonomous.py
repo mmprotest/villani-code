@@ -165,13 +165,38 @@ class VillaniModeController:
         if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
             return []
         progress = dict(execution_state.greenfield_progress or {})
-        deliverables = self._extract_user_space_deliverables(changed_files)
+        verified_writes = [
+            str(p).strip()
+            for p in list(execution_payload.get("verified_successful_write_paths", []) or [])
+            if str(p).strip()
+        ]
+        verified_inventory = [
+            str(p).strip()
+            for p in list(execution_payload.get("verified_files_present", []) or [])
+            if str(p).strip()
+        ]
+        blocked_writes = [
+            str(p).strip()
+            for p in list(execution_payload.get("blocked_write_paths", []) or [])
+            if str(p).strip()
+        ]
+        deliverables = self._extract_user_space_deliverables(verified_writes or changed_files)
         if not deliverables:
             deliverables = self._extract_user_space_deliverables(observed_write_paths)
         current_paths = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
         merged_paths = sorted(dict.fromkeys(current_paths + deliverables))
         progress["deliverable_paths"] = merged_paths
         progress["created_deliverables"] = merged_paths
+        progress["verified_files_present"] = sorted(dict.fromkeys(verified_inventory))
+        progress["successful_write_paths"] = sorted(
+            dict.fromkeys([str(x) for x in list(progress.get("successful_write_paths", []) or []) if str(x).strip()] + verified_writes)
+        )
+        progress["blocked_write_paths"] = sorted(
+            dict.fromkeys([str(x) for x in list(progress.get("blocked_write_paths", []) or []) if str(x).strip()] + blocked_writes)
+        )
+        expected = [str(x).strip() for x in list(progress.get("expected_files", []) or []) if str(x).strip()]
+        if expected:
+            progress["missing_expected_files"] = sorted(set(expected) - set(verified_inventory))
         scaffold_success = bool(progress.get("successful_greenfield_scaffold"))
         if node.phase == NodePhase.SCAFFOLD_PROJECT and node_status == "passed" and deliverables:
             scaffold_success = True
@@ -870,6 +895,9 @@ class VillaniModeController:
         )
         attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
         observed_write_paths = [str(p) for p in list(execution_payload.get("observed_write_paths", []) or []) if str(p).strip()]
+        verified_successful_write_paths = [
+            str(p) for p in list(execution_payload.get("verified_successful_write_paths", []) or []) if str(p).strip()
+        ]
         blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
         rejected_actions = list(execution_payload.get("rejected_actions", []) or [])
         if rejected_actions:
@@ -901,7 +929,7 @@ class VillaniModeController:
         if node.phase == NodePhase.SUMMARIZE_OUTCOME and bool(outcome.get("contract_violation")):
             effective_changed_files = []
         user_deliverables = self._extract_user_space_deliverables(effective_changed_files)
-        observed_user_deliverables = self._extract_user_space_deliverables(observed_write_paths)
+        observed_user_deliverables = self._extract_user_space_deliverables(verified_successful_write_paths or observed_write_paths)
         effective_user_deliverables = list(user_deliverables or observed_user_deliverables)
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD

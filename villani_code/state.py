@@ -316,9 +316,12 @@ class Runner:
         villani_mode: bool = False,
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
+        workspace_root: Path | None = None,
     ):
         self.client = client
-        self.repo = repo
+        self.repo = repo.resolve()
+        self.workspace_root = workspace_root.resolve() if workspace_root else None
+        self._active_tool_root = self.repo
         ensure_runtime_dependencies_not_shadowed(self.repo)
         self.model = model
         self.max_tokens = max_tokens
@@ -410,6 +413,17 @@ class Runner:
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
+
+    @property
+    def active_tool_root(self) -> Path:
+        return self._active_tool_root
+
+    @property
+    def active_tool_root_label(self) -> str:
+        return "repository" if self._active_tool_root == self.repo else "workspace"
+
+    def set_active_tool_root(self, root: Path | None) -> None:
+        self._active_tool_root = (root or self.repo).resolve()
 
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
@@ -599,6 +613,7 @@ class Runner:
                     "input": forced_input,
                     "tool_use_id": forced_tool_use_id,
                     "is_error": forced_result["is_error"],
+                    "content": forced_result.get("content", ""),
                     "forced": True,
                 }
             )
@@ -613,6 +628,7 @@ class Runner:
                     "input": forced_input,
                     "tool_use_id": forced_tool_use_id,
                     "is_error": forced_result["is_error"],
+                    "content": forced_result.get("content", ""),
                     "forced": True,
                 }
             )
@@ -1191,6 +1207,7 @@ class Runner:
                         "input": tool_input,
                         "tool_use_id": tool_use_id,
                         "is_error": result["is_error"],
+                        "content": result.get("content", ""),
                     }
                 )
                 transcript["tool_invocations"].append(
@@ -1204,6 +1221,7 @@ class Runner:
                         "input": tool_input,
                         "tool_use_id": tool_use_id,
                         "is_error": result["is_error"],
+                        "content": result.get("content", ""),
                     }
                 )
                 tool_results.append(
