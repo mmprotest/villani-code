@@ -410,6 +410,12 @@ class Runner:
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
         self._finalized_plan_artifact: dict[str, Any] | None = None
+        self._greenfield_budget_state: dict[str, Any] = {
+            "node_id": "",
+            "distinct_paths": set(),
+            "new_files": set(),
+            "total_write_bytes": 0,
+        }
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
@@ -670,6 +676,12 @@ class Runner:
         self._last_verification_intentional = set()
         self._last_verification_artifact_count = 0
         self._scope_expansion_used = False
+        self._greenfield_budget_state = {
+            "node_id": "",
+            "distinct_paths": set(),
+            "new_files": set(),
+            "total_write_bytes": 0,
+        }
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
         if self._first_attempt_write_lock_active:

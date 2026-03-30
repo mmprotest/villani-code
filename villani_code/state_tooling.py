@@ -211,6 +211,173 @@ def _validate_first_attempt_locked_target_mutation(
     return None
 
 
+def _greenfield_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+    if tool_name == "Write":
+        target = str(tool_input.get("file_path", "")).strip()
+        return [target] if target else []
+    if tool_name == "Patch":
+        diff = str(tool_input.get("unified_diff", ""))
+        default_path = str(tool_input.get("file_path", "") or "") or None
+        try:
+            return extract_unified_diff_targets(diff, default_file_path=default_path)
+        except PatchApplyError:
+            return [default_path] if default_path else []
+    return []
+
+
+def _greenfield_write_size_bytes(tool_name: str, tool_input: dict[str, Any]) -> int:
+    if tool_name == "Write":
+        return len(str(tool_input.get("content", "")).encode("utf-8"))
+    if tool_name == "Patch":
+        return len(str(tool_input.get("unified_diff", "")).encode("utf-8"))
+    return 0
+
+
+def _validate_greenfield_mutation_budget(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    phase_policy: dict[str, Any],
+) -> str | None:
+    if tool_name not in {"Write", "Patch"}:
+        return None
+    if str(phase_policy.get("mission_type", "")) != "greenfield_build":
+        return None
+    if not bool(phase_policy.get("allow_mutating_tools", False)):
+        return "greenfield_write_blocked: write not allowed in this phase"
+
+    node_id = str(phase_policy.get("node_id", "")).strip() or str(phase_policy.get("node_phase", "")).strip()
+    state = dict(getattr(runner, "_greenfield_budget_state", {}) or {})
+    if str(state.get("node_id", "")) != node_id:
+        state = {"node_id": node_id, "distinct_paths": set(), "new_files": set(), "total_write_bytes": 0}
+
+    distinct_paths = set(state.get("distinct_paths", set()) or set())
+    new_files = set(state.get("new_files", set()) or set())
+    total_write_bytes = int(state.get("total_write_bytes", 0) or 0)
+    active_root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+    targets = _greenfield_mutation_targets(tool_name, tool_input)
+    normalized_targets: list[str] = []
+    projected_new = 0
+
+    for raw_target in targets:
+        if not str(raw_target).strip():
+            continue
+        candidate = Path(str(raw_target)).expanduser()
+        target_path = candidate.resolve() if candidate.is_absolute() else (active_root / candidate).resolve()
+        try:
+            rel = str(target_path.relative_to(active_root)).replace("\\", "/").lstrip("./")
+        except ValueError:
+            return f"greenfield_write_blocked: exceeded workspace boundary (path={target_path})"
+        normalized_targets.append(rel)
+        if tool_name == "Write" and rel not in new_files and not target_path.exists():
+            projected_new += 1
+
+    projected_distinct_paths = len(distinct_paths | set(normalized_targets))
+    max_distinct_paths = int(phase_policy.get("max_distinct_paths_per_node", 0) or 0)
+    if max_distinct_paths > 0 and projected_distinct_paths > max_distinct_paths:
+        return (
+            f"greenfield_write_blocked: exceeded path count budget "
+            f"(limit={max_distinct_paths}, attempted={projected_distinct_paths})"
+        )
+
+    max_new_files = int(phase_policy.get("max_new_files_per_node", 0) or 0)
+    projected_new_files = len(new_files) + projected_new
+    if max_new_files > 0 and projected_new_files > max_new_files:
+        return (
+            f"greenfield_write_blocked: exceeded new-file budget "
+            f"(limit={max_new_files}, attempted={projected_new_files})"
+        )
+
+    max_total_write_bytes = int(phase_policy.get("max_total_write_bytes_per_node", 0) or 0)
+    projected_write_bytes = total_write_bytes + _greenfield_write_size_bytes(tool_name, tool_input)
+    if max_total_write_bytes > 0 and projected_write_bytes > max_total_write_bytes:
+        return (
+            f"greenfield_write_blocked: exceeded byte budget "
+            f"(limit={max_total_write_bytes}, attempted={projected_write_bytes})"
+        )
+    return None
+
+
+def _record_greenfield_mutation_budget(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    phase_policy: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    if result.get("is_error"):
+        return
+    if tool_name not in {"Write", "Patch"}:
+        return
+    if str(phase_policy.get("mission_type", "")) != "greenfield_build":
+        return
+    node_id = str(phase_policy.get("node_id", "")).strip() or str(phase_policy.get("node_phase", "")).strip()
+    state = dict(getattr(runner, "_greenfield_budget_state", {}) or {})
+    if str(state.get("node_id", "")) != node_id:
+        state = {"node_id": node_id, "distinct_paths": set(), "new_files": set(), "total_write_bytes": 0}
+
+    distinct_paths = set(state.get("distinct_paths", set()) or set())
+    new_files = set(state.get("new_files", set()) or set())
+    total_write_bytes = int(state.get("total_write_bytes", 0) or 0)
+    active_root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+
+    for raw_target in _greenfield_mutation_targets(tool_name, tool_input):
+        candidate = Path(str(raw_target)).expanduser()
+        target_path = candidate.resolve() if candidate.is_absolute() else (active_root / candidate).resolve()
+        try:
+            rel = str(target_path.relative_to(active_root)).replace("\\", "/").lstrip("./")
+        except ValueError:
+            continue
+        distinct_paths.add(rel)
+        if tool_name == "Write" and target_path.exists():
+            new_files.add(rel)
+
+    state["node_id"] = node_id
+    state["distinct_paths"] = distinct_paths
+    state["new_files"] = new_files
+    state["total_write_bytes"] = total_write_bytes + _greenfield_write_size_bytes(tool_name, tool_input)
+    runner._greenfield_budget_state = state
+
+
+def _validate_greenfield_shell_command(command: str, phase: str, allow_validation_shell: bool) -> str | None:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return "greenfield_shell_blocked: empty command is not allowed"
+
+    readonly_prefixes = (
+        "pwd", "ls", "dir", "cat ", "type ", "rg ", "grep ", "find ", "head ", "tail ", "wc ",
+    )
+    validation_prefixes = (
+        "pytest",
+        "python -m pytest",
+        "python -m compileall",
+        "python3 -m compileall",
+        "python ",
+        "python3 ",
+    )
+    mutating_or_dangerous_markers = (
+        "&&", "||", ";", "|", ">", "<", "`", "$(",
+        " rm ", " mv ", " cp ", " chmod ", " chown ", " mkdir ", " rmdir ", " touch ",
+        "curl ", "wget ", "ssh ", "scp ", "ftp ", "pip install", "npm install",
+        "git add", "git commit", "git push", "git pull", "git checkout", "git switch", "git reset",
+    )
+    framed = f" {lowered} "
+    marker = next((m for m in mutating_or_dangerous_markers if m in framed), "")
+    if marker:
+        return (
+            f"greenfield_shell_blocked: allowlist rejected command during {phase or 'unknown_phase'} "
+            f"(rule=dangerous_marker marker={marker.strip()})"
+        )
+    if any(lowered.startswith(prefix) for prefix in readonly_prefixes):
+        return None
+    if allow_validation_shell and any(lowered.startswith(prefix) for prefix in validation_prefixes):
+        return None
+    return (
+        f"greenfield_shell_blocked: allowlist rejected command during {phase or 'unknown_phase'} "
+        "(rule=not_in_safe_allowlist)"
+    )
+
+
 def execute_tool_with_policy(
     runner: Any,
     tool_name: str,
@@ -248,36 +415,16 @@ def execute_tool_with_policy(
                     "content": f"Greenfield phase policy blocked shell usage during {phase or 'unknown_phase'}",
                     "is_error": True,
                 }
-            readonly_prefixes = (
-                "pwd", "ls", "cat", "rg", "grep", "find", "head", "tail", "wc",
-                "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "git ls-files",
-            )
-            validation_prefixes = (
-                "pytest", "python -m pytest", "uv run pytest", "poetry run pytest",
-                "python ", "python3 ", "npm test", "npm run test", "make test", "make check",
-                "cargo test", "go test", "pnpm test", "yarn test",
-            )
-            mutating_markers = (
-                " >", " >>", "| tee", "sed -i", " mv ", " cp ", " rm ", " chmod ", " chown ", " touch ", " mkdir ",
-                "git add", "git commit", "git push", "git pull", "git merge", "git rebase", "git checkout", "git switch", "git restore", "git reset", "git clean", "git tag", "git cherry-pick",
-                "npm run build", "python -m build", "cargo build", "gradle build", "mvn ", "make ",
-            )
-            if any(marker in f" {command} " for marker in mutating_markers):
+            shell_error = _validate_greenfield_shell_command(command, phase, allow_validation_shell)
+            if shell_error:
                 return {
-                    "content": f"Greenfield phase policy blocked effectful shell command during {phase or 'unknown_phase'}",
+                    "content": shell_error,
                     "is_error": True,
                 }
-            if allow_validation_shell:
-                if not any(command.startswith(prefix) for prefix in validation_prefixes + readonly_prefixes):
-                    return {
-                        "content": f"Greenfield validate policy blocked non-validation shell command during {phase or 'unknown_phase'}",
-                        "is_error": True,
-                    }
-            elif not any(command.startswith(prefix) for prefix in readonly_prefixes):
-                return {
-                    "content": f"Greenfield read-only policy blocked shell command outside read-only allowlist during {phase or 'unknown_phase'}",
-                    "is_error": True,
-                }
+        if tool_name in {"Write", "Patch"}:
+            mutation_error = _validate_greenfield_mutation_budget(runner, tool_name, tool_input, phase_policy)
+            if mutation_error:
+                return {"content": mutation_error, "is_error": True}
 
     if getattr(runner, "_planning_read_only", False):
         if tool_name in {"Write", "Patch", "Edit"}:
@@ -414,4 +561,5 @@ def execute_tool_with_policy(
         unsafe=runner.unsafe,
         root_label=runner.active_tool_root_label if hasattr(runner, "active_tool_root_label") else "repository",
     )
+    _record_greenfield_mutation_budget(runner, tool_name, tool_input, phase_policy, result)
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
