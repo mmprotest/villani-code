@@ -992,7 +992,10 @@ class VillaniModeController:
         )
         blocked_reason = (
             str(outcome.get("reason", ""))
-            if (outcome.get("mission_progress_status") == "blocked" or blocked_write_paths)
+            if (
+                outcome.get("mission_progress_status") == "blocked"
+                or (blocked_write_paths and not effective_user_deliverables)
+            )
             else ""
         )
         normalized = NormalizedNodeOutcome(

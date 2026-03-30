@@ -369,6 +369,11 @@ def classify_node_outcome(
         elif node_phase in {"scaffold_project", "implement_increment"}:
             if not user_deliverable_patch:
                 status, reason = "failed", "no user-space deliverable created outside internal artifact folders"
+            elif node_phase == "scaffold_project":
+                if effective_docs_only_user_space:
+                    status, reason = "partial", "greenfield scaffold deliverables created; implementation pending runnable artifacts"
+                else:
+                    status, reason = "passed", "greenfield scaffold created user-space deliverables"
             elif effective_docs_only_user_space:
                 status, reason = "failed", "greenfield build produced docs-only output; runnable artifacts required"
             else:
@@ -507,7 +512,8 @@ def classify_node_outcome(
         mission_progress_status = "no_progress"
     elif mission_progress_status == "no_progress" and any_command and command_fail and node_phase == "validate_project":
         mission_progress_status = "validated_fail"
-    if blocked_write_paths:
+    has_effective_user_space_deliverables = bool(effective_user_space_deliverables)
+    if blocked_write_paths and not has_effective_user_space_deliverables:
         mission_progress_status = "blocked"
     if rejected_actions and not changed_files:
         phase_contract_status = "contract_violation_recovered"
