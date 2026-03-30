@@ -472,15 +472,62 @@ class Runner:
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
         return {"response": response, "summary": summary}
 
+    def run_villani_action(
+        self,
+        *,
+        objective: str,
+        belief_state: dict[str, Any],
+        chosen_action: dict[str, Any],
+        expected_evidence: list[str],
+        focus_files: list[str] | None = None,
+        known_failures: list[str] | None = None,
+        execution_budget: ExecutionBudget | None = None,
+    ) -> dict[str, Any]:
+        prompt = (
+            "Villani autonomous action.\n"
+            f"Objective: {objective}\n"
+            f"Belief state summary: {json.dumps(belief_state, ensure_ascii=False)}\n"
+            f"Chosen action: {json.dumps(chosen_action, ensure_ascii=False)}\n"
+            f"Expected evidence: {expected_evidence}\n"
+            f"Focus files: {focus_files or []}\n"
+            f"Known failures: {known_failures or []}\n"
+            "Use workspace tools for evidence. Do not assume task categories or workflow phases."
+        )
+        messages = build_initial_messages(self.repo, prompt)
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Autonomous Villani mode: execute one bounded action from beliefs/evidence only. "
+                            "Avoid legacy task ontology and deterministic pseudo-phase framing."
+                        ),
+                    }
+                ],
+            }
+        )
+        return self.run(
+            prompt,
+            messages=messages,
+            execution_budget=execution_budget,
+            orchestration_profile="villani_autonomous",
+        )
+
     def run(
         self,
         instruction: str,
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
+        orchestration_profile: Literal["default", "villani_autonomous"] = "default",
     ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
+        villani_autonomous = orchestration_profile == "villani_autonomous"
         if self._runtime_mode == "planning":
             self._task_mode = TaskMode.INSPECT_AND_PLAN
+        elif villani_autonomous:
+            self._task_mode = TaskMode.GENERAL
         else:
             self._ensure_project_memory_and_plan(instruction)
             self._task_mode = classify_task_mode(instruction)
@@ -490,7 +537,7 @@ class Runner:
         initial_read_enforced = False
         pre_edit_failure_evidence = None
         diagnosis_confidence = "weak"
-        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
+        if (self.small_model or self.villani_mode or self.benchmark_config.enabled) and not villani_autonomous:
             try:
                 from villani_code import state_runtime
 
@@ -696,11 +743,11 @@ class Runner:
         system = build_system_blocks(
             self.repo,
             repo_map=self._repo_map if self.small_model else "",
-            villani_mode=self.villani_mode,
+            villani_mode=self.villani_mode and not villani_autonomous,
             benchmark_config=self.benchmark_config,
             task_mode=self._task_mode,
         )
-        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
+        if (self.small_model or self.villani_mode or self.benchmark_config.enabled) and not villani_autonomous:
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
             messages.append(
                 {
@@ -964,7 +1011,7 @@ class Runner:
                             return _finish_bounded(
                                 response, reason, reason == "completed"
                             )
-                    constrained = self.small_model or self.villani_mode or self.benchmark_config.enabled
+                    constrained = self.small_model or self.benchmark_config.enabled or villani_autonomous
                     if constrained and self._recovery_count == 0:
                         messages.append(
                             {
