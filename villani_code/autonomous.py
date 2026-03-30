@@ -158,6 +158,7 @@ class VillaniModeController:
         execution_state: MissionExecutionState,
         node: Any,
         changed_files: list[str],
+        observed_write_paths: list[str],
         execution_payload: dict[str, Any],
         node_status: str,
     ) -> list[str]:
@@ -165,6 +166,8 @@ class VillaniModeController:
             return []
         progress = dict(execution_state.greenfield_progress or {})
         deliverables = self._extract_user_space_deliverables(changed_files)
+        if not deliverables:
+            deliverables = self._extract_user_space_deliverables(observed_write_paths)
         current_paths = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
         merged_paths = sorted(dict.fromkeys(current_paths + deliverables))
         progress["deliverable_paths"] = merged_paths
@@ -866,6 +869,7 @@ class VillaniModeController:
             },
         )
         attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
+        observed_write_paths = [str(p) for p in list(execution_payload.get("observed_write_paths", []) or []) if str(p).strip()]
         blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
         rejected_actions = list(execution_payload.get("rejected_actions", []) or [])
         if rejected_actions:
@@ -897,10 +901,12 @@ class VillaniModeController:
         if node.phase == NodePhase.SUMMARIZE_OUTCOME and bool(outcome.get("contract_violation")):
             effective_changed_files = []
         user_deliverables = self._extract_user_space_deliverables(effective_changed_files)
+        observed_user_deliverables = self._extract_user_space_deliverables(observed_write_paths)
+        effective_user_deliverables = list(user_deliverables or observed_user_deliverables)
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
             and node.phase == NodePhase.SCAFFOLD_PROJECT
-            and user_deliverables
+            and effective_user_deliverables
         ):
             outcome["status"] = "passed"
             outcome["reason"] = "greenfield scaffold created user-space deliverables"
@@ -909,7 +915,7 @@ class VillaniModeController:
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
             and node.phase == NodePhase.IMPLEMENT_INCREMENT
-            and user_deliverables
+            and effective_user_deliverables
             and str(outcome.get("status", "")) not in {"failed"}
         ):
             outcome["status"] = "passed"
@@ -943,6 +949,7 @@ class VillaniModeController:
             execution_state,
             node,
             effective_changed_files,
+            observed_write_paths,
             execution_payload,
             str(outcome.get("status", "")),
         )
@@ -993,11 +1000,11 @@ class VillaniModeController:
             node_phase=node.phase.value,
             contract_status=str(outcome.get("phase_contract_status", "unknown")),
             mission_progress_status=str(outcome.get("mission_progress_status", "no_progress")),
-            successful_user_writes=list(user_deliverables),
+            successful_user_writes=list(effective_user_deliverables),
             blocked_write_attempts=list(blocked_write_paths),
             internal_artifact_writes=list(internal_changed_files),
-            actual_changed_files_count=len(user_deliverables),
-            deliverable_paths=list(user_deliverables),
+            actual_changed_files_count=len(effective_user_deliverables),
+            deliverable_paths=list(effective_user_deliverables),
             command_results=list(command_results),
             validation_truth_status=node_validation_truth,
             validation_summary=node_validation_summary,

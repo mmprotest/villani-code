@@ -251,6 +251,56 @@ def _extract_write_paths_from_transcript(result: dict[str, Any]) -> list[str]:
     return sorted(dict.fromkeys(touched))
 
 
+def _is_explicit_write_denial(content: str) -> bool:
+    low = str(content or "").lower()
+    return any(
+        token in low
+        for token in (
+            "forbidden",
+            "denied",
+            "not allowed",
+            "scope",
+            "constrain",
+            "constraint",
+            "outside workspace",
+            "outside repo",
+            "permission denied",
+            "read-only",
+        )
+    )
+
+
+def _extract_successful_write_paths_from_transcript(result: dict[str, Any]) -> list[str]:
+    transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
+    tool_invocations = list(transcript.get("tool_invocations", []) or [])
+    tool_results = list(transcript.get("tool_results", []) or [])
+    write_like_tools = {"write", "patch", "apply_patch"}
+    path_keys = ("file_path", "path", "target_file", "filename")
+    observed: list[str] = []
+    for idx, invocation in enumerate(tool_invocations):
+        if not isinstance(invocation, dict):
+            continue
+        tool_name = str(invocation.get("name", "")).strip().lower()
+        if tool_name not in write_like_tools:
+            continue
+        payload = invocation.get("input")
+        payload = payload if isinstance(payload, dict) else {}
+        path = ""
+        for key in path_keys:
+            value = str(payload.get(key, "")).strip()
+            if value:
+                path = value
+                break
+        if not path:
+            continue
+        matching_result = tool_results[idx] if idx < len(tool_results) and isinstance(tool_results[idx], dict) else {}
+        if matching_result and bool(matching_result.get("is_error")):
+            if _is_explicit_write_denial(str(matching_result.get("content", ""))):
+                continue
+        observed.append(path)
+    return sorted(dict.fromkeys(observed))
+
+
 def _extract_shell_commands_from_transcript(result: dict[str, Any]) -> list[str]:
     transcript = result.get("transcript", {}) if isinstance(result.get("transcript"), dict) else {}
     tool_invocations = list(transcript.get("tool_invocations", []) or [])
@@ -282,8 +332,8 @@ def _extract_blocked_write_paths_from_transcript(result: dict[str, Any]) -> list
         tool_name = str(invocation.get("name", "")).strip().lower()
         if tool_name not in {"write", "patch", "apply_patch"}:
             continue
-        content = str(tool_result.get("content", "")).lower()
-        if not any(token in content for token in ("scope", "constrain", "forbidden", "not allowed", "denied")):
+        content = str(tool_result.get("content", ""))
+        if not _is_explicit_write_denial(content):
             continue
         payload = invocation.get("input")
         payload = payload if isinstance(payload, dict) else {}
@@ -552,6 +602,7 @@ def _synthesize_greenfield_controller_result(
             "self_reported_validation_claim": False,
             "self_reported_validation_without_evidence": False,
             "attempted_write_paths": [],
+            "observed_write_paths": [],
             "blocked_write_paths": [],
             "shell_invocations": [],
             "phase_contract": {
@@ -615,6 +666,7 @@ def _synthesize_greenfield_controller_result(
         "self_reported_validation_claim": False,
         "self_reported_validation_without_evidence": False,
         "attempted_write_paths": [],
+        "observed_write_paths": [],
         "blocked_write_paths": [],
         "shell_invocations": [],
         "phase_contract": {
@@ -681,14 +733,10 @@ def execute_mission_node_with_runner(
     execution = _extract_execution_payload(normalized)
     changed_all = _extract_changed_files_from_result(normalized, before, after)
     write_paths = _extract_write_paths_from_transcript(normalized)
+    observed_write_paths = _extract_successful_write_paths_from_transcript(normalized)
     shell_invocations = _extract_shell_commands_from_transcript(normalized)
     changed, internal_changed = split_internal_paths(changed_all)
-    blocked_write_paths = sorted(
-        dict.fromkeys(
-            [path for path in write_paths if path not in set(changed_all)]
-            + _extract_blocked_write_paths_from_transcript(normalized)
-        )
-    )
+    blocked_write_paths = _extract_blocked_write_paths_from_transcript(normalized)
     execution_commands = list(execution.get("validation_artifacts", []) or [])
     command_results = _extract_command_results_from_execution(execution)
     failures = _extract_failures_from_execution(execution)
@@ -777,6 +825,7 @@ def execute_mission_node_with_runner(
                 self_reported_validation_claim and not command_results
             ),
             "attempted_write_paths": list(write_paths),
+            "observed_write_paths": list(observed_write_paths),
             "blocked_write_paths": list(blocked_write_paths),
             "shell_invocations": list(shell_invocations),
             "phase_contract": {
