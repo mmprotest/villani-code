@@ -645,6 +645,13 @@ class VillaniModeController:
             node_phase=node.phase.value,
             clarification_requested=bool(node_result.get("clarification_requested")),
             scratchpad=execution_state.scratchpad,
+            mission_objective={
+                "repo_state_type": execution_state.mission.objective.repo_state_type,
+                "task_shape": execution_state.mission.objective.task_shape,
+                "deliverable_kind": list(execution_state.mission.objective.deliverable_kind or []),
+                "direction": execution_state.mission.objective.direction,
+                "initial_validation_strategy": list(execution_state.mission.objective.initial_validation_strategy or []),
+            },
         )
         attempted_write_paths = [str(p) for p in list(execution_payload.get("attempted_write_paths", []) or []) if str(p).strip()]
         blocked_write_paths = [str(p) for p in list(execution_payload.get("blocked_write_paths", []) or []) if str(p).strip()]
@@ -836,7 +843,15 @@ class VillaniModeController:
             }
         )
 
-        if outcome["status"] == "passed":
+        read_only_planning_phase = node.phase in {NodePhase.INSPECT_WORKSPACE, NodePhase.DEFINE_OBJECTIVE}
+        non_failed_read_only_partial = (
+            read_only_planning_phase
+            and str(outcome.get("status", "")) == "partial"
+            and str(outcome.get("mission_progress_status", "")) in {"state_progress", "state_progress_partial"}
+        )
+        recovered_contract_violation = bool(outcome.get("contract_violation_recovered"))
+
+        if outcome["status"] == "passed" or recovered_contract_violation or non_failed_read_only_partial:
             node.status = NodeStatus.SUCCEEDED
             execution_state.consecutive_no_progress = 0
             execution_state.repeated_delta_states = 0

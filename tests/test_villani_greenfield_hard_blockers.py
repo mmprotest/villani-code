@@ -59,3 +59,45 @@ def test_validation_claim_without_command_evidence_is_unproven() -> None:
     assert outcome["status"] == "failed"
     assert "without command evidence" in outcome["reason"]
     assert outcome["self_reported_validation_without_evidence"] is True
+
+
+def test_greenfield_inspect_can_pass_without_writes_or_validation() -> None:
+    outcome = classify_node_outcome(
+        contract_type="inspect",
+        static_result={"findings": ["workspace appears empty", "constraints captured"]},
+        command_results=[],
+        changed_files=[],
+        mission_type="greenfield_build",
+        node_phase="inspect_workspace",
+        execution_payload={"approved_actions": [{"action_type": "inspect_metadata"}]},
+        scratchpad=MissionScratchpad(mission_type="greenfield_build"),
+    )
+    assert outcome["status"] == "passed"
+    assert outcome["mission_progress_status"] == "state_progress"
+    assert outcome["verification_status"] == "validation_unproven"
+
+
+def test_greenfield_define_objective_passes_with_structured_objective_state() -> None:
+    outcome = classify_node_outcome(
+        contract_type="define_objective",
+        static_result={"findings": []},
+        command_results=[],
+        changed_files=[],
+        mission_type="greenfield_build",
+        node_phase="define_objective",
+        execution_payload={},
+        scratchpad=MissionScratchpad(
+            mission_type="greenfield_build",
+            chosen_project_direction="snake_cli_game",
+            next_required_action="scaffold_project",
+        ),
+        mission_objective={
+            "repo_state_type": "empty_sandbox",
+            "task_shape": "greenfield_build",
+            "deliverable_kind": ["game"],
+            "direction": "snake_cli_game",
+            "initial_validation_strategy": ["python -m py_compile game.py"],
+        },
+    )
+    assert outcome["status"] == "passed"
+    assert outcome["mission_progress_status"] == "state_progress"

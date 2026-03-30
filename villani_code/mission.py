@@ -272,6 +272,8 @@ def reduce_terminal_state(
             return "partial_success", ""
     if not has_meaningful_progress:
         return "stagnated", ""
+    if has_meaningful_progress and not has_deliverables and validation_truth_status == "unproven":
+        return "in_progress", ""
     if validation_truth_status == "failed":
         return "failed", ""
     return "stagnated", ""
@@ -318,6 +320,12 @@ def reduce_normalized_mission_progress(state: "MissionExecutionState") -> Normal
     has_meaningful_progress = any(
         str(item.mission_progress_status) in {
             "validated_success",
+            "validation_progress",
+            "state_progress",
+            "state_progress_partial",
+            "artifact_progress",
+            "summary_completed",
+            "summary_partial",
             "useful_progress_unvalidated",
             "useful_progress_with_contract_violation",
         }
