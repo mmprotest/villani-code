@@ -228,9 +228,14 @@ def classify_node_outcome(
     shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
     approved_actions = list(execution_payload.get("approved_actions", []) or [])
     mission_objective = mission_objective or {}
+    phase_for_validation = str(node_phase or "").strip().lower()
+    validation_relevant_results = command_results
+    if phase_for_validation in {"inspect_workspace", "define_objective", "summarize_outcome"}:
+        validation_relevant_results = []
 
-    command_fail = any(int(r.get("exit", 0)) != 0 for r in command_results)
-    any_command = bool(command_results)
+    command_fail = any(int(r.get("exit", 0)) != 0 for r in validation_relevant_results)
+    any_command = bool(validation_relevant_results)
+    any_probe_command = bool(command_results)
     validation_status = "validation_unproven"
     if any_command and command_fail:
         validation_status = "validated_fail"
@@ -286,7 +291,7 @@ def classify_node_outcome(
         else:
             status, reason = "failed", "no localization evidence produced"
     elif contract == TaskContract.INSPECT:
-        if has_localization or bool(static_result.get("findings")) or any_command:
+        if has_localization or bool(static_result.get("findings")) or any_probe_command:
             status, reason = "passed", "inspection produced actionable evidence"
         else:
             status, reason = "failed", "inspection lacked concrete repo evidence"
@@ -375,7 +380,7 @@ def classify_node_outcome(
             else:
                 status, reason = "passed", "greenfield outcome summarized"
         elif node_phase == "inspect_workspace":
-            inspection_signals = bool(has_localization or static_result.get("findings") or any_command or approved_actions)
+            inspection_signals = bool(has_localization or static_result.get("findings") or any_probe_command or approved_actions)
             if patch_exists:
                 status, reason = "failed", "contract violation: inspect_workspace is read-only but wrote files"
                 contract_violation = True
@@ -478,7 +483,7 @@ def classify_node_outcome(
         phase_contract_status = "contract_partial"
     if mission_progress_status == "no_progress" and not patch_exists and not any_command:
         mission_progress_status = "no_progress"
-    elif mission_progress_status == "no_progress" and any_command and command_fail:
+    elif mission_progress_status == "no_progress" and any_command and command_fail and node_phase == "validate_project":
         mission_progress_status = "validated_fail"
     if blocked_write_paths:
         mission_progress_status = "blocked"

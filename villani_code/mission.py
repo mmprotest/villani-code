@@ -228,11 +228,19 @@ class NormalizedMissionProgress:
     blocked_reason: str = ""
 
 
-def reduce_validation_truth(command_results: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-    total = len(command_results)
+def select_validation_relevant_commands(command_results: list[dict[str, Any]], *, node_phase: str = "") -> list[dict[str, Any]]:
+    phase = str(node_phase or "").strip().lower()
+    if phase in {"inspect_workspace", "define_objective", "summarize_outcome"}:
+        return []
+    return [dict(item) for item in command_results if isinstance(item, dict)]
+
+
+def reduce_validation_truth(command_results: list[dict[str, Any]], *, node_phase: str = "") -> tuple[str, dict[str, Any]]:
+    relevant = select_validation_relevant_commands(command_results, node_phase=node_phase)
+    total = len(relevant)
     if total <= 0:
         return "unproven", {"commands_run": 0, "passed": 0, "failed": 0, "evidence": "none"}
-    failed = sum(1 for item in command_results if int(item.get("exit", 1) or 1) != 0)
+    failed = sum(1 for item in relevant if int(item.get("exit", 1) or 1) != 0)
     passed = max(0, total - failed)
     if failed > 0:
         return "failed", {"commands_run": total, "passed": passed, "failed": failed, "evidence": "real_command_results"}
@@ -314,7 +322,12 @@ def reduce_normalized_mission_progress(state: "MissionExecutionState") -> Normal
         }
     )
     all_commands = [dict(cmd) for item in outcomes for cmd in list(item.command_results or []) if isinstance(cmd, dict)]
-    validation_truth_status, validation_summary = reduce_validation_truth(all_commands)
+    phase_scoped_validation_commands = [
+        dict(cmd)
+        for item in outcomes
+        for cmd in select_validation_relevant_commands(list(item.command_results or []), node_phase=str(item.node_phase))
+    ]
+    validation_truth_status, validation_summary = reduce_validation_truth(phase_scoped_validation_commands)
     fallback_direction = str(state.scratchpad.chosen_project_direction or state.greenfield_selection.get("project_type", "")).strip()
     realized_direction = infer_realized_artifact_direction(deliverables or successful_user_writes, fallback=fallback_direction)
     has_meaningful_progress = any(

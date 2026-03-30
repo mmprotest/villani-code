@@ -75,6 +75,12 @@ def test_windows_shell_portability_patterns_are_not_emitted() -> None:
     assert "&& echo" not in cmd
 
 
+def test_windows_probe_commands_are_normalized_to_powershell_forms() -> None:
+    cmd = normalize_command_for_shell("python --version && pip --version && dir /b", ShellFamily.WINDOWS)
+    assert "&&" not in cmd
+    assert "Get-ChildItem -Name" in cmd
+
+
 def test_posix_shell_command_is_kept_valid() -> None:
     cmd = baseline_import_validation_command(ShellFamily.POSIX)
     assert cmd.startswith("python -c")
