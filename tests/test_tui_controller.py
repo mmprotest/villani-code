@@ -130,3 +130,15 @@ def test_stream_text_still_renders_outside_plan_mode() -> None:
     controller._suppress_assistant_stream_text = False
     controller.on_runner_event({"type": "stream_text", "text": "normal output"})
     assert any(isinstance(m, LogAppend) and m.kind == "stream" and "normal output" in m.text for m in app.messages)
+
+
+def test_tool_result_error_is_rendered_explicitly() -> None:
+    app = DummyApp()
+    controller = RunnerController(StreamRunner(), app)
+    controller.on_runner_event({"type": "tool_started", "name": "Read", "input": {"file_path": "src/game.py"}})
+    controller.on_runner_event(
+        {"type": "tool_result", "name": "Read", "is_error": True, "content": "File not found: src/game.py"}
+    )
+    meta_logs = [m.text for m in app.messages if isinstance(m, LogAppend) and m.kind == "meta"]
+    assert any(line.startswith("read  src/game.py") for line in meta_logs)
+    assert any("error File not found: src/game.py" in line for line in meta_logs)

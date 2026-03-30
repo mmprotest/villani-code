@@ -131,7 +131,14 @@ def tool_specs() -> list[dict[str, Any]]:
     return specs
 
 
-def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool = False) -> dict[str, Any]:
+def execute_tool(
+    name: str,
+    raw_input: dict[str, Any],
+    root: Path,
+    unsafe: bool = False,
+    *,
+    root_label: str = "workspace",
+) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
         return _error(f"Unknown tool: {name}")
@@ -142,21 +149,21 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
 
     try:
         if name == "Ls":
-            return _ok(_run_ls(parsed, repo))
+            return _ok(_run_ls(parsed, root, root_label=root_label))
         if name == "Read":
-            return _ok(_run_read(parsed, repo))
+            return _ok(_run_read(parsed, root, root_label=root_label))
         if name == "Grep":
-            return _ok(_run_grep(parsed, repo))
+            return _ok(_run_grep(parsed, root, root_label=root_label))
         if name == "Glob":
-            return _ok(_run_glob(parsed, repo))
+            return _ok(_run_glob(parsed, root))
         if name == "Search":
-            return _ok(_run_search(parsed, repo))
+            return _ok(_run_search(parsed, root, root_label=root_label))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe))
+            return _ok(_run_bash(parsed, root, unsafe=unsafe, root_label=root_label))
         if name == "Write":
-            return _ok(_run_write(parsed, repo))
+            return _ok(_run_write(parsed, root, root_label=root_label))
         if name == "Patch":
-            return _ok(_run_patch(parsed, repo))
+            return _ok(_run_patch(parsed, root, root_label=root_label))
         if name == "WebFetch":
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
@@ -168,18 +175,19 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
     return _error("Unhandled tool")
 
 
-def _safe_path(repo: Path, raw: str) -> Path:
-    path = (repo / raw).resolve()
-    repo_resolved = repo.resolve()
+def _safe_path(root: Path, raw: str, *, root_label: str = "workspace") -> Path:
+    root_resolved = root.resolve()
+    candidate = Path(raw).expanduser()
+    path = candidate.resolve() if candidate.is_absolute() else (root_resolved / candidate).resolve()
     try:
-        path.relative_to(repo_resolved)
+        path.relative_to(root_resolved)
     except ValueError:
-        raise ValueError("Path escapes repository")
+        raise ValueError(f"Path escapes {root_label}: {path}")
     return path
 
 
-def _run_ls(data: LsInput, repo: Path) -> str:
-    target = _safe_path(repo, data.path)
+def _run_ls(data: LsInput, root: Path, *, root_label: str) -> str:
+    target = _safe_path(root, data.path, root_label=root_label)
     lines = []
     for entry in sorted(target.iterdir(), key=lambda p: p.name.lower()):
         if entry.name in data.ignore:
@@ -188,14 +196,14 @@ def _run_ls(data: LsInput, repo: Path) -> str:
     return "\n".join(lines)
 
 
-def _run_read(data: ReadInput, repo: Path) -> str:
-    path = _safe_path(repo, data.file_path)
+def _run_read(data: ReadInput, root: Path, *, root_label: str) -> str:
+    path = _safe_path(root, data.file_path, root_label=root_label)
     raw = path.read_bytes()[: data.max_bytes]
     return raw.decode("utf-8", errors="replace")
 
 
-def _run_grep(data: GrepInput, repo: Path) -> str:
-    base = _safe_path(repo, data.path)
+def _run_grep(data: GrepInput, root: Path, *, root_label: str) -> str:
+    base = _safe_path(root, data.path, root_label=root_label)
     rg_bin = shutil.which("rg")
     if rg_bin:
         cmd = [rg_bin, "-n", data.pattern, str(base)]
@@ -206,45 +214,45 @@ def _run_grep(data: GrepInput, repo: Path) -> str:
     return ""
 
 
-def _run_glob(data: GlobInput, repo: Path) -> str:
-    hits = [str(Path(p).relative_to(repo)) for p in glob.glob(str(repo / data.pattern), recursive=True)]
+def _run_glob(data: GlobInput, root: Path) -> str:
+    hits = [str(Path(p).relative_to(root)) for p in glob.glob(str(root / data.pattern), recursive=True)]
     return "\n".join(sorted(hits))
 
 
-def _run_search(data: SearchInput, repo: Path) -> str:
+def _run_search(data: SearchInput, root: Path, *, root_label: str) -> str:
     rg_bin = shutil.which("rg")
     if not rg_bin:
-        return _run_grep(GrepInput(pattern=data.query, path=data.path), repo)
-    base = _safe_path(repo, data.path)
+        return _run_grep(GrepInput(pattern=data.query, path=data.path), root, root_label=root_label)
+    base = _safe_path(root, data.path, root_label=root_label)
     cmd = [rg_bin, "-n", "-C", str(data.context_lines), data.query, str(base)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.stdout
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool) -> str:
+def _run_bash(data: BashInput, root: Path, unsafe: bool, *, root_label: str) -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
-    cwd = _safe_path(repo, data.cwd)
+    cwd = _safe_path(root, data.cwd, root_label=root_label)
     proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
     return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
 
 
-def _run_write(data: WriteInput, repo: Path) -> str:
-    path = _safe_path(repo, data.file_path)
+def _run_write(data: WriteInput, root: Path, *, root_label: str) -> str:
+    path = _safe_path(root, data.file_path, root_label=root_label)
     if data.mkdirs:
         path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data.content, encoding="utf-8")
     return f"Wrote {path}"
 
 
-def _run_patch(data: PatchInput, repo: Path) -> str:
+def _run_patch(data: PatchInput, root: Path, *, root_label: str) -> str:
     if data.file_path:
-        _safe_path(repo, data.file_path)
+        _safe_path(root, data.file_path, root_label=root_label)
     try:
-        touched = apply_unified_diff(repo, data.unified_diff, default_file_path=data.file_path or None)
+        touched = apply_unified_diff(root, data.unified_diff, default_file_path=data.file_path or None)
     except PatchApplyError as exc:
         raise ValueError(str(exc)) from exc
     return f"Patch applied to {len(touched)} file(s)"

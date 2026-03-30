@@ -240,6 +240,7 @@ def build_mission_summary(
     selection_direction = str((mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", "")).strip()
     canonical_direction = str(objective.direction or scratchpad.chosen_project_direction or selection_direction or normalized.realized_artifact_direction).strip()
     if mission.mission_type.value == "greenfield_build":
+        progress = dict(execution_state.greenfield_progress or {})
         internal_artifacts = list(normalized.internal_artifact_writes)
         user_deliverables = list(normalized.deliverable_paths)
         greenfield = {
@@ -264,6 +265,8 @@ def build_mission_summary(
                 "attempted_write_paths": attempted_write_paths,
                 "blocked_write_paths": blocked_write_attempts,
                 "attempted_but_blocked_only": sorted(set(blocked_write_attempts) - set(successful_write_paths)),
+                "verified_files_present": list(progress.get("verified_files_present", [])),
+                "missing_expected_files": list(progress.get("missing_expected_files", [])),
             },
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }

@@ -227,3 +227,92 @@ def test_blocked_write_removes_same_path_from_fallback_observed_writes(tmp_path:
     result = execute_mission_node_with_runner(_FallbackBlockedRunner(), mission, node, state)
     assert result.execution_payload["blocked_write_paths"] == ["/tmp/outside.txt"]
     assert result.execution_payload["observed_write_paths"] == []
+
+
+class _WorkspaceWritingRunner:
+    def __init__(self, workspace_root: Path) -> None:
+        self.workspace_root = workspace_root
+
+    def run(self, _prompt: str, **_kwargs):
+        target = self.workspace_root / "src" / "game.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("print('game')\n", encoding="utf-8")
+        return {
+            "transcript": {
+                "tool_invocations": [{"name": "write", "input": {"file_path": "src/game.py"}}],
+                "tool_results": [{"is_error": False, "content": "Wrote src/game.py"}],
+            }
+        }
+
+
+def test_greenfield_workspace_root_tracks_verified_files_outside_repo(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    workspace_root = tmp_path / "sandbox"
+    workspace_root.mkdir()
+    mission = _greenfield_mission(repo_root)
+    mission.mission_context["workspace_root"] = str(workspace_root)
+    node = MissionNode(
+        node_id="n1",
+        title="Scaffold",
+        phase=NodePhase.SCAFFOLD_PROJECT,
+        objective="Create starter files",
+        contract_type="scaffold_project",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(mission=mission, scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value))
+    result = execute_mission_node_with_runner(_WorkspaceWritingRunner(workspace_root), mission, node, state)
+    assert result.execution_payload["verified_successful_write_paths"] == ["src/game.py"]
+    assert result.execution_payload["changed_files"] == ["src/game.py"]
+
+
+class _HallucinatedScaffoldRunner:
+    def __init__(self, workspace_root: Path) -> None:
+        self.workspace_root = workspace_root
+
+    def run(self, _prompt: str, **_kwargs):
+        (self.workspace_root / "README.md").write_text("# demo\n", encoding="utf-8")
+        (self.workspace_root / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+        return {
+            "response": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Created README.md, pyproject.toml, src/game.py, tests/test_game.py",
+                    }
+                ]
+            },
+            "transcript": {
+                "tool_invocations": [
+                    {"name": "write", "input": {"file_path": "README.md"}},
+                    {"name": "write", "input": {"file_path": "pyproject.toml"}},
+                    {"name": "read", "input": {"file_path": "src/game.py"}},
+                ],
+                "tool_results": [
+                    {"is_error": False, "content": "Wrote README.md"},
+                    {"is_error": False, "content": "Wrote pyproject.toml"},
+                    {"is_error": True, "content": "File not found: src/game.py"},
+                ],
+            },
+        }
+
+
+def test_scaffold_hallucination_does_not_pollute_verified_inventory(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    workspace_root = tmp_path / "sandbox"
+    workspace_root.mkdir()
+    mission = _greenfield_mission(repo_root)
+    mission.mission_context["workspace_root"] = str(workspace_root)
+    node = MissionNode(
+        node_id="n1",
+        title="Scaffold",
+        phase=NodePhase.SCAFFOLD_PROJECT,
+        objective="Create starter files",
+        contract_type="scaffold_project",
+        status=NodeStatus.READY,
+    )
+    state = MissionExecutionState(mission=mission, scratchpad=MissionScratchpad(mission_type=MissionType.GREENFIELD_BUILD.value))
+    result = execute_mission_node_with_runner(_HallucinatedScaffoldRunner(workspace_root), mission, node, state)
+    assert result.execution_payload["verified_files_present"] == ["README.md", "pyproject.toml"]
+    assert "src/game.py" not in result.execution_payload["verified_files_present"]

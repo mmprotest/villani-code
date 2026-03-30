@@ -69,7 +69,9 @@ def _benchmark_post_write_python_validation(
         normalized = str(target or "").replace("\\", "/").lstrip("./")
         if not normalized.endswith(".py"):
             continue
-        abs_target = (runner.repo / normalized).resolve()
+        root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+        candidate = Path(normalized)
+        abs_target = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
         if abs_target.exists() and abs_target.is_file():
             py_targets.append((normalized, abs_target))
 
@@ -383,7 +385,9 @@ def execute_tool_with_policy(
             runner._intended_targets.add(normalized_target)
             runner._current_verification_targets = {normalized_target}
             runner._current_verification_before_contents = {}
-            target_path = (runner.repo / normalized_target).resolve()
+            root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+            candidate = Path(target)
+            target_path = candidate.resolve() if candidate.is_absolute() else (root / normalized_target).resolve()
             if target_path.exists() and target_path.is_file():
                 before_text = target_path.read_text(encoding="utf-8", errors="replace")
                 runner._before_contents[normalized_target] = before_text
@@ -402,5 +406,12 @@ def execute_tool_with_policy(
             "tool_use_id": tool_use_id,
         }
     )
-    result = execute_tool(tool_name, tool_input, runner.repo, unsafe=runner.unsafe)
+    active_root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+    result = execute_tool(
+        tool_name,
+        tool_input,
+        active_root,
+        unsafe=runner.unsafe,
+        root_label=runner.active_tool_root_label if hasattr(runner, "active_tool_root_label") else "repository",
+    )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
