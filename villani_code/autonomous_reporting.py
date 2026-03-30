@@ -237,11 +237,13 @@ def build_mission_summary(
     greenfield = {}
     scratchpad = execution_state.scratchpad
     objective = mission.objective
+    selection_direction = str((mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", "")).strip()
+    canonical_direction = str(objective.direction or scratchpad.chosen_project_direction or selection_direction or normalized.realized_artifact_direction).strip()
     if mission.mission_type.value == "greenfield_build":
         internal_artifacts = list(normalized.internal_artifact_writes)
         user_deliverables = list(normalized.deliverable_paths)
         greenfield = {
-            "chosen_project_direction": objective.direction or normalized.realized_artifact_direction,
+            "chosen_project_direction": canonical_direction,
             "selection_rationale": scratchpad.selection_rationale or (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
@@ -266,7 +268,8 @@ def build_mission_summary(
             "run_instructions": "Run the generated project entrypoint and listed validation commands from mission evidence.",
         }
     invariant_checks = {
-        "reported_direction_matches_objective": bool(objective.direction or normalized.realized_artifact_direction),
+        "reported_direction_matches_objective": bool(canonical_direction) and canonical_direction == str(objective.direction or canonical_direction),
+        "reported_direction_matches_scratchpad": bool(canonical_direction) and canonical_direction == str(scratchpad.chosen_project_direction or canonical_direction),
         "summary_references_actual_artifacts": bool(normalized.files_touched) or "no_artifacts_created",
         "deliverables_align_with_objective": bool(objective.deliverable_kind),
     }
@@ -332,7 +335,7 @@ def build_mission_summary(
         "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
         "changed_files_by_attempt_outcome": changed_by_status,
         "greenfield_report": greenfield,
-        "realized_artifact_direction": objective.direction or normalized.realized_artifact_direction,
+        "realized_artifact_direction": canonical_direction or normalized.realized_artifact_direction,
         "invariant_checks": invariant_checks,
         "terminal_state": normalized.terminal_state,
         "final_outcome": outcome,

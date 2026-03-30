@@ -484,6 +484,15 @@ def _validate_actions_for_phase(phase: str, actions: list[ProposedAction]) -> tu
             rejected.append(payload)
     return approved, rejected
 
+def _greenfield_controller_read_only_ready(phase: str, repo_signals: dict[str, Any]) -> bool:
+    if phase == "define_objective":
+        return True
+    return bool(
+        repo_signals.get("workspace_empty_or_internal_only")
+        or repo_signals.get("workspace_lightweight_hints_only")
+        or repo_signals.get("workspace_sparse_greenfield_like")
+        or not repo_signals.get("existing_project_detected", False)
+    )
 
 def _synthesize_greenfield_controller_result(
     mission: Mission,
@@ -516,6 +525,8 @@ def _synthesize_greenfield_controller_result(
             findings.append("workspace has lightweight hints only")
         if not repo_signals.get("existing_project_detected", False):
             findings.append("no existing project detected")
+        if repo_signals.get("workspace_sparse_greenfield_like"):
+            findings.append("workspace appears sparse/partial scaffold and still greenfield-like")
         findings.append("greenfield context confirmed")
         if language_hints:
             findings.append("language/runtime hints: " + ", ".join(language_hints[:4]))
@@ -570,8 +581,15 @@ def _synthesize_greenfield_controller_result(
             execution_payload=execution_payload,
         )
 
+    fallback_repo_state = "unknown"
+    if repo_signals.get("workspace_empty_or_internal_only"):
+        fallback_repo_state = "empty_sandbox"
+    elif repo_signals.get("workspace_lightweight_hints_only"):
+        fallback_repo_state = "lightweight_hints"
+    elif repo_signals.get("workspace_sparse_greenfield_like"):
+        fallback_repo_state = "sparse_scaffold"
     objective_payload = {
-        "repo_state_type": str(objective.repo_state_type or ("empty_sandbox" if repo_signals.get("workspace_empty_or_internal_only") else "unknown")),
+        "repo_state_type": str(objective.repo_state_type or fallback_repo_state),
         "task_shape": str(objective.task_shape or "greenfield_build"),
         "deliverable_kind": list(objective.deliverable_kind or ["unknown"]),
         "direction": direction or "python_cli_utility",
@@ -634,11 +652,8 @@ def execute_mission_node_with_runner(
     execution_state: MissionExecutionState,
 ) -> MissionNodeResult:
     controller_result = _synthesize_greenfield_controller_result(mission, node, execution_state)
-    if (
-        controller_result is not None
-        and node.phase.value == "inspect_workspace"
-        and bool(mission.mission_context.get("repo_signals", {}).get("workspace_empty_or_internal_only", False))
-    ):
+    repo_signals = dict(mission.mission_context.get("repo_signals", {}) or {})
+    if controller_result is not None and _greenfield_controller_read_only_ready(node.phase.value, repo_signals):
         return controller_result
 
     instruction = build_node_instruction(mission, node, execution_state)

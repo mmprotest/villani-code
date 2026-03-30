@@ -363,7 +363,12 @@ def reduce_normalized_mission_progress(state: "MissionExecutionState") -> Normal
         and next_action in {NodePhase.SCAFFOLD_PROJECT.value, NodePhase.IMPLEMENT_INCREMENT.value, NodePhase.VALIDATE_PROJECT.value}
     ):
         terminal_state = "in_progress"
-    if terminal_state == "stagnated" and ready_greenfield_recovery and next_action:
+    has_read_only_forward_progress = bool(
+        state.mission.mission_type == MissionType.GREENFIELD_BUILD
+        and next_action
+        and any(str(item.mission_progress_status) in {"state_progress", "state_progress_partial"} for item in outcomes)
+    )
+    if terminal_state == "stagnated" and (ready_greenfield_recovery and next_action or has_read_only_forward_progress):
         terminal_state = "in_progress"
     mission_completion_state = "complete" if terminal_state == "success" else ("partial" if terminal_state == "partial_success" else "incomplete")
     return NormalizedMissionProgress(
