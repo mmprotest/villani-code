@@ -23,6 +23,7 @@ from villani_code.mission import (
     NodeOutcomeRecord,
     reduce_normalized_mission_progress,
     reduce_validation_truth,
+    select_validation_relevant_commands,
     infer_realized_artifact_direction,
 )
 from villani_code.mission_bridge import execute_mission_node_with_runner
@@ -616,11 +617,16 @@ class VillaniModeController:
             cmd_key = str(record.get("command", "")).strip() or f"__index_{len(normalized_command_results)}"
             normalized_command_results[cmd_key] = dict(record)
         command_results = list(normalized_command_results.values())
-        validation_summary = summarize_validation_results(command_results)
+        validation_relevant_results = select_validation_relevant_commands(command_results, node_phase=node.phase.value)
+        baseline_validation_results = select_validation_relevant_commands(
+            list(baseline.previous_command_results),
+            node_phase=node.phase.value,
+        )
+        validation_summary = summarize_validation_results(validation_relevant_results)
         validation_delta = compute_validation_delta(
             baseline.validation_summary,
-            baseline.previous_command_results,
-            command_results,
+            baseline_validation_results,
+            validation_relevant_results,
         ).to_dict()
         localization_payload = self._localization_payload(node, node_result, execution_state)
         previous_loc = execution_state.localization_history[-2] if len(execution_state.localization_history) > 1 else LocalizationSnapshot()
@@ -766,7 +772,7 @@ class VillaniModeController:
             self._ensure_validate_node_ready(execution_state)
         self._apply_no_regression_guards(execution_state, outcome)
         execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
-        node_validation_truth, node_validation_summary = reduce_validation_truth(command_results)
+        node_validation_truth, node_validation_summary = reduce_validation_truth(command_results, node_phase=node.phase.value)
         node_realized_direction = infer_realized_artifact_direction(
             persisted_deliverables or user_deliverables,
             fallback=execution_state.scratchpad.chosen_project_direction,

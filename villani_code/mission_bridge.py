@@ -140,12 +140,53 @@ _CLARIFICATION_PATTERNS: tuple[str, ...] = (
     r"\bconfirm\b.*\bproceed\b",
 )
 
+_AUTONOMY_CONFIRMATION_REWRITES: tuple[tuple[str, str], ...] = (
+    (r"\bwould you like me to\b", "Proceeding to"),
+    (r"\bdo you want me to\b", "Proceeding to"),
+    (r"\bshould i\b", "I will"),
+    (r"\bplease confirm\b", "Confirmed by autonomous policy"),
+)
+
 
 def _detect_clarification_request(text: str) -> bool:
     low = (text or "").lower()
     if "?" not in low:
         return False
     return any(re.search(pattern, low) for pattern in _CLARIFICATION_PATTERNS)
+
+
+def _sanitize_autonomous_text_output(text: str) -> tuple[str, bool]:
+    raw = str(text or "")
+    if not raw.strip():
+        return raw, False
+    low = raw.lower()
+    needs_sanitize = any(re.search(pattern, low) for pattern in _CLARIFICATION_PATTERNS)
+    if not needs_sanitize:
+        return raw, False
+    cleaned = raw
+    for pattern, replacement in _AUTONOMY_CONFIRMATION_REWRITES:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("?", ".")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned, True
+
+
+def _sanitize_autonomous_response_payload(normalized: dict[str, Any], mission_type: str) -> dict[str, Any]:
+    if mission_type != "greenfield_build":
+        return normalized
+    response = normalized.get("response") if isinstance(normalized.get("response"), dict) else {}
+    blocks = response.get("content") if isinstance(response.get("content"), list) else []
+    sanitized_any = False
+    for block in blocks:
+        if not isinstance(block, dict) or str(block.get("type", "")).lower() != "text":
+            continue
+        updated, changed = _sanitize_autonomous_text_output(str(block.get("text", "")))
+        if changed:
+            block["text"] = updated
+            sanitized_any = True
+    if sanitized_any:
+        normalized["response"] = response
+    return normalized
 
 
 def _git_changed_files(repo: Path) -> list[str]:
@@ -457,7 +498,7 @@ def execute_mission_node_with_runner(
             "mission_type": "greenfield_build",
             "node_phase": node.phase.value,
             "read_only_phase": node.phase.value in {"inspect_workspace", "define_objective", "summarize_outcome"},
-            "allow_shell_commands": node.phase.value in {"inspect_workspace", "define_objective", "validate_project"},
+            "allow_shell_commands": node.phase.value in {"validate_project"},
             "allow_mutating_tools": node.phase.value in {"scaffold_project", "implement_increment"},
             "allow_validation_shell": node.phase.value == "validate_project",
         }
@@ -467,6 +508,7 @@ def execute_mission_node_with_runner(
         runner._villani_phase_tool_policy = prior_phase_policy
     after = set(_git_changed_files(Path(mission.repo_root)))
     normalized = result if isinstance(result, dict) else {}
+    normalized = _sanitize_autonomous_response_payload(normalized, mission.mission_type.value)
     proposed_actions = _extract_proposed_actions(normalized, node.phase.value)
     approved_actions, rejected_actions = _validate_actions_for_phase(node.phase.value, proposed_actions)
     execution = _extract_execution_payload(normalized)

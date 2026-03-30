@@ -135,7 +135,7 @@ _PHASE_CONTRACTS: dict[str, PhaseContract] = {
     "inspect_workspace": PhaseContract(
         phase="inspect_workspace",
         purpose="Inspect repository and constraints without mutating files",
-        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell"},
+        allowed_actions={"list_files", "read_file", "inspect_metadata"},
         forbidden_actions={"write_file", "patch_file", "mkdir", "delete_path"},
         expected_outputs=["workspace_evidence", "constraints"],
         transition_criteria=["workspace inspected"],
@@ -143,7 +143,7 @@ _PHASE_CONTRACTS: dict[str, PhaseContract] = {
     "define_objective": PhaseContract(
         phase="define_objective",
         purpose="Produce structured objective and delivery plan",
-        allowed_actions={"list_files", "read_file", "inspect_metadata", "run_shell"},
+        allowed_actions={"list_files", "read_file", "inspect_metadata"},
         forbidden_actions={"write_file", "patch_file", "mkdir", "delete_path"},
         expected_outputs=["mission_objective", "deliverable_plan", "validation_plan"],
         transition_criteria=["objective selected"],

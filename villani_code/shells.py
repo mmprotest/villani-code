@@ -26,6 +26,9 @@ def shell_family_for_platform(platform_name: str) -> ShellFamily:
 def normalize_command_for_shell(command: str, family: ShellFamily) -> str:
     normalized = command.strip()
     if family == ShellFamily.WINDOWS:
+        normalized = normalized.replace("&&", ";")
+        normalized = normalized.replace("dir /b", "Get-ChildItem -Name")
+        normalized = normalized.replace("python --version && pip --version", "python --version; pip --version")
         for pattern in _BASH_ONLY_PATTERNS:
             normalized = normalized.replace(pattern, "")
     return " ".join(normalized.split())
