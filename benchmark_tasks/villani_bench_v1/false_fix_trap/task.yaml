@@ -1,6 +1,6 @@
 id: false_fix_trap
 benchmark_track: core
-family: bugfix
+family: repro_test
 difficulty: medium
 language: python
 max_minutes: 3

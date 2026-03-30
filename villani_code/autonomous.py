@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from villani_code.autonomy import TaskContract, VerificationEngine
+from villani_code.autonomous_progress import (
+    mark_category_discovery,
+    stop_reason_from_categories,
+    surface_followups,
+    update_category_attempt_state,
+)
+from villani_code.autonomy import Opportunity, TakeoverConfig, TakeoverState, TaskContract, VerificationEngine, VerificationStatus
 from villani_code.autonomous_reporting import build_mission_summary
 from villani_code.autonomous_stop import evaluate_mission_stop
 from villani_code.change_containment import build_change_containment_context, create_regression_containment_nodes
@@ -89,7 +95,13 @@ class AutonomousTask:
     produced_validation: bool = False
     produced_inspection_conclusion: bool = False
     terminated_reason: str = ""
+    task_key: str = ""
     attempts: int = 0
+    retries: int = 0
+    turns_used: int = 0
+    tool_calls_used: int = 0
+    elapsed_seconds: float = 0.0
+    completed: bool = False
 
 
 class VillaniModeController:
@@ -120,6 +132,22 @@ class VillaniModeController:
         self._repo_signals: dict[str, Any] = {}
         self.takeover_config = takeover_config
         self.verifier = VerificationEngine(self.repo)
+        self._satisfied_task_keys: dict[str, str] = {}
+        self._lineage_last_fingerprint: dict[str, str] = {}
+        self._lineage_last_intentional_changes: dict[str, tuple[str, ...]] = {}
+        self._followup_queue: list[Opportunity] = []
+        self._retryable_queue: list[Opportunity] = []
+        self._backlog_insertions: list[dict[str, str]] = []
+        self._lineage_retry_counts: dict[str, int] = {}
+        self._category_state: dict[str, str] = {
+            "tests": "unknown",
+            "docs": "unknown",
+            "entrypoints": "unknown",
+            "imports": "unknown",
+        }
+        self._model_request_count = 0
+        self._planner_only_cycles = 0
+        self._followup_skip_reasons: list[str] = []
 
     def _extract_user_space_deliverables(self, changed_files: list[str]) -> list[str]:
         user_deliverables, _internal = split_internal_paths([str(item or "").strip() for item in changed_files])
@@ -369,17 +397,9 @@ class VillaniModeController:
 
     def run(self) -> dict[str, Any]:
         if not (self.steering_objective or "").strip():
-            snapshot = self.inspect_repo()
-            ranked = self.rank_tasks(self.generate_candidates(snapshot))
-            if not ranked or float(ranked[0].confidence) < 0.35:
-                return {
-                    "done_reason": "No opportunities above confidence threshold.",
-                    "tasks_attempted": [],
-                    "blockers": [],
-                    "files_changed": [],
-                    "recommended_next_steps": ["Refine goal and rerun Villani mode with a tighter objective."],
-                    "working_memory": {"model_request_count": 0, "planner_only_cycles": 1, "followup_skip_reasons": ["below_threshold"], "stop_decision_kind": "below_threshold"},
-                }
+            return self._run_legacy_takeover()
+        if not hasattr(self.planner, "build_mission"):
+            return self._run_legacy_takeover()
         mission_state = self._initialize_mission()
         save_mission_snapshot(str(self.repo), mission_state.mission, mission_state.to_dict())
 
@@ -401,6 +421,137 @@ class VillaniModeController:
             save_mission_snapshot(str(self.repo), mission_state.mission, mission_state.to_dict())
 
         return self._finalize_mission(mission_state)
+
+    def _takeover_cfg(self) -> TakeoverConfig:
+        if isinstance(self.takeover_config, TakeoverConfig):
+            return self.takeover_config
+        return TakeoverConfig()
+
+    def _run_legacy_takeover(self) -> dict[str, Any]:
+        cfg = self._takeover_cfg()
+        preexisting_changes = set(self._git_changed_files())
+        attempted: list[AutonomousTask] = []
+        state = TakeoverState(
+            repo_summary=(
+                self.planner.build_repo_summary() if hasattr(self.planner, "build_repo_summary") else "summary"
+            )
+        )
+        mark_category_discovery(self.repo, self._category_state, self._is_meaningful_test_file)
+        planner_churn_cycles = 0
+        done_reason = ""
+
+        for wave in range(max(1, int(cfg.max_waves))):
+            if hasattr(self.planner, "discover_opportunities"):
+                discovered = list(self.planner.discover_opportunities())
+            else:
+                discovered = []
+                snapshot = self.inspect_repo()
+                discovered = [
+                    Opportunity(
+                        title=t.title,
+                        category="generated",
+                        priority=t.priority,
+                        confidence=t.confidence,
+                        affected_files=[],
+                        evidence=t.rationale,
+                        blast_radius="small",
+                        proposed_next_action=t.title,
+                        task_contract=t.task_contract,
+                    )
+                    for t in self.generate_candidates(snapshot)
+                ]
+            discovered.extend(self._followup_queue)
+            self._followup_queue = []
+            discovered.extend(self._retryable_queue)
+            self._retryable_queue = []
+            ranked = self._build_wave_candidates(discovered)
+            if wave == 0 and not discovered and getattr(self.planner, "enable_fallback", True) is False:
+                done_reason = "No opportunities discovered."
+                break
+            if discovered and not ranked:
+                _, done_reason = stop_reason_from_categories(self._category_state)
+                break
+            if not ranked:
+                planner_churn_cycles += 1
+                self._planner_only_cycles += 1
+                if planner_churn_cycles >= 3:
+                    self.event_callback({"type": "villani_planner_churn"})
+                    done_reason = "Stopped: planner loop with no model activity."
+                    break
+                rationale, done_reason = stop_reason_from_categories(self._category_state)
+                _ = rationale
+                continue
+            planner_churn_cycles = 0
+            op = ranked[0]
+            task = AutonomousTask(
+                task_id=f"wave-{wave+1}-{len(attempted)+1}",
+                title=op.title,
+                rationale=op.evidence,
+                priority=op.priority,
+                confidence=op.confidence,
+                verification_plan=[],
+                task_contract=op.task_contract,
+                task_key=self._task_key_for_opportunity(op),
+                attempts=1,
+            )
+            update_category_attempt_state(self._category_state, task.title)
+            task = self._execute_task(task)
+            status = self._update_lifecycle_after_attempt(task, op)
+            task.status = status
+            task.completed = status in {"passed", "exhausted"}
+            if status == "passed" and task.task_contract in {TaskContract.VALIDATION.value, TaskContract.VALIDATE.value, TaskContract.INSPECTION.value, TaskContract.INSPECT.value}:
+                self._satisfied_task_keys[task.task_key] = self._repo_fingerprint_for_task(task.task_key)
+            attempted.append(task)
+            state.completed_waves.append({"wave": wave + 1, "title": task.title, "status": task.status})
+            if cfg.max_total_task_attempts and len(attempted) >= int(cfg.max_total_task_attempts):
+                done_reason = "Villani mode budget exhausted."
+                break
+            if task.status in {"failed", "retryable", "exhausted"} and task.terminated_reason in {"model_idle", "no_edits"}:
+                if cfg.stagnation_cycle_limit and sum(1 for t in attempted[-int(cfg.stagnation_cycle_limit):] if t.terminated_reason in {"model_idle", "no_edits"}) >= int(cfg.stagnation_cycle_limit):
+                    done_reason = "No meaningful progress observed across recent cycles."
+                    break
+            followups = self._deterministic_followups(task, op)
+            for followup in followups:
+                self._insert_followup(followup, "deterministic")
+
+        if not done_reason:
+            _, done_reason = stop_reason_from_categories(self._category_state)
+
+        current_changes = set(self._git_changed_files())
+        if not attempted and not done_reason:
+            rationale, done_reason = stop_reason_from_categories(self._category_state)
+            _ = rationale
+        successful = [t for t in attempted if t.status == "passed"]
+        failed = [t for t in attempted if t.status in {"failed", "retryable", "exhausted", "blocked"}]
+        intentional_changes = sorted({p for t in attempted for p in t.intentional_changes} - preexisting_changes)
+        incidental_changes = sorted({p for t in attempted for p in t.incidental_changes} - preexisting_changes)
+        files_changed = sorted(current_changes - preexisting_changes)
+        return {
+            "repo_summary": state.repo_summary,
+            "tasks_attempted": [self._task_to_dict(t) for t in attempted],
+            "blockers": [t.title for t in attempted if t.status == "blocked"],
+            "files_changed": files_changed,
+            "preexisting_changes": sorted(preexisting_changes),
+            "intentional_changes": intentional_changes,
+            "incidental_changes": incidental_changes,
+            "opportunities_considered": len(state.completed_waves),
+            "opportunities_attempted": len(attempted),
+            "successful_tasks": len(successful),
+            "failed_tasks": len(failed),
+            "completed_waves": state.completed_waves,
+            "done_reason": done_reason,
+            "recommended_next_steps": ["Run full CI before merging autonomous changes."],
+            "working_memory": {
+                "model_request_count": self._model_request_count,
+                "planner_only_cycles": self._planner_only_cycles,
+                "followup_skip_reasons": list(self._followup_skip_reasons),
+                "stop_decision_kind": "planner_churn" if "planner loop" in done_reason else ("budget_exhausted" if "budget exhausted" in done_reason else "below_threshold"),
+                "satisfied_task_keys": dict(self._satisfied_task_keys),
+                "backlog_insertions": list(self._backlog_insertions),
+                "category_examination_state": dict(self._category_state),
+                "stop_decision_rationale": done_reason,
+            },
+        }
 
     def _initialize_mission(self) -> MissionExecutionState:
         self._activity("Initializing mission and collecting repository signals.")
@@ -1142,6 +1293,185 @@ class VillaniModeController:
     def rank_tasks(tasks: list[AutonomousTask]) -> list[AutonomousTask]:
         return sorted(tasks, key=lambda t: (t.priority, t.confidence), reverse=True)
 
+    @staticmethod
+    def _task_to_dict(task: AutonomousTask) -> dict[str, Any]:
+        return {
+            "id": task.task_id,
+            "title": task.title,
+            "status": task.status,
+            "task_contract": task.task_contract,
+            "attempts": task.attempts,
+            "retries": task.retries,
+            "reason": task.outcome,
+            "verification": task.verification_results,
+            "validation_artifacts": task.validation_artifacts,
+            "inspection_summary": task.inspection_summary,
+            "runner_failures": task.runner_failures,
+            "produced_effect": task.produced_effect,
+            "produced_validation": task.produced_validation,
+            "produced_inspection_conclusion": task.produced_inspection_conclusion,
+            "files_changed": task.files_changed,
+            "intentional_changes": task.intentional_changes,
+            "incidental_changes": task.incidental_changes,
+            "terminated_reason": task.terminated_reason,
+            "turns_used": task.turns_used,
+            "tool_calls_used": task.tool_calls_used,
+            "elapsed_seconds": task.elapsed_seconds,
+            "completed": task.completed,
+        }
+
+    @staticmethod
+    def _task_slug(title: str) -> str:
+        return "-".join(str(title).strip().lower().replace("/", " ").split())
+
+    def _task_key_for_opportunity(self, op: Opportunity) -> str:
+        return self._task_slug(op.title)
+
+    def _repo_fingerprint_for_task(self, task_key: str) -> str:
+        stamp_parts: list[str] = []
+        for path in sorted(p for p in self.repo.rglob("*") if p.is_file() and ".git" not in p.parts):
+            rel = path.relative_to(self.repo).as_posix()
+            if is_internal_villani_path(rel):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                stamp_parts.append(f"{rel}:{len(text)}:{hash(text)}")
+            except OSError:
+                continue
+            if len(stamp_parts) >= 150:
+                break
+        return f"{task_key}|{'|'.join(stamp_parts)}"
+
+    def _is_task_satisfied(self, task_key: str) -> bool:
+        previous = self._satisfied_task_keys.get(task_key)
+        if not previous:
+            return False
+        return previous == self._repo_fingerprint_for_task(task_key)
+
+    @staticmethod
+    def _is_meaningful_test_file(path: str) -> bool:
+        normalized = str(path).replace("\\", "/")
+        return normalized.startswith("tests/test_") and normalized.endswith(".py")
+
+    @staticmethod
+    def _split_changes(changed_files: list[str]) -> tuple[list[str], list[str], list[str]]:
+        all_changes = [str(item).strip() for item in (changed_files or []) if str(item).strip()]
+        def _incidental(path: str) -> bool:
+            low = path.replace("\\", "/")
+            return is_internal_villani_path(path) or "__pycache__/" in low or low.endswith(".pyc")
+        intentional = [p for p in all_changes if not _incidental(p)]
+        incidental = [p for p in all_changes if _incidental(p)]
+        return sorted(dict.fromkeys(intentional)), sorted(dict.fromkeys(incidental)), sorted(dict.fromkeys(all_changes))
+
+    def _build_wave_candidates(self, opportunities: list[Opportunity]) -> list[Opportunity]:
+        cfg = self._takeover_cfg()
+        out: list[Opportunity] = []
+        for op in opportunities:
+            if float(op.confidence) < float(cfg.min_confidence):
+                self._followup_skip_reasons.append("below_threshold")
+                continue
+            key = self._task_key_for_opportunity(op)
+            if self._is_task_satisfied(key):
+                self._followup_skip_reasons.append("already_satisfied")
+                continue
+            out.append(op)
+        return sorted(out, key=lambda op: (1 if op.category.startswith("followup") else 0, op.priority, op.confidence), reverse=True)
+
+    def _insert_followup(self, op: Opportunity, source: str) -> None:
+        key = self._task_key_for_opportunity(op)
+        if any(self._task_key_for_opportunity(existing) == key for existing in self._followup_queue):
+            return
+        self._followup_queue.append(op)
+        self._backlog_insertions.append({"title": op.title, "source": source})
+
+    def _deterministic_followups(self, task: AutonomousTask | Any, op: Opportunity) -> list[Opportunity]:
+        if str(getattr(task, "status", "")) in {"failed", "retryable"} and self._is_stale_repeat(task):
+            return []
+        followups: list[Opportunity] = []
+        if getattr(task, "status", "") == "passed":
+            category_snapshot = dict(self._category_state)
+            tests_present = any(self._is_meaningful_test_file(p.relative_to(self.repo).as_posix()) for p in self.repo.rglob("tests/test_*.py"))
+            docs_present = (self.repo / "README.md").exists() or (self.repo / "docs").exists()
+            cli_present = any(p.name == "cli.py" for p in self.repo.rglob("*.py"))
+            if not tests_present:
+                category_snapshot["tests"] = "unknown"
+            if not docs_present:
+                category_snapshot["docs"] = "unknown"
+            if not cli_present:
+                category_snapshot["entrypoints"] = "unknown"
+            followups.extend(surface_followups(category_snapshot))
+        title = str(getattr(task, "title", "")).lower()
+        changed = list(getattr(task, "intentional_changes", []) or [])
+        if changed and not getattr(task, "produced_validation", False):
+            followups.append(
+                Opportunity(
+                    "Validate recent autonomous changes",
+                    "followup_validation",
+                    0.98,
+                    0.88,
+                    changed[:4],
+                    "post-edit validation required",
+                    "small",
+                    "run targeted validation",
+                    TaskContract.VALIDATION.value,
+                )
+            )
+        if "bootstrap minimal tests" in title:
+            followups.append(
+                Opportunity(
+                    "Complete baseline tests scaffolding",
+                    "followup_tests_complete",
+                    0.95,
+                    0.8,
+                    [],
+                    "initial bootstrap may be partial",
+                    "small",
+                    "complete baseline tests scaffolding",
+                    TaskContract.EFFECTFUL.value,
+                )
+            )
+        if "validate baseline importability" in title and not bool(getattr(task, "produced_validation", True)):
+            followups.append(
+                Opportunity(
+                    "Re-run Validate baseline importability validation",
+                    "followup_validation",
+                    0.97,
+                    0.85,
+                    [],
+                    "missing validation evidence",
+                    "small",
+                    "rerun importability validation with command evidence",
+                    TaskContract.VALIDATION.value,
+                )
+            )
+        return followups
+
+    def _is_stale_repeat(self, task: Any) -> bool:
+        key = str(getattr(task, "task_key", "")).strip()
+        if not key:
+            return False
+        prior_fp = self._lineage_last_fingerprint.get(key)
+        prior_changes = self._lineage_last_intentional_changes.get(key)
+        current_fp = self._repo_fingerprint_for_task(key)
+        current_changes = tuple(sorted(getattr(task, "intentional_changes", []) or []))
+        return bool(getattr(task, "attempts", 0) >= 2 and prior_fp == current_fp and prior_changes == current_changes)
+
+    def _update_lifecycle_after_attempt(self, task: AutonomousTask, op: Opportunity) -> str:
+        key = str(task.task_key or self._task_key_for_opportunity(op))
+        task.task_key = key
+        self._lineage_last_fingerprint[key] = self._repo_fingerprint_for_task(key)
+        self._lineage_last_intentional_changes[key] = tuple(sorted(task.intentional_changes))
+        if task.status == "passed":
+            return "passed"
+        if self._is_stale_repeat(task):
+            return "exhausted"
+        if task.terminated_reason in {"model_idle", "no_edits"}:
+            retry_count = self._lineage_retry_counts.get(key, 0) + 1
+            self._lineage_retry_counts[key] = retry_count
+            task.retries = retry_count
+            return "retryable" if retry_count <= 1 else "exhausted"
+        return "failed"
+
     def _extract_commands(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for tr in (result.get("transcript", {}) or {}).get("tool_results", []):
@@ -1168,14 +1498,23 @@ class VillaniModeController:
         if task.runner_failures:
             return "failed", "runner_failures_present"
         if contract in {TaskContract.VALIDATION.value, TaskContract.VALIDATE.value}:
-            if not task.produced_validation and not self._has_real_validation_artifact(task):
+            if not self._has_real_validation_artifact(task):
                 return "failed", "validation_not_executed"
+            if getattr(verification, "status", None) == VerificationStatus.UNCERTAIN:
+                return "failed", "verification_uncertain"
             return "passed", "validation_satisfied"
         if contract in {TaskContract.INSPECTION.value, TaskContract.INSPECT.value}:
+            if getattr(verification, "status", None) == VerificationStatus.UNCERTAIN:
+                return "failed", "verification_uncertain"
             if task.produced_inspection_conclusion and task.inspection_summary.strip():
                 return "passed", "inspection_completed"
             return "failed", "inspection_incomplete"
         if contract in {TaskContract.EFFECTFUL.value, TaskContract.NARROW_FIX.value, TaskContract.BROAD_FIX.value, TaskContract.IMPLEMENT.value, TaskContract.CLEANUP.value}:
+            if getattr(verification, "status", None) == VerificationStatus.UNCERTAIN:
+                return "failed", "verification_uncertain"
+            title = task.title.lower()
+            if "bootstrap minimal tests" in title and not any(str(path).replace("\\", "/").startswith("tests/") for path in task.intentional_changes):
+                return "failed", "bootstrap_requires_test_file_change"
             if task.produced_effect and bool(task.intentional_changes):
                 return "passed", "effectful_change_detected"
             return "failed", "no_effectful_change"
@@ -1183,12 +1522,27 @@ class VillaniModeController:
 
     def _execute_task(self, task: AutonomousTask) -> AutonomousTask:
         self.event_callback({"type": "villani_model_request_started", "task_id": task.task_id, "title": task.title})
-        prompt = f"Task: {task.title}\nReason: {task.rationale}\nNo network. Keep scope narrow.\nValidation plan: {'; '.join(task.verification_plan[:3])}"
+        validation_plan = list(task.verification_plan[:3])
+        if not validation_plan and "validate baseline importability" in task.title.lower():
+            validation_plan = ["python -c 'import villani_code'"]
+        prompt = f"Task: {task.title}\nReason: {task.rationale}\nNo network. Keep scope narrow.\nValidation plan: {'; '.join(validation_plan)}"
+        if task.title == "Inspect repo for highest-leverage improvement":
+            prompt += (
+                "\nInspection checklist:\n"
+                "1) top-level README.md or README.rst\n"
+                "2) pyproject.toml / setup.cfg / requirements files\n"
+                "3) tests/ coverage surface and obvious gaps\n"
+                "4) up to 3 representative Python source files\n"
+            )
+        self._model_request_count += 1
         result = self.runner.run(prompt, execution_budget=None)
         self.event_callback({"type": "villani_model_request_finished", "task_id": task.task_id, "title": task.title})
 
         execution = (result or {}).get("execution", {}) if isinstance(result, dict) else {}
         task.terminated_reason = str(execution.get("terminated_reason", ""))
+        task.turns_used = int(execution.get("turns_used", 0) or 0)
+        task.tool_calls_used = int(execution.get("tool_calls_used", 0) or 0)
+        task.elapsed_seconds = float(execution.get("elapsed_seconds", 0.0) or 0.0)
         task.validation_artifacts = list(execution.get("validation_artifacts", []) or [])
         task.runner_failures = list(execution.get("tool_failures", execution.get("runner_failures", [])) or [])
         task.inspection_summary = str(execution.get("inspection_summary", "") or "")
@@ -1201,7 +1555,10 @@ class VillaniModeController:
         verification = self.verifier.verify(task.title, task.files_changed, self._extract_commands(result), validation_artifacts=task.validation_artifacts)
         status, reason = self._adjudicate_task(task, verification)
         task.status = status
-        task.outcome = getattr(verification, "summary", reason)
+        if status != "passed" and getattr(verification, "findings", None):
+            task.outcome = str(verification.findings[0].message)
+        else:
+            task.outcome = getattr(verification, "summary", reason)
         task.verification_results = self._extract_commands(result)
         return task
 
@@ -1214,6 +1571,7 @@ class VillaniModeController:
                 f"- done_reason: {report.get('done_reason', '')}",
                 f"- blockers: {', '.join(report.get('blockers', []) or []) or 'none'}",
                 f"- changed: {report.get('files_changed', [])}",
+                f"- incidental_changed: {report.get('incidental_changes', [])}",
                 "## Villani control loop",
             ]
             memory = dict(report.get("working_memory", {}) or {})

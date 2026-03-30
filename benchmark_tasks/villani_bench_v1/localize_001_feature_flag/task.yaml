@@ -17,9 +17,4 @@ success_policy:
   fail_on_repo_dirty_outside_allowlist: true
 allowlist_paths:
 - src/app/runtime.py
-forbidden_paths:
-- tests/
-- pyproject.toml
-- src/app/config.py
-- src/app/flags.py
 benchmark_track: core

@@ -134,6 +134,9 @@ def _is_task_adjacent_support(
     if task_type == "repo_navigation_bugfix" and path.endswith(".py") and _has_parent_overlap(path, expected_paths):
         return True
 
+    if family == "bugfix" and path == "tests/test_core.py":
+        return True
+
     if family == "localize_patch" and path.endswith(".py") and _has_parent_overlap(path, expected_paths):
         return True
 

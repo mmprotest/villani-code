@@ -1,1 +1,1 @@
-Fix the retry helper so 429 and 5xx responses are retried, while 4xx client errors below 429 are not.
+Fix the retry helper so 429 and 500-level responses are retried, while 400-level client errors below 429 are not.
