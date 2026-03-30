@@ -9,19 +9,33 @@ def evaluate_mission_status(state: MissionExecutionState, max_no_progress: int =
     if total_attempts >= budget_limit:
         return MissionOutcome.BUDGET_EXHAUSTED, "Mission budget exhausted."
     normalized = reduce_normalized_mission_progress(state)
+    ready_greenfield_recovery = bool(
+        mission.mission_type.value == "greenfield_build"
+        and any(node.status.value == "ready" and str(node.created_from_node_id or "").strip() for node in mission.nodes)
+        and str(normalized.next_recommended_action or "").strip()
+    )
     if not normalized.node_outcomes:
         return None, ""
-    if state.consecutive_no_progress >= max_no_progress and not normalized.deliverable_paths:
+    if state.consecutive_no_progress >= max_no_progress and not normalized.deliverable_paths and not ready_greenfield_recovery:
         return MissionOutcome.STAGNATED, "Repeated no-progress cycles exceeded threshold."
-    if state.repeated_delta_states >= 3 and not normalized.deliverable_paths:
+    if state.repeated_delta_states >= 3 and not normalized.deliverable_paths and not ready_greenfield_recovery:
         return MissionOutcome.STAGNATED, "Repeated no/ambiguous delta outcomes exceeded threshold."
-    if state.consecutive_no_model_activity >= max_no_activity and not normalized.deliverable_paths:
+    if state.consecutive_no_model_activity >= max_no_activity and not normalized.deliverable_paths and not ready_greenfield_recovery:
         return MissionOutcome.EXHAUSTED, "Repeated no-activity cycles exceeded threshold."
     if normalized.terminal_state == "success":
+        if mission.mission_type.value == "greenfield_build":
+            summary_done = any(
+                node.phase.value == "summarize_outcome" and node.status.value == "succeeded"
+                for node in mission.nodes
+            )
+            if not summary_done:
+                return None, ""
         return MissionOutcome.SOLVED, "Normalized mission reducer marked success."
     if normalized.terminal_state == "blocked":
         return MissionOutcome.BLOCKED, normalized.blocked_reason or "Normalized mission reducer marked blocked."
     if normalized.terminal_state == "partial_success":
+        if mission.mission_type.value == "greenfield_build" and normalized.next_recommended_action == "summarize_outcome":
+            return None, ""
         if normalized.validation_truth_status == "failed":
             return MissionOutcome.PARTIAL_SUCCESS_BUILT_VALIDATION_FAILED, "Deliverables exist but command validation failed."
         if mission.mission_type.value == "greenfield_build" and not state.scratchpad.has_runnable_entrypoint:

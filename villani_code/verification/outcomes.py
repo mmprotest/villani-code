@@ -228,6 +228,15 @@ def classify_node_outcome(
     shell_invocations = [str(c) for c in list(execution_payload.get("shell_invocations", []) or []) if str(c).strip()]
     approved_actions = list(execution_payload.get("approved_actions", []) or [])
     mission_objective = mission_objective or {}
+    controller_findings = [str(x) for x in list(execution_payload.get("controller_findings", []) or []) if str(x).strip()]
+    controller_objective = dict(execution_payload.get("controller_objective", {}) or {})
+    has_controller_objective = _has_structured_objective(controller_objective) or _has_structured_objective(mission_objective)
+    has_controller_read_only_evidence = bool(controller_findings or approved_actions)
+    prose_only_override_allowed = bool(
+        mission_type == "greenfield_build"
+        and node_phase in {"inspect_workspace", "define_objective"}
+        and (has_controller_read_only_evidence or has_controller_objective)
+    )
     phase_for_validation = str(node_phase or "").strip().lower()
     validation_relevant_results = command_results
     if phase_for_validation in {"inspect_workspace", "define_objective", "summarize_outcome"}:
@@ -281,7 +290,7 @@ def classify_node_outcome(
 
     if clarification_requested:
         status, reason = "failed", "autonomous node asked user for confirmation/clarification"
-    elif prose_only:
+    elif prose_only and not prose_only_override_allowed:
         status, reason = "stale", "runner produced prose-only output"
     elif contract == TaskContract.LOCALIZE:
         if delta.classification in {DeltaClassification.STRONG_IMPROVEMENT, DeltaClassification.WEAK_IMPROVEMENT}:
@@ -380,7 +389,9 @@ def classify_node_outcome(
             else:
                 status, reason = "passed", "greenfield outcome summarized"
         elif node_phase == "inspect_workspace":
-            inspection_signals = bool(has_localization or static_result.get("findings") or any_probe_command or approved_actions)
+            inspection_signals = bool(
+                has_localization or static_result.get("findings") or any_probe_command or approved_actions or controller_findings
+            )
             if patch_exists:
                 status, reason = "failed", "contract violation: inspect_workspace is read-only but wrote files"
                 contract_violation = True
@@ -392,8 +403,9 @@ def classify_node_outcome(
             else:
                 status, reason = "partial", "inspect remained read-only but did not capture enough workspace evidence"
         elif node_phase == "define_objective":
-            objective_complete = _has_structured_objective(mission_objective)
-            objective_partial = bool(mission_objective.get("direction") or mission_objective.get("deliverable_kind"))
+            objective_complete = _has_structured_objective(mission_objective) or _has_structured_objective(controller_objective)
+            effective_objective = mission_objective if _has_structured_objective(mission_objective) else controller_objective
+            objective_partial = bool(effective_objective.get("direction") or effective_objective.get("deliverable_kind"))
             if patch_exists:
                 status, reason = "failed", "contract violation: define_objective is read-only but wrote files"
                 contract_violation = True
@@ -429,14 +441,18 @@ def classify_node_outcome(
     mission_progress_status = "no_progress"
     read_only_state_advanced = False
     if node_phase == "inspect_workspace":
-        read_only_state_advanced = bool(status in {"passed", "partial"} and (has_localization or static_result.get("findings") or approved_actions or any_command))
+        read_only_state_advanced = bool(
+            status in {"passed", "partial"}
+            and (has_localization or static_result.get("findings") or approved_actions or any_command or controller_findings)
+        )
     elif node_phase == "define_objective":
+        effective_objective = mission_objective if _has_structured_objective(mission_objective) else controller_objective
         read_only_state_advanced = bool(
             status in {"passed", "partial"}
             and (
-                _has_structured_objective(mission_objective)
-                or mission_objective.get("direction")
-                or mission_objective.get("initial_validation_strategy")
+                _has_structured_objective(effective_objective)
+                or effective_objective.get("direction")
+                or effective_objective.get("initial_validation_strategy")
                 or (scratchpad and (scratchpad.chosen_project_direction or scratchpad.next_required_action))
             )
         )

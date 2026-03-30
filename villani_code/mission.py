@@ -353,6 +353,18 @@ def reduce_normalized_mission_progress(state: "MissionExecutionState") -> Normal
         explicit_blocked_reason=blocked_reason,
     )
     next_action = next((str(item.next_recommended_action).strip() for item in reversed(outcomes) if str(item.next_recommended_action).strip()), "")
+    ready_greenfield_recovery = bool(
+        state.mission.mission_type == MissionType.GREENFIELD_BUILD
+        and any(node.status == NodeStatus.READY and str(node.created_from_node_id or "").strip() for node in state.mission.nodes)
+    )
+    if (
+        state.mission.mission_type == MissionType.GREENFIELD_BUILD
+        and terminal_state == "partial_success"
+        and next_action in {NodePhase.SCAFFOLD_PROJECT.value, NodePhase.IMPLEMENT_INCREMENT.value, NodePhase.VALIDATE_PROJECT.value}
+    ):
+        terminal_state = "in_progress"
+    if terminal_state == "stagnated" and ready_greenfield_recovery and next_action:
+        terminal_state = "in_progress"
     mission_completion_state = "complete" if terminal_state == "success" else ("partial" if terminal_state == "partial_success" else "incomplete")
     return NormalizedMissionProgress(
         node_outcomes=outcomes,
@@ -365,7 +377,7 @@ def reduce_normalized_mission_progress(state: "MissionExecutionState") -> Normal
         realized_artifact_direction=realized_direction,
         mission_completion_state=mission_completion_state,
         terminal_state=terminal_state,
-        next_recommended_action="" if terminal_state in {"success", "failed", "stagnated", "blocked"} else next_action,
+        next_recommended_action="" if terminal_state in {"success", "failed", "blocked"} else next_action,
         blocked_reason=reduced_blocked_reason,
     )
 

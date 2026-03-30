@@ -483,12 +483,164 @@ def _validate_actions_for_phase(phase: str, actions: list[ProposedAction]) -> tu
             payload["rejection_reason"] = reason
             rejected.append(payload)
     return approved, rejected
+
+
+def _synthesize_greenfield_controller_result(
+    mission: Mission,
+    node: MissionNode,
+    execution_state: MissionExecutionState,
+) -> MissionNodeResult | None:
+    if mission.mission_type.value != "greenfield_build":
+        return None
+    phase = node.phase.value
+    if phase not in {"inspect_workspace", "define_objective"}:
+        return None
+
+    repo_signals = dict(mission.mission_context.get("repo_signals", {}) or {})
+    objective = mission.objective
+    scratchpad = execution_state.scratchpad
+    default_validation = list(objective.initial_validation_strategy or repo_signals.get("likely_validation_commands", []) or [])
+    language_hints = list(repo_signals.get("language_hints", []) or [])
+    direction = str(
+        objective.direction
+        or scratchpad.chosen_project_direction
+        or execution_state.greenfield_selection.get("project_type", "")
+    ).strip()
+    approved_actions = [{"phase": phase, "action_type": "inspect_metadata", "target_paths": []}]
+
+    if phase == "inspect_workspace":
+        findings: list[str] = []
+        if repo_signals.get("workspace_empty_or_internal_only"):
+            findings.append("workspace empty or internal-only")
+        if repo_signals.get("workspace_lightweight_hints_only"):
+            findings.append("workspace has lightweight hints only")
+        if not repo_signals.get("existing_project_detected", False):
+            findings.append("no existing project detected")
+        findings.append("greenfield context confirmed")
+        if language_hints:
+            findings.append("language/runtime hints: " + ", ".join(language_hints[:4]))
+        else:
+            findings.append("language/runtime hints: python (default)")
+        execution_payload = {
+            "changed_files": [],
+            "all_changed_files": [],
+            "internal_changed_files": [],
+            "patch_detected": False,
+            "meaningful_patch": False,
+            "intentional_changes": [],
+            "incidental_changes": [],
+            "command_results": [],
+            "inferred_command_results": [],
+            "tool_failures": [],
+            "validation_artifacts": [],
+            "terminated_reason": "controller_native_greenfield_inspect",
+            "model_activity": {"tool_invocations": 0, "tool_results": 0, "tool_errors": 0, "responses": 0, "requests": 0},
+            "prose_only": False,
+            "acted": True,
+            "clarification_requested": False,
+            "self_reported_validation_claim": False,
+            "self_reported_validation_without_evidence": False,
+            "attempted_write_paths": [],
+            "blocked_write_paths": [],
+            "shell_invocations": [],
+            "phase_contract": {
+                "phase": phase,
+                "allowed_actions": sorted(get_phase_contract(phase).allowed_actions),
+                "forbidden_actions": sorted(get_phase_contract(phase).forbidden_actions),
+            },
+            "approved_actions": approved_actions,
+            "rejected_actions": [],
+            "controller_findings": findings,
+            "controller_native": True,
+        }
+        return MissionNodeResult(
+            response={},
+            changed_files=[],
+            internal_changed_files=[],
+            commands_run=[],
+            command_results=[],
+            tool_failures=[],
+            patch_detected=False,
+            meaningful_patch=False,
+            transcript_summary="controller_native inspect findings synthesized",
+            model_activity=execution_payload["model_activity"],
+            prose_only=False,
+            acted=True,
+            clarification_requested=False,
+            execution_payload=execution_payload,
+        )
+
+    objective_payload = {
+        "repo_state_type": str(objective.repo_state_type or ("empty_sandbox" if repo_signals.get("workspace_empty_or_internal_only") else "unknown")),
+        "task_shape": str(objective.task_shape or "greenfield_build"),
+        "deliverable_kind": list(objective.deliverable_kind or ["unknown"]),
+        "direction": direction or "python_cli_utility",
+        "initial_validation_strategy": list(default_validation[:4]) or ["python -m py_compile <entrypoint>"],
+    }
+    execution_payload = {
+        "changed_files": [],
+        "all_changed_files": [],
+        "internal_changed_files": [],
+        "patch_detected": False,
+        "meaningful_patch": False,
+        "intentional_changes": [],
+        "incidental_changes": [],
+        "command_results": [],
+        "inferred_command_results": [],
+        "tool_failures": [],
+        "validation_artifacts": [],
+        "terminated_reason": "controller_native_greenfield_objective",
+        "model_activity": {"tool_invocations": 0, "tool_results": 0, "tool_errors": 0, "responses": 0, "requests": 0},
+        "prose_only": False,
+        "acted": True,
+        "clarification_requested": False,
+        "self_reported_validation_claim": False,
+        "self_reported_validation_without_evidence": False,
+        "attempted_write_paths": [],
+        "blocked_write_paths": [],
+        "shell_invocations": [],
+        "phase_contract": {
+            "phase": phase,
+            "allowed_actions": sorted(get_phase_contract(phase).allowed_actions),
+            "forbidden_actions": sorted(get_phase_contract(phase).forbidden_actions),
+        },
+        "approved_actions": approved_actions,
+        "rejected_actions": [],
+        "controller_objective": objective_payload,
+        "controller_native": True,
+    }
+    return MissionNodeResult(
+        response={},
+        changed_files=[],
+        internal_changed_files=[],
+        commands_run=[],
+        command_results=[],
+        tool_failures=[],
+        patch_detected=False,
+        meaningful_patch=False,
+        transcript_summary="controller_native objective synthesized",
+        model_activity=execution_payload["model_activity"],
+        prose_only=False,
+        acted=True,
+        clarification_requested=False,
+        execution_payload=execution_payload,
+    )
+
+
 def execute_mission_node_with_runner(
     runner: Any,
     mission: Mission,
     node: MissionNode,
     execution_state: MissionExecutionState,
 ) -> MissionNodeResult:
+    controller_result = _synthesize_greenfield_controller_result(mission, node, execution_state)
+    if (
+        controller_result is not None
+        and node.phase.value == "inspect_workspace"
+        and bool(mission.mission_context.get("repo_signals", {}).get("workspace_empty_or_internal_only", False))
+    ):
+        return controller_result
+
     instruction = build_node_instruction(mission, node, execution_state)
     phase_contract = get_phase_contract(node.phase.value)
     before = set(_git_changed_files(Path(mission.repo_root)))
@@ -548,6 +700,27 @@ def execute_mission_node_with_runner(
     meaningful_patch = bool(execution.get("meaningful_patch", bool(execution.get("intentional_changes")) or bool(changed)))
     prose_only = bool(execution.get("prose_only", (not changed) and (not command_results) and model_activity.get("tool_results", 0) == 0 and bool(text.strip())))
     acted = bool(execution.get("acted", patch_detected or bool(command_results) or model_activity.get("tool_invocations", 0) > 0))
+    if controller_result is not None:
+        merged_actions = approved_actions + list(controller_result.execution_payload.get("approved_actions", []) or [])
+        approved_actions = []
+        seen_actions: set[str] = set()
+        for action in merged_actions:
+            if not isinstance(action, dict):
+                continue
+            action_key = json.dumps(action, sort_keys=True)
+            if action_key in seen_actions:
+                continue
+            seen_actions.add(action_key)
+            approved_actions.append(action)
+        static_cast = list(controller_result.execution_payload.get("controller_findings", []) or [])
+        if static_cast:
+            execution.setdefault("controller_findings", list(static_cast))
+        controller_objective = dict(controller_result.execution_payload.get("controller_objective", {}) or {})
+        if controller_objective:
+            execution.setdefault("controller_objective", controller_objective)
+        prose_only = False
+        acted = True
+        clarification_requested = False
     transcript_summary = (
         f"tools={model_activity.get('tool_results', 0)} "
         f"errors={model_activity.get('tool_errors', 0)} "
@@ -598,5 +771,8 @@ def execute_mission_node_with_runner(
             },
             "approved_actions": approved_actions,
             "rejected_actions": rejected_actions,
+            "controller_native": bool(controller_result is not None),
+            "controller_findings": list(execution.get("controller_findings", []) or []),
+            "controller_objective": dict(execution.get("controller_objective", {}) or {}),
         },
     )

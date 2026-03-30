@@ -253,6 +253,45 @@ class VillaniModeController:
                 return
         scratchpad.next_required_action = scratchpad.derive_next_action()
 
+    def _synthesize_greenfield_phase_state(self, execution_state: MissionExecutionState, node: Any) -> None:
+        if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
+            return
+        repo_signals = dict(self._repo_signals or execution_state.mission.mission_context.get("repo_signals", {}) or {})
+        if node.phase == NodePhase.INSPECT_WORKSPACE:
+            findings: list[str] = []
+            if repo_signals.get("workspace_empty_or_internal_only"):
+                findings.append("workspace empty or internal-only")
+            if not repo_signals.get("existing_project_detected", False):
+                findings.append("no existing project detected")
+            findings.append("greenfield context confirmed")
+            hints = list(repo_signals.get("language_hints", []) or [])
+            if hints:
+                findings.append("language/runtime hints: " + ", ".join(hints[:4]))
+            execution_state.mission.mission_context["inspect_workspace_findings"] = findings
+            return
+        if node.phase != NodePhase.DEFINE_OBJECTIVE:
+            return
+        objective = execution_state.mission.objective
+        direction = str(
+            execution_state.greenfield_selection.get("project_type", "")
+            or execution_state.scratchpad.chosen_project_direction
+            or objective.direction
+        ).strip()
+        if not direction:
+            direction = "python_cli_utility"
+        objective.repo_state_type = str(objective.repo_state_type or ("empty_sandbox" if repo_signals.get("workspace_empty_or_internal_only") else "unknown"))
+        objective.task_shape = str(objective.task_shape or "greenfield_build")
+        objective.deliverable_kind = list(objective.deliverable_kind or ["unknown"])
+        objective.direction = direction
+        objective.initial_validation_strategy = list(objective.initial_validation_strategy or repo_signals.get("likely_validation_commands", []) or ["python -m py_compile <entrypoint>"])[:4]
+        execution_state.scratchpad.chosen_project_direction = direction
+        execution_state.scratchpad.chosen_product_shape = direction
+        execution_state.scratchpad.next_required_action = NodePhase.SCAFFOLD_PROJECT.value
+        execution_state.greenfield_selection["project_type"] = direction
+        execution_state.mission.mission_context["objective"] = {k: getattr(objective, k) for k in objective.__dataclass_fields__.keys()}
+        execution_state.mission.mission_context["greenfield_selection"] = dict(execution_state.greenfield_selection)
+        execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
+
     def _apply_no_regression_guards(self, execution_state: MissionExecutionState, outcome: dict[str, Any]) -> None:
         scratchpad = execution_state.scratchpad
         mission = execution_state.mission
@@ -291,9 +330,7 @@ class VillaniModeController:
     def _promote_greenfield_conclusion(self, execution_state: MissionExecutionState) -> None:
         gate = self._greenfield_completion_gate(execution_state)
         progress = dict(execution_state.greenfield_progress or {})
-        deliverables = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
-        partial_ready = bool(deliverables) and bool(execution_state.scratchpad.has_runnable_entrypoint)
-        if not gate.get("ready") and not partial_ready:
+        if not gate.get("ready"):
             return
         summarize_nodes = [n for n in execution_state.mission.nodes if n.phase == NodePhase.SUMMARIZE_OUTCOME]
         if summarize_nodes:
@@ -355,6 +392,7 @@ class VillaniModeController:
         objective = (self.steering_objective or "").strip()
         self._repo_signals = self._collect_repo_signals()
         mission = self.planner.build_mission(objective, str(self.repo), repo_signals=self._repo_signals)
+        mission.mission_context["repo_signals"] = dict(self._repo_signals)
         if mission.mission_type == MissionType.GREENFIELD_BUILD:
             candidates, selection = self._plan_greenfield_direction(objective, self._repo_signals)
             mission.mission_context["greenfield_candidates"] = candidates
@@ -436,8 +474,9 @@ class VillaniModeController:
             return None
         if execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD:
             if not execution_state.scratchpad.validation_proven:
+                implement_ready = [n for n in ready_nodes if n.phase == NodePhase.IMPLEMENT_INCREMENT]
                 validate_ready = [n for n in ready_nodes if n.phase == NodePhase.VALIDATE_PROJECT]
-                if validate_ready:
+                if validate_ready and not implement_ready:
                     selected = validate_ready[0]
                     self._refresh_scratchpad_pre_node(execution_state, selected)
                     if selected.status == NodeStatus.SKIPPED:
@@ -462,6 +501,7 @@ class VillaniModeController:
         node.status = NodeStatus.RUNNING
         node.attempts += 1
         execution_state.active_node_id = node.node_id
+        self._synthesize_greenfield_phase_state(execution_state, node)
 
         localization_result = None
         if node.phase == NodePhase.LOCALIZE:
