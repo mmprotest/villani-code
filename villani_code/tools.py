@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -138,6 +139,7 @@ def execute_tool(
     unsafe: bool = False,
     *,
     root_label: str = "workspace",
+    enforce_command_boundary: bool = False,
 ) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
@@ -159,7 +161,15 @@ def execute_tool(
         if name == "Search":
             return _ok(_run_search(parsed, root, root_label=root_label))
         if name == "Bash":
-            return _ok(_run_bash(parsed, root, unsafe=unsafe, root_label=root_label))
+            return _ok(
+                _run_bash(
+                    parsed,
+                    root,
+                    unsafe=unsafe,
+                    root_label=root_label,
+                    enforce_command_boundary=enforce_command_boundary,
+                )
+            )
         if name == "Write":
             return _ok(_run_write(parsed, root, root_label=root_label))
         if name == "Patch":
@@ -229,13 +239,48 @@ def _run_search(data: SearchInput, root: Path, *, root_label: str) -> str:
     return proc.stdout
 
 
-def _run_bash(data: BashInput, root: Path, unsafe: bool, *, root_label: str) -> str:
+def _bash_references_outside_root(command: str, cwd: Path, root: Path) -> str | None:
+    root_resolved = root.resolve()
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return "unable to parse shell command safely"
+    for token in tokens:
+        if token in {"..", "../", "..\\"}:
+            return token
+        if token.startswith("-"):
+            continue
+        if token.startswith(("http://", "https://")):
+            continue
+        if "/" not in token and "\\" not in token and token not in {".", "~"}:
+            continue
+        candidate = Path(token).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (cwd / candidate).resolve()
+        try:
+            resolved.relative_to(root_resolved)
+        except ValueError:
+            return token
+    return None
+
+
+def _run_bash(
+    data: BashInput,
+    root: Path,
+    unsafe: bool,
+    *,
+    root_label: str,
+    enforce_command_boundary: bool = False,
+) -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
     cwd = _safe_path(root, data.cwd, root_label=root_label)
+    if enforce_command_boundary:
+        blocked_token = _bash_references_outside_root(data.command, cwd, root)
+        if blocked_token:
+            raise ValueError(f"sandbox_boundary_blocked: shell command references outside sandbox_root ({blocked_token})")
     proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
     return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
 

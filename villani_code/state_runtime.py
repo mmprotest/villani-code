@@ -496,11 +496,21 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
         str(phase_policy.get("mission_type", "")) == "greenfield_build"
         and str(phase_policy.get("node_phase", "")) in {"scaffold_project", "implement_increment"}
     )
+    unrestricted_within_sandbox = (
+        str(phase_policy.get("mission_type", "")) == "greenfield_build"
+        and bool(phase_policy.get("unrestricted_within_sandbox", False))
+    )
     if tool_name in {"Write", "Patch"}:
         fp = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
         if fp:
-            path = (runner.repo / fp).resolve()
-            if is_ignored_repo_path(fp) or classify_repo_path(fp) != "authoritative":
+            root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+            path = (root / fp).resolve()
+            if unrestricted_within_sandbox:
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    return f"sandbox_boundary_blocked: path escapes sandbox_root ({path})"
+            elif is_ignored_repo_path(fp) or classify_repo_path(fp) != "authoritative":
                 return f"Small-model mode policy: target path is not authoritative: {fp}."
             if tool_name == "Patch" and not path.exists():
                 return f"Read-before-edit policy: cannot patch missing file {fp}. Use Write to create it first."
@@ -513,7 +523,7 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 runner._files_read.add(fp)
 
             intended = set(getattr(runner, "_intended_targets", set()))
-            if intended and fp not in intended and not greenfield_mutation_phase:
+            if intended and fp not in intended and not greenfield_mutation_phase and not unrestricted_within_sandbox:
                 explicit_allowlisted = runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp)
                 benchmark_scope_ok = (not runner.benchmark_config.enabled) or explicit_allowlisted
                 has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(fp, intended)
@@ -555,12 +565,19 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                     runner._current_verification_before_contents.setdefault(fp, before_text)
     if tool_name == "Write":
         file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
-        path = (runner.repo / file_path).resolve()
+        root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+        path = (root / file_path).resolve()
         if (not path.exists()) and greenfield_mutation_phase:
             max_new_file_write = int(phase_policy.get("new_file_whole_write_max_bytes", 100_000) or 100_000)
             proposed = str(tool_input.get("content", ""))
             if len(proposed.encode("utf-8")) <= max_new_file_write:
                 return None
+        if unrestricted_within_sandbox:
+            try:
+                path.relative_to(root)
+            except ValueError:
+                return f"sandbox_boundary_blocked: path escapes sandbox_root ({path})"
+            return None
         if path.exists() and path.is_file():
             text = path.read_text(encoding="utf-8", errors="replace")
             if len(text) > 10_000 or len(text.splitlines()) > 200:

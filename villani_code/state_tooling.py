@@ -378,6 +378,33 @@ def _validate_greenfield_shell_command(command: str, phase: str, allow_validatio
     )
 
 
+def _greenfield_unrestricted_within_sandbox(phase_policy: dict[str, Any]) -> bool:
+    return (
+        str(phase_policy.get("mission_type", "")) == "greenfield_build"
+        and bool(phase_policy.get("unrestricted_within_sandbox", False))
+    )
+
+
+def _validate_sandbox_boundary_for_mutation(
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> str | None:
+    if tool_name not in {"Write", "Patch"}:
+        return None
+    active_root = runner.active_tool_root if hasattr(runner, "active_tool_root") else runner.repo
+    for raw_target in _greenfield_mutation_targets(tool_name, tool_input):
+        if not str(raw_target).strip():
+            continue
+        candidate = Path(str(raw_target)).expanduser()
+        target_path = candidate.resolve() if candidate.is_absolute() else (active_root / candidate).resolve()
+        try:
+            target_path.relative_to(active_root)
+        except ValueError:
+            return f"sandbox_boundary_blocked: path escapes sandbox_root ({target_path})"
+    return None
+
+
 def execute_tool_with_policy(
     runner: Any,
     tool_name: str,
@@ -398,30 +425,36 @@ def execute_tool_with_policy(
         return {"content": "Plan artifact accepted", "is_error": False}
 
     phase_policy = dict(getattr(runner, "_villani_phase_tool_policy", {}) or {})
+    unrestricted_within_sandbox = _greenfield_unrestricted_within_sandbox(phase_policy)
     if str(phase_policy.get("mission_type", "")) == "greenfield_build":
         phase = str(phase_policy.get("node_phase", "")).strip()
         allow_mutating_tools = bool(phase_policy.get("allow_mutating_tools", False))
         allow_shell_commands = bool(phase_policy.get("allow_shell_commands", False))
         allow_validation_shell = bool(phase_policy.get("allow_validation_shell", False))
-        if tool_name in {"Write", "Patch", "Edit"} and not allow_mutating_tools:
+        if tool_name in {"Write", "Patch", "Edit"} and not allow_mutating_tools and not unrestricted_within_sandbox:
             return {
                 "content": f"Greenfield phase policy blocked mutation tool '{tool_name}' during {phase or 'unknown_phase'}",
                 "is_error": True,
             }
+        if unrestricted_within_sandbox and tool_name in {"Write", "Patch"}:
+            boundary_error = _validate_sandbox_boundary_for_mutation(runner, tool_name, tool_input)
+            if boundary_error:
+                return {"content": boundary_error, "is_error": True}
         if tool_name == "Bash":
             command = str(tool_input.get("command", "")).strip().lower()
-            if not allow_shell_commands:
+            if not allow_shell_commands and not unrestricted_within_sandbox:
                 return {
                     "content": f"Greenfield phase policy blocked shell usage during {phase or 'unknown_phase'}",
                     "is_error": True,
                 }
-            shell_error = _validate_greenfield_shell_command(command, phase, allow_validation_shell)
-            if shell_error:
-                return {
-                    "content": shell_error,
-                    "is_error": True,
-                }
-        if tool_name in {"Write", "Patch"}:
+            if not unrestricted_within_sandbox:
+                shell_error = _validate_greenfield_shell_command(command, phase, allow_validation_shell)
+                if shell_error:
+                    return {
+                        "content": shell_error,
+                        "is_error": True,
+                    }
+        if tool_name in {"Write", "Patch"} and not unrestricted_within_sandbox:
             mutation_error = _validate_greenfield_mutation_budget(runner, tool_name, tool_input, phase_policy)
             if mutation_error:
                 return {"content": mutation_error, "is_error": True}
@@ -558,8 +591,9 @@ def execute_tool_with_policy(
         tool_name,
         tool_input,
         active_root,
-        unsafe=runner.unsafe,
+        unsafe=runner.unsafe or unrestricted_within_sandbox,
         root_label=runner.active_tool_root_label if hasattr(runner, "active_tool_root_label") else "repository",
+        enforce_command_boundary=unrestricted_within_sandbox,
     )
     _record_greenfield_mutation_budget(runner, tool_name, tool_input, phase_policy, result)
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
