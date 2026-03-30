@@ -17,9 +17,13 @@ from villani_code.mission import (
     MissionExecutionState,
     MissionScratchpad,
     MissionType,
+    NormalizedNodeOutcome,
     NodePhase,
     NodeStatus,
     NodeOutcomeRecord,
+    reduce_normalized_mission_progress,
+    reduce_validation_truth,
+    infer_realized_artifact_direction,
 )
 from villani_code.mission_bridge import execute_mission_node_with_runner
 from villani_code.mission_planner import MissionPlanner
@@ -116,11 +120,8 @@ class VillaniModeController:
         self.takeover_config = takeover_config
         self.verifier = VerificationEngine(self.repo)
 
-    def _extract_user_space_deliverables(self, changed_files: list[str], execution_payload: dict[str, Any]) -> list[str]:
-        candidates = list(changed_files)
-        for key in ("intentional_changes", "incidental_changes", "changed_files"):
-            candidates.extend(str(x) for x in list(execution_payload.get(key, []) or []))
-        user_deliverables, _internal = split_internal_paths([str(item or "").strip() for item in candidates])
+    def _extract_user_space_deliverables(self, changed_files: list[str]) -> list[str]:
+        user_deliverables, _internal = split_internal_paths([str(item or "").strip() for item in changed_files])
         return user_deliverables
 
     def _record_greenfield_progress(
@@ -134,7 +135,7 @@ class VillaniModeController:
         if execution_state.mission.mission_type != MissionType.GREENFIELD_BUILD:
             return []
         progress = dict(execution_state.greenfield_progress or {})
-        deliverables = self._extract_user_space_deliverables(changed_files, execution_payload)
+        deliverables = self._extract_user_space_deliverables(changed_files)
         current_paths = [str(x) for x in list(progress.get("deliverable_paths", []) or []) if str(x).strip()]
         merged_paths = sorted(dict.fromkeys(current_paths + deliverables))
         progress["deliverable_paths"] = merged_paths
@@ -672,7 +673,7 @@ class VillaniModeController:
         effective_changed_files = list(changed_files)
         if node.phase == NodePhase.SUMMARIZE_OUTCOME and bool(outcome.get("contract_violation")):
             effective_changed_files = []
-        user_deliverables = self._extract_user_space_deliverables(effective_changed_files, execution_payload)
+        user_deliverables = self._extract_user_space_deliverables(effective_changed_files)
         if (
             execution_state.mission.mission_type == MissionType.GREENFIELD_BUILD
             and node.phase == NodePhase.SCAFFOLD_PROJECT
@@ -754,6 +755,35 @@ class VillaniModeController:
             self._ensure_validate_node_ready(execution_state)
         self._apply_no_regression_guards(execution_state, outcome)
         execution_state.mission.mission_context["scratchpad"] = execution_state.scratchpad.to_dict()
+        node_validation_truth, node_validation_summary = reduce_validation_truth(command_results)
+        node_realized_direction = infer_realized_artifact_direction(
+            persisted_deliverables or user_deliverables,
+            fallback=execution_state.scratchpad.chosen_project_direction,
+        )
+        blocked_reason = (
+            str(outcome.get("reason", ""))
+            if (outcome.get("mission_progress_status") == "blocked" or blocked_write_paths)
+            else ""
+        )
+        normalized = NormalizedNodeOutcome(
+            node_id=node.node_id,
+            node_phase=node.phase.value,
+            contract_status=str(outcome.get("phase_contract_status", "unknown")),
+            mission_progress_status=str(outcome.get("mission_progress_status", "no_progress")),
+            successful_user_writes=list(user_deliverables),
+            blocked_write_attempts=list(blocked_write_paths),
+            internal_artifact_writes=list(internal_changed_files),
+            actual_changed_files_count=len(user_deliverables),
+            deliverable_paths=list(user_deliverables),
+            command_results=list(command_results),
+            validation_truth_status=node_validation_truth,
+            validation_summary=node_validation_summary,
+            realized_artifact_direction=node_realized_direction,
+            next_recommended_action=execution_state.scratchpad.derive_next_action(),
+            terminal_candidate_state=str(outcome.get("status", "")),
+            blocked_reason=blocked_reason,
+        )
+        execution_state.normalized_node_outcomes.append(normalized)
 
         node.evidence.extend(static_result.get("findings", []))
         node.evidence.extend([f"cmd:{r.get('command')} exit={r.get('exit')}" for r in command_results])
@@ -782,6 +812,23 @@ class VillaniModeController:
                 ),
                 "inferred_command_results": inferred_command_results,
                 "verification_status": str(outcome.get("verification_status", "validation_unproven")),
+                "normalized_outcome": {
+                    "node_id": normalized.node_id,
+                    "node_phase": normalized.node_phase,
+                    "contract_status": normalized.contract_status,
+                    "mission_progress_status": normalized.mission_progress_status,
+                    "successful_user_writes": normalized.successful_user_writes,
+                    "blocked_write_attempts": normalized.blocked_write_attempts,
+                    "internal_artifact_writes": normalized.internal_artifact_writes,
+                    "actual_changed_files_count": normalized.actual_changed_files_count,
+                    "deliverable_paths": normalized.deliverable_paths,
+                    "validation_truth_status": normalized.validation_truth_status,
+                    "validation_summary": normalized.validation_summary,
+                    "realized_artifact_direction": normalized.realized_artifact_direction,
+                    "next_recommended_action": normalized.next_recommended_action,
+                    "terminal_candidate_state": normalized.terminal_candidate_state,
+                    "blocked_reason": normalized.blocked_reason,
+                },
             }
         )
 
@@ -936,28 +983,9 @@ class VillaniModeController:
     def _finalize_mission(self, execution_state: MissionExecutionState) -> dict[str, Any]:
         self._activity("Finalizing mission report and summarizing outcomes.")
         mission = execution_state.mission
-        touched_from_git = sorted(set(self._git_changed_files()) - set(execution_state.changed_files_baseline))
-        touched_from_nodes = sorted(
-            {
-                str(path)
-                for node in mission.nodes
-                for path in list(node.last_outcome.changed_files or [])
-                if str(path).strip()
-            }
-        )
-        touched_from_payloads = sorted(
-            {
-                str(path)
-                for item in execution_state.verification_history
-                for path in list((item.get("changed_files", []) or []))
-                if str(path).strip()
-            }
-        )
-        touched = sorted(dict.fromkeys(touched_from_git + touched_from_nodes + touched_from_payloads))
-        touched, internal_touched = split_internal_paths(touched)
-        if mission.mission_type == MissionType.GREENFIELD_BUILD:
-            persisted = list(dict(execution_state.greenfield_progress or {}).get("deliverable_paths", []) or [])
-            touched = sorted(dict.fromkeys(touched + [str(p) for p in persisted if str(p).strip()]))
+        normalized_progress = reduce_normalized_mission_progress(execution_state)
+        touched = list(normalized_progress.files_touched)
+        internal_touched = list(normalized_progress.internal_artifact_writes)
         report = build_mission_summary(
             mission,
             execution_state,

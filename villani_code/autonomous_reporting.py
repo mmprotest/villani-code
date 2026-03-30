@@ -7,7 +7,7 @@ from typing import Any
 
 from villani_code.evidence import parse_command_evidence
 from villani_code.repo_rules import is_ignored_repo_path
-from villani_code.mission import Mission, MissionExecutionState
+from villani_code.mission import Mission, MissionExecutionState, reduce_normalized_mission_progress
 from villani_code.path_authority import split_internal_paths
 
 
@@ -157,6 +157,7 @@ def build_mission_summary(
     outcome: str,
     stop_reason: str,
 ) -> dict[str, Any]:
+    normalized = reduce_normalized_mission_progress(execution_state)
     nodes = []
     for node in mission.nodes:
         nodes.append(
@@ -223,14 +224,7 @@ def build_mission_summary(
         "succeeded": sorted({p for n in mission.nodes if n.status.value == "succeeded" for p in n.last_outcome.changed_files}),
         "failed": sorted({p for n in mission.nodes if n.status.value == "failed" for p in n.last_outcome.changed_files}),
     }
-    blocked_write_attempts = sorted(
-        {
-            str(path)
-            for item in validations
-            for path in list((item.get("blocked_write_paths", []) or []))
-            if str(path).strip()
-        }
-    )
+    blocked_write_attempts = list(normalized.blocked_write_attempts)
     attempted_write_paths = sorted(
         {
             str(path)
@@ -239,42 +233,30 @@ def build_mission_summary(
             if str(path).strip()
         }
     )
-    successful_write_paths = sorted(
-        {
-            str(path)
-            for item in validations
-            for path in list((item.get("changed_files", []) or []))
-            if str(path).strip()
-        }
-    )
+    successful_write_paths = list(normalized.files_touched)
     greenfield = {}
     scratchpad = execution_state.scratchpad
     if mission.mission_type.value == "greenfield_build":
-        progress = dict(execution_state.greenfield_progress or {})
-        persisted_deliverables = [str(p) for p in list(progress.get("deliverable_paths", []) or []) if str(p).strip()]
-        merged_touched = sorted(dict.fromkeys(list(files_touched) + persisted_deliverables))
-        files_touched, internal_artifacts = split_internal_paths(merged_touched)
-        user_deliverables = list(files_touched)
-        if not user_deliverables and persisted_deliverables:
-            user_deliverables, _ = split_internal_paths(persisted_deliverables)
+        internal_artifacts = list(normalized.internal_artifact_writes)
+        user_deliverables = list(normalized.deliverable_paths)
         greenfield = {
-            "chosen_project_direction": scratchpad.chosen_project_direction or (mission.mission_context or {}).get("greenfield_selection", {}).get("project_type", ""),
+            "chosen_project_direction": normalized.realized_artifact_direction,
             "selection_rationale": scratchpad.selection_rationale or (mission.mission_context or {}).get("greenfield_selection", {}).get("selection_rationale", ""),
             "project_candidates": list((mission.mission_context or {}).get("greenfield_candidates", [])),
             "user_space_deliverables": user_deliverables,
             "internal_artifacts": internal_artifacts,
             "runnable_slice": bool(user_deliverables),
-            "successful_greenfield_scaffold": bool(progress.get("successful_greenfield_scaffold")),
-            "validation_state": "proven" if bool(scratchpad.validation_proven) else "unproven",
-            "mission_completion_state": "complete" if bool(scratchpad.validation_proven and user_deliverables and scratchpad.has_runnable_entrypoint) else "partial",
-            "remaining_next_action": "" if bool(scratchpad.validation_proven) else (scratchpad.next_required_action or "validate_project"),
+            "successful_greenfield_scaffold": bool(user_deliverables),
+            "validation_state": normalized.validation_truth_status,
+            "mission_completion_state": normalized.mission_completion_state,
+            "remaining_next_action": normalized.next_recommended_action,
             "no_regression_guard": bool(user_deliverables),
             "validation_truth": {
-                "authoritative_command_evidence": bool(validation_evidence["real_validation_evidence_nodes"]),
+                "authoritative_command_evidence": normalized.validation_summary.get("evidence") == "real_command_results",
                 "self_reported_unverified": bool(validation_evidence["self_reported_unverified_nodes"]),
             },
             "write_accounting": {
-                "actual_user_space_changes": sorted(set(files_touched)),
+                "actual_user_space_changes": list(normalized.files_touched),
                 "actual_successful_writes": successful_write_paths,
                 "attempted_write_paths": attempted_write_paths,
                 "blocked_write_paths": blocked_write_attempts,
@@ -300,16 +282,22 @@ def build_mission_summary(
         },
         "nodes_executed": nodes,
         "files_inspected": sorted(set(execution_state.inspected_files)),
-        "files_touched": sorted(set(files_touched)),
-        "changed_count": len(sorted(set(files_touched))),
+        "files_touched": list(normalized.files_touched),
+        "deliverables": list(normalized.deliverable_paths),
+        "changed_count": len(normalized.files_touched),
         "evidence": execution_state.evidence_log[-40:],
         "validation_results": validations,
         "validation_timeline": validation_timeline,
         "validation_evidence": validation_evidence,
+        "validation_truth_state": normalized.validation_truth_status,
         "validation_truth_statement": (
             "Validation backed by real command evidence."
-            if validation_evidence["real_validation_evidence_nodes"]
-            else "Validation not proven by command evidence; prose/inferred claims are self-reported and non-authoritative."
+            if normalized.validation_truth_status == "proven"
+            else (
+                "Validation failed based on real command evidence."
+                if normalized.validation_truth_status == "failed"
+                else "Validation is unproven because no authoritative command evidence was captured."
+            )
         ),
         "verification_status_timeline": [
             {
@@ -322,7 +310,9 @@ def build_mission_summary(
         "failure_fingerprint_evolution": [fp for fp in execution_state.failure_fingerprint_history[-20:] if fp],
         "changed_files_by_attempt_outcome": changed_by_status,
         "greenfield_report": greenfield,
+        "realized_artifact_direction": normalized.realized_artifact_direction,
+        "terminal_state": normalized.terminal_state,
         "final_outcome": outcome,
         "stop_reason": stop_reason,
-        "blocked_reason": stop_reason if outcome == "blocked" else "",
+        "blocked_reason": normalized.blocked_reason or (stop_reason if outcome == "blocked" else ""),
     }
