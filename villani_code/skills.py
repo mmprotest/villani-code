@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from villani_code.runtime_paths import get_memory_dir
+
 import yaml
 
 
@@ -14,7 +16,7 @@ class Skill:
 
 
 def discover_skills(repo: Path) -> dict[str, Skill]:
-    roots = [repo / ".villani" / "skills"]
+    roots = [get_memory_dir(repo) / "skills"]
     skills: dict[str, Skill] = {}
     for root in roots:
         if not root.exists():

@@ -28,6 +28,7 @@ from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
+from villani_code.runtime_paths import get_artifacts_dir, get_memory_dir
 from villani_code.utils import ensure_dir
 
 
@@ -447,7 +448,7 @@ def inject_retrieval_briefing(runner: Any, messages: list[dict[str, Any]]) -> No
 
 
 def init_small_model_support(runner: Any) -> None:
-    index_path = runner.repo / ".villani_code" / "index" / "index.json"
+    index_path = get_artifacts_dir(runner.repo) / "index" / "index.json"
     if index_path.exists():
         idx = RepoIndex.load(index_path)
         if idx.needs_rebuild(runner.repo):
@@ -1036,7 +1037,7 @@ def is_no_progress_response(response: dict[str, Any]) -> bool:
 def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
     if getattr(runner, "_planning_read_only", False):
         return
-    root = runner.repo / ".villani_code" / "sessions"
+    root = get_artifacts_dir(runner.repo) / "sessions"
     ensure_dir(root)
     (root / "last.json").write_text(
         json.dumps({"id": "last", "messages": messages, "cwd": str(runner.repo), "settings": {"model": runner.model}}, indent=2),
@@ -1104,12 +1105,12 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         return
     ensure_project_memory(runner.repo)
     runner.event_callback({"type": "init_started"})
-    runner.event_callback({"type": "init_completed", "path": str(runner.repo / ".villani")})
+    runner.event_callback({"type": "init_completed", "path": str(get_memory_dir(runner.repo))})
     runner.event_callback({"type": "planning_started"})
 
     repo_map = load_repo_map(runner.repo)
     validation_steps: list[str] = []
-    val_file = runner.repo / ".villani" / "validation.json"
+    val_file = get_memory_dir(runner.repo) / "validation.json"
     if val_file.exists():
         try:
             payload = json.loads(val_file.read_text(encoding="utf-8"))
@@ -1123,7 +1124,7 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     inventory.task_id = instruction[:80] or "task"
     runner._context_governance.register_item(
         inventory,
-        ".villani/repo_map.json",
+        "runtime_memory/repo_map.json",
         "memory",
         "repo map loaded",
         len(json.dumps(repo_map)),
@@ -1132,7 +1133,7 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     )
     runner._context_governance.register_item(
         inventory,
-        ".villani/validation.json",
+        "runtime_memory/validation.json",
         "memory",
         "validation config loaded",
         sum(len(v) for v in validation_steps),

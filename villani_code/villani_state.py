@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from villani_code.runtime_paths import get_memory_dir
+
 
 @dataclass(slots=True)
 class ValidationObservation:
@@ -70,20 +72,24 @@ class WorkspaceBeliefState:
         return payload
 
 
-BELIEF_PATH = Path(".villani") / "villani_beliefs.json"
+BELIEF_PATH = Path("villani_beliefs.json")
 
 
 def save_beliefs(repo: Path, beliefs: WorkspaceBeliefState) -> Path:
-    target = repo / BELIEF_PATH
+    target = get_memory_dir(repo) / BELIEF_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(beliefs.to_snapshot(), indent=2), encoding="utf-8")
     return target
 
 
 def load_beliefs(repo: Path, objective: str) -> WorkspaceBeliefState | None:
-    target = repo / BELIEF_PATH
+    target = get_memory_dir(repo) / BELIEF_PATH
     if not target.exists():
-        return None
+        legacy = repo / ".villani" / "villani_beliefs.json"
+        if legacy.exists():
+            target = legacy
+        else:
+            return None
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

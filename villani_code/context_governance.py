@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from villani_code.runtime_paths import get_memory_dir
+
 
 class ContextInclusionReason(str, Enum):
     TASK_RELEVANCE = "task_relevance"
@@ -129,8 +131,9 @@ def _compact_lines(source_type: str, text: str, signal_tokens: tuple[str, ...]) 
 class ContextGovernanceManager:
     def __init__(self, repo: Path, budget_limit: int = 35_000):
         self.repo = repo.resolve()
-        self.path = self.repo / ".villani" / "context_state.json"
-        self.checkpoint_root = self.repo / ".villani" / "session_checkpoints"
+        memory_root = get_memory_dir(self.repo)
+        self.path = memory_root / "context_state.json"
+        self.checkpoint_root = memory_root / "session_checkpoints"
         self.budget_limit = budget_limit
 
     def load_inventory(self) -> ContextInventory:

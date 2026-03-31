@@ -18,6 +18,7 @@ from villani_code.benchmark.reporting import (
 )
 from villani_code.benchmark.runner import BenchmarkRunner
 from villani_code.plugins import PluginManager
+from villani_code.runtime_paths import get_artifacts_dir
 
 
 def register_benchmark_commands(benchmark_app: typer.Typer, console: Console) -> None:
@@ -213,7 +214,7 @@ def register_mcp_commands(mcp_app: typer.Typer, console: Console) -> None:
 
     @mcp_app.command("reset-project-choices")
     def mcp_reset_project_choices(repo: Path = typer.Option(Path("."), "--repo")) -> None:
-        approvals_file = repo.resolve() / ".villani_code" / "mcp_approvals.json"
+        approvals_file = get_artifacts_dir(repo.resolve()) / "mcp_approvals.json"
         if approvals_file.exists():
             approvals_file.unlink()
         console.print("Reset project MCP approvals")

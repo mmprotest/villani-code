@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -15,6 +16,7 @@ from villani_code.autonomy import (
     VerificationEngine,
 )
 from villani_code.checkpoints import CheckpointManager
+from villani_code.debug_recorder import DebugRecorder
 from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
@@ -35,6 +37,7 @@ from villani_code.planning import TaskMode, classify_task_mode, generate_executi
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
+from villani_code.runtime_paths import get_artifacts_dir
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
@@ -323,6 +326,10 @@ class Runner:
         villani_mode: bool = False,
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
+        state_dir: Path | None = None,
+        debug_run: bool = False,
+        debug_dir: Path | None = None,
+        debug_level: str = "standard",
     ):
         self.client = client
         self.repo = repo
@@ -349,6 +356,12 @@ class Runner:
             enabled=villani_mode, steering_objective=villani_objective
         )
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
+        self.state_dir = state_dir
+        if self.state_dir is not None:
+            os.environ["VILLANI_STATE_DIR"] = str(Path(self.state_dir).expanduser().resolve())
+        self.debug_run = debug_run
+        self.debug_dir = debug_dir
+        self.debug_level = debug_level
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
         self.permissions = PermissionEngine(
@@ -377,7 +390,7 @@ class Runner:
         self.checkpoints = CheckpointManager(self.repo)
         self.skills = discover_skills(self.repo)
         self.mcp = load_mcp_config(self.repo)
-        self.proposals = ProposalStore(self.repo / ".villani_code" / "edits")
+        self.proposals = ProposalStore(get_artifacts_dir(self.repo) / "edits")
         self.capture_next_diff_proposal = False
         self._coalescer = StreamCoalescer()
         self._live_stream_buffer = ""
@@ -416,6 +429,7 @@ class Runner:
         self.execution_profile: Literal["default", "villani_autonomous"] = "default"
         self._finalized_plan_artifact: dict[str, Any] | None = None
         self._verification_engine = VerificationEngine(self.repo)
+        self._debug_recorder = DebugRecorder(self.repo, enabled=debug_run, debug_dir=debug_dir, level=debug_level)
         if self.small_model:
             self._init_small_model_support()
 
@@ -493,7 +507,11 @@ class Runner:
             repo=self.repo,
             objective=objective,
             event_callback=self.event_callback,
+            debug_recorder=self._debug_recorder if self.debug_run else None,
         )
+        if self.debug_run:
+            self._debug_recorder.record_beliefs(summary.get("beliefs", {}), "final")
+            self._debug_recorder.finalize(exit_status="completed", stop_reason=summary.get("done_reason", ""), confidence=summary.get("beliefs", {}).get("completion_confidence"))
         text = format_villani_summary(summary)
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
         return {"response": response, "summary": summary}
@@ -548,6 +566,23 @@ class Runner:
         execution_budget: ExecutionBudget | None = None,
         orchestration_profile: Literal["default", "villani_autonomous"] = "default",
     ) -> dict[str, Any]:
+        if self.debug_run:
+            self._debug_recorder.start_run(
+                session_id=str(int(time.time() * 1000)),
+                objective=instruction,
+                meta={
+                    "model": self.model,
+                    "execution_profile": orchestration_profile,
+                    "villani_mode": self.villani_mode,
+                },
+            )
+            prior_callback = self.event_callback
+
+            def _debug_event_callback(event: dict[str, Any]) -> None:
+                self._debug_recorder.record_event(event)
+                prior_callback(event)
+
+            self.event_callback = _debug_event_callback
         messages = messages or build_initial_messages(self.repo, instruction)
         self.execution_profile = orchestration_profile
         villani_autonomous = self.is_villani_autonomous_execution()
@@ -851,6 +886,8 @@ class Runner:
             if post:
                 response.setdefault("content", []).append({"type": "text", "text": post})
             self._save_session_snapshot(messages)
+            if self.debug_run:
+                self._debug_recorder.finalize(exit_status="completed" if completed else "stopped", stop_reason=reason)
             return {
                 "response": response,
                 "messages": messages,

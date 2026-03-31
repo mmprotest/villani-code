@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from villani_code.runtime_paths import get_transcripts_dir
 from villani_code.utils import ensure_dir, now_stamp
 
 
@@ -19,7 +20,7 @@ def maybe_redact_payload(payload: dict[str, Any], redact: bool) -> dict[str, Any
 
 
 def save_transcript(repo: Path, transcript: dict[str, Any], redact: bool = False) -> Path:
-    out_dir = repo / ".villani_code" / "transcripts"
+    out_dir = get_transcripts_dir(repo)
     ensure_dir(out_dir)
     path = out_dir / f"{now_stamp()}.json"
     to_write = dict(transcript)
