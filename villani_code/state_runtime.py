@@ -29,6 +29,36 @@ from villani_code.utils import ensure_dir
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
 
 
+def _runner_is_villani_autonomous(runner: Any) -> bool:
+    method = getattr(runner, "is_villani_autonomous_execution", None)
+    if callable(method):
+        return bool(method())
+    execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
+    return execution_profile == "villani_autonomous"
+
+
+def _runner_uses_legacy_villani_constraints(runner: Any) -> bool:
+    method = getattr(runner, "uses_legacy_villani_constraints", None)
+    if callable(method):
+        return bool(method())
+    return bool(getattr(runner, "villani_mode", False)) and not _runner_is_villani_autonomous(runner)
+
+
+def _runner_uses_constrained_tooling_policy(runner: Any) -> bool:
+    method = getattr(runner, "uses_constrained_tooling_policy", None)
+    if callable(method):
+        return bool(method())
+    return (
+        bool(getattr(runner, "small_model", False))
+        or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False))
+        or _runner_uses_legacy_villani_constraints(runner)
+    )
+
+
+def _runner_uses_auto_plan_approval_profile(runner: Any) -> bool:
+    return _runner_uses_legacy_villani_constraints(runner)
+
+
 def _normalize_repo_path(value: str) -> str:
     return str(value or "").replace("\\", "/").lstrip("./")
 
@@ -477,14 +507,7 @@ def _is_strongly_adjacent_path(candidate: str, locked_paths: set[str]) -> bool:
 
 
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
-    constrained_policy = getattr(runner, "uses_constrained_tooling_policy", None)
-    if callable(constrained_policy):
-        constrained = bool(constrained_policy())
-    else:
-        execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
-        villani_mode = bool(getattr(runner, "villani_mode", False))
-        legacy_villani = villani_mode and execution_profile != "villani_autonomous"
-        constrained = bool(getattr(runner, "small_model", False)) or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False)) or legacy_villani
+    constrained = _runner_uses_constrained_tooling_policy(runner)
     if not constrained:
         return None
     if tool_name in {"Write", "Patch"}:
@@ -1144,7 +1167,7 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         update_session_state(runner.repo, session)
         return
 
-    if runner.villani_mode:
+    if _runner_uses_auto_plan_approval_profile(runner):
         runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
         update_session_state(runner.repo, session)
         return

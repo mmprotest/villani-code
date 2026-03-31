@@ -14,6 +14,36 @@ from villani_code.tools import execute_tool
 _FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
 
 
+def _runner_is_villani_autonomous(runner: Any) -> bool:
+    method = getattr(runner, "is_villani_autonomous_execution", None)
+    if callable(method):
+        return bool(method())
+    execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
+    return execution_profile == "villani_autonomous"
+
+
+def _runner_uses_legacy_villani_constraints(runner: Any) -> bool:
+    method = getattr(runner, "uses_legacy_villani_constraints", None)
+    if callable(method):
+        return bool(method())
+    return bool(getattr(runner, "villani_mode", False)) and not _runner_is_villani_autonomous(runner)
+
+
+def _runner_uses_constrained_tooling_policy(runner: Any) -> bool:
+    method = getattr(runner, "uses_constrained_tooling_policy", None)
+    if callable(method):
+        return bool(method())
+    return (
+        bool(getattr(runner, "small_model", False))
+        or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False))
+        or _runner_uses_legacy_villani_constraints(runner)
+    )
+
+
+def _runner_uses_auto_approval_profile(runner: Any) -> bool:
+    return _runner_uses_legacy_villani_constraints(runner)
+
+
 def _extract_fenced_code(text: str) -> str | None:
     match = _FENCED_BLOCK_RE.search(text)
     if not match:
@@ -216,17 +246,8 @@ def execute_tool_with_policy(
     tool_use_id: str,
     message_count: int,
 ) -> dict[str, Any]:
-    constrained_policy = getattr(runner, "uses_constrained_tooling_policy", None)
-    if callable(constrained_policy):
-        constrained_tooling_policy = bool(constrained_policy())
-    else:
-        execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
-        villani_mode = bool(getattr(runner, "villani_mode", False))
-        legacy_villani = villani_mode and execution_profile != "villani_autonomous"
-        constrained_tooling_policy = bool(getattr(runner, "small_model", False)) or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False)) or legacy_villani
-
-    autonomous_profile = str(getattr(runner, "execution_profile", "default") or "default") == "villani_autonomous"
-    legacy_villani_constraints = bool(getattr(runner, "villani_mode", False)) and not autonomous_profile
+    constrained_tooling_policy = _runner_uses_constrained_tooling_policy(runner)
+    legacy_villani_constraints = _runner_uses_legacy_villani_constraints(runner)
 
     hook_pre = runner.hooks.run_event(
         "PreToolUse",
@@ -278,7 +299,7 @@ def execute_tool_with_policy(
     if policy.decision == Decision.DENY:
         return {"content": "Denied by permission policy", "is_error": True}
     if policy.decision == Decision.ASK:
-        if runner.villani_mode:
+        if _runner_uses_auto_approval_profile(runner):
             runner.event_callback(
                 {
                     "type": "approval_auto_resolved",
