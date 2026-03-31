@@ -9,39 +9,26 @@ from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targe
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.tools import execute_tool
+from villani_code.execution_policy import (
+    is_legacy_villani,
+    uses_constrained_tooling_policy,
+    uses_villani_auto_approval_profile,
+)
 
 
 _FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
 
 
-def _runner_is_villani_autonomous(runner: Any) -> bool:
-    method = getattr(runner, "is_villani_autonomous_execution", None)
-    if callable(method):
-        return bool(method())
-    execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
-    return execution_profile == "villani_autonomous"
-
-
 def _runner_uses_legacy_villani_constraints(runner: Any) -> bool:
-    method = getattr(runner, "uses_legacy_villani_constraints", None)
-    if callable(method):
-        return bool(method())
-    return bool(getattr(runner, "villani_mode", False)) and not _runner_is_villani_autonomous(runner)
+    return is_legacy_villani(runner)
 
 
 def _runner_uses_constrained_tooling_policy(runner: Any) -> bool:
-    method = getattr(runner, "uses_constrained_tooling_policy", None)
-    if callable(method):
-        return bool(method())
-    return (
-        bool(getattr(runner, "small_model", False))
-        or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False))
-        or _runner_uses_legacy_villani_constraints(runner)
-    )
+    return uses_constrained_tooling_policy(runner)
 
 
 def _runner_uses_auto_approval_profile(runner: Any) -> bool:
-    return _runner_uses_legacy_villani_constraints(runner)
+    return uses_villani_auto_approval_profile(runner)
 
 
 def _extract_fenced_code(text: str) -> str | None:

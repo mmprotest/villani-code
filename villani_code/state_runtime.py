@@ -17,6 +17,12 @@ from villani_code.planning import TaskMode, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
 from villani_code.tools import execute_tool
+from villani_code.execution_policy import (
+    is_legacy_villani,
+    uses_constrained_runtime_policy,
+    uses_constrained_tooling_policy,
+    uses_villani_auto_approval_profile,
+)
 from villani_code.validation_loop import run_validation
 from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
@@ -29,34 +35,20 @@ from villani_code.utils import ensure_dir
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
 
 
-def _runner_is_villani_autonomous(runner: Any) -> bool:
-    method = getattr(runner, "is_villani_autonomous_execution", None)
-    if callable(method):
-        return bool(method())
-    execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
-    return execution_profile == "villani_autonomous"
-
-
 def _runner_uses_legacy_villani_constraints(runner: Any) -> bool:
-    method = getattr(runner, "uses_legacy_villani_constraints", None)
-    if callable(method):
-        return bool(method())
-    return bool(getattr(runner, "villani_mode", False)) and not _runner_is_villani_autonomous(runner)
+    return is_legacy_villani(runner)
 
 
 def _runner_uses_constrained_tooling_policy(runner: Any) -> bool:
-    method = getattr(runner, "uses_constrained_tooling_policy", None)
-    if callable(method):
-        return bool(method())
-    return (
-        bool(getattr(runner, "small_model", False))
-        or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False))
-        or _runner_uses_legacy_villani_constraints(runner)
-    )
+    return uses_constrained_tooling_policy(runner)
+
+
+def _runner_uses_constrained_runtime_policy(runner: Any) -> bool:
+    return uses_constrained_runtime_policy(runner)
 
 
 def _runner_uses_auto_plan_approval_profile(runner: Any) -> bool:
-    return _runner_uses_legacy_villani_constraints(runner)
+    return uses_villani_auto_approval_profile(runner)
 
 
 def _normalize_repo_path(value: str) -> str:
