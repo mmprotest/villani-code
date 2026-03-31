@@ -19,6 +19,13 @@ from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
+from villani_code.execution_policy import (
+    is_legacy_villani,
+    is_villani_autonomous,
+    uses_constrained_runtime_policy,
+    uses_constrained_tooling_policy,
+    uses_villani_auto_approval_profile,
+)
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
@@ -413,17 +420,22 @@ class Runner:
             self._init_small_model_support()
 
     def is_villani_autonomous_execution(self) -> bool:
-        return self.execution_profile == "villani_autonomous"
+        return is_villani_autonomous(self)
+
+    def is_legacy_villani(self) -> bool:
+        return is_legacy_villani(self)
 
     def uses_legacy_villani_constraints(self) -> bool:
-        return self.villani_mode and not self.is_villani_autonomous_execution()
+        return self.is_legacy_villani()
 
     def uses_constrained_tooling_policy(self) -> bool:
-        return (
-            self.small_model
-            or self.benchmark_config.enabled
-            or self.uses_legacy_villani_constraints()
-        )
+        return uses_constrained_tooling_policy(self)
+
+    def uses_constrained_runtime_policy(self) -> bool:
+        return uses_constrained_runtime_policy(self)
+
+    def uses_villani_auto_approval_profile(self) -> bool:
+        return uses_villani_auto_approval_profile(self)
 
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
@@ -552,7 +564,7 @@ class Runner:
         initial_read_enforced = False
         pre_edit_failure_evidence = None
         diagnosis_confidence = "weak"
-        if (self.small_model or self.villani_mode or self.benchmark_config.enabled) and not villani_autonomous:
+        if self.uses_constrained_runtime_policy() and not villani_autonomous:
             try:
                 from villani_code import state_runtime
 
@@ -762,7 +774,7 @@ class Runner:
             benchmark_config=self.benchmark_config,
             task_mode=self._task_mode,
         )
-        if (self.small_model or self.villani_mode or self.benchmark_config.enabled) and not villani_autonomous:
+        if self.uses_constrained_runtime_policy() and not villani_autonomous:
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
             messages.append(
                 {
