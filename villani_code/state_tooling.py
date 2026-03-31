@@ -216,6 +216,18 @@ def execute_tool_with_policy(
     tool_use_id: str,
     message_count: int,
 ) -> dict[str, Any]:
+    constrained_policy = getattr(runner, "uses_constrained_tooling_policy", None)
+    if callable(constrained_policy):
+        constrained_tooling_policy = bool(constrained_policy())
+    else:
+        execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
+        villani_mode = bool(getattr(runner, "villani_mode", False))
+        legacy_villani = villani_mode and execution_profile != "villani_autonomous"
+        constrained_tooling_policy = bool(getattr(runner, "small_model", False)) or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False)) or legacy_villani
+
+    autonomous_profile = str(getattr(runner, "execution_profile", "default") or "default") == "villani_autonomous"
+    legacy_villani_constraints = bool(getattr(runner, "villani_mode", False)) and not autonomous_profile
+
     hook_pre = runner.hooks.run_event(
         "PreToolUse",
         {"event": "PreToolUse", "tool": tool_name, "input": tool_input},
@@ -247,7 +259,7 @@ def execute_tool_with_policy(
             if not any(command.startswith(prefix) for prefix in readonly_prefixes):
                 return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
-    if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
+    if constrained_tooling_policy:
         policy_error = runner._small_model_tool_guard(tool_name, tool_input)
         if policy_error:
             return {"content": policy_error, "is_error": True}
@@ -314,7 +326,7 @@ def execute_tool_with_policy(
         )
         return {"content": correction, "is_error": True}
 
-    if runner.villani_mode and tool_name in {"Write", "Patch"}:
+    if legacy_villani_constraints and tool_name in {"Write", "Patch"}:
         target = str(tool_input.get("file_path", ""))
         if target:
             classification = classify_repo_path(target)

@@ -258,6 +258,80 @@ def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Pat
     assert runner._before_contents["src/a.py"] == "x=0\n"
 
 
+def test_autonomous_villani_bypasses_legacy_low_authority_write_filter(tmp_path: Path) -> None:
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "villani_autonomous"
+
+    result = runner._execute_tool_with_policy(
+        "Write",
+        {"file_path": "tests/test_new.py", "content": "x=1\n", "mkdirs": True},
+        "tool-1",
+        0,
+    )
+
+    assert result["is_error"] is False
+
+
+def test_legacy_villani_keeps_low_authority_write_filter(tmp_path: Path) -> None:
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "default"
+
+    result = runner._execute_tool_with_policy(
+        "Write",
+        {"file_path": ".villani_code/notes.txt", "content": "x=1\n", "mkdirs": True},
+        "tool-2",
+        0,
+    )
+
+    assert result["is_error"] is True
+    assert "Skipped low-authority path" in str(result["content"])
+
+
+def test_autonomous_villani_preserves_workspace_boundary_block(tmp_path: Path) -> None:
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "villani_autonomous"
+
+    result = runner._execute_tool_with_policy(
+        "Read",
+        {"file_path": "../outside.txt"},
+        "tool-3",
+        0,
+    )
+
+    assert result["is_error"] is True
+    assert "Path escapes repository" in str(result["content"])
+
+
+def test_autonomous_villani_keeps_change_tracking_for_mutations(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "tracked.py").write_text("x=0\n", encoding="utf-8")
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "villani_autonomous"
+
+    result = runner._execute_tool_with_policy(
+        "Write",
+        {"file_path": "src/tracked.py", "content": "x=1\n", "mkdirs": True},
+        "tool-4",
+        0,
+    )
+
+    assert result["is_error"] is False
+    assert "src/tracked.py" in runner._intended_targets
+    assert runner._before_contents["src/tracked.py"] == "x=0\n"
+
+
+def test_small_model_scope_lock_does_not_apply_to_autonomous_villani_by_default(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=0\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("y=0\n", encoding="utf-8")
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True, small_model=False)
+    runner.execution_profile = "villani_autonomous"
+    runner._intended_targets = {"src/a.py"}
+
+    err = runner._small_model_tool_guard("Patch", {"file_path": "src/b.py", "patch": "x"})
+    assert err is None
+
+
 def test_patch_sanity_gate_catches_broken_python_edit(tmp_path: Path, monkeypatch) -> None:
     broken = tmp_path / "broken.py"
     broken.write_text("def x(:\n", encoding="utf-8")
