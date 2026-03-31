@@ -233,8 +233,8 @@ def execute_tool_with_policy(
     tool_use_id: str,
     message_count: int,
 ) -> dict[str, Any]:
-    constrained_tooling_policy = _runner_uses_constrained_tooling_policy(runner)
-    legacy_villani_constraints = _runner_uses_legacy_villani_constraints(runner)
+    uses_constrained_tooling_policy_profile = _runner_uses_constrained_tooling_policy(runner)
+    uses_legacy_villani_constraints = _runner_uses_legacy_villani_constraints(runner)
 
     hook_pre = runner.hooks.run_event(
         "PreToolUse",
@@ -267,7 +267,7 @@ def execute_tool_with_policy(
             if not any(command.startswith(prefix) for prefix in readonly_prefixes):
                 return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
-    if constrained_tooling_policy:
+    if uses_constrained_tooling_policy_profile:
         policy_error = runner._small_model_tool_guard(tool_name, tool_input)
         if policy_error:
             return {"content": policy_error, "is_error": True}
@@ -334,7 +334,7 @@ def execute_tool_with_policy(
         )
         return {"content": correction, "is_error": True}
 
-    if legacy_villani_constraints and tool_name in {"Write", "Patch"}:
+    if uses_legacy_villani_constraints and tool_name in {"Write", "Patch"}:
         target = str(tool_input.get("file_path", ""))
         if target:
             classification = classify_repo_path(target)

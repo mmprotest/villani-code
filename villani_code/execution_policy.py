@@ -8,7 +8,7 @@ AUTONOMOUS_VILLANI_PROFILE = "villani_autonomous"
 
 def is_villani_autonomous(runner: Any) -> bool:
     execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
-    return execution_profile == AUTONOMOUS_VILLANI_PROFILE
+    return bool(getattr(runner, "villani_mode", False)) and execution_profile == AUTONOMOUS_VILLANI_PROFILE
 
 
 def is_legacy_villani(runner: Any) -> bool:
