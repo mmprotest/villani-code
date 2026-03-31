@@ -49,6 +49,13 @@ def test_execution_policy_helpers_semantic_split() -> None:
     assert uses_constrained_runtime_policy(non_villani) is False
     assert uses_villani_auto_approval_profile(non_villani) is False
 
+    non_villani_autonomous_profile = _runner_like(villani_mode=False, execution_profile="villani_autonomous")
+    assert is_villani_autonomous(non_villani_autonomous_profile) is False
+    assert is_legacy_villani(non_villani_autonomous_profile) is False
+    assert uses_constrained_tooling_policy(non_villani_autonomous_profile) is False
+    assert uses_constrained_runtime_policy(non_villani_autonomous_profile) is False
+    assert uses_villani_auto_approval_profile(non_villani_autonomous_profile) is False
+
 
 def test_execution_policy_helpers_keep_small_model_and_benchmark_constraints() -> None:
     small_model = _runner_like(villani_mode=False, execution_profile="default", small_model=True)

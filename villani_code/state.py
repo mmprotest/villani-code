@@ -564,7 +564,7 @@ class Runner:
         initial_read_enforced = False
         pre_edit_failure_evidence = None
         diagnosis_confidence = "weak"
-        if self.uses_constrained_runtime_policy() and not villani_autonomous:
+        if self.uses_constrained_runtime_policy():
             try:
                 from villani_code import state_runtime
 
@@ -770,11 +770,11 @@ class Runner:
         system = build_system_blocks(
             self.repo,
             repo_map=self._repo_map if self.small_model else "",
-            villani_mode=self.villani_mode and not villani_autonomous,
+            villani_mode=self.uses_legacy_villani_constraints(),
             benchmark_config=self.benchmark_config,
             task_mode=self._task_mode,
         )
-        if self.uses_constrained_runtime_policy() and not villani_autonomous:
+        if self.uses_constrained_runtime_policy():
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
             messages.append(
                 {

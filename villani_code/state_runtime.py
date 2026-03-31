@@ -18,7 +18,6 @@ from villani_code.project_memory import SessionState, ensure_project_memory, loa
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
 from villani_code.tools import execute_tool
 from villani_code.execution_policy import (
-    is_legacy_villani,
     uses_constrained_runtime_policy,
     uses_constrained_tooling_policy,
     uses_villani_auto_approval_profile,
@@ -33,10 +32,6 @@ from villani_code.utils import ensure_dir
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
-
-
-def _runner_uses_legacy_villani_constraints(runner: Any) -> bool:
-    return is_legacy_villani(runner)
 
 
 def _runner_uses_constrained_tooling_policy(runner: Any) -> bool:
