@@ -272,6 +272,45 @@ def test_autonomous_villani_bypasses_legacy_low_authority_write_filter(tmp_path:
     assert result["is_error"] is False
 
 
+def test_execution_profile_helpers_distinguish_autonomous_and_legacy(tmp_path: Path) -> None:
+    autonomous = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    autonomous.execution_profile = "villani_autonomous"
+    assert autonomous.is_villani_autonomous_execution() is True
+    assert autonomous.uses_legacy_villani_constraints() is False
+    assert autonomous.uses_constrained_tooling_policy() is False
+
+    legacy = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    legacy.execution_profile = "default"
+    assert legacy.is_villani_autonomous_execution() is False
+    assert legacy.uses_legacy_villani_constraints() is True
+    assert legacy.uses_constrained_tooling_policy() is True
+
+
+def test_autonomous_villani_requires_approval_for_ask_policy(tmp_path: Path) -> None:
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "villani_autonomous"
+    events: list[dict] = []
+    runner.event_callback = events.append
+    asked = {"count": 0}
+
+    def deny(_name: str, _payload: dict) -> bool:
+        asked["count"] += 1
+        return False
+
+    runner.approval_callback = deny
+    result = runner._execute_tool_with_policy(
+        "Write",
+        {"file_path": "src/needs_approval.py", "content": "x=1\n", "mkdirs": True},
+        "tool-ask-autonomous",
+        0,
+    )
+
+    assert result["is_error"] is True
+    assert asked["count"] == 1
+    assert any(event.get("type") == "approval_required" for event in events)
+    assert all(event.get("type") != "approval_auto_resolved" for event in events)
+
+
 def test_legacy_villani_keeps_low_authority_write_filter(tmp_path: Path) -> None:
     runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
     runner.execution_profile = "default"
@@ -285,6 +324,50 @@ def test_legacy_villani_keeps_low_authority_write_filter(tmp_path: Path) -> None
 
     assert result["is_error"] is True
     assert "Skipped low-authority path" in str(result["content"])
+
+
+def test_legacy_villani_auto_resolves_approval_for_ask_policy(tmp_path: Path) -> None:
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "default"
+    events: list[dict] = []
+    runner.event_callback = events.append
+
+    def deny_if_called(_name: str, _payload: dict) -> bool:
+        raise AssertionError("legacy villani approval callback should not be called")
+
+    runner.approval_callback = deny_if_called
+    result = runner._execute_tool_with_policy(
+        "Write",
+        {"file_path": "src/legacy_auto_approve.py", "content": "x=1\n", "mkdirs": True},
+        "tool-ask-legacy",
+        0,
+    )
+
+    assert result["is_error"] is False
+    assert any(event.get("type") == "approval_auto_resolved" for event in events)
+
+
+def test_non_villani_requires_approval_for_ask_policy(tmp_path: Path) -> None:
+    runner = Runner(client=_Client(), repo=tmp_path, model="m", stream=False, villani_mode=False)
+    events: list[dict] = []
+    runner.event_callback = events.append
+    asked = {"count": 0}
+
+    def deny(_name: str, _payload: dict) -> bool:
+        asked["count"] += 1
+        return False
+
+    runner.approval_callback = deny
+    result = runner._execute_tool_with_policy(
+        "Write",
+        {"file_path": "src/non_villani.py", "content": "x=1\n", "mkdirs": True},
+        "tool-ask-non-villani",
+        0,
+    )
+
+    assert result["is_error"] is True
+    assert asked["count"] == 1
+    assert any(event.get("type") == "approval_required" for event in events)
 
 
 def test_autonomous_villani_preserves_workspace_boundary_block(tmp_path: Path) -> None:

@@ -54,6 +54,22 @@ def test_non_villani_high_risk_plan_rejection_path(monkeypatch: pytest.MonkeyPat
     assert asked["count"] == 1
 
 
+def test_autonomous_villani_high_risk_plan_requires_approval(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=True)
+    runner.execution_profile = "villani_autonomous"
+    asked = {"count": 0}
+
+    def reject(_name: str, _payload: dict) -> bool:
+        asked["count"] += 1
+        return False
+
+    runner.approval_callback = reject
+    with pytest.raises(RuntimeError, match="Execution plan rejected"):
+        state_runtime.ensure_project_memory_and_plan(runner, "delete files and rewrite history")
+    assert asked["count"] == 1
+
+
 class _RetrieverHit:
     def __init__(self, path: str, reason: str) -> None:
         self.path = path
