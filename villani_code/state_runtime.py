@@ -477,7 +477,14 @@ def _is_strongly_adjacent_path(candidate: str, locked_paths: set[str]) -> bool:
 
 
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
-    constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
+    constrained_policy = getattr(runner, "uses_constrained_tooling_policy", None)
+    if callable(constrained_policy):
+        constrained = bool(constrained_policy())
+    else:
+        execution_profile = str(getattr(runner, "execution_profile", "default") or "default")
+        villani_mode = bool(getattr(runner, "villani_mode", False))
+        legacy_villani = villani_mode and execution_profile != "villani_autonomous"
+        constrained = bool(getattr(runner, "small_model", False)) or bool(getattr(getattr(runner, "benchmark_config", None), "enabled", False)) or legacy_villani
     if not constrained:
         return None
     if tool_name in {"Write", "Patch"}:

@@ -406,10 +406,24 @@ class Runner:
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
+        self.execution_profile: Literal["default", "villani_autonomous"] = "default"
         self._finalized_plan_artifact: dict[str, Any] | None = None
         self._verification_engine = VerificationEngine(self.repo)
         if self.small_model:
             self._init_small_model_support()
+
+    def is_villani_autonomous_execution(self) -> bool:
+        return self.execution_profile == "villani_autonomous"
+
+    def uses_legacy_villani_constraints(self) -> bool:
+        return self.villani_mode and not self.is_villani_autonomous_execution()
+
+    def uses_constrained_tooling_policy(self) -> bool:
+        return (
+            self.small_model
+            or self.benchmark_config.enabled
+            or self.uses_legacy_villani_constraints()
+        )
 
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
@@ -523,7 +537,8 @@ class Runner:
         orchestration_profile: Literal["default", "villani_autonomous"] = "default",
     ) -> dict[str, Any]:
         messages = messages or build_initial_messages(self.repo, instruction)
-        villani_autonomous = orchestration_profile == "villani_autonomous"
+        self.execution_profile = orchestration_profile
+        villani_autonomous = self.is_villani_autonomous_execution()
         if self._runtime_mode == "planning":
             self._task_mode = TaskMode.INSPECT_AND_PLAN
         elif villani_autonomous:
@@ -1011,7 +1026,7 @@ class Runner:
                             return _finish_bounded(
                                 response, reason, reason == "completed"
                             )
-                    constrained = self.small_model or self.benchmark_config.enabled or villani_autonomous
+                    constrained = self.uses_constrained_tooling_policy()
                     if constrained and self._recovery_count == 0:
                         messages.append(
                             {
