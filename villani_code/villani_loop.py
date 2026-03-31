@@ -113,10 +113,13 @@ def run_villani_loop(
     objective: str,
     event_callback: Any | None = None,
     config: VillaniLoopConfig | None = None,
+    debug_recorder: Any | None = None,
 ) -> dict[str, Any]:
     config = config or VillaniLoopConfig()
     event_callback = event_callback or (lambda _e: None)
     beliefs = load_beliefs(repo, objective) or observe_workspace(repo, objective)
+    if debug_recorder:
+        debug_recorder.record_beliefs(beliefs.to_snapshot(), "initial")
 
     iterations = 0
     stop_reason = "Budget exhausted."
@@ -132,6 +135,8 @@ def run_villani_loop(
         candidates = propose_actions(beliefs)
         action = choose_best_action(candidates)
 
+        if debug_recorder:
+            debug_recorder.record_action({"step_index": iterations, "proposed_actions": [asdict(c) for c in candidates], "chosen_action": asdict(action), "rationale": action.rationale, "expected_evidence": list(action.expected_evidence), "confidence": action.confidence, "priority": action.priority})
         loop_signals = detect_loop_signals(beliefs)
         if loop_signals:
             beliefs.repeated_patterns = loop_signals
@@ -166,6 +171,8 @@ def run_villani_loop(
         summary = _result_summary(action, run_result, beliefs)
         beliefs.add_action_result(summary)
         save_beliefs(repo, beliefs)
+        if debug_recorder:
+            debug_recorder.record_beliefs(beliefs.to_snapshot(), "step", step_index=iterations)
 
     final = {
         "done_reason": stop_reason,

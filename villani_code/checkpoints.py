@@ -5,6 +5,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from villani_code.runtime_paths import get_checkpoints_dir
 from villani_code.utils import ensure_dir, now_stamp
 
 
@@ -18,7 +19,7 @@ class Checkpoint:
 class CheckpointManager:
     def __init__(self, repo: Path):
         self.repo = repo.resolve()
-        self.root = self.repo / ".villani_code" / "checkpoints"
+        self.root = get_checkpoints_dir(self.repo)
         ensure_dir(self.root)
 
     def create(self, files: list[Path], message_index: int) -> Checkpoint:

@@ -89,7 +89,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     return bool(getattr(settings, "villani_mode", False))
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None) -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, state_dir: Optional[Path] = None, debug_run: bool = False, debug_dir: Optional[Path] = None, debug_level: Literal["standard", "full"] = "standard") -> Runner:
     resolved_repo = repo.resolve()
     try:
         ensure_runtime_dependencies_not_shadowed(resolved_repo)
@@ -110,7 +110,7 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
         except json.JSONDecodeError:
             thinking_obj = thinking
     benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json) if benchmark_runtime_json else None
-    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config)
+    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, state_dir=state_dir, debug_run=debug_run, debug_dir=debug_dir, debug_level=debug_level)
 
 
 def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None) -> None:
@@ -187,8 +187,12 @@ def run(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
+    state_dir: Optional[Path] = typer.Option(None, "--state-dir"),
+    debug_run: bool = typer.Option(False, "--debug-run"),
+    debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
+    debug_level: Literal["standard", "full"] = typer.Option("standard", "--debug-level"),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json)
+    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, state_dir=state_dir, debug_run=debug_run or os.environ.get("VILLANI_DEBUG","0") in {"1","true","TRUE"}, debug_dir=debug_dir or (Path(os.environ["VILLANI_DEBUG_DIR"]).expanduser() if os.environ.get("VILLANI_DEBUG_DIR") else None), debug_level=debug_level if not os.environ.get("VILLANI_DEBUG_LEVEL") else str(os.environ.get("VILLANI_DEBUG_LEVEL")))
     result = runner.run(instruction)
     _print_response_text_blocks(result)
 
@@ -247,7 +251,7 @@ def init(
     from villani_code.project_memory import init_project_memory
 
     files = init_project_memory(repo.resolve())
-    console.print("Initialized .villani project memory:")
+    console.print("Initialized runtime project memory:")
     for key, path in files.items():
         console.print(f"- {key}: {path}")
 

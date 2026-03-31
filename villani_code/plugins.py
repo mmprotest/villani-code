@@ -4,11 +4,13 @@ import json
 import shutil
 from pathlib import Path
 
+from villani_code.runtime_paths import get_memory_dir
+
 
 class PluginManager:
     def __init__(self, repo: Path):
         self.repo = repo
-        self.root = repo / ".villani" / "plugins"
+        self.root = get_memory_dir(repo) / "plugins"
         self.root.mkdir(parents=True, exist_ok=True)
 
     def install(self, src: Path) -> str:

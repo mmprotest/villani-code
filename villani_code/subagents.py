@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
+from villani_code.runtime_paths import get_memory_dir
 from typing import Any
 
 import yaml
@@ -25,7 +27,7 @@ def load_subagents(repo: Path) -> dict[str, SubagentConfig]:
         "Plan": SubagentConfig(name="Plan", description="Planning only", denied_tools=["Write", "Patch", "Bash"]),
         "General": SubagentConfig(name="General", description="General purpose"),
     }
-    custom_dir = repo / ".villani" / "agents"
+    custom_dir = get_memory_dir(repo) / "agents"
     if custom_dir.exists():
         for p in custom_dir.iterdir():
             if p.suffix not in {".json", ".yaml", ".yml"}:

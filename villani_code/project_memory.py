@@ -7,6 +7,8 @@ from typing import Any
 
 VILLANI_DIR = ".villani"
 
+from villani_code.runtime_paths import get_memory_dir
+
 LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "python": (".py",),
     "javascript": (".js", ".jsx"),
@@ -362,7 +364,7 @@ def scan_repo(repo: Path) -> tuple[RepoMap, ValidationConfig, ProjectRules]:
 
 
 def init_project_memory(repo: Path) -> dict[str, Path]:
-    root = repo / VILLANI_DIR
+    root = get_memory_dir(repo)
     root.mkdir(parents=True, exist_ok=True)
 
     repo_map, validation, rules = scan_repo(repo)
@@ -381,7 +383,7 @@ def init_project_memory(repo: Path) -> dict[str, Path]:
 
 
 def ensure_project_memory(repo: Path) -> dict[str, Path]:
-    root = repo / VILLANI_DIR
+    root = get_memory_dir(repo)
     required = [root / "project_rules.md", root / "validation.json", root / "repo_map.json", root / "session_state.json"]
     if any(not p.exists() for p in required):
         return init_project_memory(repo)
@@ -389,20 +391,28 @@ def ensure_project_memory(repo: Path) -> dict[str, Path]:
 
 
 def load_repo_map(repo: Path) -> dict[str, Any]:
-    path = repo / VILLANI_DIR / "repo_map.json"
+    path = get_memory_dir(repo) / "repo_map.json"
+    if not path.exists():
+        legacy = repo / ".villani" / "repo_map.json"
+        if legacy.exists():
+            path = legacy
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def load_validation_config(repo: Path) -> ValidationConfig:
-    path = repo / VILLANI_DIR / "validation.json"
+    path = get_memory_dir(repo) / "validation.json"
+    if not path.exists():
+        legacy = repo / ".villani" / "validation.json"
+        if legacy.exists():
+            path = legacy
     if not path.exists():
         return ValidationConfig(steps=[])
     return ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
 def update_session_state(repo: Path, state: SessionState) -> None:
-    path = repo / VILLANI_DIR / "session_state.json"
+    path = get_memory_dir(repo) / "session_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")

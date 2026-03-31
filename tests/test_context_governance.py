@@ -7,6 +7,7 @@ from villani_code.context_governance import (
     ContextInclusionReason,
     ContextInventory,
 )
+from villani_code.runtime_paths import get_memory_dir
 
 
 def test_active_context_inventory_and_pruning(tmp_path: Path) -> None:
@@ -36,7 +37,7 @@ def test_stale_detection_checkpoint_and_reset(tmp_path: Path) -> None:
     stale = manager.detect_stale_context(inventory, "docs_update_safe", 2)
     assert stale
     checkpoint = manager.create_checkpoint(inventory, "task", ["handoff"])
-    payload = (tmp_path / ".villani" / "session_checkpoints" / f"{checkpoint.checkpoint_id}.json").read_text(encoding="utf-8")
+    payload = (get_memory_dir(tmp_path) / "session_checkpoints" / f"{checkpoint.checkpoint_id}.json").read_text(encoding="utf-8")
     assert "transcript" not in payload.lower()
     restored = manager.reset_from_checkpoint(checkpoint.checkpoint_id)
     assert restored.checkpoint_id == checkpoint.checkpoint_id
