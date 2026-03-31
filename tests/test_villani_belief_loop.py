@@ -126,7 +126,7 @@ def test_run_villani_mode_routes_to_new_controller(tmp_path: Path, monkeypatch) 
 
     called = {"v": False}
 
-    def fake_loop(*, runner, repo, objective, event_callback):
+    def fake_loop(*, runner, repo, objective, event_callback, debug_recorder=None):
         called["v"] = True
         return {"done_reason": "ok", "iterations": 1, "beliefs": {"completion_confidence": 1.0, "likely_deliverables": [], "unresolved_critical_issues": []}}
 

@@ -124,6 +124,13 @@ def update_beliefs(existing: WorkspaceBeliefState, observed: WorkspaceBeliefStat
     )[-12:]
     observed.repeated_action_kinds = dict(existing.repeated_action_kinds)
     observed.repeated_failure_signatures = dict(existing.repeated_failure_signatures)
+    observed.last_validation_attempted = existing.last_validation_attempted
+    observed.last_validation_passed = existing.last_validation_passed
+    observed.last_validation_failed = existing.last_validation_failed
+    observed.last_validation_commands = list(existing.last_validation_commands)
+    observed.last_failure_signature = existing.last_failure_signature
+    observed.last_artifacts_created = list(existing.last_artifacts_created)
+    observed.last_repair_brief = dict(existing.last_repair_brief)
     if observed.known_failures:
         observed.known_failures = observed.known_failures[:16]
     if observed.validation_observations:

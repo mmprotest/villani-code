@@ -54,6 +54,13 @@ class WorkspaceBeliefState:
     materially_satisfied: bool = False
     unresolved_critical_issues: list[str] = field(default_factory=list)
     action_history: list[ActionResultSummary] = field(default_factory=list)
+    last_validation_attempted: bool = False
+    last_validation_passed: bool = False
+    last_validation_failed: bool = False
+    last_validation_commands: list[str] = field(default_factory=list)
+    last_failure_signature: str = ""
+    last_artifacts_created: list[str] = field(default_factory=list)
+    last_repair_brief: dict[str, Any] = field(default_factory=dict)
 
     def add_action_result(self, result: ActionResultSummary) -> None:
         self.last_action_result = result
@@ -143,6 +150,13 @@ def load_beliefs(repo: Path, objective: str) -> WorkspaceBeliefState | None:
                 str(v) for v in raw.get("unresolved_critical_issues", []) if isinstance(v, str)
             ],
             action_history=[],
+            last_validation_attempted=bool(raw.get("last_validation_attempted", False)),
+            last_validation_passed=bool(raw.get("last_validation_passed", False)),
+            last_validation_failed=bool(raw.get("last_validation_failed", False)),
+            last_validation_commands=[str(v) for v in raw.get("last_validation_commands", []) if isinstance(v, str)],
+            last_failure_signature=str(raw.get("last_failure_signature", "")),
+            last_artifacts_created=[str(v) for v in raw.get("last_artifacts_created", []) if isinstance(v, str)],
+            last_repair_brief=dict(raw.get("last_repair_brief", {})) if isinstance(raw.get("last_repair_brief", {}), dict) else {},
         )
     except Exception:
         return None

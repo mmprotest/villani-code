@@ -16,6 +16,12 @@ from villani_code.villani_state import (
     save_beliefs,
 )
 from villani_code.villani_stop import should_stop
+from villani_code.villani_validation import (
+    apply_validation_result,
+    format_validation_artifact,
+    is_artifact_producing_task,
+    validate_villani_deliverable,
+)
 
 
 @dataclass(slots=True)
@@ -107,6 +113,24 @@ def _escape_action(beliefs: WorkspaceBeliefState) -> VillaniAction:
     )
 
 
+def _should_validate_after_action(objective: str, action: VillaniAction, changed_files: list[str]) -> bool:
+    if action.kind in {ActionKind.IMPLEMENT, ActionKind.REPAIR, ActionKind.VALIDATE} and changed_files:
+        return True
+    if any(Path(f).suffix.lower() in {".py", ".html"} for f in changed_files):
+        return True
+    return is_artifact_producing_task(objective) and action.kind in {ActionKind.IMPLEMENT, ActionKind.REPAIR}
+
+
+def _final_stop_reason(default_reason: str, beliefs: WorkspaceBeliefState) -> str:
+    if beliefs.last_validation_passed:
+        return "objective_validated"
+    if beliefs.last_validation_failed:
+        return "validation_failed_repair_exhausted"
+    if is_artifact_producing_task(beliefs.objective) and not beliefs.last_validation_attempted:
+        return "loop_without_valid_deliverable"
+    return default_reason
+
+
 def run_villani_loop(
     runner: Any,
     repo: Path,
@@ -142,7 +166,10 @@ def run_villani_loop(
             beliefs.repeated_patterns = loop_signals
             action = _escape_action(beliefs)
             if action.kind == ActionKind.STOP:
-                stop_reason = "Loop detected with no unresolved critical failures."
+                if is_artifact_producing_task(objective) and not beliefs.last_validation_passed:
+                    stop_reason = "loop_without_valid_deliverable"
+                else:
+                    stop_reason = "Loop detected with no unresolved critical failures."
                 break
 
         if action.kind == ActionKind.CLEANUP:
@@ -168,12 +195,27 @@ def run_villani_loop(
         )
         observed = observe_workspace(repo, objective, run_result)
         beliefs = update_beliefs(beliefs, observed)
+        pre_validation_summary = _result_summary(action, run_result, beliefs)
+        changed_files = [Path(c) for c in pre_validation_summary.changed_files]
+        if _should_validate_after_action(objective, action, pre_validation_summary.changed_files):
+            validation = validate_villani_deliverable(
+                objective=objective,
+                workspace_root=repo,
+                touched_files=changed_files,
+                belief_state=beliefs,
+            )
+            apply_validation_result(beliefs, validation)
+            run_result.setdefault("execution", {}).setdefault("validation_artifacts", []).append(format_validation_artifact(validation))
+            if not validation.passed and validation.failure_signature:
+                run_result.setdefault("execution", {}).setdefault("runner_failures", []).append(validation.failure_signature)
+
         summary = _result_summary(action, run_result, beliefs)
         beliefs.add_action_result(summary)
         save_beliefs(repo, beliefs)
         if debug_recorder:
             debug_recorder.record_beliefs(beliefs.to_snapshot(), "step", step_index=iterations)
 
+    stop_reason = _final_stop_reason(stop_reason, beliefs)
     final = {
         "done_reason": stop_reason,
         "iterations": iterations,
@@ -189,11 +231,18 @@ def run_villani_loop(
 
 def format_villani_summary(summary: dict[str, Any]) -> str:
     beliefs = summary.get("beliefs", {})
+    changed: list[str] = []
+    for row in summary.get("working_memory", {}).get("recent_actions", []):
+        changed.extend(row.get("changed_files", []))
+    unique_changed = sorted(set(changed))[:12]
     return (
         "Villani autonomous loop complete.\n"
+        f"objective: {beliefs.get('objective', '')}\n"
         f"reason: {summary.get('done_reason', '')}\n"
         f"iterations: {summary.get('iterations', 0)}\n"
-        f"confidence: {beliefs.get('completion_confidence', 0)}\n"
-        f"deliverables: {beliefs.get('likely_deliverables', [])[:6]}\n"
-        f"failures: {beliefs.get('unresolved_critical_issues', [])[:4]}"
+        f"files_changed: {unique_changed}\n"
+        f"validation_commands: {beliefs.get('last_validation_commands', [])}\n"
+        f"validation_passed: {beliefs.get('last_validation_passed', False)}\n"
+        f"artifacts_created: {beliefs.get('last_artifacts_created', [])}\n"
+        f"unresolved_failure: {beliefs.get('last_failure_signature', '') or beliefs.get('unresolved_critical_issues', [])[:4]}"
     )
