@@ -44,6 +44,7 @@ from villani_code.state_execution import (
     summarize_changes,
 )
 from villani_code.utils import (
+    is_path_within,
     is_effectively_empty_content,
     merge_extra_json,
     normalize_content_blocks,
@@ -101,7 +102,7 @@ def _select_planning_evidence_files(repo: Path, instruction: str, repo_map: dict
     existing: list[str] = []
     for raw in _dedupe_preserve(candidates):
         target = (repo / raw).resolve()
-        if target.exists() and target.is_file() and str(target).startswith(str(repo.resolve())):
+        if target.exists() and target.is_file() and is_path_within(repo, target):
             existing.append(raw)
         if len(existing) >= 12:
             break
@@ -608,7 +609,7 @@ class Runner:
                     diagnosis_confidence == "strong"
                     and diagnosed_target_file
                     and target_path is not None
-                    and str(target_path).startswith(str(repo_root))
+                    and is_path_within(repo_root, target_path)
                     and target_path.exists()
                     and target_path.is_file()
                 ):
@@ -1455,14 +1456,9 @@ class Runner:
             return
         packet = build_model_context_packet(self)
         rendered = render_model_context_packet(packet)
-        for message in messages:
-            if message.get("role") != "user":
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            content.insert(0, {"type": "text", "text": rendered})
-            return
+        from villani_code import state_runtime
+
+        state_runtime.prepend_text_to_latest_safe_user_message(messages, rendered)
 
     def _save_transcript_and_link(self, transcript: dict[str, Any]) -> Path:
         path = save_transcript(self.repo, transcript, redact=self.redact)

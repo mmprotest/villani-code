@@ -112,7 +112,9 @@ def get_current_mission_metadata_path(repo: Path) -> Path:
 
 
 def new_mission_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Keep a sortable UTC timestamp prefix while adding sub-second precision
+    # so multiple IDs created in the same second do not collide.
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
 
 
 def create_mission_state(repo: Path, objective: str, mode: str, mission_id: str | None = None) -> MissionState:

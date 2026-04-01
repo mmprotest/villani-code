@@ -248,6 +248,109 @@ def test_inject_diagnosis_hint_prepends_user_context() -> None:
     assert "Treat it as a hint, not ground truth." in first
 
 
+def test_inject_diagnosis_hint_targets_latest_safe_user_message() -> None:
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "older"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+        {"role": "user", "content": [{"type": "text", "text": "latest prompt"}]},
+    ]
+    state_runtime.inject_diagnosis_hint(
+        messages,
+        {"target_file": "src/app/core.py", "bug_class": "logic", "fix_intent": "fix"},
+    )
+    assert messages[0]["content"][0]["text"] == "older"
+    assert messages[2]["content"] == [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
+    assert "Likely diagnosis:" in messages[3]["content"][0]["text"]
+
+
+def test_inject_diagnosis_hint_handles_string_user_content() -> None:
+    messages = [{"role": "user", "content": "fix it"}]
+    state_runtime.inject_diagnosis_hint(
+        messages,
+        {"target_file": "src/a.py", "bug_class": "logic", "fix_intent": "fix"},
+    )
+    assert isinstance(messages[0]["content"], str)
+    assert "Likely diagnosis:" in messages[0]["content"]
+    assert messages[0]["content"].endswith("fix it")
+
+
+def test_inject_diagnosis_hint_skips_when_only_tool_result_turns_exist() -> None:
+    messages = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+    ]
+    original = [dict(msg) for msg in messages]
+    state_runtime.inject_diagnosis_hint(
+        messages,
+        {"target_file": "src/a.py", "bug_class": "logic", "fix_intent": "fix"},
+    )
+    assert messages == original
+
+
+def test_prepare_messages_for_model_deepcopies_before_injection() -> None:
+    class _CtxGov:
+        def load_inventory(self):
+            return SimpleNamespace(task_id="")
+
+        def register_item(self, *args, **kwargs):
+            return None
+
+        def prune_for_budget(self, _inventory):
+            return None
+
+        def save_inventory(self, _inventory):
+            return None
+
+    runner = SimpleNamespace(
+        small_model=True,
+        _retriever=_RetrieverStub(),
+        _context_budget=None,
+        _context_governance=_CtxGov(),
+        _execution_plan=SimpleNamespace(task_goal="t"),
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Need context on runtime."}]}]
+    original = [{"role": "user", "content": [{"type": "text", "text": "Need context on runtime."}]}]
+
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+
+    assert messages == original
+    assert prepared[0]["content"][0]["type"] == "text"
+    assert "<retrieval-briefing>" in prepared[0]["content"][0]["text"]
+
+
+def test_prepare_messages_for_model_repeated_calls_do_not_duplicate_injection() -> None:
+    class _CtxGov:
+        def load_inventory(self):
+            return SimpleNamespace(task_id="")
+
+        def register_item(self, *args, **kwargs):
+            return None
+
+        def prune_for_budget(self, _inventory):
+            return None
+
+        def save_inventory(self, _inventory):
+            return None
+
+    runner = SimpleNamespace(
+        small_model=True,
+        _retriever=_RetrieverStub(),
+        _context_budget=None,
+        _context_governance=_CtxGov(),
+        _execution_plan=SimpleNamespace(task_goal="t"),
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Need context on runtime."}]}]
+    prepared_one = state_runtime.prepare_messages_for_model(runner, messages)
+    prepared_two = state_runtime.prepare_messages_for_model(runner, messages)
+    for prepared in (prepared_one, prepared_two):
+        assert sum(
+            1
+            for block in prepared[0]["content"]
+            if isinstance(block, dict) and "<retrieval-briefing>" in str(block.get("text", ""))
+        ) == 1
+
+
 def test_fail_first_localization_runs_without_strong_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     events: list[dict] = []

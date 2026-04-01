@@ -32,6 +32,11 @@ def register_benchmark_commands(benchmark_app: typer.Typer, console: Console) ->
         language: Optional[str] = typer.Option(None, "--language"),
         track: Optional[str] = typer.Option(None, "--track"),
         include_private: bool = typer.Option(False, "--include-private"),
+        resume: bool = typer.Option(
+            False,
+            "--resume",
+            help="Resume from matching manifests/task_results in output-dir instead of running tasks again.",
+        ),
     ) -> None:
         runner = BenchmarkRunner(
             output_dir=Path("artifacts/benchmark"),
@@ -95,6 +100,11 @@ def register_benchmark_commands(benchmark_app: typer.Typer, console: Console) ->
         language: Optional[str] = typer.Option(None, "--language"),
         track: Optional[str] = typer.Option(None, "--track"),
         include_private: bool = typer.Option(False, "--include-private"),
+        resume: bool = typer.Option(
+            False,
+            "--resume",
+            help="Resume from matching manifests/task_results in output-dir instead of running tasks again.",
+        ),
     ) -> None:
         runner = BenchmarkRunner(
             output_dir=output_dir.resolve(),
@@ -113,6 +123,7 @@ def register_benchmark_commands(benchmark_app: typer.Typer, console: Console) ->
                 provider=provider,
                 repeat=repeat,
                 include_private=include_private,
+                resume=resume,
                 family=family,
                 difficulty=difficulty,
                 tag=tag,

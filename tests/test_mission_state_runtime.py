@@ -167,6 +167,54 @@ def test_projected_context_not_injected_in_benchmark_mode(tmp_path: Path) -> Non
     )
 
 
+def test_projected_context_injected_into_latest_safe_user_turn(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "older prompt"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+        {"role": "user", "content": [{"type": "text", "text": "latest prompt"}]},
+    ]
+    runner._inject_projected_context(messages)
+    assert messages[0]["content"][0]["text"] == "older prompt"
+    assert messages[2]["content"] == [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
+    assert "Mission context packet:" in messages[3]["content"][0]["text"]
+
+
+def test_projected_context_injected_into_string_user_content(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    messages = [
+        {"role": "assistant", "content": [{"type": "text", "text": "ack"}]},
+        {"role": "user", "content": "final prompt"},
+    ]
+    runner._inject_projected_context(messages)
+    assert isinstance(messages[1]["content"], str)
+    assert "Mission context packet:" in messages[1]["content"]
+    assert messages[1]["content"].endswith("final prompt")
+
+
+def test_projected_context_skips_when_only_tool_result_user_turn_exists(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    messages = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+    ]
+    original = json.loads(json.dumps(messages))
+    runner._inject_projected_context(messages)
+    assert messages == original
+
+
+def test_new_mission_id_unique_for_rapid_calls() -> None:
+    from villani_code.mission_state import new_mission_id
+
+    ids = [new_mission_id() for _ in range(200)]
+    assert len(set(ids)) == len(ids)
+    assert all("_" in mission_id and mission_id.endswith("Z") for mission_id in ids)
+
+
 def test_compaction_survival_guidance() -> None:
     from villani_code.context_governance import ContextCompactor
 

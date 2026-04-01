@@ -172,9 +172,14 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
             )
 
     monkeypatch.setattr("villani_code.benchmark.runner.build_agent_runner", lambda agent: FakeRunner())
-    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: [])
+    monkeypatch.setattr("villani_code.benchmark.runner.list_touched_files", lambda repo: ["src/app/date_utils.py"])
     monkeypatch.setattr("villani_code.benchmark.runner.line_stats", lambda repo: (0, 0))
     monkeypatch.setattr("villani_code.benchmark.runner.run_commands", lambda repo, commands, timeout_seconds, **_kwargs: (True, [], 1.0, 2.0, False))
+    monkeypatch.setattr(
+        BenchmarkRunner,
+        "_check_required_artifacts",
+        lambda self, task, touched: (False, "missing required artifact: test (no changes under tests/)"),
+    )
 
     runner = BenchmarkRunner(output_dir=Path("artifacts/benchmark-test"))
     data = runner.run(
@@ -188,7 +193,7 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
 
     out = capsys.readouterr().out
     assert "reason=missing_artifact" in out
-    assert "detail=missing required artifact: patch" in out
+    assert "detail=missing required artifact: test" in out
 
     from villani_code.benchmark.reporting import load_results
 
@@ -196,7 +201,7 @@ def test_missing_artifact_logging_includes_detail(monkeypatch, capsys) -> None:
     assert row.failure_reason is not None
     assert row.failure_reason.value == "missing_artifact"
     assert row.error is not None
-    assert "missing required artifact: patch" in row.error
+    assert "missing required artifact: test" in row.error
 
 
 def test_solved_task_with_support_file_edit_is_allowed_with_warning(monkeypatch, capsys) -> None:

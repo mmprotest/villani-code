@@ -29,4 +29,9 @@
     "deterministic_tests"
   ],
   "benchmark_bucket": "baseline"
+  ,
+  "allowed_support_files": [
+    "src/app/core.py",
+    "tests/test_core.py"
+  ]
 }
