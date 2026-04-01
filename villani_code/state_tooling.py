@@ -282,7 +282,16 @@ def execute_tool_with_policy(
                     "input": tool_input,
                 }
             )
-            if not runner.approval_callback(tool_name, tool_input):
+            approved = runner.approval_callback(tool_name, tool_input)
+            runner.event_callback(
+                {
+                    "type": "approval_resolved",
+                    "name": tool_name,
+                    "input": tool_input,
+                    "approved": approved,
+                }
+            )
+            if not approved:
                 return {"content": "User denied tool execution", "is_error": True}
     elif runner.plan_mode != "off" and tool_name in {"Write", "Patch"}:
         return {"content": "Plan mode: edit not executed", "is_error": False}
@@ -353,5 +362,11 @@ def execute_tool_with_policy(
             "tool_use_id": tool_use_id,
         }
     )
-    result = execute_tool(tool_name, tool_input, runner.repo, unsafe=runner.unsafe)
+    result = execute_tool(
+        tool_name,
+        tool_input,
+        runner.repo,
+        unsafe=runner.unsafe,
+        debug_callback=getattr(runner, "_debug_tool_callback", None),
+    )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)

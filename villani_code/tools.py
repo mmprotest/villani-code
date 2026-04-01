@@ -131,7 +131,13 @@ def tool_specs() -> list[dict[str, Any]]:
     return specs
 
 
-def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool = False) -> dict[str, Any]:
+def execute_tool(
+    name: str,
+    raw_input: dict[str, Any],
+    repo: Path,
+    unsafe: bool = False,
+    debug_callback: Any | None = None,
+) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
         return _error(f"Unknown tool: {name}")
@@ -144,7 +150,7 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
         if name == "Ls":
             return _ok(_run_ls(parsed, repo))
         if name == "Read":
-            return _ok(_run_read(parsed, repo))
+            return _ok(_run_read(parsed, repo, debug_callback=debug_callback))
         if name == "Grep":
             return _ok(_run_grep(parsed, repo))
         if name == "Glob":
@@ -152,11 +158,11 @@ def execute_tool(name: str, raw_input: dict[str, Any], repo: Path, unsafe: bool 
         if name == "Search":
             return _ok(_run_search(parsed, repo))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe))
+            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback))
         if name == "Write":
-            return _ok(_run_write(parsed, repo))
+            return _ok(_run_write(parsed, repo, debug_callback=debug_callback))
         if name == "Patch":
-            return _ok(_run_patch(parsed, repo))
+            return _ok(_run_patch(parsed, repo, debug_callback=debug_callback))
         if name == "WebFetch":
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
@@ -188,9 +194,11 @@ def _run_ls(data: LsInput, repo: Path) -> str:
     return "\n".join(lines)
 
 
-def _run_read(data: ReadInput, repo: Path) -> str:
+def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None) -> str:
     path = _safe_path(repo, data.file_path)
     raw = path.read_bytes()[: data.max_bytes]
+    if callable(debug_callback):
+        debug_callback("file_read", {"file_path": data.file_path, "size_bytes": len(raw), "ok": True})
     return raw.decode("utf-8", errors="replace")
 
 
@@ -221,32 +229,51 @@ def _run_search(data: SearchInput, repo: Path) -> str:
     return proc.stdout
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool) -> str:
+def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None) -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
     cwd = _safe_path(repo, data.cwd)
+    if callable(debug_callback):
+        debug_callback("command_started", {"command": data.command, "cwd": data.cwd})
     proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    if callable(debug_callback):
+        debug_callback(
+            "command_finished",
+            {
+                "command": data.command,
+                "cwd": data.cwd,
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "truncated": False,
+            },
+        )
     return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
 
 
-def _run_write(data: WriteInput, repo: Path) -> str:
+def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None) -> str:
     path = _safe_path(repo, data.file_path)
     if data.mkdirs:
         path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data.content, encoding="utf-8")
+    if callable(debug_callback):
+        debug_callback("file_write", {"file_path": data.file_path, "size_bytes": len(data.content.encode("utf-8")), "ok": True})
     return f"Wrote {path}"
 
 
-def _run_patch(data: PatchInput, repo: Path) -> str:
+def _run_patch(data: PatchInput, repo: Path, debug_callback: Any | None = None) -> str:
     if data.file_path:
         _safe_path(repo, data.file_path)
     try:
         touched = apply_unified_diff(repo, data.unified_diff, default_file_path=data.file_path or None)
     except PatchApplyError as exc:
         raise ValueError(str(exc)) from exc
+    if callable(debug_callback):
+        for file_path in touched:
+            debug_callback("patch_applied", {"file_path": file_path, "ok": True})
     return f"Patch applied to {len(touched)} file(s)"
 
 
