@@ -6,6 +6,20 @@ if TYPE_CHECKING:
     from villani_code.state import Runner
 
 
+def _is_runtime_artifact_path(path: str) -> bool:
+    normalized = str(path).strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized:
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    return ".villani_code" in parts
+
+
+def _filter_model_facing_paths(paths: list[str]) -> list[str]:
+    return [path for path in paths if not _is_runtime_artifact_path(path)]
+
+
 def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
     mission = getattr(runner, "_mission_state", None)
     constraints = []
@@ -21,8 +35,8 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
         "plan_summary": getattr(mission, "plan_summary", ""),
         "verified_facts": [f.value for f in getattr(mission, "verified_facts", [])],
         "open_hypotheses": [h.statement for h in getattr(mission, "open_hypotheses", [])],
-        "intended_targets": list(getattr(mission, "intended_targets", [])),
-        "changed_files": list(getattr(mission, "changed_files", [])),
+        "intended_targets": _filter_model_facing_paths(list(getattr(mission, "intended_targets", []))),
+        "changed_files": _filter_model_facing_paths(list(getattr(mission, "changed_files", []))),
         "last_failed_command": getattr(mission, "last_failed_command", ""),
         "validation_failures": list(getattr(mission, "validation_failures", [])),
         "compact_recent_actions": getattr(mission, "compact_summary", ""),

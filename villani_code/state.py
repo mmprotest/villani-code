@@ -510,10 +510,12 @@ class Runner:
         instruction: str,
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
+        inject_projected_context: bool = False,
     ) -> dict[str, Any]:
         self._ensure_mission(instruction)
         messages = messages or build_initial_messages(self.repo, instruction)
-        self._inject_projected_context(messages)
+        if inject_projected_context:
+            self._inject_projected_context(messages)
         if self._runtime_mode == "planning":
             self._task_mode = TaskMode.INSPECT_AND_PLAN
         else:
@@ -1342,12 +1344,27 @@ class Runner:
         save_mission_state(self.repo, self._mission_state)
 
     def _inject_projected_context(self, messages: list[dict[str, Any]]) -> None:
-        if not self._mission_state:
+        if not self._mission_state or self.benchmark_config.enabled:
             return
-        if any("Mission context packet:" in str(block.get("text", "")) for msg in messages for block in msg.get("content", []) if isinstance(block, dict)):
+        if len(messages) <= 1:
+            return
+        if any(
+            "Mission context packet:" in str(block.get("text", ""))
+            for msg in messages
+            for block in msg.get("content", [])
+            if isinstance(block, dict)
+        ):
             return
         packet = build_model_context_packet(self)
-        messages.append({"role": "user", "content": [{"type": "text", "text": render_model_context_packet(packet)}]})
+        rendered = render_model_context_packet(packet)
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            content.insert(0, {"type": "text", "text": rendered})
+            return
 
     def _save_transcript_and_link(self, transcript: dict[str, Any]) -> Path:
         path = save_transcript(self.repo, transcript, redact=self.redact)

@@ -121,6 +121,52 @@ def test_context_projection_packet(tmp_path: Path) -> None:
     assert packet["objective"] == "do x"
 
 
+def test_context_projection_excludes_runtime_artifacts(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("do x")
+    runner._mission_state.changed_files = ["src/app.py", ".villani_code/missions/m1/state.json"]
+    runner._mission_state.intended_targets = ["./.villani_code/sessions/last.json", "tests/test_app.py"]
+    packet = build_model_context_packet(runner)
+    assert packet["changed_files"] == ["src/app.py"]
+    assert packet["intended_targets"] == ["tests/test_app.py"]
+
+
+def test_projected_context_not_injected_on_initial_turn_even_when_requested(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    messages = [{"role": "user", "content": [{"type": "text", "text": "task prompt"}]}]
+    runner._inject_projected_context(messages)
+    assert len(messages) == 1
+    assert messages[0]["content"][0]["text"] == "task prompt"
+
+
+def test_projected_context_not_injected_in_benchmark_mode(tmp_path: Path) -> None:
+    from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
+
+    runner = Runner(
+        client=DummyClient(),
+        repo=tmp_path,
+        model="x",
+        stream=False,
+        print_stream=False,
+        benchmark_config=BenchmarkRuntimeConfig(enabled=True, task_id="t1"),
+    )
+    runner._ensure_mission("objective")
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "older context"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "ack"}]},
+        {"role": "user", "content": [{"type": "text", "text": "benchmark contract prompt"}]},
+    ]
+    runner._inject_projected_context(messages)
+    assert messages[-1]["content"][0]["text"] == "benchmark contract prompt"
+    assert not any(
+        "Mission context packet:" in str(block.get("text", ""))
+        for message in messages
+        for block in message.get("content", [])
+        if isinstance(block, dict)
+    )
+
+
 def test_compaction_survival_guidance() -> None:
     from villani_code.context_governance import ContextCompactor
 
