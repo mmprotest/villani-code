@@ -34,6 +34,8 @@ from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.context_projection import build_model_context_packet, render_model_context_packet
 from villani_code.event_recorder import RuntimeEventRecorder
+from villani_code.debug_mode import DebugConfig, DebugMode
+from villani_code.debug_recorder import DebugRecorder
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.state_execution import (
@@ -319,6 +321,7 @@ class Runner:
         villani_mode: bool = False,
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
+        debug_config: DebugConfig | None = None,
     ):
         self.client = client
         self.repo = repo
@@ -346,6 +349,8 @@ class Runner:
             enabled=villani_mode, steering_objective=villani_objective
         )
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
+        self._debug_config = debug_config or DebugConfig(mode=DebugMode.OFF)
+        self._debug_recorder: DebugRecorder | None = None
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
         self.permissions = PermissionEngine(
@@ -418,6 +423,45 @@ class Runner:
         self._event_recorder: RuntimeEventRecorder | None = None
         if self.small_model:
             self._init_small_model_support()
+
+    def _debug_tool_callback(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self._debug_recorder is None:
+            return
+        if event_type == "file_read":
+            self._debug_recorder.record_file_read(
+                str(payload.get("file_path", "")),
+                int(payload.get("size_bytes", 0)),
+                bool(payload.get("ok", True)),
+            )
+            return
+        if event_type == "file_write":
+            self._debug_recorder.record_file_write(
+                str(payload.get("file_path", "")),
+                int(payload.get("size_bytes", 0)),
+                bool(payload.get("ok", True)),
+            )
+            return
+        if event_type == "patch_applied":
+            self._debug_recorder.record_patch_applied(
+                str(payload.get("file_path", "")),
+                bool(payload.get("ok", True)),
+            )
+            return
+        if event_type == "command_started":
+            self._debug_recorder.record_command_start(
+                str(payload.get("command", "")),
+                str(payload.get("cwd", ".")),
+            )
+            return
+        if event_type == "command_finished":
+            self._debug_recorder.record_command_finish(
+                command=str(payload.get("command", "")),
+                cwd=str(payload.get("cwd", ".")),
+                exit_code=int(payload.get("exit_code", 0)),
+                stdout=str(payload.get("stdout", "")),
+                stderr=str(payload.get("stderr", "")),
+                truncated=bool(payload.get("truncated", False)),
+            )
 
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
@@ -501,6 +545,15 @@ class Runner:
         )
         if self._event_recorder is not None:
             self._event_recorder.write_digest()
+        if self._debug_recorder is not None:
+            self._debug_recorder.record_event("subagent_finished", "Autonomous run finished", {"done_reason": summary.get("done_reason", "") if isinstance(summary, dict) else ""})
+            self._debug_recorder.record_event("run_finished", "Run finished", {"status": "completed", "termination_reason": "completed"})
+            self._debug_recorder.write_final_summary(
+                status="completed",
+                termination_reason="completed",
+                total_turns=0,
+                mission_id=self._mission_id,
+            )
         text = VillaniModeController.format_summary(summary)
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
         return {"response": response, "summary": summary}
@@ -818,6 +871,14 @@ class Runner:
             self._update_mission_state(status=mission_status, changed_files=all_changes, compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_event("run_finished", "Run finished", {"status": mission_status, "termination_reason": reason})
+                self._debug_recorder.write_final_summary(
+                    status=mission_status,
+                    termination_reason=reason,
+                    total_turns=turns_used,
+                    mission_id=self._mission_id,
+                )
             return {
                 "response": response,
                 "messages": messages,
@@ -868,6 +929,10 @@ class Runner:
                 payload["thinking"] = self.thinking
             payload = merge_extra_json(payload, self.extra_json)
             transcript["requests"].append(payload)
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_turn_start(turns_used + 1, {"message_count": len(turn_messages)})
+                self._debug_recorder.record_model_request(payload)
+                self._debug_recorder.write_working_context(json.dumps(turn_messages, indent=2, ensure_ascii=False) + "\n")
             self.event_callback({"type": "model_request_started", "model": self.model})
 
             raw = self.client.create_message(payload, stream=self.stream)
@@ -883,6 +948,9 @@ class Runner:
 
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_model_response(response)
+                self._debug_recorder.record_turn_finish(turns_used + 1, str(response.get("stop_reason", "")))
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}
             )
@@ -981,6 +1049,14 @@ class Runner:
                     self._save_session_snapshot(messages)
                     if self._event_recorder is not None:
                         self._event_recorder.write_digest()
+                    if self._debug_recorder is not None:
+                        self._debug_recorder.record_event("run_finished", "Run finished", {"status": "completed", "termination_reason": "completed"})
+                        self._debug_recorder.write_final_summary(
+                            status="completed",
+                            termination_reason="completed",
+                            total_turns=turns_used,
+                            mission_id=self._mission_id,
+                        )
                     return {
                         "response": response,
                         "messages": messages,
@@ -1102,6 +1178,14 @@ class Runner:
                 self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
                 if self._event_recorder is not None:
                     self._event_recorder.write_digest()
+                if self._debug_recorder is not None:
+                    self._debug_recorder.record_event("run_finished", "Run finished", {"status": "completed", "termination_reason": "completed"})
+                    self._debug_recorder.write_final_summary(
+                        status="completed",
+                        termination_reason="completed",
+                        total_turns=turns_used,
+                        mission_id=self._mission_id,
+                    )
                 return {
                     "response": response,
                     "messages": messages,
@@ -1321,6 +1405,8 @@ class Runner:
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if self._event_recorder is not None:
             self._event_recorder.record(event)
+        if self._debug_recorder is not None:
+            self._debug_recorder.on_runner_event(event)
         self._user_event_callback(event)
 
     def _ensure_mission(self, instruction: str) -> None:
@@ -1330,6 +1416,16 @@ class Runner:
             self._mission_id = self._mission_state.mission_id
             self._mission_dir = get_mission_dir(self.repo, self._mission_id)
             self._event_recorder = RuntimeEventRecorder(self._mission_dir)
+            if self._debug_config.enabled:
+                self._debug_recorder = DebugRecorder(
+                    config=self._debug_config,
+                    run_id=self._mission_id,
+                    objective=instruction,
+                    repo=self.repo,
+                    mode=mode,
+                    model=self.model,
+                )
+                self._debug_recorder.record_event("run_started", "Run started", {"instruction": instruction})
         self._update_mission_state(objective=instruction, mode=mode, status="active")
 
     def _update_mission_state(self, **fields: Any) -> None:
@@ -1342,6 +1438,8 @@ class Runner:
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()
         save_mission_state(self.repo, self._mission_state)
+        if self._debug_recorder is not None:
+            self._debug_recorder.record_mission_state_snapshot(self._mission_state.to_dict(), "mission_state_update")
 
     def _inject_projected_context(self, messages: list[dict[str, Any]]) -> None:
         if not self._mission_state or self.benchmark_config.enabled:
