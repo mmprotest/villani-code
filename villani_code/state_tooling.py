@@ -21,6 +21,38 @@ def _extract_fenced_code(text: str) -> str | None:
     return match.group(1).strip("\n")
 
 
+def _sanitize_tool_input_file_path(tool_input: dict[str, Any], repo: Path) -> None:
+    """Normalize and sanitize a `file_path` value in tool_input in-place.
+
+    - Strip surrounding quotes
+    - Normalize backslashes to forward slashes
+    - If an absolute path points inside `repo`, convert to a repo-relative path
+    - Strip leading './' or leading '/'
+    """
+    try:
+        raw = tool_input.get("file_path")
+        if not isinstance(raw, str):
+            return
+        fp = raw.strip()
+        if (fp.startswith('"') and fp.endswith('"')) or (fp.startswith("'") and fp.endswith("'")):
+            fp = fp[1:-1].strip()
+        fp = fp.strip('"').strip("'")
+        fp = fp.replace("\\", "/")
+        p = Path(fp)
+        if p.is_absolute():
+            try:
+                rel = p.resolve().relative_to(repo.resolve())
+                fp = str(rel).replace("\\", "/")
+            except Exception:
+                pass
+        fp = fp.lstrip("./")
+        if fp.startswith("/"):
+            fp = fp.lstrip("/")
+        tool_input["file_path"] = fp
+    except Exception:
+        return
+
+
 def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     if tool_name == "Write":
         path = str(tool_input.get("file_path", ""))
@@ -222,6 +254,10 @@ def execute_tool_with_policy(
     )
     if not hook_pre.allow:
         return {"content": f"Blocked by hook: {hook_pre.reason}", "is_error": True}
+    try:
+        _sanitize_tool_input_file_path(tool_input, runner.repo)
+    except Exception:
+        pass
 
     if tool_name == "SubmitPlan":
         if not getattr(runner, "_planning_read_only", False):
