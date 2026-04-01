@@ -32,6 +32,10 @@ from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
+from villani_code.context_projection import build_model_context_packet, render_model_context_packet
+from villani_code.event_recorder import RuntimeEventRecorder
+from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
+from villani_code.summarizer import summarize_mission_state
 from villani_code.state_execution import (
     collect_runner_failures,
     collect_validation_artifacts,
@@ -333,7 +337,8 @@ class Runner:
         self.plan_mode = plan_mode
         self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)
-        self.event_callback = event_callback or (lambda _event: None)
+        self._user_event_callback = event_callback or (lambda _event: None)
+        self.event_callback = self._dispatch_event
         self.small_model = small_model
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
@@ -407,6 +412,10 @@ class Runner:
         self._runtime_mode: Literal["execution", "planning"] = "execution"
         self._finalized_plan_artifact: dict[str, Any] | None = None
         self._verification_engine = VerificationEngine(self.repo)
+        self._mission_id = ""
+        self._mission_dir: Path | None = None
+        self._mission_state: MissionState | None = None
+        self._event_recorder: RuntimeEventRecorder | None = None
         if self.small_model:
             self._init_small_model_support()
 
@@ -427,6 +436,8 @@ class Runner:
         self._planning_read_only = True
         self._runtime_mode = "planning"
         self._finalized_plan_artifact = None
+        self._ensure_mission(instruction)
+        self._update_mission_state(mode="planning", plan_summary=instruction)
         try:
             planning_prompt = build_planning_instruction(
                 instruction,
@@ -439,8 +450,10 @@ class Runner:
             if isinstance(artifact, dict):
                 plan_result = _build_plan_result_from_artifact(instruction, artifact, resolved_answers, evidence_paths)
                 if plan_result is not None:
+                    if self._mission_dir is not None:
+                        (self._mission_dir / "plan_artifact.json").write_text(json.dumps(plan_result.to_dict(), indent=2), encoding="utf-8")
                     return plan_result
-            return _build_emergency_plan_result(
+            fallback = _build_emergency_plan_result(
                 instruction,
                 self.repo,
                 repo_map,
@@ -448,6 +461,9 @@ class Runner:
                 evidence_paths,
                 resolved_answers,
             )
+            if self._mission_dir is not None:
+                (self._mission_dir / "plan_artifact.json").write_text(json.dumps(fallback.to_dict(), indent=2), encoding="utf-8")
+            return fallback
         finally:
             self._planning_read_only = False
             self._runtime_mode = "execution"
@@ -456,10 +472,15 @@ class Runner:
     def run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]:
         if not plan.ready_to_execute:
             raise RuntimeError("Plan is not ready to execute; unresolved clarifications remain.")
+        self._ensure_mission(plan.instruction)
+        if self._mission_dir is not None:
+            (self._mission_dir / "plan_artifact.json").write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+        self._update_mission_state(plan_summary=plan.task_summary)
         return self.run(build_execution_instruction_from_plan(plan))
 
     def run_villani_mode(self) -> dict[str, Any]:
         ensure_runtime_dependencies_not_shadowed(self.repo)
+        self._ensure_mission(self.villani_objective or "Autonomous Villani mode run")
         controller = VillaniModeController(
             self,
             self.repo,
@@ -467,6 +488,19 @@ class Runner:
             event_callback=self.event_callback,
         )
         summary = controller.run()
+        working = summary.get("working_memory", {}) if isinstance(summary, dict) else {}
+        self._update_mission_state(
+            mode="autonomous",
+            status="completed",
+            autonomous_wave=int(summary.get("waves", 0) or 0) if isinstance(summary, dict) else 0,
+            autonomous_backlog_summary=[str(v) for v in summary.get("recommended_next_steps", [])[:8]] if isinstance(summary, dict) else [],
+            autonomous_attempted_tasks=len(summary.get("attempted", [])) if isinstance(summary, dict) else 0,
+            autonomous_satisfied_keys_summary=[str(k) for k in (working.get("satisfied_task_keys", {}) or {}).keys()][:8],
+            autonomous_blockers_summary=[str(v) for v in (working.get("stop_decision_rationale", {}) or {}).values()][:8],
+            autonomous_stop_reason=str(summary.get("done_reason", "")) if isinstance(summary, dict) else "",
+        )
+        if self._event_recorder is not None:
+            self._event_recorder.write_digest()
         text = VillaniModeController.format_summary(summary)
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
         return {"response": response, "summary": summary}
@@ -477,7 +511,9 @@ class Runner:
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
     ) -> dict[str, Any]:
+        self._ensure_mission(instruction)
         messages = messages or build_initial_messages(self.repo, instruction)
+        self._inject_projected_context(messages)
         if self._runtime_mode == "planning":
             self._task_mode = TaskMode.INSPECT_AND_PLAN
         else:
@@ -771,11 +807,15 @@ class Runner:
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = None
             if not self._planning_read_only:
-                transcript_path = save_transcript(self.repo, transcript, redact=self.redact)
+                transcript_path = self._save_transcript_and_link(transcript)
             post = self._run_post_execution_validation(_change_summary()[2])
             if post:
                 response.setdefault("content", []).append({"type": "text", "text": post})
             self._save_session_snapshot(messages)
+            mission_status = "completed" if completed else ("interrupted" if reason in {"max_seconds", "max_turns", "max_tool_calls"} else "failed")
+            self._update_mission_state(status=mission_status, changed_files=all_changes, compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
+            if self._event_recorder is not None:
+                self._event_recorder.write_digest()
             return {
                 "response": response,
                 "messages": messages,
@@ -932,13 +972,13 @@ class Runner:
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
-                    transcript_path = save_transcript(
-                        self.repo, transcript, redact=self.redact
-                    )
+                    transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
                     if post:
                         response.setdefault("content", []).append({"type": "text", "text": post})
                     self._save_session_snapshot(messages)
+                    if self._event_recorder is not None:
+                        self._event_recorder.write_digest()
                     return {
                         "response": response,
                         "messages": messages,
@@ -1055,10 +1095,11 @@ class Runner:
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
-                    transcript_path = save_transcript(
-                        self.repo, transcript, redact=self.redact
-                    )
+                    transcript_path = self._save_transcript_and_link(transcript)
                     self._save_session_snapshot(messages)
+                self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
+                if self._event_recorder is not None:
+                    self._event_recorder.write_digest()
                 return {
                     "response": response,
                     "messages": messages,
@@ -1120,6 +1161,7 @@ class Runner:
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
+                    self._update_mission_state(last_failed_command=f"{tool_name} {tool_input}", last_failed_summary=result_text[:500])
                     if (
                         self.benchmark_config.enabled
                         and tool_name in {"Write", "Patch"}
@@ -1273,6 +1315,44 @@ class Runner:
             )
             return not command.startswith(readonly_prefixes)
         return False
+
+    def _dispatch_event(self, event: dict[str, Any]) -> None:
+        if self._event_recorder is not None:
+            self._event_recorder.record(event)
+        self._user_event_callback(event)
+
+    def _ensure_mission(self, instruction: str) -> None:
+        mode = "autonomous" if self.villani_mode else self._runtime_mode
+        if self._mission_state is None:
+            self._mission_state = create_mission_state(self.repo, instruction, mode=mode)
+            self._mission_id = self._mission_state.mission_id
+            self._mission_dir = get_mission_dir(self.repo, self._mission_id)
+            self._event_recorder = RuntimeEventRecorder(self._mission_dir)
+        self._update_mission_state(objective=instruction, mode=mode, status="active")
+
+    def _update_mission_state(self, **fields: Any) -> None:
+        if self._mission_state is None:
+            return
+        for key, value in fields.items():
+            if hasattr(self._mission_state, key):
+                setattr(self._mission_state, key, value)
+        self._mission_state.intended_targets = sorted(self._intended_targets)
+        if self._mission_state.status == "active":
+            self._mission_state.changed_files = self._git_changed_files()
+        save_mission_state(self.repo, self._mission_state)
+
+    def _inject_projected_context(self, messages: list[dict[str, Any]]) -> None:
+        if not self._mission_state:
+            return
+        if any("Mission context packet:" in str(block.get("text", "")) for msg in messages for block in msg.get("content", []) if isinstance(block, dict)):
+            return
+        packet = build_model_context_packet(self)
+        messages.append({"role": "user", "content": [{"type": "text", "text": render_model_context_packet(packet)}]})
+
+    def _save_transcript_and_link(self, transcript: dict[str, Any]) -> Path:
+        path = save_transcript(self.repo, transcript, redact=self.redact)
+        self._update_mission_state(last_transcript_path=str(path))
+        return path
 
     def _execute_tool_with_policy(
         self,

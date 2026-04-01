@@ -23,6 +23,8 @@ from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
+from villani_code.mission_state import save_mission_state
+from villani_code.summarizer import summarize_mission_state
 from villani_code.utils import ensure_dir
 
 
@@ -1017,8 +1019,16 @@ def is_no_progress_response(response: dict[str, Any]) -> bool:
 
 
 def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
-    if getattr(runner, "_planning_read_only", False):
-        return
+    if getattr(runner, "_mission_state", None) is not None and getattr(runner, "_mission_dir", None) is not None:
+        mission_dir = runner._mission_dir
+        ensure_dir(mission_dir)
+        (mission_dir / "messages.json").write_text(json.dumps(messages, indent=2), encoding="utf-8")
+        summary_text = summarize_mission_state(runner._mission_state)
+        runner._mission_state.compact_summary = summary_text
+        (mission_dir / "working_summary.md").write_text(summary_text + "\n", encoding="utf-8")
+        save_mission_state(runner.repo, runner._mission_state)
+        if getattr(runner, "_event_recorder", None) is not None:
+            runner._event_recorder.write_digest()
     root = runner.repo / ".villani_code" / "sessions"
     ensure_dir(root)
     (root / "last.json").write_text(
@@ -1204,6 +1214,10 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             next_step_hints=["Finalize and report output"],
             handoff_checkpoint="validation_passed",
         ))
+        if getattr(runner, "_mission_state", None) is not None:
+            runner._mission_state.validation_failures = []
+            runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
+            save_mission_state(runner.repo, runner._mission_state)
         return "Validation: passed."
 
     outcome = execute_repair_loop(
@@ -1228,6 +1242,10 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             next_step_hints=["Report repaired validation and summarize edits"],
             handoff_checkpoint="repair_recovered",
         ))
+        if getattr(runner, "_mission_state", None) is not None:
+            runner._mission_state.validation_failures = []
+            runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
+            save_mission_state(runner.repo, runner._mission_state)
         return outcome.message
 
     checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"])
@@ -1242,4 +1260,9 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         next_step_hints=["Inspect failing step and rerun with interactive guidance"],
         handoff_checkpoint="repair_exhausted",
     ))
+    if getattr(runner, "_mission_state", None) is not None:
+        runner._mission_state.validation_failures = [result.failure_summary]
+        runner._mission_state.last_failed_summary = outcome.message
+        runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
+        save_mission_state(runner.repo, runner._mission_state)
     return outcome.message

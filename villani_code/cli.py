@@ -17,6 +17,7 @@ from villani_code.state import Runner
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.cli_subcommands import register_benchmark_commands, register_mcp_commands, register_plugin_commands
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
+from villani_code.debug_bundle import create_debug_bundle
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -250,6 +251,15 @@ def init(
     console.print("Initialized .villani project memory:")
     for key, path in files.items():
         console.print(f"- {key}: {path}")
+
+
+@app.command("debug-bundle")
+def debug_bundle_cmd(
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository path"),
+    mission_id: Optional[str] = typer.Option(None, "--mission-id", help="Mission id (defaults to current)"),
+) -> None:
+    bundle = create_debug_bundle(repo.resolve(), mission_id=mission_id)
+    console.print(str(bundle))
 
 
 
