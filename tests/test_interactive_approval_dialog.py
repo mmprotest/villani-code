@@ -18,6 +18,24 @@ from villani_code.tui.widgets.approval import ApprovalBar
 class DummyRunner:
     permissions = None
     model = "demo"
+    print_stream = False
+    approval_callback = None
+    event_callback = None
+
+    def run(self, instruction: str, messages=None, execution_budget=None):
+        _ = (instruction, messages, execution_budget)
+        return {"response": {"content": []}}
+
+    def plan(self, instruction: str, answers=None):
+        _ = (instruction, answers)
+        raise RuntimeError("unused")
+
+    def run_with_plan(self, plan):
+        _ = plan
+        return {"response": {"content": []}}
+
+    def run_villani_mode(self):
+        return {"response": {"content": []}}
 
 
 class DummyApp:
@@ -26,6 +44,24 @@ class DummyApp:
 
     def post_message(self, message):
         self.messages.append(message)
+
+    def call_from_thread(self, callback, *args, **kwargs):
+        return callback(*args, **kwargs)
+
+    def apply_plan_result(self, _result, _reset_answers: bool) -> None:
+        return None
+
+    def record_plan_answer(self, _answer) -> None:
+        return None
+
+    def get_plan_instruction(self) -> str:
+        return ""
+
+    def get_plan_answers(self) -> list:
+        return []
+
+    def get_last_ready_plan(self):
+        return None
 
 
 class FakeController:

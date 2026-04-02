@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import shlex
 import threading
 import traceback
@@ -8,14 +9,47 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from villani_code.plan_session import PlanAnswer, PlanSessionResult
 from villani_code.context_budget import ContextBudget
+from villani_code.execution import ExecutionBudget
+from villani_code.plan_session import PlanAnswer, PlanSessionResult
 from villani_code.runtime_events import RuntimeEvent
 from villani_code.tui.messages import ApprovalRequest, LogAppend, SpinnerState, StatusUpdate
 
 
-class MessageSink(Protocol):
+class ControllerRunner(Protocol):
+    print_stream: bool
+    approval_callback: Any
+    event_callback: Any
+    permissions: Any
+
+    def run(
+        self,
+        instruction: str,
+        messages: list[dict[str, Any]] | None = None,
+        execution_budget: ExecutionBudget | None = None,
+    ) -> dict[str, Any]: ...
+
+    def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult: ...
+
+    def run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]: ...
+
+    def run_villani_mode(self) -> dict[str, Any]: ...
+
+
+class ControllerAppHost(Protocol):
     def post_message(self, message: object) -> object: ...
+
+    def call_from_thread(self, callback: Any, *args: Any, **kwargs: Any) -> Any: ...
+
+    def apply_plan_result(self, result: PlanSessionResult, reset_answers: bool) -> None: ...
+
+    def record_plan_answer(self, answer: PlanAnswer) -> None: ...
+
+    def get_plan_instruction(self) -> str: ...
+
+    def get_plan_answers(self) -> list[PlanAnswer]: ...
+
+    def get_last_ready_plan(self) -> PlanSessionResult | None: ...
 
 
 @dataclass
@@ -25,7 +59,8 @@ class ApprovalWaiter:
 
 
 class RunnerController:
-    def __init__(self, runner: Any, app: MessageSink) -> None:
+    def __init__(self, runner: ControllerRunner, app: ControllerAppHost) -> None:
+        self._validate_runner_contract(runner)
         self.runner = runner
         self.app = app
         self._approval_waiters: dict[str, ApprovalWaiter] = {}
@@ -38,6 +73,18 @@ class RunnerController:
         self.runner.print_stream = False
         self.runner.approval_callback = self.request_approval
         self.runner.event_callback = self.on_runner_event
+
+    def _validate_runner_contract(self, runner: object) -> None:
+        required_callables = ("run", "plan", "run_with_plan", "run_villani_mode")
+        missing = [name for name in required_callables if not callable(getattr(runner, name, None))]
+        if missing:
+            raise TypeError(f"RunnerController runner is missing required method(s): {', '.join(missing)}")
+        for attr in ("print_stream", "approval_callback", "event_callback", "permissions"):
+            if not hasattr(runner, attr):
+                raise TypeError(f"RunnerController runner is missing required attribute: {attr}")
+        first_param = next(iter(inspect.signature(getattr(runner, "run")).parameters.values()), None)
+        if first_param is None:
+            raise TypeError("RunnerController runner.run must accept an instruction positional argument")
 
     def run_prompt(self, text: str) -> None:
         threading.Thread(target=self._run_prompt_worker, args=(text,), daemon=True).start()
@@ -57,6 +104,22 @@ class RunnerController:
     def run_villani_mode(self) -> None:
         threading.Thread(target=self._run_villani_mode_worker, daemon=True).start()
 
+    def _runner_run(
+        self,
+        instruction: str,
+        messages: list[dict[str, Any]] | None = None,
+        execution_budget: ExecutionBudget | None = None,
+    ) -> dict[str, Any]:
+        return self.runner.run(instruction, messages=messages, execution_budget=execution_budget)
+
+    def _runner_plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
+        return self.runner.plan(instruction, answers=answers)
+
+    def _runner_run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]:
+        return self.runner.run_with_plan(plan)
+
+    def _runner_run_villani_mode(self) -> dict[str, Any]:
+        return self.runner.run_villani_mode()
 
     def reset_session_context(self) -> None:
         self._session_messages = None
@@ -73,17 +136,14 @@ class RunnerController:
         return self._session_context_budget.compact_session_messages(next_messages)
 
     def _ui_call(self, callback: Any, *args: Any, **kwargs: Any) -> Any:
-        call_from_thread = getattr(self.app, "call_from_thread", None)
-        if callable(call_from_thread):
-            return call_from_thread(callback, *args, **kwargs)
-        return callback(*args, **kwargs)
+        return self.app.call_from_thread(callback, *args, **kwargs)
 
     def _run_villani_mode_worker(self) -> None:
         self.app.post_message(LogAppend("[villani-mode] Autonomous repo improvement started.", kind="meta"))
         self.app.post_message(SpinnerState(True, None))
         self.app.post_message(StatusUpdate("scanning repo"))
         try:
-            result = self.runner.run_villani_mode()
+            result = self._runner_run_villani_mode()
             content = result.get("response", {}).get("content", [])
             response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
             if response_text:
@@ -103,7 +163,7 @@ class RunnerController:
         self.app.post_message(StatusUpdate("Thinking"))
         self._assistant_stream_saw_text = False
         run_messages = self._messages_for_prompt(text)
-        result = self.runner.run(text, messages=run_messages)
+        result = self._runner_run(text, messages=run_messages)
         result_messages = result.get("messages")
         if isinstance(result_messages, list) and result_messages:
             self._session_messages = result_messages
@@ -121,7 +181,7 @@ class RunnerController:
         self._assistant_stream_saw_text = False
         self._suppress_assistant_stream_text = True
         try:
-            result = self.runner.plan(text)
+            result = self._runner_plan(text)
         finally:
             self._suppress_assistant_stream_text = False
         self._ui_call(self.app.apply_plan_result, result, True)
@@ -143,7 +203,7 @@ class RunnerController:
         self._assistant_stream_saw_text = False
         self._suppress_assistant_stream_text = True
         try:
-            result = self.runner.plan(instruction, answers=answers)
+            result = self._runner_plan(instruction, answers=answers)
         finally:
             self._suppress_assistant_stream_text = False
         self._ui_call(self.app.apply_plan_result, result, False)
@@ -160,7 +220,7 @@ class RunnerController:
         self.app.post_message(SpinnerState(True, None))
         self.app.post_message(StatusUpdate("Executing plan"))
         self._assistant_stream_saw_text = False
-        result = self.runner.run_with_plan(plan)
+        result = self._runner_run_with_plan(plan)
         content = result.get("response", {}).get("content", [])
         response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
         if response_text and not self._assistant_stream_saw_text:

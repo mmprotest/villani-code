@@ -16,7 +16,8 @@ class SessionRunner:
         self.permissions = None
         self.calls: list[dict[str, object]] = []
 
-    def run(self, instruction: str, messages=None):
+    def run(self, instruction: str, messages=None, execution_budget=None):
+        _ = execution_budget
         self.calls.append({"instruction": instruction, "messages": messages})
         if messages is None:
             session_messages = [
@@ -30,6 +31,17 @@ class SessionRunner:
             "response": {"content": [{"type": "text", "text": "ok"}]},
             "messages": session_messages,
         }
+
+    def plan(self, instruction: str, answers=None):
+        _ = (instruction, answers)
+        raise RuntimeError("unused")
+
+    def run_with_plan(self, plan):
+        _ = plan
+        return {"response": {"content": []}}
+
+    def run_villani_mode(self):
+        return {"response": {"content": []}}
 
 
 def test_run_prompt_persists_messages_across_turns() -> None:
