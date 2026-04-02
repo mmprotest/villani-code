@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,15 @@ from villani_code.tui.widgets.approval import ApprovalBar
 from villani_code.tui.widgets.plan_question import PlanQuestionWidget
 from villani_code.tui.widgets.slash_popup import SlashCommandPopup
 from villani_code.tui.widgets.status import StatusBarWidget
+
+
+
+
+class InteractionMode(str, Enum):
+    NORMAL = "normal"
+    APPROVAL = "approval"
+    CLARIFICATION = "clarification"
+    SLASH = "slash"
 
 
 def _render_plan_lines(result: PlanSessionResult) -> list[str]:
@@ -122,6 +132,7 @@ class VillaniTUI(App[None]):
         self.question_cursor = 0
         self.captured_answers: list[PlanAnswer] = []
         self.last_ready_plan: PlanSessionResult | None = None
+        self._interaction_mode = InteractionMode.NORMAL
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main"):
@@ -169,28 +180,65 @@ class VillaniTUI(App[None]):
         self._show_current_question_or_finalize()
         self.query_one(StatusBarWidget).set_plan_mode(bool(result.open_questions))
 
-    def _set_question_mode(self, enabled: bool) -> None:
+    def _set_interaction_mode(self, mode: InteractionMode) -> None:
+        self._interaction_mode = mode
+
+    def _restore_input_focus(self) -> None:
+        def _focus_input() -> None:
+            input_widget = self.query_one(Input)
+            if not input_widget.disabled:
+                input_widget.focus()
+
+        self.call_after_refresh(_focus_input)
+
+    def _enter_normal_mode(self) -> None:
         input_widget = self.query_one(Input)
-        input_widget.disabled = enabled
-        if not enabled:
-            input_widget.focus()
+        input_widget.disabled = False
+        self._set_interaction_mode(InteractionMode.NORMAL)
+        self._restore_input_focus()
+
+    def _enter_approval_mode(self, prompt: str, request_id: str, choices: list[str]) -> None:
+        input_widget = self.query_one(Input)
+        input_widget.disabled = True
+        bar = self.query_one(ApprovalBar)
+        bar.show_request(prompt, request_id, choices)
+        self._set_interaction_mode(InteractionMode.APPROVAL)
+        self.call_after_refresh(bar.focus_options)
+
+    def _enter_clarification_mode(self, question: PlanQuestion) -> None:
+        input_widget = self.query_one(Input)
+        input_widget.disabled = True
+        widget = self.query_one(PlanQuestionWidget)
+        widget.show_question(question)
+        self._set_interaction_mode(InteractionMode.CLARIFICATION)
+        self.call_after_refresh(lambda: widget.scroll_visible(animate=False))
+
+    def _enter_slash_mode_if_needed(self, value: str) -> None:
+        if self._interaction_mode in {InteractionMode.APPROVAL, InteractionMode.CLARIFICATION}:
+            return
+        popup = self._slash_popup()
+        if popup is None:
+            return
+        if popup.visible and value.strip().startswith("/"):
+            self._set_interaction_mode(InteractionMode.SLASH)
+            return
+        if self._interaction_mode == InteractionMode.SLASH:
+            self._set_interaction_mode(InteractionMode.NORMAL)
 
     def _show_current_question_or_finalize(self) -> None:
         widget = self.query_one(PlanQuestionWidget)
         if self.question_cursor < len(self.pending_questions):
             question = self.pending_questions[self.question_cursor]
-            self._set_question_mode(True)
             lines = [
                 f"Clarification {self.question_cursor + 1}/{len(self.pending_questions)}: {question.question}",
                 *[f"[{idx}] {option.label}" for idx, option in enumerate(question.options, start=1)],
             ]
             self._log_local_meta("\n".join(lines))
             self.query_one(StatusBarWidget).set_status("Plan awaiting clarification")
-            widget.show_question(question)
-            self.call_after_refresh(lambda: widget.scroll_visible(animate=False))
+            self._enter_clarification_mode(question)
             return
         widget.hide_question()
-        self._set_question_mode(False)
+        self._enter_normal_mode()
         if self.current_plan_result and self.current_plan_result.ready_to_execute:
             self.plan_mode_enabled = False
             self.plan_session_active = False
@@ -262,14 +310,18 @@ class VillaniTUI(App[None]):
         query = value.strip()
         if not query.startswith("/"):
             popup.hide_popup()
+            self._enter_slash_mode_if_needed(value)
             return
         matches = [item for _, item in self.command_palette.search_commands(query)]
         popup.set_suggestions(matches)
+        self._enter_slash_mode_if_needed(value)
 
     def _close_slash_popup(self) -> None:
         popup = self._slash_popup()
         if popup is not None:
             popup.hide_popup()
+        if self._interaction_mode == InteractionMode.SLASH:
+            self._set_interaction_mode(InteractionMode.NORMAL)
 
     def _execute_command_item(self, item: PaletteItem) -> None:
         trigger = item.trigger
@@ -295,7 +347,7 @@ class VillaniTUI(App[None]):
             self.captured_answers = []
             self.last_ready_plan = None
             self.query_one(PlanQuestionWidget).hide_question()
-            self._set_question_mode(False)
+            self._enter_normal_mode()
             status = self.query_one(StatusBarWidget)
             status.set_status("Plan canceled")
             status.set_plan_mode(False)
@@ -313,7 +365,7 @@ class VillaniTUI(App[None]):
             self.plan_session_active = False
             self.query_one(StatusBarWidget).set_plan_mode(False)
             self.query_one(PlanQuestionWidget).hide_question()
-            self._set_question_mode(False)
+            self._enter_normal_mode()
             self.controller.run_execute_plan()
             return
         if trigger == "/fork":
@@ -370,8 +422,7 @@ class VillaniTUI(App[None]):
             self.exit()
             return
         if self._handle_slash_command(text):
-            if not self.query_one(Input).disabled:
-                self.query_one(Input).focus()
+            self._restore_input_focus()
             return
         self._interrupts.reset_interrupt_state()
         if self.awaiting_plan_prompt:
@@ -466,10 +517,7 @@ class VillaniTUI(App[None]):
         self.query_one(StatusBarWidget).set_spinner(message.active, message.label)
 
     def on_approval_request(self, message: ApprovalRequest) -> None:
-        bar = self.query_one(ApprovalBar)
-        self.query_one(Input).disabled = True
-        bar.show_request(message.prompt, message.request_id, message.choices)
-        self.call_after_refresh(lambda: bar.query_one("#approval-options").focus())
+        self._enter_approval_mode(message.prompt, message.request_id, message.choices)
 
     @on(ApprovalBar.ApprovalSelected)
     def on_approval_selected(self, event: ApprovalBar.ApprovalSelected) -> None:
@@ -480,13 +528,11 @@ class VillaniTUI(App[None]):
         self.controller.resolve_approval(request_id, event.choice)
         self._interrupts.reset_interrupt_state()
         bar.hide_request()
-        input_widget = self.query_one(Input)
-        input_widget.disabled = False
-        input_widget.focus()
+        self._enter_normal_mode()
 
     def on_key(self, event: Key) -> None:
-        bar = self.query_one(ApprovalBar)
-        if bar.display:
+        if self._interaction_mode == InteractionMode.APPROVAL:
+            bar = self.query_one(ApprovalBar)
             if event.key == "up":
                 bar.action_cursor_up()
             elif event.key == "down":
@@ -495,12 +541,14 @@ class VillaniTUI(App[None]):
                 bar.action_confirm()
             elif event.key == "escape":
                 bar.action_deny()
+            else:
+                return
             event.stop()
             event.prevent_default()
             return
 
-        question = self.query_one(PlanQuestionWidget)
-        if question.display:
+        if self._interaction_mode == InteractionMode.CLARIFICATION:
+            question = self.query_one(PlanQuestionWidget)
             if event.key == "up":
                 question.action_cursor_up()
             elif event.key == "down":
@@ -516,13 +564,18 @@ class VillaniTUI(App[None]):
         popup = self._slash_popup()
         input_widget = self.query_one(Input)
         popup_visible = bool(popup is not None and popup.visible)
-        if popup is not None and popup_visible and self.focused is input_widget:
+        if (
+            self._interaction_mode == InteractionMode.SLASH
+            and popup is not None
+            and popup_visible
+            and self.focused is input_widget
+        ):
             if event.key == "down":
                 popup.cursor_down()
             elif event.key == "up":
                 popup.cursor_up()
             elif event.key == "escape":
-                popup.hide_popup()
+                self._close_slash_popup()
             elif event.key == "tab":
                 trigger = popup.accept_selected_trigger()
                 if trigger is not None:
@@ -535,7 +588,7 @@ class VillaniTUI(App[None]):
                     input_widget.value = selected.trigger
                     self._close_slash_popup()
                     self._handle_slash_command(selected.trigger)
-                    input_widget.focus()
+                    self._restore_input_focus()
             else:
                 return
             event.stop()
@@ -543,16 +596,6 @@ class VillaniTUI(App[None]):
             return
 
         transcript = self.query_one(VillaniTranscript)
-        if event.key == "space":
-            focused = self.focused
-            if isinstance(focused, Input) and not focused.disabled:
-                cursor = focused.cursor_position
-                value = focused.value
-                focused.value = f"{value[:cursor]} {value[cursor:]}"
-                focused.cursor_position = cursor + 1
-                event.stop()
-                event.prevent_default()
-            return
         if event.key == "home":
             self.set_follow_tail(False)
             transcript.scroll_home(animate=False)
@@ -566,3 +609,7 @@ class VillaniTUI(App[None]):
         elif event.key == "end":
             self.set_follow_tail(True)
             transcript.scroll_end(animate=False)
+        else:
+            return
+        event.stop()
+        event.prevent_default()

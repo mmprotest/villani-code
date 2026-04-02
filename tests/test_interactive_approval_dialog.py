@@ -95,10 +95,9 @@ def test_approval_prompt_renders_literal_markup_like_text(tmp_path: Path) -> Non
             await pilot.pause()
 
             bar = app.query_one(ApprovalBar)
-            prompt_widget = bar.query_one("#approval-prompt", Static)
 
             assert bar.display is True
-            assert str(prompt_widget.renderable) == prompt
+            assert bar.prompt_text == prompt
 
     asyncio.run(run())
 def test_stylesheet_loads_and_app_mounts(tmp_path: Path) -> None:

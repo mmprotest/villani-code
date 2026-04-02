@@ -22,6 +22,7 @@ class ApprovalBar(Vertical):
         self.request_id: str | None = None
         self._choices: list[str] = []
         self._resolved = False
+        self._prompt_text = ""
 
     def compose(self) -> ComposeResult:
         yield Static("", id="approval-prompt")
@@ -33,20 +34,26 @@ class ApprovalBar(Vertical):
     def show_request(self, prompt: str, request_id: str, choices: list[str]) -> None:
         self.request_id = request_id
         self._choices = choices
+        self._prompt_text = prompt
         self._resolved = False
         self.display = True
-        self.query_one("#approval-prompt", Static).update(Text(prompt))
+        self.query_one("#approval-prompt", Static).update(Text(self._prompt_text))
         options = self._options()
         options.clear()
         for choice in choices:
             options.append(ListItem(Label(choice.capitalize())))
         options.index = 0
         self._sync_selected_style()
-        options.focus()
+        self.focus_options()
 
     def hide_request(self) -> None:
         self.request_id = None
+        self._prompt_text = ""
         self.display = False
+
+    @property
+    def prompt_text(self) -> str:
+        return self._prompt_text
 
     def _options(self) -> ListView:
         options = self.query_one("#approval-options", ListView)
@@ -58,6 +65,9 @@ class ApprovalBar(Vertical):
         for idx, child in enumerate(options.children):
             if isinstance(child, ListItem):
                 child.set_class(idx == options.index, "selected")
+
+    def focus_options(self) -> None:
+        self._options().focus()
 
     def action_cursor_up(self) -> None:
         if self.request_id is not None:
