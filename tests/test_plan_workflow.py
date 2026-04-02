@@ -113,11 +113,15 @@ class PlanningRunnerStub:
             confidence_score=0.7,
         )
 
-    def run(self, text: str):
-        return {"response": {"content": [{"type": "text", "text": text}]}}
+    def run(self, instruction: str, messages=None, execution_budget=None):
+        _ = (messages, execution_budget)
+        return {"response": {"content": [{"type": "text", "text": instruction}]}}
 
     def run_with_plan(self, plan: PlanSessionResult):
         return {"response": {"content": [{"type": "text", "text": plan.task_summary}]}}
+
+    def run_villani_mode(self):
+        return {"response": {"content": []}}
 
 
 class ThreadSafeApp:

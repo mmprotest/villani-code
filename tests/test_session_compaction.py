@@ -9,6 +9,24 @@ class DummyApp:
     def post_message(self, message: object) -> object:
         return message
 
+    def call_from_thread(self, callback, *args, **kwargs):
+        return callback(*args, **kwargs)
+
+    def apply_plan_result(self, _result, _reset_answers: bool) -> None:
+        return None
+
+    def record_plan_answer(self, _answer) -> None:
+        return None
+
+    def get_plan_instruction(self) -> str:
+        return ""
+
+    def get_plan_answers(self) -> list:
+        return []
+
+    def get_last_ready_plan(self):
+        return None
+
 
 class CapturingRunner:
     def __init__(self) -> None:
@@ -18,7 +36,8 @@ class CapturingRunner:
         self.permissions = None
         self.last_messages = None
 
-    def run(self, instruction: str, messages=None):
+    def run(self, instruction: str, messages=None, execution_budget=None):
+        _ = execution_budget
         self.last_messages = messages
         return {
             "response": {"content": [{"type": "text", "text": "ack"}]},
@@ -36,6 +55,17 @@ class CapturingRunner:
                 {"role": "assistant", "content": [{"type": "text", "text": "I read a.py"}]},
             ],
         }
+
+    def plan(self, instruction: str, answers=None):
+        _ = (instruction, answers)
+        raise RuntimeError("unused")
+
+    def run_with_plan(self, plan):
+        _ = plan
+        return {"response": {"content": []}}
+
+    def run_villani_mode(self):
+        return {"response": {"content": []}}
 
 
 def test_compaction_preserves_valid_tool_sequence_with_summary() -> None:

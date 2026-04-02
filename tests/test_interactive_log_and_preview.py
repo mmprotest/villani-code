@@ -10,6 +10,24 @@ from villani_code.tui.messages import LogAppend, SpinnerState
 
 class DummyRunner:
     permissions = None
+    print_stream = False
+    approval_callback = None
+    event_callback = None
+
+    def run(self, instruction: str, messages=None, execution_budget=None):
+        _ = (instruction, messages, execution_budget)
+        return {"response": {"content": []}}
+
+    def plan(self, instruction: str, answers=None):
+        _ = (instruction, answers)
+        raise RuntimeError("unused")
+
+    def run_with_plan(self, plan):
+        _ = plan
+        return {"response": {"content": []}}
+
+    def run_villani_mode(self):
+        return {"response": {"content": []}}
 
 
 class DummyApp:
@@ -18,6 +36,24 @@ class DummyApp:
 
     def post_message(self, message):
         self.messages.append(message)
+
+    def call_from_thread(self, callback, *args, **kwargs):
+        return callback(*args, **kwargs)
+
+    def apply_plan_result(self, _result, _reset_answers: bool) -> None:
+        return None
+
+    def record_plan_answer(self, _answer) -> None:
+        return None
+
+    def get_plan_instruction(self) -> str:
+        return ""
+
+    def get_plan_answers(self) -> list:
+        return []
+
+    def get_last_ready_plan(self):
+        return None
 
 
 def test_stream_event_posts_log_append_incrementally(tmp_path: Path) -> None:
@@ -58,7 +94,8 @@ def test_tool_started_logs_only_read_write_patch(tmp_path: Path) -> None:
 
 def test_non_stream_fallback_has_no_assistant_prefix(tmp_path: Path) -> None:
     class NonStreamingRunner(DummyRunner):
-        def run(self, _text):
+        def run(self, instruction: str, messages=None, execution_budget=None):
+            _ = (instruction, messages, execution_budget)
             return {"response": {"content": [{"type": "text", "text": "hello"}]}}
 
     app = DummyApp()
@@ -104,7 +141,8 @@ def test_request_approval_posts_prompt_without_meta_spam(tmp_path: Path) -> None
 
 def test_streamed_response_does_not_emit_fallback_ai_dump(tmp_path: Path) -> None:
     class StreamingRunner(DummyRunner):
-        def run(self, _text):
+        def run(self, instruction: str, messages=None, execution_budget=None):
+            _ = (instruction, messages, execution_budget)
             self.event_callback({"type": "stream_text", "text": "hello"})
             return {"response": {"content": [{"type": "text", "text": "hello"}]}}
 
