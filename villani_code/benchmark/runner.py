@@ -135,22 +135,25 @@ class BenchmarkRunner:
         task_id: str | None = None,
         repeat: int = 1,
         include_private: bool = False,
+        resume: bool = False,
         **filters: str | None,
     ) -> dict[str, object]:
         tasks = load_tasks(suite_dir, task_id=task_id, **filters)
         if include_private and self.private_suite_dir and self.private_suite_dir.exists():
             tasks.extend(load_tasks(self.private_suite_dir, task_id=task_id, **filters))
-        existing_results = self._load_existing_task_results_from_manifests(
-            tasks=tasks,
-            repeat=repeat,
-            agent=agent,
-            model=model,
-            base_url=base_url,
-            provider=provider,
-        )
+        existing_results: dict[tuple[int, str], BenchmarkRunResult] = {}
+        if resume:
+            existing_results = self._load_existing_task_results_from_manifests(
+                tasks=tasks,
+                repeat=repeat,
+                agent=agent,
+                model=model,
+                base_url=base_url,
+                provider=provider,
+            )
         results: list[BenchmarkRunResult] = list(existing_results.values())
         self._log(
-            f"start suite={suite_dir} tasks={len(tasks)} agent={agent} model={model or '-'} provider={provider or '-'} base_url={base_url or '-'} output_dir={self.output_dir}"
+            f"start suite={suite_dir} tasks={len(tasks)} agent={agent} model={model or '-'} provider={provider or '-'} base_url={base_url or '-'} output_dir={self.output_dir} resume={int(resume)}"
         )
         for repeat_index in range(repeat):
             for index, task in enumerate(tasks, start=1):
@@ -752,11 +755,6 @@ class BenchmarkRunner:
                 elif not visible_pass or not hidden_pass:
                     if policy_result.violating_paths and failure_reason not in {FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED}:
                         failure_reason = FailureReason.FORBIDDEN_EDIT
-            if failure_reason is None and not artifacts_ok:
-                failure_reason = FailureReason.MISSING_ARTIFACT
-                if artifact_failure_detail:
-                    error = artifact_failure_detail
-
             no_op_patch_attempt = self._is_noop_patch_attempt(
                 file_writes=None,
                 patch_attempts=None,
@@ -767,9 +765,19 @@ class BenchmarkRunner:
                 and not timeout
                 and not error
                 and not policy_result.violating_paths
-                and failure_reason in {None, FailureReason.VISIBLE_VERIFICATION_FAILED, FailureReason.HIDDEN_VERIFICATION_FAILED, FailureReason.MISSING_ARTIFACT}
+                and failure_reason in {
+                    None,
+                    FailureReason.VISIBLE_VERIFICATION_FAILED,
+                    FailureReason.HIDDEN_VERIFICATION_FAILED,
+                    FailureReason.MISSING_ARTIFACT,
+                }
             ):
                 failure_reason = FailureReason.BENCHMARK_NO_PATCH_ATTEMPT
+
+            if failure_reason is None and not artifacts_ok:
+                failure_reason = FailureReason.MISSING_ARTIFACT
+                if artifact_failure_detail:
+                    error = artifact_failure_detail
 
             policy_repo_clean_ok = policy_result.allowlist_ok and policy_result.forbidden_ok
             if solved_checks_passed and not policy_result.violating_paths:

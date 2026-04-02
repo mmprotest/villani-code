@@ -1,17 +1,43 @@
 from __future__ import annotations
 
+import difflib
 import py_compile
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets
+from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets, parse_unified_diff
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.tools import execute_tool
 
 
 _FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
+_DIFF_HEADER_RE = re.compile(r"^(diff --git\s+|---\s+|\+\+\+\s+)", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class MutationGuardThresholds:
+    max_touched_lines: int = 120
+    max_touched_ratio: float = 0.35
+    min_lines_for_ratio_guard: int = 40
+
+
+MUTATION_GUARD_THRESHOLDS = MutationGuardThresholds()
+
+
+@dataclass
+class MutationEditAnalysis:
+    path: str
+    existed: bool
+    original_line_count: int
+    new_line_count: int
+    lines_added: int
+    lines_deleted: int
+    touched_lines: int
+    touched_ratio: float
+    probable_rewrite: bool
 
 
 def _extract_fenced_code(text: str) -> str | None:
@@ -19,6 +45,164 @@ def _extract_fenced_code(text: str) -> str | None:
     if not match:
         return None
     return match.group(1).strip("\n")
+
+
+def _extract_fenced_blocks(text: str) -> list[str]:
+    return [m.group(1).strip("\n") for m in _FENCED_BLOCK_RE.finditer(text)]
+
+
+def _looks_like_unified_diff(text: str) -> bool:
+    return bool(_DIFF_HEADER_RE.search(text) and "@@ " in text)
+
+
+def _extract_diff_text_from_payload(text: str) -> str:
+    raw = str(text or "")
+    if not raw.strip():
+        return raw
+    for block in _extract_fenced_blocks(raw):
+        if _looks_like_unified_diff(block):
+            return block + ("" if block.endswith("\n") else "\n")
+    if _looks_like_unified_diff(raw):
+        return raw
+    start = None
+    lines = raw.replace("\r\n", "\n").split("\n")
+    for idx, line in enumerate(lines):
+        if line.startswith("diff --git ") or line.startswith("--- "):
+            start = idx
+            break
+    if start is not None:
+        extracted = "\n".join(lines[start:]).strip("\n")
+        if extracted:
+            return extracted + "\n"
+    return raw
+
+
+def _extract_literal_content_from_payload(content: str) -> str:
+    blocks = _extract_fenced_blocks(content)
+    if len(blocks) == 1:
+        extracted = blocks[0]
+        return extracted + ("" if extracted.endswith("\n") else "\n")
+    return content
+
+
+def _analyze_text_rewrite(
+    path: str, existed: bool, before_text: str, after_text: str, thresholds: MutationGuardThresholds
+) -> MutationEditAnalysis:
+    before_lines = before_text.splitlines()
+    after_lines = after_text.splitlines()
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines)
+    lines_added = 0
+    lines_deleted = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "insert":
+            lines_added += j2 - j1
+        elif tag == "delete":
+            lines_deleted += i2 - i1
+        elif tag == "replace":
+            lines_deleted += i2 - i1
+            lines_added += j2 - j1
+    touched = lines_added + lines_deleted
+    baseline = max(len(before_lines), 1)
+    touched_ratio = touched / baseline
+    probable_rewrite = existed and (
+        touched > thresholds.max_touched_lines
+        or (len(before_lines) >= thresholds.min_lines_for_ratio_guard and touched_ratio > thresholds.max_touched_ratio)
+    )
+    return MutationEditAnalysis(
+        path=path,
+        existed=existed,
+        original_line_count=len(before_lines),
+        new_line_count=len(after_lines),
+        lines_added=lines_added,
+        lines_deleted=lines_deleted,
+        touched_lines=touched,
+        touched_ratio=touched_ratio,
+        probable_rewrite=probable_rewrite,
+    )
+
+
+def _analyze_patch_mutation(
+    repo: Path, unified_diff: str, default_file_path: str | None, thresholds: MutationGuardThresholds
+) -> list[MutationEditAnalysis]:
+    analyses: list[MutationEditAnalysis] = []
+    parsed = parse_unified_diff(unified_diff)
+    for target in extract_unified_diff_targets(unified_diff, default_file_path=default_file_path):
+        normalized = str(target).replace("\\", "/").lstrip("./")
+        path = (repo / normalized).resolve()
+        existed = path.exists()
+        before_text = path.read_text(encoding="utf-8", errors="replace") if existed and path.is_file() else ""
+        added = 0
+        deleted = 0
+        for file_patch in parsed:
+            file_target = (
+                file_patch.new_path
+                if file_patch.new_path != "/dev/null"
+                else file_patch.old_path
+            ).replace("\\", "/").lstrip("./")
+            if file_target != normalized:
+                continue
+            for hunk in file_patch.hunks:
+                for hline in hunk.lines:
+                    if hline.startswith("+"):
+                        added += 1
+                    elif hline.startswith("-"):
+                        deleted += 1
+        baseline = max(len(before_text.splitlines()), 1)
+        touched = added + deleted
+        touched_ratio = touched / baseline
+        analyses.append(
+            MutationEditAnalysis(
+                path=normalized,
+                existed=existed,
+                original_line_count=len(before_text.splitlines()),
+                new_line_count=max(0, len(before_text.splitlines()) - deleted + added),
+                lines_added=added,
+                lines_deleted=deleted,
+                touched_lines=touched,
+                touched_ratio=touched_ratio,
+                probable_rewrite=existed
+                and (
+                    touched > thresholds.max_touched_lines
+                    or (
+                        len(before_text.splitlines()) >= thresholds.min_lines_for_ratio_guard
+                        and touched_ratio > thresholds.max_touched_ratio
+                    )
+                ),
+            )
+        )
+    return analyses
+
+
+def _sanitize_tool_input_file_path(tool_input: dict[str, Any], repo: Path) -> None:
+    """Normalize and sanitize a `file_path` value in tool_input in-place.
+
+    - Strip surrounding quotes
+    - Normalize backslashes to forward slashes
+    - If an absolute path points inside `repo`, convert to a repo-relative path
+    - Strip leading './' or leading '/'
+    """
+    try:
+        raw = tool_input.get("file_path")
+        if not isinstance(raw, str):
+            return
+        fp = raw.strip()
+        if (fp.startswith('"') and fp.endswith('"')) or (fp.startswith("'") and fp.endswith("'")):
+            fp = fp[1:-1].strip()
+        fp = fp.strip('"').strip("'")
+        fp = fp.replace("\\", "/")
+        p = Path(fp)
+        if p.is_absolute():
+            try:
+                rel = p.resolve().relative_to(repo.resolve())
+                fp = str(rel).replace("\\", "/")
+            except Exception:
+                pass
+        fp = fp.lstrip("./")
+        if fp.startswith("/"):
+            fp = fp.lstrip("/")
+        tool_input["file_path"] = fp
+    except Exception:
+        return
 
 
 def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
@@ -35,21 +219,17 @@ def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> l
     return []
 
 
-def _normalize_mutation_payload_for_code_files(tool_name: str, tool_input: dict[str, Any]) -> None:
+def _normalize_mutation_payload(tool_name: str, tool_input: dict[str, Any]) -> None:
     if tool_name == "Write":
-        file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
-        if not file_path.endswith(".py"):
-            return
         content = str(tool_input.get("content", ""))
-        extracted = _extract_fenced_code(content)
-        if extracted is not None:
-            tool_input["content"] = extracted + ("\n" if not extracted.endswith("\n") else "")
+        if "```" in content:
+            tool_input["content"] = _extract_literal_content_from_payload(content)
         return
     if tool_name == "Patch":
         diff = str(tool_input.get("unified_diff", ""))
-        extracted = _extract_fenced_code(diff)
-        if extracted is not None and "--- " in extracted and "+++ " in extracted:
-            tool_input["unified_diff"] = extracted + ("\n" if not extracted.endswith("\n") else "")
+        normalized = _extract_diff_text_from_payload(diff)
+        if normalized != diff:
+            tool_input["unified_diff"] = normalized
 
 
 def _benchmark_post_write_python_validation(
@@ -209,6 +389,60 @@ def _validate_first_attempt_locked_target_mutation(
     return None
 
 
+def _reject_rewrite_message(analysis: MutationEditAnalysis) -> str:
+    percent = int(round(analysis.touched_ratio * 100))
+    return (
+        "Rewrite-heavy mutation rejected for existing file "
+        f"{analysis.path}: touched_lines={analysis.touched_lines} "
+        f"(+{analysis.lines_added}/-{analysis.lines_deleted}), touched_ratio={percent}%. "
+        "Emit a narrow Patch targeting only the smallest necessary region; avoid whole-file rewrites."
+    )
+
+
+def _prepare_global_mutation_policy(
+    runner: Any, tool_name: str, tool_input: dict[str, Any]
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    if tool_name == "Write":
+        file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if not file_path:
+            return tool_name, tool_input, None
+        path = (runner.repo / file_path).resolve()
+        exists = path.exists() and path.is_file()
+        if not exists:
+            return tool_name, tool_input, None
+        before_text = path.read_text(encoding="utf-8", errors="replace")
+        after_text = str(tool_input.get("content", ""))
+        if before_text == after_text:
+            return tool_name, tool_input, {"content": f"No changes for {file_path}", "is_error": False}
+        analysis = _analyze_text_rewrite(file_path, True, before_text, after_text, MUTATION_GUARD_THRESHOLDS)
+        if analysis.probable_rewrite:
+            return tool_name, tool_input, {"content": _reject_rewrite_message(analysis), "is_error": True}
+        diff_lines = list(
+            difflib.unified_diff(
+                before_text.splitlines(),
+                after_text.splitlines(),
+                fromfile=f"a/{file_path}",
+                tofile=f"b/{file_path}",
+                lineterm="",
+            )
+        )
+        unified_diff = "\n".join(diff_lines).rstrip("\n") + "\n"
+        patched_input = {"file_path": file_path, "unified_diff": unified_diff}
+        return "Patch", patched_input, None
+    if tool_name == "Patch":
+        default_path = str(tool_input.get("file_path", "") or "") or None
+        try:
+            analyses = _analyze_patch_mutation(
+                runner.repo, str(tool_input.get("unified_diff", "")), default_path, MUTATION_GUARD_THRESHOLDS
+            )
+        except PatchApplyError:
+            return tool_name, tool_input, None
+        for analysis in analyses:
+            if analysis.probable_rewrite:
+                return tool_name, tool_input, {"content": _reject_rewrite_message(analysis), "is_error": True}
+    return tool_name, tool_input, None
+
+
 def execute_tool_with_policy(
     runner: Any,
     tool_name: str,
@@ -222,6 +456,10 @@ def execute_tool_with_policy(
     )
     if not hook_pre.allow:
         return {"content": f"Blocked by hook: {hook_pre.reason}", "is_error": True}
+    try:
+        _sanitize_tool_input_file_path(tool_input, runner.repo)
+    except Exception:
+        pass
 
     if tool_name == "SubmitPlan":
         if not getattr(runner, "_planning_read_only", False):
@@ -253,8 +491,8 @@ def execute_tool_with_policy(
             return {"content": policy_error, "is_error": True}
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
-    if runner.benchmark_config.enabled and tool_name in {"Write", "Patch"}:
-        _normalize_mutation_payload_for_code_files(tool_name, tool_input)
+    if tool_name in {"Write", "Patch"}:
+        _normalize_mutation_payload(tool_name, tool_input)
 
     policy = runner.permissions.evaluate_with_reason(
         tool_name,
@@ -282,10 +520,23 @@ def execute_tool_with_policy(
                     "input": tool_input,
                 }
             )
-            if not runner.approval_callback(tool_name, tool_input):
+            approved = runner.approval_callback(tool_name, tool_input)
+            runner.event_callback(
+                {
+                    "type": "approval_resolved",
+                    "name": tool_name,
+                    "input": tool_input,
+                    "approved": approved,
+                }
+            )
+            if not approved:
                 return {"content": "User denied tool execution", "is_error": True}
     elif runner.plan_mode != "off" and tool_name in {"Write", "Patch"}:
         return {"content": "Plan mode: edit not executed", "is_error": False}
+
+    tool_name, tool_input, forced_result = _prepare_global_mutation_policy(runner, tool_name, tool_input)
+    if forced_result is not None:
+        return forced_result
 
     first_attempt_lock_violation = _validate_first_attempt_locked_target_mutation(runner, tool_name, tool_input)
     if first_attempt_lock_violation:
@@ -328,23 +579,27 @@ def execute_tool_with_policy(
                 return {"content": msg, "is_error": True}
 
     if tool_name in {"Write", "Patch"}:
-        target = str(tool_input.get("file_path", ""))
-        if target:
-            normalized_target = target.replace("\\", "/").lstrip("./")
-            runner._intended_targets.add(normalized_target)
-            runner._current_verification_targets = {normalized_target}
+        targets = _benchmark_mutation_targets(tool_name, tool_input)
+        normalized_targets = sorted(
+            {
+                str(target or "").replace("\\", "/").lstrip("./")
+                for target in targets
+                if str(target or "").strip()
+            }
+        )
+        if normalized_targets:
+            runner._intended_targets.update(normalized_targets)
+            runner._current_verification_targets = set(normalized_targets)
             runner._current_verification_before_contents = {}
-            target_path = (runner.repo / normalized_target).resolve()
-            if target_path.exists() and target_path.is_file():
-                before_text = target_path.read_text(encoding="utf-8", errors="replace")
-                runner._before_contents[normalized_target] = before_text
-                runner._current_verification_before_contents[normalized_target] = before_text
-        checkpoint_target = str(tool_input.get("file_path", "")).strip()
-        if checkpoint_target:
-            runner.checkpoints.create(
-                [Path(checkpoint_target)],
-                message_index=message_count,
-            )
+            checkpoint_paths: list[Path] = []
+            for normalized_target in normalized_targets:
+                target_path = (runner.repo / normalized_target).resolve()
+                checkpoint_paths.append(Path(normalized_target))
+                if target_path.exists() and target_path.is_file():
+                    before_text = target_path.read_text(encoding="utf-8", errors="replace")
+                    runner._before_contents[normalized_target] = before_text
+                    runner._current_verification_before_contents[normalized_target] = before_text
+            runner.checkpoints.create(checkpoint_paths, message_index=message_count)
     runner.event_callback(
         {
             "type": "tool_started",
@@ -353,5 +608,11 @@ def execute_tool_with_policy(
             "tool_use_id": tool_use_id,
         }
     )
-    result = execute_tool(tool_name, tool_input, runner.repo, unsafe=runner.unsafe)
+    result = execute_tool(
+        tool_name,
+        tool_input,
+        runner.repo,
+        unsafe=runner.unsafe,
+        debug_callback=getattr(runner, "_debug_tool_callback", None),
+    )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)

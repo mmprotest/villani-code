@@ -1072,7 +1072,16 @@ def test_runner_resume_from_manifest_and_task_result(tmp_path: Path, monkeypatch
         return _resume_result(task.id, repeat_index, task.task_checksum or "")
 
     monkeypatch.setattr(runner, "_run_task", fake_run_task)
-    data = runner.run(suite_dir=tmp_path / "suite", agent="villani", model="m", base_url=None, api_key=None, provider=None, repeat=1)
+    data = runner.run(
+        suite_dir=tmp_path / "suite",
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+        repeat=1,
+        resume=True,
+    )
 
     assert executed == [("task_two", 0)]
     rows = [BenchmarkRunResult.model_validate_json(line) for line in Path(data["results_path"]).read_text(encoding="utf-8").splitlines() if line]
@@ -1112,7 +1121,16 @@ def test_runner_resume_reruns_for_corrupt_manifest_or_missing_or_mismatch(tmp_pa
         return _resume_result(task.id, repeat_index, task.task_checksum or "")
 
     monkeypatch.setattr(runner, "_run_task", fake_run_task)
-    runner.run(suite_dir=tmp_path / "suite", agent="villani", model="m", base_url=None, api_key=None, provider=None, repeat=1)
+    runner.run(
+        suite_dir=tmp_path / "suite",
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+        repeat=1,
+        resume=True,
+    )
 
     assert ("task_valid", 0) not in executed
     assert ("task_corrupt", 0) in executed
@@ -1136,8 +1154,46 @@ def test_runner_resume_repeat_indexes_independent(tmp_path: Path, monkeypatch) -
         return _resume_result(task_arg.id, repeat_index, task_arg.task_checksum or "")
 
     monkeypatch.setattr(runner, "_run_task", fake_run_task)
-    data = runner.run(suite_dir=tmp_path / "suite", agent="villani", model="m", base_url=None, api_key=None, provider=None, repeat=2)
+    data = runner.run(
+        suite_dir=tmp_path / "suite",
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+        repeat=2,
+        resume=True,
+    )
 
     assert executed == [("task_repeat", 1)]
     rows = [BenchmarkRunResult.model_validate_json(line) for line in Path(data["results_path"]).read_text(encoding="utf-8").splitlines() if line]
     assert [(row.repeat_index, row.task_id) for row in rows] == [(0, "task_repeat"), (1, "task_repeat")]
+
+
+def test_runner_fresh_run_ignores_stale_manifest_without_resume(tmp_path: Path, monkeypatch) -> None:
+    task = _minimal_task(tmp_path / "task", id="task_repeat", task_checksum="ck")
+    runner = BenchmarkRunner(output_dir=tmp_path / "out")
+    runner._task_result_dir().mkdir(parents=True, exist_ok=True)
+    (runner.output_dir / "manifest_task_repeat_0_1.json").write_text(_resume_manifest(task, 0).model_dump_json(indent=2), encoding="utf-8")
+    runner._task_result_path("task_repeat", 0).write_text(_resume_result("task_repeat", 0, "ck").model_dump_json(indent=2), encoding="utf-8")
+
+    monkeypatch.setattr("villani_code.benchmark.runner.load_tasks", lambda *args, **kwargs: [task])
+    executed: list[tuple[str, int]] = []
+
+    def fake_run_task(task_arg: BenchmarkTask, **kwargs) -> BenchmarkRunResult:
+        repeat_index = int(kwargs["repeat_index"])
+        executed.append((task_arg.id, repeat_index))
+        return _resume_result(task_arg.id, repeat_index, task_arg.task_checksum or "")
+
+    monkeypatch.setattr(runner, "_run_task", fake_run_task)
+    runner.run(
+        suite_dir=tmp_path / "suite",
+        agent="villani",
+        model="m",
+        base_url=None,
+        api_key=None,
+        provider=None,
+        repeat=1,
+        resume=False,
+    )
+    assert executed == [("task_repeat", 0)]

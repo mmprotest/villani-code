@@ -81,6 +81,26 @@ def test_approval_shows_all_three_options(tmp_path: Path) -> None:
 
 
 
+
+
+def test_approval_prompt_renders_literal_markup_like_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(DummyRunner(), tmp_path)
+        async with app.run_test() as pilot:
+            prompt = (
+                'Allow Bash on cd "C:\\tmp" && echo "<div class=\"header\">" && '
+                'echo "[bold]oops[/bold]" && echo "go.Bar("'
+            )
+            app.on_approval_request(ApprovalRequest(prompt, ["yes", "always", "no"], "r-markup"))
+            await pilot.pause()
+
+            bar = app.query_one(ApprovalBar)
+            prompt_widget = bar.query_one("#approval-prompt", Static)
+
+            assert bar.display is True
+            assert str(prompt_widget.renderable) == prompt
+
+    asyncio.run(run())
 def test_stylesheet_loads_and_app_mounts(tmp_path: Path) -> None:
     async def run() -> None:
         app = VillaniTUI(DummyRunner(), tmp_path)

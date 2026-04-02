@@ -4,6 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
+from rich.text import Text
 from textual.widgets import Input, Label, ListItem, ListView, Static
 
 from villani_code.plan_session import PlanAnswer, PlanQuestion
@@ -34,8 +35,8 @@ class PlanQuestionWidget(Vertical):
     def show_question(self, question: PlanQuestion) -> None:
         self._question = question
         self.display = True
-        self.query_one("#plan-question-text", Static).update(question.question)
-        self.query_one("#plan-question-rationale", Static).update(f"Why this matters: {question.rationale}")
+        self.query_one("#plan-question-text", Static).update(Text(question.question))
+        self.query_one("#plan-question-rationale", Static).update(Text(f"Why this matters: {question.rationale}"))
         options = self.query_one("#plan-question-options", ListView)
         options.can_focus = True
         options.clear()

@@ -101,6 +101,26 @@ class ContextCompactor:
     def compact_repair_history(text: str) -> ContextCompactionResult:
         return _compact_lines("repair_history", text, ("attempt", "failure", "fix", "status", "step"))
 
+    @staticmethod
+    def compact_mission_sections(sections: dict[str, list[str]]) -> list[ContextCompactionResult]:
+        results: list[ContextCompactionResult] = []
+        for key, values in sections.items():
+            text = "\n".join(v for v in values if str(v).strip())
+            results.append(_compact_lines(f"mission_{key}", text, ("failed", "error", "summary", "active", "skill", "verified")))
+        return results
+
+    @staticmethod
+    def build_compact_mission_summary(sections: dict[str, list[str]]) -> str:
+        lines: list[str] = []
+        for key, values in sections.items():
+            clean = [str(v).strip() for v in values if str(v).strip()]
+            if not clean:
+                continue
+            lines.append(f"{key}: {clean[0]}")
+            if len(clean) > 1:
+                lines.append(f"{key} (+{len(clean)-1} more)")
+        return "\n".join(lines[:16])
+
 
 def _compact_lines(source_type: str, text: str, signal_tokens: tuple[str, ...]) -> ContextCompactionResult:
     lines = [line.strip() for line in text.splitlines() if line.strip()]

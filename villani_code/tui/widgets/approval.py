@@ -4,6 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
+from rich.text import Text
 from textual.widgets import Label, ListItem, ListView, Static
 
 
@@ -34,7 +35,7 @@ class ApprovalBar(Vertical):
         self._choices = choices
         self._resolved = False
         self.display = True
-        self.query_one("#approval-prompt", Static).update(prompt)
+        self.query_one("#approval-prompt", Static).update(Text(prompt))
         options = self._options()
         options.clear()
         for choice in choices:

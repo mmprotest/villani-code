@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 import shutil
@@ -23,10 +24,46 @@ from villani_code.repair import execute_repair_loop
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
+from villani_code.mission_state import save_mission_state
+from villani_code.summarizer import summarize_mission_state
 from villani_code.utils import ensure_dir
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
+
+
+def _user_message_is_safe_for_text_injection(message: dict[str, Any]) -> bool:
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list):
+        if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+            return False
+        return True
+    return False
+
+
+def _find_latest_safe_user_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if _user_message_is_safe_for_text_injection(message):
+            return message
+    return None
+
+
+def prepend_text_to_latest_safe_user_message(messages: list[dict[str, Any]], text: str) -> bool:
+    message = _find_latest_safe_user_message(messages)
+    if message is None:
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        message["content"] = text + "\n\n" + content if content else text
+        return True
+    if isinstance(content, list):
+        content.insert(0, {"type": "text", "text": text})
+        return True
+    return False
 
 
 def _normalize_repo_path(value: str) -> str:
@@ -330,18 +367,11 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
         f"- Repair intent: {diagnosis['fix_intent']}\n\n"
         "Use this to focus your first inspection and first repair attempt. Treat it as a hint, not ground truth."
     )
-    for message in messages:
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, list):
-            content.insert(0, {"type": "text", "text": hint})
-        return
-    messages.insert(0, {"role": "user", "content": [{"type": "text", "text": hint}]})
+    prepend_text_to_latest_safe_user_message(messages, hint)
 
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    prepared = [dict(m) for m in messages]
+    prepared = deepcopy(messages)
     if runner.small_model:
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
@@ -1017,8 +1047,16 @@ def is_no_progress_response(response: dict[str, Any]) -> bool:
 
 
 def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
-    if getattr(runner, "_planning_read_only", False):
-        return
+    if getattr(runner, "_mission_state", None) is not None and getattr(runner, "_mission_dir", None) is not None:
+        mission_dir = runner._mission_dir
+        ensure_dir(mission_dir)
+        (mission_dir / "messages.json").write_text(json.dumps(messages, indent=2), encoding="utf-8")
+        summary_text = summarize_mission_state(runner._mission_state)
+        runner._mission_state.compact_summary = summary_text
+        (mission_dir / "working_summary.md").write_text(summary_text + "\n", encoding="utf-8")
+        save_mission_state(runner.repo, runner._mission_state)
+        if getattr(runner, "_event_recorder", None) is not None:
+            runner._event_recorder.write_digest()
     root = runner.repo / ".villani_code" / "sessions"
     ensure_dir(root)
     (root / "last.json").write_text(
@@ -1204,6 +1242,10 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             next_step_hints=["Finalize and report output"],
             handoff_checkpoint="validation_passed",
         ))
+        if getattr(runner, "_mission_state", None) is not None:
+            runner._mission_state.validation_failures = []
+            runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
+            save_mission_state(runner.repo, runner._mission_state)
         return "Validation: passed."
 
     outcome = execute_repair_loop(
@@ -1228,6 +1270,10 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             next_step_hints=["Report repaired validation and summarize edits"],
             handoff_checkpoint="repair_recovered",
         ))
+        if getattr(runner, "_mission_state", None) is not None:
+            runner._mission_state.validation_failures = []
+            runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
+            save_mission_state(runner.repo, runner._mission_state)
         return outcome.message
 
     checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"])
@@ -1242,4 +1288,9 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         next_step_hints=["Inspect failing step and rerun with interactive guidance"],
         handoff_checkpoint="repair_exhausted",
     ))
+    if getattr(runner, "_mission_state", None) is not None:
+        runner._mission_state.validation_failures = [result.failure_summary]
+        runner._mission_state.last_failed_summary = outcome.message
+        runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
+        save_mission_state(runner.repo, runner._mission_state)
     return outcome.message
