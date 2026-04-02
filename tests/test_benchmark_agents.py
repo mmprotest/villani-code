@@ -89,6 +89,7 @@ def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
         "claude",
         "--model",
         "claude-3-7-sonnet",
+        "--bare",
         "--print",
         "--output-format",
         "json",
