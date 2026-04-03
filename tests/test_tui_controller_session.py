@@ -16,8 +16,9 @@ class SessionRunner:
         self.permissions = None
         self.calls: list[dict[str, object]] = []
 
-    def run(self, instruction: str, messages=None, execution_budget=None):
+    def run(self, instruction: str, messages=None, execution_budget=None, approved_plan=None):
         _ = execution_budget
+        _ = approved_plan
         self.calls.append({"instruction": instruction, "messages": messages})
         if messages is None:
             session_messages = [

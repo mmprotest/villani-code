@@ -48,8 +48,8 @@ class ExplodingRunner:
         self.event_callback = None
         self.permissions = None
 
-    def run(self, instruction: str, messages=None, execution_budget=None):
-        _ = (instruction, messages, execution_budget)
+    def run(self, instruction: str, messages=None, execution_budget=None, approved_plan=None):
+        _ = (instruction, messages, execution_budget, approved_plan)
         return {"response": {"content": []}}
 
     def plan(self, instruction: str, answers=None):
@@ -70,8 +70,8 @@ class ApprovalRunner:
     approval_callback = None
     event_callback = None
 
-    def run(self, instruction: str, messages=None, execution_budget=None):
-        _ = (instruction, messages, execution_budget)
+    def run(self, instruction: str, messages=None, execution_budget=None, approved_plan=None):
+        _ = (instruction, messages, execution_budget, approved_plan)
         return {"response": {"content": []}}
 
     def plan(self, instruction: str, answers=None):
@@ -164,8 +164,8 @@ class StreamRunner:
     event_callback = None
     permissions = None
 
-    def run(self, instruction: str, messages=None, execution_budget=None):
-        _ = (instruction, messages, execution_budget)
+    def run(self, instruction: str, messages=None, execution_budget=None, approved_plan=None):
+        _ = (instruction, messages, execution_budget, approved_plan)
         return {"response": {"content": []}}
 
     def plan(self, instruction: str, answers=None):
@@ -194,3 +194,37 @@ def test_stream_text_still_renders_outside_plan_mode() -> None:
     controller._suppress_assistant_stream_text = False
     controller.on_runner_event({"type": "stream_text", "text": "normal output"})
     assert any(isinstance(m, LogAppend) and m.kind == "stream" and "normal output" in m.text for m in app.messages)
+
+
+def test_execute_uses_standard_run_path_with_approved_plan() -> None:
+    class ExecuteRunner(StreamRunner):
+        def __init__(self) -> None:
+            self.run_calls: list[object] = []
+            self.run_with_plan_calls = 0
+
+        def run(self, instruction: str, messages=None, execution_budget=None, approved_plan=None):
+            self.run_calls.append((instruction, approved_plan))
+            return {"response": {"content": []}}
+
+        def run_with_plan(self, plan):
+            _ = plan
+            self.run_with_plan_calls += 1
+            return {"response": {"content": []}}
+
+    class ExecuteApp(DummyApp):
+        def __init__(self, plan) -> None:
+            super().__init__()
+            self._plan = plan
+
+        def get_last_ready_plan(self):
+            return self._plan
+
+    from villani_code.plan_session import PlanSessionResult
+
+    plan = PlanSessionResult(instruction="implement fix", task_summary="fix", ready_to_execute=True)
+    runner = ExecuteRunner()
+    controller = RunnerController(runner, ExecuteApp(plan))
+    controller._run_execute_plan_worker()
+
+    assert runner.run_with_plan_calls == 0
+    assert runner.run_calls == [("implement fix", plan)]

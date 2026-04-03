@@ -146,6 +146,36 @@ def build_execution_instruction_from_plan(plan: PlanSessionResult) -> str:
     return "\n".join(sections)
 
 
+def build_approved_plan_context(plan: PlanSessionResult) -> str:
+    answers = []
+    for answer in plan.resolved_answers:
+        text = f"{answer.question_id}: {answer.selected_option_id}"
+        if answer.other_text.strip():
+            text += f" (other={answer.other_text.strip()})"
+        answers.append(text)
+
+    lines = [
+        "<approved-plan-context>",
+        "This plan is approved and ready for implementation.",
+        f"Approved objective: {plan.task_summary}",
+        "Candidate files:",
+        *([f"- {path}" for path in plan.candidate_files] if plan.candidate_files else ["- none specified"]),
+        "Recommended steps:",
+        *([f"- {step}" for step in plan.recommended_steps] if plan.recommended_steps else ["- none specified"]),
+        "Validation expectations and constraints:",
+        *([f"- {item}" for item in plan.assumptions] if plan.assumptions else ["- none specified"]),
+        "Resolved clarifications:",
+        *([f"- {item}" for item in answers] if answers else ["- none"]),
+        "Execution guidance:",
+        "- Implement directly; do not switch into read-only planning mode.",
+        "- Follow the approved plan unless repository evidence requires adjustment.",
+        "- Avoid re-planning from scratch.",
+        "- Run and report validation before completion.",
+        "</approved-plan-context>",
+    ]
+    return "\n".join(lines)
+
+
 def build_solution_planning_messages(
     instruction: str,
     repo_summary: dict[str, Any],

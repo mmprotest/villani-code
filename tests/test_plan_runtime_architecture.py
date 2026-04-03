@@ -13,9 +13,11 @@ from villani_code.state_tooling import execute_tool_with_policy
 class SequencedClient:
     def __init__(self, responses):
         self.responses = list(responses)
+        self.last_payload = None
 
     def create_message(self, payload, stream=False):
-        _ = (payload, stream)
+        _ = stream
+        self.last_payload = payload
         if not self.responses:
             return {"content": [{"type": "text", "text": "done"}]}
         return self.responses.pop(0)
@@ -112,6 +114,7 @@ def test_execute_consumes_finalized_plan(monkeypatch, tmp_path: Path) -> None:
     def fake_run(instruction: str, **_kwargs):
         captured["instruction"] = instruction
         captured["force_task_mode"] = _kwargs.get("force_task_mode")
+        captured["approved_plan"] = _kwargs.get("approved_plan")
         return {"response": {"content": [{"type": "text", "text": "ok"}]}}
 
     monkeypatch.setattr(runner, "run", fake_run)
@@ -123,8 +126,8 @@ def test_execute_consumes_finalized_plan(monkeypatch, tmp_path: Path) -> None:
         ready_to_execute=True,
     )
     runner.run_with_plan(plan)
-    assert "Objective: summary" in captured["instruction"]
-    assert "Implementation checklist:" in captured["instruction"]
+    assert captured["instruction"] == "orig"
+    assert captured["approved_plan"] is plan
     assert captured["force_task_mode"].value == "general"
 
 
@@ -135,6 +138,7 @@ def test_run_with_plan_forces_execution_mode_even_if_instruction_has_plan_words(
     def fake_run(instruction: str, **kwargs):
         seen["instruction"] = instruction
         seen["force_task_mode"] = kwargs.get("force_task_mode")
+        seen["approved_plan"] = kwargs.get("approved_plan")
         return {"response": {"content": [{"type": "text", "text": "ok"}]}}
 
     monkeypatch.setattr(runner, "run", fake_run)
@@ -146,8 +150,31 @@ def test_run_with_plan_forces_execution_mode_even_if_instruction_has_plan_words(
         ready_to_execute=True,
     )
     runner.run_with_plan(plan)
-    assert "Implement this approved task now." in str(seen["instruction"])
+    assert str(seen["instruction"]) == "inspect current behavior and then execute fix"
+    assert seen["approved_plan"] is plan
     assert seen["force_task_mode"] is not None
+
+
+def test_run_injects_approved_plan_context_into_normal_message_flow(tmp_path: Path) -> None:
+    client = SequencedClient([{"content": [{"type": "text", "text": "done"}]}])
+    runner = Runner(client, tmp_path, model="demo", stream=False)
+    plan = PlanSessionResult(
+        instruction="inspect current behavior and plan the fix",
+        task_summary="Implement fix using approved plan",
+        candidate_files=["villani_code/tui/controller.py"],
+        recommended_steps=["Edit controller execute path", "Run tests"],
+        assumptions=["Run validation before completion"],
+        ready_to_execute=True,
+    )
+
+    runner.run(plan.instruction, approved_plan=plan)
+
+    messages = client.last_payload["messages"]
+    user_content = messages[0]["content"]
+    merged = "\n".join(str(block.get("text", "")) for block in user_content if isinstance(block, dict))
+    assert "<approved-plan-context>" in merged
+    assert "Approved objective: Implement fix using approved plan" in merged
+    assert runner._task_mode.value == "general"
 
 
 def test_planning_recovers_strict_json_text_without_submit_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

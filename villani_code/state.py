@@ -23,7 +23,12 @@ from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
 from villani_code.plan_session import PlanAnswer, PlanOption, PlanQuestion, PlanSessionResult
-from villani_code.prompting import build_execution_instruction_from_plan, build_initial_messages, build_planning_instruction, build_system_blocks
+from villani_code.prompting import (
+    build_approved_plan_context,
+    build_initial_messages,
+    build_planning_instruction,
+    build_system_blocks,
+)
 from villani_code.planning import TaskMode, classify_task_mode, generate_execution_plan
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
@@ -227,7 +232,7 @@ def _is_greenfield_instruction(instruction: str) -> bool:
 
 def _plan_is_concrete_enough(instruction: str, candidate_files: list[str], recommended_steps: list[str]) -> bool:
     greenfield = _is_greenfield_instruction(instruction)
-    min_candidate_files = 1 if greenfield else 2
+    min_candidate_files = 0 if greenfield else 2
     min_steps = 2 if greenfield else 3
     if len(candidate_files) < min_candidate_files:
         return False
@@ -702,7 +707,7 @@ class Runner:
         if self._mission_dir is not None:
             (self._mission_dir / "plan_artifact.json").write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
         self._update_mission_state(plan_summary=plan.task_summary)
-        return self.run(build_execution_instruction_from_plan(plan), force_task_mode=TaskMode.GENERAL)
+        return self.run(plan.instruction, approved_plan=plan, force_task_mode=TaskMode.GENERAL)
 
     def run_villani_mode(self) -> dict[str, Any]:
         ensure_runtime_dependencies_not_shadowed(self.repo)
@@ -747,13 +752,27 @@ class Runner:
         execution_budget: ExecutionBudget | None = None,
         inject_projected_context: bool = False,
         force_task_mode: TaskMode | None = None,
+        approved_plan: PlanSessionResult | None = None,
     ) -> dict[str, Any]:
+        if approved_plan is not None and not approved_plan.ready_to_execute:
+            raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
         messages = messages or build_initial_messages(self.repo, instruction)
+        if approved_plan is not None:
+            if self._mission_dir is not None:
+                (self._mission_dir / "plan_artifact.json").write_text(json.dumps(approved_plan.to_dict(), indent=2), encoding="utf-8")
+            self._update_mission_state(plan_summary=approved_plan.task_summary)
+            approved_plan_block = {"type": "text", "text": build_approved_plan_context(approved_plan)}
+            if messages and messages[0].get("role") == "user" and isinstance(messages[0].get("content"), list):
+                messages[0]["content"].append(approved_plan_block)
+            else:
+                messages.append({"role": "user", "content": [approved_plan_block]})
         if inject_projected_context:
             self._inject_projected_context(messages)
         if force_task_mode is not None:
             self._task_mode = force_task_mode
+        elif approved_plan is not None:
+            self._task_mode = TaskMode.GENERAL
         elif self._runtime_mode == "planning":
             self._task_mode = TaskMode.INSPECT_AND_PLAN
         else:

@@ -27,11 +27,10 @@ class ControllerRunner(Protocol):
         instruction: str,
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
+        approved_plan: PlanSessionResult | None = None,
     ) -> dict[str, Any]: ...
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult: ...
-
-    def run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]: ...
 
     def run_villani_mode(self) -> dict[str, Any]: ...
 
@@ -77,7 +76,7 @@ class RunnerController:
         self.runner.event_callback = self.on_runner_event
 
     def _validate_runner_contract(self, runner: object) -> None:
-        required_callables = ("run", "plan", "run_with_plan", "run_villani_mode")
+        required_callables = ("run", "plan", "run_villani_mode")
         missing = [name for name in required_callables if not callable(getattr(runner, name, None))]
         if missing:
             raise TypeError(f"RunnerController runner is missing required method(s): {', '.join(missing)}")
@@ -111,14 +110,15 @@ class RunnerController:
         instruction: str,
         messages: list[dict[str, Any]] | None = None,
         execution_budget: ExecutionBudget | None = None,
+        approved_plan: PlanSessionResult | None = None,
     ) -> dict[str, Any]:
-        return self.runner.run(instruction, messages=messages, execution_budget=execution_budget)
+        kwargs: dict[str, Any] = {"messages": messages, "execution_budget": execution_budget}
+        if approved_plan is not None:
+            kwargs["approved_plan"] = approved_plan
+        return self.runner.run(instruction, **kwargs)
 
     def _runner_plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
         return self.runner.plan(instruction, answers=answers)
-
-    def _runner_run_with_plan(self, plan: PlanSessionResult) -> dict[str, Any]:
-        return self.runner.run_with_plan(plan)
 
     def _runner_run_villani_mode(self) -> dict[str, Any]:
         return self.runner.run_villani_mode()
@@ -231,7 +231,7 @@ class RunnerController:
         self.app.post_message(StatusUpdate("Executing plan"))
         self._assistant_stream_saw_text = False
         try:
-            result = self._runner_run_with_plan(plan)
+            result = self._runner_run(plan.instruction, approved_plan=plan)
             content = result.get("response", {}).get("content", [])
             response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
             if response_text and not self._assistant_stream_saw_text:
