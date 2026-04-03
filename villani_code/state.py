@@ -293,6 +293,7 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
     }
     section = "general"
     sections: dict[str, list[str]] = {name: [] for name in ("objective", "files", "steps", "validation", "open_questions", "assumptions", "general")}
+    general_bullets: list[str] = []
     bullet_pattern = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.*)$")
     file_pattern = re.compile(r"(?:[\w./-]+/)*[\w.-]+\.(?:py|md|txt|json|ya?ml|toml|ini|cfg|sh|js|ts|tsx|jsx|css|html|sql|rst)")
 
@@ -310,14 +311,26 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
         bullet_match = bullet_pattern.match(line)
         entry = bullet_match.group(1).strip() if bullet_match else line
         sections[section].append(entry)
+        if bullet_match and section == "general":
+            general_bullets.append(entry)
 
     objective = " ".join(sections["objective"]).strip() or instruction.strip()
     candidate_files = _dedupe_preserve(
         [match.group(0) for text in (sections["files"] + sections["general"] + sections["steps"]) for match in file_pattern.finditer(text)]
     )[:16]
     recommended_steps = _dedupe_preserve([step for step in sections["steps"] if step])[:24]
+    if not recommended_steps:
+        recommended_steps = _dedupe_preserve(general_bullets)[:24]
 
     validation_items = [item for item in sections["validation"] if item]
+    if not validation_items:
+        validation_markers = ("pytest", "unittest", "tox", "nox", "mypy", "ruff", "test", "validate", "verification")
+        derived_validation: list[str] = []
+        for item in [*recommended_steps, *sections["general"]]:
+            lowered = item.lower()
+            if any(marker in lowered for marker in validation_markers):
+                derived_validation.append(item)
+        validation_items = _dedupe_preserve(derived_validation)[:16]
     open_question_lines = [item for item in sections["open_questions"] if item]
     open_questions = []
     for idx, question_text in enumerate(open_question_lines[:3], start=1):

@@ -250,6 +250,23 @@ def test_planning_fails_for_unrecoverable_plain_text_without_fallback(tmp_path: 
         runner.plan("Fix a defect in this repo")
 
 
+def test_planning_recovers_bulleted_plain_text_without_headings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(SequencedClient([]), tmp_path, model="demo", stream=False)
+    text = "\n".join(
+        [
+            "- Implement a pygame game loop in game.py with player movement and collision handling.",
+            "- Add score/lives behavior and restart flow in game.py.",
+            "- Run python game.py and validate controls plus collision outcomes.",
+            "- Run pytest tests/test_plan_runtime_architecture.py for regression coverage.",
+        ]
+    )
+    monkeypatch.setattr(runner, "run", lambda *_a, **_k: {"response": {"content": [{"type": "text", "text": text}]}})
+    result = runner.plan("I need to make a fun python game using pygame")
+    assert result.recommended_steps
+    assert result.ready_to_execute is True
+    assert any("pytest" in item.lower() or "validate" in item.lower() for item in result.assumptions)
+
+
 def test_format_plan_text_to_artifact_recovers_core_fields() -> None:
     text = "\n".join(
         [
