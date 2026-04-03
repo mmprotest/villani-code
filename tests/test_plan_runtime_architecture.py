@@ -280,7 +280,12 @@ def test_format_plan_text_to_artifact_recovers_core_fields() -> None:
             "Validation:",
             "- pytest tests/test_plan_workflow.py",
             "Open Questions:",
-            "- Should recovery tolerate missing headings?",
+            "Q1: Should recovery tolerate missing headings?",
+            "- A: Keep strict headings only.",
+            "- B: Allow known aliases for headings.",
+            "- C: Allow bullets without headings in fallback mode.",
+            "- Other: Provide a custom compatibility strategy.",
+            "Reason: This changes parser behavior and compatibility guarantees.",
         ]
     )
     artifact = format_plan_text_to_artifact("Fallback objective", text)
@@ -289,6 +294,21 @@ def test_format_plan_text_to_artifact_recovers_core_fields() -> None:
     assert artifact["recommended_steps"]
     assert any("pytest" in item for item in artifact["assumptions"])
     assert artifact["open_questions"]
+    option_labels = [option["label"] for option in artifact["open_questions"][0]["options"]]
+    assert option_labels == ["A", "B", "C", "Other"]
+    assert all(not label.startswith("Option ") for label in option_labels)
+
+
+def test_format_plan_text_to_artifact_does_not_fabricate_placeholder_options() -> None:
+    text = "\n".join(
+        [
+            "Objective: Stabilize planning conversion",
+            "Open Questions:",
+            "- Should recovery tolerate missing headings?",
+        ]
+    )
+    artifact = format_plan_text_to_artifact("Fallback objective", text)
+    assert artifact["open_questions"] == []
 
 
 def test_planning_mode_blocks_write_patch_and_mutating_bash(tmp_path: Path) -> None:

@@ -491,6 +491,58 @@ def test_question_widget_visible_and_options_render_and_other_validation(tmp_pat
     asyncio.run(run())
 
 
+def test_other_option_allows_typing_custom_answer(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(PlanningRunnerStub(), tmp_path)
+        async with app.run_test() as pilot:
+            app.apply_plan_result(app.runner.plan("task"), reset_answers=True)
+            await pilot.pause()
+            await pilot.press("down", "down", "down")
+            await pilot.pause()
+            other_input = app.query_one("#plan-other-input", Input)
+            assert other_input.display is True
+            await pilot.press("c", "u", "s", "t", "o", "m")
+            await pilot.pause()
+            assert other_input.value == "custom"
+
+    asyncio.run(run())
+
+
+def test_other_option_enter_submits_clarification_without_main_prompt_submission(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = VillaniTUI(PlanningRunnerStub(), tmp_path)
+        app.controller = ControllerSpy()
+        async with app.run_test() as pilot:
+            app.apply_plan_result(
+                PlanSessionResult(
+                    instruction="task",
+                    task_summary="task",
+                    open_questions=[
+                        PlanQuestion(
+                            id="q",
+                            question="Which one?",
+                            rationale="Need it",
+                            options=[
+                                PlanOption("a", "A", "a"),
+                                PlanOption("b", "B", "b"),
+                                PlanOption("c", "C", "c"),
+                                PlanOption("o", "Other", "o", is_other=True),
+                            ],
+                        )
+                    ],
+                ),
+                reset_answers=True,
+            )
+            await pilot.pause()
+            await pilot.press("down", "down", "down")
+            await pilot.pause()
+            await pilot.press("x", "y", "z", "enter")
+            await pilot.pause()
+            assert app.controller.calls == ["q"]
+
+    asyncio.run(run())
+
+
 def test_final_answer_submission_triggers_replan(tmp_path: Path) -> None:
     async def run() -> None:
         app = VillaniTUI(PlanningRunnerStub(), tmp_path)
@@ -534,6 +586,20 @@ def test_clarification_options_are_logged_to_transcript(tmp_path: Path) -> None:
             assert "[4] Other" in app._log_plain_text
 
     asyncio.run(run())
+
+
+def test_main_input_submission_guard_ignores_plan_other_input(tmp_path: Path) -> None:
+    app = VillaniTUI(DummyRunnerForApp(), tmp_path)
+    app.controller = ControllerSpy()
+    app.on_input_submitted(Input.Submitted(Input(id="plan-other-input"), "custom"))
+    assert app.controller.calls == []
+
+
+def test_main_input_submission_still_routes_primary_input(tmp_path: Path) -> None:
+    app = VillaniTUI(DummyRunnerForApp(), tmp_path)
+    app.controller = ControllerSpy()
+    app.on_input_submitted(Input.Submitted(Input(id="input"), "hello"))
+    assert app.controller.calls == ["run:hello"]
 
 
 def test_plan_payload_dicts_are_normalized_for_clean_rendering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

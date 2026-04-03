@@ -447,10 +447,14 @@ class VillaniTUI(App[None]):
 
     @on(Input.Changed)
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "input":
+            return
         self._refresh_slash_popup(event.value)
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "input":
+            return
         text = event.value.strip()
         event.input.value = ""
         self._close_slash_popup()
@@ -587,6 +591,9 @@ class VillaniTUI(App[None]):
 
         if self._interaction_mode == InteractionMode.CLARIFICATION:
             question = self.query_one(PlanQuestionWidget)
+            other_input = question.query_one("#plan-other-input", Input)
+            if self.focused is other_input and event.key not in {"up", "down", "enter"}:
+                return
             if event.key == "up":
                 question.action_cursor_up()
             elif event.key == "down":

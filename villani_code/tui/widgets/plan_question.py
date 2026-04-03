@@ -4,6 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
+from textual import on
 from rich.text import Text
 from textual.widgets import Input, Label, ListItem, ListView, Static
 
@@ -50,6 +51,9 @@ class PlanQuestionWidget(Vertical):
     def hide_question(self) -> None:
         self.display = False
         self._question = None
+        other_input = self.query_one("#plan-other-input", Input)
+        other_input.display = False
+        other_input.value = ""
 
     def _selected_index(self) -> int:
         options = self.query_one("#plan-question-options", ListView)
@@ -123,6 +127,13 @@ class PlanQuestionWidget(Vertical):
         if self.display:
             self._sync_selected_style()
             self._sync_other_visibility()
+
+    @on(Input.Submitted, "#plan-other-input")
+    def on_other_input_submitted(self, event: Input.Submitted) -> None:
+        if not self.display:
+            return
+        event.stop()
+        self.action_confirm()
 
 
     def option_labels(self) -> list[str]:

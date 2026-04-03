@@ -332,23 +332,7 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
                 derived_validation.append(item)
         validation_items = _dedupe_preserve(derived_validation)[:16]
     open_question_lines = [item for item in sections["open_questions"] if item]
-    open_questions = []
-    for idx, question_text in enumerate(open_question_lines[:3], start=1):
-        if "?" not in question_text:
-            continue
-        open_questions.append(
-            {
-                "id": f"q{idx}",
-                "question": question_text,
-                "rationale": "Clarification required before execution.",
-                "options": [
-                    {"id": f"q{idx}_opt1", "label": "Option 1", "description": "", "is_other": False},
-                    {"id": f"q{idx}_opt2", "label": "Option 2", "description": "", "is_other": False},
-                    {"id": f"q{idx}_opt3", "label": "Option 3", "description": "", "is_other": False},
-                    {"id": f"q{idx}_opt4", "label": "Other", "description": "", "is_other": True},
-                ],
-            }
-        )
+    open_questions = _parse_plain_text_open_questions(open_question_lines)
 
     assumptions = _dedupe_preserve([*sections["assumptions"], *validation_items, *sections["general"]])[:24]
     return {
@@ -359,6 +343,89 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
         "validation_approach": validation_items,
         "open_questions": open_questions,
     }
+
+
+def _parse_plain_text_open_questions(lines: list[str]) -> list[dict[str, Any]]:
+    if not lines:
+        return []
+    if len(lines) == 1 and lines[0].strip().lstrip("-* ").strip().lower() == "none":
+        return []
+
+    question_re = re.compile(r"^(?:[-*]\s*)?q\s*\d*\s*:\s*(.+)$", flags=re.IGNORECASE)
+    option_re = re.compile(r"^(?:[-*]\s*)?(a|b|c|other)\s*:\s*(.+)$", flags=re.IGNORECASE)
+    reason_re = re.compile(r"^(?:[-*]\s*)?reason\s*:\s*(.+)$", flags=re.IGNORECASE)
+    option_order = ("a", "b", "c", "other")
+
+    parsed_questions: list[dict[str, Any]] = []
+    current_question: str | None = None
+    current_reason: str | None = None
+    current_options: dict[str, str] = {}
+
+    def flush_question() -> None:
+        nonlocal current_question, current_reason, current_options
+        if not current_question:
+            current_question = None
+            current_reason = None
+            current_options = {}
+            return
+        if not current_reason:
+            current_question = None
+            current_reason = None
+            current_options = {}
+            return
+        if any(not current_options.get(key, "").strip() for key in option_order):
+            current_question = None
+            current_reason = None
+            current_options = {}
+            return
+        idx = len(parsed_questions) + 1
+        options = []
+        for opt_idx, token in enumerate(option_order, start=1):
+            description = current_options[token].strip()
+            is_other = token == "other"
+            options.append(
+                {
+                    "id": f"q{idx}_opt{opt_idx}",
+                    "label": "Other" if is_other else token.upper(),
+                    "description": description,
+                    "is_other": is_other,
+                }
+            )
+        parsed_questions.append(
+            {
+                "id": f"q{idx}",
+                "question": current_question.strip(),
+                "rationale": current_reason.strip(),
+                "options": options,
+            }
+        )
+        current_question = None
+        current_reason = None
+        current_options = {}
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        question_match = question_re.match(line)
+        if question_match:
+            flush_question()
+            current_question = question_match.group(1).strip()
+            continue
+        if current_question is None:
+            continue
+        option_match = option_re.match(line)
+        if option_match:
+            token = option_match.group(1).lower()
+            current_options[token] = option_match.group(2).strip()
+            continue
+        reason_match = reason_re.match(line)
+        if reason_match:
+            current_reason = reason_match.group(1).strip()
+            continue
+
+    flush_question()
+    return parsed_questions[:3]
 
 
 def _build_plan_result_from_artifact(
