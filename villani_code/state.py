@@ -298,6 +298,101 @@ def _extract_strict_json_plan_artifact(run_result: dict[str, Any]) -> dict[str, 
     return None
 
 
+def _extract_assistant_plan_text(run_result: dict[str, Any]) -> str:
+    response = run_result.get("response", {})
+    if not isinstance(response, dict):
+        return ""
+    content = response.get("content", [])
+    if not isinstance(content, list):
+        return ""
+    blocks: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = str(block.get("text", "")).strip()
+        if text:
+            blocks.append(text)
+    return "\n".join(blocks).strip()
+
+
+def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, Any]:
+    lines = [line.rstrip() for line in plan_text.splitlines()]
+    heading_aliases = {
+        "objective": "objective",
+        "files": "files",
+        "candidate files": "files",
+        "steps": "steps",
+        "recommended steps": "steps",
+        "implementation steps": "steps",
+        "validation": "validation",
+        "open questions": "open_questions",
+        "questions": "open_questions",
+        "assumptions": "assumptions",
+        "risks": "assumptions",
+    }
+    section = "general"
+    sections: dict[str, list[str]] = {name: [] for name in ("objective", "files", "steps", "validation", "open_questions", "assumptions", "general")}
+    bullet_pattern = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.*)$")
+    file_pattern = re.compile(r"(?:[\w./-]+/)*[\w.-]+\.(?:py|md|txt|json|ya?ml|toml|ini|cfg|sh|js|ts|tsx|jsx|css|html|sql|rst)")
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        heading_match = re.match(r"^(Objective|Files|Candidate Files|Steps|Recommended Steps|Implementation Steps|Validation|Open Questions|Questions|Assumptions|Risks)\s*:\s*(.*)$", line, flags=re.IGNORECASE)
+        if heading_match:
+            section = heading_aliases.get(heading_match.group(1).strip().lower(), "general")
+            remainder = heading_match.group(2).strip()
+            if remainder:
+                sections[section].append(remainder)
+            continue
+        bullet_match = bullet_pattern.match(line)
+        entry = bullet_match.group(1).strip() if bullet_match else line
+        sections[section].append(entry)
+
+    objective = " ".join(sections["objective"]).strip() or instruction.strip()
+    candidate_files = _dedupe_preserve(
+        [match.group(0) for text in (sections["files"] + sections["general"] + sections["steps"]) for match in file_pattern.finditer(text)]
+    )[:16]
+    recommended_steps = _dedupe_preserve([step for step in sections["steps"] if step])[:24]
+    if not recommended_steps:
+        fallback_steps = []
+        for text in sections["general"]:
+            lowered = text.lower()
+            if bullet_pattern.match(f"- {text}") and any(verb in lowered for verb in ("inspect", "read", "update", "implement", "add", "run", "validate", "write")):
+                fallback_steps.append(text)
+        recommended_steps = _dedupe_preserve(fallback_steps)[:24]
+
+    validation_items = [item for item in sections["validation"] if item]
+    open_question_lines = [item for item in sections["open_questions"] if item]
+    open_questions = []
+    for idx, question_text in enumerate(open_question_lines[:3], start=1):
+        if "?" not in question_text:
+            continue
+        open_questions.append(
+            {
+                "id": f"q{idx}",
+                "question": question_text,
+                "rationale": "Clarification required before execution.",
+                "options": [
+                    {"id": f"q{idx}_opt1", "label": "Option 1", "description": "", "is_other": False},
+                    {"id": f"q{idx}_opt2", "label": "Option 2", "description": "", "is_other": False},
+                    {"id": f"q{idx}_opt3", "label": "Option 3", "description": "", "is_other": False},
+                    {"id": f"q{idx}_opt4", "label": "Other", "description": "", "is_other": True},
+                ],
+            }
+        )
+
+    assumptions = _dedupe_preserve([*sections["assumptions"], *validation_items, *sections["general"]])[:24]
+    return {
+        "task_summary": objective,
+        "candidate_files": candidate_files,
+        "assumptions": assumptions,
+        "recommended_steps": recommended_steps,
+        "open_questions": open_questions,
+    }
+
+
 def _build_plan_result_from_artifact(
     instruction: str,
     artifact: dict[str, Any],
@@ -350,6 +445,7 @@ def _build_emergency_plan_result(
     ]
     assumptions = _dedupe_preserve([
         "Planning mode remained read-only.",
+        "Fallback-derived plan: structure could not be reliably recovered; rerun /replan before /execute.",
         *[f"Evidence inspected: {path}" for path in evidence_paths[:8]],
         *[_format_answer(answer) for answer in resolved_answers],
     ])
@@ -361,7 +457,7 @@ def _build_emergency_plan_result(
         recommended_steps=steps,
         open_questions=[],
         resolved_answers=resolved_answers,
-        ready_to_execute=True,
+        ready_to_execute=False,
         execution_brief="\n".join([instruction.strip(), *steps]),
         risk_level=execution_plan.risk_level.value,
         confidence_score=0.35,
@@ -570,6 +666,9 @@ class Runner:
             artifact = copy.deepcopy(getattr(self, "_finalized_plan_artifact", None))
             if not isinstance(artifact, dict):
                 artifact = _extract_strict_json_plan_artifact(run_result)
+            if not isinstance(artifact, dict):
+                assistant_text = _extract_assistant_plan_text(run_result)
+                artifact = format_plan_text_to_artifact(instruction, assistant_text) if assistant_text else None
             planner_source: Literal["runtime", "fallback"] = "fallback"
             if isinstance(artifact, dict):
                 plan_result = _build_plan_result_from_artifact(instruction, artifact, resolved_answers, evidence_paths)

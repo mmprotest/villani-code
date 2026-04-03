@@ -564,6 +564,21 @@ def test_apply_plan_result_renders_plain_english_without_raw_json(tmp_path: Path
     assert "}" not in app._log_plain_text
 
 
+def test_apply_plan_result_for_non_ready_plan_does_not_log_execute_hint(tmp_path: Path) -> None:
+    app = VillaniTUI(DummyRunnerForApp(), tmp_path)
+    result = PlanSessionResult(
+        instruction="Fix planner flow",
+        task_summary="Fallback-derived plan",
+        candidate_files=["villani_code/state.py"],
+        recommended_steps=["Re-run /replan after reviewing evidence"],
+        assumptions=["Fallback-derived plan: structure could not be reliably recovered."],
+        ready_to_execute=False,
+    )
+    app.apply_plan_result(result, reset_answers=True)
+    assert "Plan ready. Run /execute to implement." not in app._log_plain_text
+    assert app.planning_session.stage == "idle"
+
+
 def test_plan_flow_from_mixed_narrative_json_renders_only_final_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
     app = VillaniTUI(DummyRunnerForApp(), tmp_path)

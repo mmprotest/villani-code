@@ -6,7 +6,7 @@ import pytest
 
 from villani_code.permissions import Decision
 from villani_code.plan_session import PlanSessionResult
-from villani_code.state import Runner
+from villani_code.state import Runner, format_plan_text_to_artifact
 from villani_code.state_tooling import execute_tool_with_policy
 
 
@@ -102,6 +102,7 @@ def test_planning_rejects_generic_artifact(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runner, "run", fake_run)
     result = runner.plan("Find the biggest bug in this repo and make a plan to fix it")
     assert result.confidence_score == 0.35
+    assert result.ready_to_execute is False
 
 
 def test_execute_consumes_finalized_plan(monkeypatch, tmp_path: Path) -> None:
@@ -175,7 +176,30 @@ def test_planning_recovers_strict_json_text_without_submit_plan(tmp_path: Path, 
     assert result.confidence_score != 0.35
 
 
-def test_planning_ignores_non_json_prose_when_submit_plan_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_planning_recovers_plain_text_plan_without_submit_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = Runner(SequencedClient([]), tmp_path, model="demo", stream=False)
+    text = "\n".join(
+        [
+            "Objective: Fix planner readiness behavior",
+            "Files:",
+            "- villani_code/state.py",
+            "- tests/test_plan_runtime_architecture.py",
+            "Steps:",
+            "1. Update villani_code/state.py to parse assistant text into artifact fields.",
+            "2. Keep SubmitPlan optional in villani_code/state.py and preserve strict JSON recovery.",
+            "3. Run pytest tests/test_plan_runtime_architecture.py to validate behavior.",
+            "Validation:",
+            "- pytest tests/test_plan_runtime_architecture.py",
+        ]
+    )
+    monkeypatch.setattr(runner, "run", lambda *_a, **_k: {"response": {"content": [{"type": "text", "text": text}]}})
+    result = runner.plan("Fix a defect in this repo")
+    assert result.task_summary == "Fix planner readiness behavior"
+    assert result.ready_to_execute is True
+    assert "villani_code/state.py" in result.candidate_files
+
+
+def test_planning_falls_back_for_unusable_plain_text_and_is_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = Runner(SequencedClient([]), tmp_path, model="demo", stream=False)
     monkeypatch.setattr(
         runner,
@@ -184,6 +208,31 @@ def test_planning_ignores_non_json_prose_when_submit_plan_missing(tmp_path: Path
     )
     result = runner.plan("Fix a defect in this repo")
     assert result.confidence_score == 0.35
+    assert result.ready_to_execute is False
+
+
+def test_format_plan_text_to_artifact_recovers_core_fields() -> None:
+    text = "\n".join(
+        [
+            "Objective: Stabilize planning conversion",
+            "Files:",
+            "- villani_code/state.py",
+            "- tests/test_plan_workflow.py",
+            "Steps:",
+            "- Update plan parser in runtime.",
+            "- Add tests for plain-text plan recovery.",
+            "Validation:",
+            "- pytest tests/test_plan_workflow.py",
+            "Open Questions:",
+            "- Should recovery tolerate missing headings?",
+        ]
+    )
+    artifact = format_plan_text_to_artifact("Fallback objective", text)
+    assert artifact["task_summary"] == "Stabilize planning conversion"
+    assert "villani_code/state.py" in artifact["candidate_files"]
+    assert artifact["recommended_steps"]
+    assert any("pytest" in item for item in artifact["assumptions"])
+    assert artifact["open_questions"]
 
 
 def test_planning_mode_blocks_write_patch_and_mutating_bash(tmp_path: Path) -> None:
