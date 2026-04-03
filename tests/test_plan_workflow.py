@@ -19,7 +19,29 @@ from villani_code.tui.widgets.plan_question import PlanQuestionWidget
 
 
 class DummyClient:
-    pass
+    def create_message(self, payload, stream=False):
+        _ = (payload, stream)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": __import__("json").dumps(
+                        {
+                            "task_summary": "Repo improvement plan",
+                            "candidate_files": ["villani_code/state.py", "tests/test_plan_workflow.py"],
+                            "assumptions": ["Planning mode remains read-only"],
+                            "recommended_steps": [
+                                "Inspect villani_code/state.py planning flow.",
+                                "Update logic to preserve recovered artifacts.",
+                                "Run pytest tests/test_plan_workflow.py.",
+                            ],
+                            "validation_approach": ["pytest tests/test_plan_workflow.py"],
+                            "open_questions": [],
+                        }
+                    ),
+                }
+            ]
+        }
 
 
 class DummyRunnerForApp:
@@ -207,7 +229,7 @@ def test_runner_plan_records_real_file_evidence(tmp_path: Path) -> None:
 
 
 
-def test_plan_uses_runtime_loop_before_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plan_uses_runtime_loop_for_recovered_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
     seen: dict[str, str] = {}
 
@@ -219,7 +241,6 @@ def test_plan_uses_runtime_loop_before_fallback(tmp_path: Path, monkeypatch: pyt
             "candidate_files": ["villani_code/state.py"],
             "assumptions": ["a"],
             "recommended_steps": ["read file", "propose ordered edits"],
-            "risks": ["regression"],
             "validation_approach": ["pytest tests/test_plan_workflow.py"],
             "open_questions": [],
             "risk_level": "medium",
@@ -253,7 +274,6 @@ def test_plan_runtime_prompt_contains_multi_file_evidence(tmp_path: Path, monkey
             "candidate_files": ["villani_code/state.py", "villani_code/state_tooling.py"],
             "assumptions": ["a"],
             "recommended_steps": ["read both files", "sequence changes"],
-            "risks": ["regression"],
             "validation_approach": ["pytest"],
             "open_questions": [],
         }
@@ -284,7 +304,6 @@ def test_planning_can_continue_after_clarification_answers(tmp_path: Path, monke
                 "candidate_files": ["villani_code/state.py"],
                 "assumptions": ["a"],
                 "recommended_steps": ["step"],
-                "risks": ["risk"],
                 "validation_approach": ["pytest"],
                 "open_questions": [
                     {
@@ -306,7 +325,6 @@ def test_planning_can_continue_after_clarification_answers(tmp_path: Path, monke
                 "candidate_files": ["villani_code/state.py"],
                 "assumptions": ["a", "q1: a"],
                 "recommended_steps": ["step", "step2"],
-                "risks": ["risk"],
                 "validation_approach": ["pytest"],
                 "open_questions": [],
             }
@@ -348,18 +366,41 @@ def test_ready_plan_does_not_hijack_future_normal_prompts(tmp_path: Path) -> Non
 
 def test_clarification_only_for_real_design_uncertainty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
-
-    class FakePlan:
-        task_goal = "task"
-        relevant_files = ["a.py"]
-        candidate_targets = [{"target": "a.py"}]
-        assumptions = ["a"]
-        risk_level = type("Risk", (), {"value": "medium"})()
-        confidence_score = 0.2
-        action_classes = ["code_edit", "config_edit"]
-        requires_validation_phase = True
-
-    monkeypatch.setattr("villani_code.state.generate_execution_plan", lambda *_a, **_k: FakePlan())
+    monkeypatch.setattr(
+        runner,
+        "run",
+        lambda *_a, **_k: {
+            "response": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": __import__("json").dumps(
+                            {
+                                "task_summary": "task",
+                                "candidate_files": ["a.py"],
+                                "assumptions": ["a"],
+                                "recommended_steps": ["read a.py"],
+                                "validation_approach": ["pytest"],
+                                "open_questions": [
+                                    {
+                                        "id": "implementation_path",
+                                        "question": "Pick one",
+                                        "rationale": "Need decision",
+                                        "options": [
+                                            {"id": "a", "label": "A", "description": "a"},
+                                            {"id": "b", "label": "B", "description": "b"},
+                                            {"id": "c", "label": "C", "description": "c"},
+                                            {"id": "o", "label": "Other", "description": "o", "is_other": True},
+                                        ],
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                ]
+            }
+        },
+    )
     result = runner.plan("Implement feature with ambiguous architecture")
     assert len(result.open_questions) == 1
     assert result.open_questions[0].id == "implementation_path"
@@ -503,7 +544,6 @@ def test_plan_payload_dicts_are_normalized_for_clean_rendering(tmp_path: Path, m
         "candidate_files": [{"path": "villani_code/state.py", "improvement_focus": "planning control flow"}],
         "assumptions": [{"risk": "moderate", "mitigation": "targeted tests"}],
         "recommended_steps": [{"priority": "P1", "action": "Fix /plan routing"}],
-        "risks": [{"risk": "regression in slash routing", "mitigation": "slash command tests"}],
         "validation_approach": [{"check": "pytest tests/test_plan_workflow.py"}],
         "open_questions": [],
         "risk_level": "medium",
@@ -569,10 +609,10 @@ def test_apply_plan_result_for_non_ready_plan_does_not_log_execute_hint(tmp_path
     app = VillaniTUI(DummyRunnerForApp(), tmp_path)
     result = PlanSessionResult(
         instruction="Fix planner flow",
-        task_summary="Fallback-derived plan",
+        task_summary="Recovered plan needs details",
         candidate_files=["villani_code/state.py"],
         recommended_steps=["Re-run /replan after reviewing evidence"],
-        assumptions=["Fallback-derived plan: structure could not be reliably recovered."],
+        assumptions=["Waiting for validation command details."],
         ready_to_execute=False,
     )
     app.apply_plan_result(result, reset_answers=True)
@@ -624,7 +664,7 @@ def test_greenfield_plan_with_single_candidate_file_is_accepted(tmp_path: Path, 
     assert result.candidate_files == ["game.py"]
 
 
-def test_greenfield_plan_can_be_ready_without_candidate_files_when_steps_are_concrete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_greenfield_plan_without_validation_is_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
     payload = {
         "task_summary": "Build a pygame game",
@@ -643,11 +683,10 @@ def test_greenfield_plan_can_be_ready_without_candidate_files_when_steps_are_con
         lambda *_a, **_k: {"response": {"content": [{"type": "text", "text": __import__("json").dumps(payload)}]}},
     )
     result = runner.plan("Build me a pygame game from scratch")
-    assert result.ready_to_execute is True
-    assert result.confidence_score != 0.35
+    assert result.ready_to_execute is False
 
 
-def test_repo_fix_still_requires_file_specific_concreteness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_repo_fix_with_validation_and_no_open_questions_is_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = Runner(DummyClient(), tmp_path, model="demo")
     payload = {
         "task_summary": "Fix planner bug",
@@ -658,6 +697,7 @@ def test_repo_fix_still_requires_file_specific_concreteness(tmp_path: Path, monk
             "Run validation and summarize results.",
             "Update tests accordingly.",
         ],
+        "validation_approach": ["pytest tests/test_plan_workflow.py"],
         "open_questions": [],
     }
     monkeypatch.setattr(
@@ -666,4 +706,4 @@ def test_repo_fix_still_requires_file_specific_concreteness(tmp_path: Path, monk
         lambda *_a, **_k: {"response": {"content": [{"type": "text", "text": __import__("json").dumps(payload)}]}},
     )
     result = runner.plan("Fix the planning bug in this repo")
-    assert result.confidence_score == 0.35
+    assert result.ready_to_execute is True

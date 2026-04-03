@@ -190,11 +190,16 @@ class RunnerController:
         self._suppress_assistant_stream_text = True
         try:
             result = self._runner_plan(text)
+            self._ui_call(self.app.apply_plan_result, result, True)
+            self.app.post_message(SpinnerState(False, None))
+            self.app.post_message(StatusUpdate("Plan ready" if result.ready_to_execute else "Plan awaiting clarification"))
+        except Exception as exc:  # noqa: BLE001
+            self._set_plan_stage("idle")
+            self.app.post_message(SpinnerState(False, "Planning failed"))
+            self.app.post_message(StatusUpdate("Planning failed"))
+            self.app.post_message(LogAppend(str(exc), kind="meta"))
         finally:
             self._suppress_assistant_stream_text = False
-        self._ui_call(self.app.apply_plan_result, result, True)
-        self.app.post_message(SpinnerState(False, None))
-        self.app.post_message(StatusUpdate("Plan ready" if result.ready_to_execute else "Plan awaiting clarification"))
 
     def _submit_plan_answer_worker(self, answer: PlanAnswer) -> None:
         self._ui_call(self.app.record_plan_answer, answer)
@@ -213,12 +218,17 @@ class RunnerController:
         self._suppress_assistant_stream_text = True
         try:
             result = self._runner_plan(instruction, answers=answers)
+            self._ui_call(self.app.apply_plan_result, result, False)
+            self.app.post_message(SpinnerState(False, None))
+            label = "Replanned" if not auto else "Plan updated"
+            self.app.post_message(StatusUpdate(label if result.ready_to_execute else "Plan awaiting clarification"))
+        except Exception as exc:  # noqa: BLE001
+            self._set_plan_stage("idle")
+            self.app.post_message(SpinnerState(False, "Planning failed"))
+            self.app.post_message(StatusUpdate("Planning failed"))
+            self.app.post_message(LogAppend(str(exc), kind="meta"))
         finally:
             self._suppress_assistant_stream_text = False
-        self._ui_call(self.app.apply_plan_result, result, False)
-        self.app.post_message(SpinnerState(False, None))
-        label = "Replanned" if not auto else "Plan updated"
-        self.app.post_message(StatusUpdate(label if result.ready_to_execute else "Plan awaiting clarification"))
 
     def _run_execute_plan_worker(self) -> None:
         plan = self._ui_call(self.app.get_last_ready_plan)

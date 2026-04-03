@@ -5,7 +5,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 from rich.console import Console
 
@@ -29,7 +29,7 @@ from villani_code.prompting import (
     build_planning_instruction,
     build_system_blocks,
 )
-from villani_code.planning import TaskMode, classify_task_mode, generate_execution_plan
+from villani_code.planning import TaskMode, classify_task_mode
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.llm_client import LLMClient
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
@@ -205,63 +205,19 @@ def _normalize_open_questions(raw_questions: Any) -> list[PlanQuestion]:
     return open_questions
 
 
-def _is_greenfield_instruction(instruction: str) -> bool:
-    text = instruction.lower()
-    greenfield_markers = (
-        "from scratch",
-        "greenfield",
-        "build me",
-        "create a",
-        "create an",
-        "new project",
-        "new app",
-        "new tool",
-        "empty sandbox",
+def _normalize_validation_items(artifact: dict[str, Any]) -> list[str]:
+    return _normalize_plan_text_list(
+        artifact.get("validation_approach", artifact.get("validation", [])),
+        limit=16,
     )
-    repo_fix_markers = (
-        "fix",
-        "bug",
-        "failing",
-        "regression",
-        "repo",
-        "existing",
-        "current",
-    )
-    return any(marker in text for marker in greenfield_markers) and not any(marker in text for marker in repo_fix_markers)
 
 
-def _plan_is_concrete_enough(instruction: str, candidate_files: list[str], recommended_steps: list[str]) -> bool:
-    greenfield = _is_greenfield_instruction(instruction)
-    min_candidate_files = 0 if greenfield else 2
-    min_steps = 2 if greenfield else 3
-    if len(candidate_files) < min_candidate_files:
-        return False
-    lowered_steps = [step.lower() for step in recommended_steps if step.strip()]
-    if len(lowered_steps) < min_steps:
-        return False
-    generic_markers = (
-        "inspect architecture",
-        "review rendering",
-        "prioritize findings",
-        "prepare execution order",
-        "inspect the repo",
-    )
-    concrete_hits = 0
-    action_markers = ("create", "implement", "build", "add", "write", "wire", "validate", "run")
-    specificity_markers = (".py", ".md", "test", "command", "function", "module", "file", "pygame", "script")
-    for step in lowered_steps:
-        has_path = any("/" in token or token.endswith(".py") or token.endswith(".md") for token in step.split())
-        has_action = any(marker in step for marker in action_markers)
-        has_specificity = any(marker in step for marker in specificity_markers)
-        if has_path:
-            concrete_hits += 1
-        elif greenfield and has_action and has_specificity:
-            concrete_hits += 1
-        if any(marker in step for marker in generic_markers) and not has_path:
-            return False
-    if greenfield:
-        return concrete_hits >= 2
-    return concrete_hits >= 2
+def _is_coherent_plan_artifact(artifact: dict[str, Any], instruction: str) -> bool:
+    task_summary = str(artifact.get("task_summary", "")).strip() or instruction.strip()
+    steps = _normalize_plan_text_list(artifact.get("recommended_steps", []), limit=24)
+    open_questions = _normalize_open_questions(artifact.get("open_questions", []))
+    validation_items = _normalize_validation_items(artifact)
+    return bool(task_summary and (steps or open_questions or validation_items))
 
 
 def _parse_strict_json_object(raw_text: str) -> dict[str, Any] | None:
@@ -337,6 +293,7 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
     }
     section = "general"
     sections: dict[str, list[str]] = {name: [] for name in ("objective", "files", "steps", "validation", "open_questions", "assumptions", "general")}
+    general_bullets: list[str] = []
     bullet_pattern = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.*)$")
     file_pattern = re.compile(r"(?:[\w./-]+/)*[\w.-]+\.(?:py|md|txt|json|ya?ml|toml|ini|cfg|sh|js|ts|tsx|jsx|css|html|sql|rst)")
 
@@ -354,6 +311,8 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
         bullet_match = bullet_pattern.match(line)
         entry = bullet_match.group(1).strip() if bullet_match else line
         sections[section].append(entry)
+        if bullet_match and section == "general":
+            general_bullets.append(entry)
 
     objective = " ".join(sections["objective"]).strip() or instruction.strip()
     candidate_files = _dedupe_preserve(
@@ -361,14 +320,17 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
     )[:16]
     recommended_steps = _dedupe_preserve([step for step in sections["steps"] if step])[:24]
     if not recommended_steps:
-        fallback_steps = []
-        for text in sections["general"]:
-            lowered = text.lower()
-            if bullet_pattern.match(f"- {text}") and any(verb in lowered for verb in ("inspect", "read", "update", "implement", "add", "run", "validate", "write")):
-                fallback_steps.append(text)
-        recommended_steps = _dedupe_preserve(fallback_steps)[:24]
+        recommended_steps = _dedupe_preserve(general_bullets)[:24]
 
     validation_items = [item for item in sections["validation"] if item]
+    if not validation_items:
+        validation_markers = ("pytest", "unittest", "tox", "nox", "mypy", "ruff", "test", "validate", "verification")
+        derived_validation: list[str] = []
+        for item in [*recommended_steps, *sections["general"]]:
+            lowered = item.lower()
+            if any(marker in lowered for marker in validation_markers):
+                derived_validation.append(item)
+        validation_items = _dedupe_preserve(derived_validation)[:16]
     open_question_lines = [item for item in sections["open_questions"] if item]
     open_questions = []
     for idx, question_text in enumerate(open_question_lines[:3], start=1):
@@ -394,6 +356,7 @@ def format_plan_text_to_artifact(instruction: str, plan_text: str) -> dict[str, 
         "candidate_files": candidate_files,
         "assumptions": assumptions,
         "recommended_steps": recommended_steps,
+        "validation_approach": validation_items,
         "open_questions": open_questions,
     }
 
@@ -408,15 +371,18 @@ def _build_plan_result_from_artifact(
     candidate_files = _normalize_plan_text_list(artifact.get("candidate_files", []), limit=16)
     assumptions = _normalize_plan_text_list(artifact.get("assumptions", []), limit=24)
     recommended_steps = _normalize_plan_text_list(artifact.get("recommended_steps", []), limit=24)
-    if not _plan_is_concrete_enough(instruction, candidate_files, recommended_steps):
+    validation_items = _normalize_validation_items(artifact)
+    if not _is_coherent_plan_artifact(artifact, instruction):
         return None
 
     open_questions = _normalize_open_questions(artifact.get("open_questions", []))
-    assumptions.extend([f"Evidence inspected: {path}" for path in evidence_paths[:8]])
+    assumptions.extend(validation_items)
+    assumptions.extend(f"Evidence inspected: {path}" for path in evidence_paths[:8])
     assumptions.extend(_format_answer(answer) for answer in resolved_answers)
     assumptions = _dedupe_preserve(assumptions)
 
-    ready = not open_questions
+    has_required_execution_detail = bool(recommended_steps and validation_items)
+    ready = has_required_execution_detail and not open_questions
     brief = "\n".join([task_summary, *recommended_steps])
     return PlanSessionResult(
         instruction=instruction,
@@ -430,42 +396,6 @@ def _build_plan_result_from_artifact(
         execution_brief=brief,
         risk_level=str(artifact.get("risk_level", "medium")),
         confidence_score=float(artifact.get("confidence_score", 0.65) or 0.65),
-    )
-
-
-def _build_emergency_plan_result(
-    instruction: str,
-    self_repo: Path,
-    repo_map: dict[str, Any],
-    validation_steps: list[str],
-    evidence_paths: list[str],
-    resolved_answers: list[PlanAnswer],
-) -> PlanSessionResult:
-    execution_plan = generate_execution_plan(instruction, self_repo, repo_map, validation_steps)
-    candidate_files = _dedupe_preserve([str(path) for path in repo_map.get("likely_entrypoints", [])])[:8]
-    steps = [
-        "Inspect the highest-signal failing path first and confirm the exact defect with Read/Grep.",
-        "Draft the smallest ordered edit list with exact files and expected behavior changes.",
-        "Define targeted validation commands and escalation criteria before /execute.",
-    ]
-    assumptions = _dedupe_preserve([
-        "Planning mode remained read-only.",
-        "Fallback-derived plan: structure could not be reliably recovered; rerun /replan before /execute.",
-        *[f"Evidence inspected: {path}" for path in evidence_paths[:8]],
-        *[_format_answer(answer) for answer in resolved_answers],
-    ])
-    return PlanSessionResult(
-        instruction=instruction,
-        task_summary=instruction.strip() or execution_plan.task_goal,
-        candidate_files=candidate_files,
-        assumptions=assumptions,
-        recommended_steps=steps,
-        open_questions=[],
-        resolved_answers=resolved_answers,
-        ready_to_execute=False,
-        execution_brief="\n".join([instruction.strip(), *steps]),
-        risk_level=execution_plan.risk_level.value,
-        confidence_score=0.35,
     )
 
 
@@ -674,27 +604,23 @@ class Runner:
             if not isinstance(artifact, dict):
                 assistant_text = _extract_assistant_plan_text(run_result)
                 artifact = format_plan_text_to_artifact(instruction, assistant_text) if assistant_text else None
-            planner_source: Literal["runtime", "fallback"] = "fallback"
             if isinstance(artifact, dict):
                 plan_result = _build_plan_result_from_artifact(instruction, artifact, resolved_answers, evidence_paths)
                 if plan_result is not None:
-                    planner_source = "runtime"
                     if self._mission_dir is not None:
                         (self._mission_dir / "plan_artifact.json").write_text(json.dumps(plan_result.to_dict(), indent=2), encoding="utf-8")
-                    self.event_callback({"type": "plan_finalized", "source": planner_source, "ready_to_execute": plan_result.ready_to_execute})
+                    self.event_callback({"type": "plan_finalized", "source": "runtime", "ready_to_execute": plan_result.ready_to_execute})
                     return plan_result
-            fallback = _build_emergency_plan_result(
-                instruction,
-                self.repo,
-                repo_map,
-                validation_steps,
-                evidence_paths,
-                resolved_answers,
+            message = "Planning failed: could not recover a structured plan from model output."
+            self.event_callback(
+                {
+                    "type": "plan_failed",
+                    "reason": "could_not_recover_structured_plan",
+                    "message": message,
+                    "ready_to_execute": False,
+                }
             )
-            if self._mission_dir is not None:
-                (self._mission_dir / "plan_artifact.json").write_text(json.dumps(fallback.to_dict(), indent=2), encoding="utf-8")
-            self.event_callback({"type": "plan_finalized", "source": planner_source, "ready_to_execute": fallback.ready_to_execute})
-            return fallback
+            raise RuntimeError(message)
         finally:
             self._planning_read_only = False
             self._runtime_mode = "execution"
