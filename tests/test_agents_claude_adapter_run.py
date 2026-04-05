@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 from pathlib import Path
 
@@ -176,7 +177,14 @@ def test_claude_adapter_deep_debug_writes_stream_events(tmp_path: Path, monkeypa
     stream_path = Path(result.debug_artifacts["claude_stream_events"])
     assert stream_path.exists()
     cmd = (debug / "agent_command.txt").read_text(encoding="utf-8")
-    assert "--output-format stream-json" in cmd
-    assert "--verbose" in cmd
-    assert "--include-hook-events" in cmd
-    assert "--allowedTools Read,Edit,Write,Bash" in cmd
+    cmd_parts = shlex.split(cmd)
+    assert "--output-format" in cmd_parts
+    assert "stream-json" in cmd_parts
+    assert "--verbose" in cmd_parts
+    assert "--include-hook-events" in cmd_parts
+    assert "--permission-mode" in cmd_parts
+    permission_idx = cmd_parts.index("--permission-mode")
+    assert cmd_parts[permission_idx + 1] == "bypassPermissions"
+    allowed_idx = cmd_parts.index("--allowedTools")
+    assert cmd_parts[allowed_idx + 1 : allowed_idx + 5] == ["Read", "Edit", "Write", "Bash"]
+    assert "Read,Edit,Write,Bash" not in cmd_parts

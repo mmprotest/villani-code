@@ -23,7 +23,7 @@ class ClaudeCodeAgentRunner(AgentRunner):
     CLI_EXECUTABLE = "claude"
     NON_INTERACTIVE_FLAGS = ["--bare", "--print", "--output-format", "json"]
     PERMISSION_FLAGS = ["--permission-mode", "bypassPermissions"]
-    DEFAULT_ALLOWED_TOOLS = "Read,Edit,Write,Bash"
+    DEFAULT_ALLOWED_TOOLS = ("Read", "Edit", "Write", "Bash")
     _CAPABILITY_FLAGS = {
         "bare": "--bare",
         "settings": "--settings",
@@ -306,9 +306,7 @@ class ClaudeCodeAgentRunner(AgentRunner):
         if deep_debug and capabilities.get("include_hook_events", False):
             updated = [*updated[:-1], "--include-hook-events", updated[-1]]
         if capabilities.get("allowed_tools", False):
-            updated = self._remove_flag_with_value(updated, "--permission-mode")
-            if "--allowedTools" not in updated:
-                updated = [*updated[:-1], "--allowedTools", self.DEFAULT_ALLOWED_TOOLS, updated[-1]]
+            updated = self._replace_allowed_tools(updated, self.DEFAULT_ALLOWED_TOOLS)
         return updated
 
     @staticmethod
@@ -318,6 +316,22 @@ class ClaudeCodeAgentRunner(AgentRunner):
         idx = command.index(flag)
         end = idx + 2 if idx + 1 < len(command) else idx + 1
         return [part for i, part in enumerate(command) if i < idx or i >= end]
+
+    @staticmethod
+    def _replace_allowed_tools(command: list[str], allowed_tools: tuple[str, ...]) -> list[str]:
+        if not command:
+            return command
+        prompt = command[-1]
+        flags = command[:-1]
+        if "--allowedTools" in flags:
+            start = flags.index("--allowedTools")
+            end = start + 1
+            while end < len(flags) and not flags[end].startswith("--"):
+                end += 1
+            flags = [*flags[:start], "--allowedTools", *allowed_tools, *flags[end:]]
+        else:
+            flags = [*flags, "--allowedTools", *allowed_tools]
+        return [*flags, prompt]
 
     @staticmethod
     def _parse_options(benchmark_config_json: str | None) -> dict[str, Any]:
