@@ -812,10 +812,24 @@ def _build_compact_validation_summary(
     target: str,
     summary: str,
     repeated_without_new_evidence: bool,
+    artifact_signature: str,
 ) -> str:
     runner._last_validation_target = target
     runner._last_validation_summary = summary
     runner._validation_repeated_without_new_evidence = repeated_without_new_evidence
+    runner._last_validation_artifact_signature = artifact_signature
+    emitted_fingerprint = json.dumps(
+        {
+            "last_validation_target": target,
+            "last_validation_summary": summary,
+            "validation_repeated_without_new_evidence": bool(repeated_without_new_evidence),
+            "last_validation_artifact_signature": artifact_signature,
+        },
+        sort_keys=True,
+    )
+    if emitted_fingerprint == getattr(runner, "_last_emitted_validation_fingerprint", ""):
+        return ""
+    runner._last_emitted_validation_fingerprint = emitted_fingerprint
     return (
         "<validation_summary>\n"
         f"last_validation_target: {target or 'none'}\n"
@@ -994,8 +1008,6 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         runner._last_verification_fingerprint = fingerprint
         runner._last_verification_intentional = set(attributed_intentional)
         runner._last_verification_artifact_count = len(verification_artifacts)
-    runner._last_validation_artifact_signature = artifact_signature
-
     if repeated_stale and runner._repeated_stale_verification_count >= 2:
         runner.event_callback(
             {
@@ -1025,6 +1037,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             target=validation_target,
             summary=summary,
             repeated_without_new_evidence=repeated_without_new_evidence,
+            artifact_signature=artifact_signature,
         )
 
     lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")
@@ -1073,6 +1086,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         target=validation_target,
         summary=summary,
         repeated_without_new_evidence=repeated_without_new_evidence,
+        artifact_signature=artifact_signature,
     )
 
 
