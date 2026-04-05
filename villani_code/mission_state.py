@@ -55,6 +55,22 @@ class MissionState:
     last_checkpoint_id: str = ""
     last_transcript_path: str = ""
     compact_summary: str = ""
+    active_shell_form: str = ""
+    working_interpreter_cmd: str = ""
+    environment_facts: list[str] = field(default_factory=list)
+    active_artifacts: list[str] = field(default_factory=list)
+    helper_artifacts: list[str] = field(default_factory=list)
+    superseded_artifacts: list[str] = field(default_factory=list)
+    final_targets: list[str] = field(default_factory=list)
+    last_meaningful_tool_result: str = ""
+    last_failed_action: str = ""
+    last_failed_artifact: str = ""
+    last_validation_target: str = ""
+    last_validation_summary: str = ""
+    validation_fingerprint: str = ""
+    attempted_actions: list[str] = field(default_factory=list)
+    attempted_strategies: list[str] = field(default_factory=list)
+    compact_state_summary: str = ""
     autonomous_wave: int = 0
     autonomous_backlog_summary: list[str] = field(default_factory=list)
     autonomous_attempted_tasks: int = 0
@@ -86,6 +102,22 @@ class MissionState:
             last_checkpoint_id=str(payload.get("last_checkpoint_id", "")),
             last_transcript_path=str(payload.get("last_transcript_path", "")),
             compact_summary=str(payload.get("compact_summary", "")),
+            active_shell_form=str(payload.get("active_shell_form", "")),
+            working_interpreter_cmd=str(payload.get("working_interpreter_cmd", "")),
+            environment_facts=[str(v) for v in payload.get("environment_facts", [])],
+            active_artifacts=[str(v) for v in payload.get("active_artifacts", [])],
+            helper_artifacts=[str(v) for v in payload.get("helper_artifacts", [])],
+            superseded_artifacts=[str(v) for v in payload.get("superseded_artifacts", [])],
+            final_targets=[str(v) for v in payload.get("final_targets", [])],
+            last_meaningful_tool_result=str(payload.get("last_meaningful_tool_result", "")),
+            last_failed_action=str(payload.get("last_failed_action", "")),
+            last_failed_artifact=str(payload.get("last_failed_artifact", "")),
+            last_validation_target=str(payload.get("last_validation_target", "")),
+            last_validation_summary=str(payload.get("last_validation_summary", "")),
+            validation_fingerprint=str(payload.get("validation_fingerprint", "")),
+            attempted_actions=[str(v) for v in payload.get("attempted_actions", [])],
+            attempted_strategies=[str(v) for v in payload.get("attempted_strategies", [])],
+            compact_state_summary=str(payload.get("compact_state_summary", "")),
             autonomous_wave=int(payload.get("autonomous_wave", 0)),
             autonomous_backlog_summary=[str(v) for v in payload.get("autonomous_backlog_summary", [])],
             autonomous_attempted_tasks=int(payload.get("autonomous_attempted_tasks", 0)),

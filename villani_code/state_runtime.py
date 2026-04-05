@@ -371,6 +371,35 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = deepcopy(messages)
+    legacy_verification_phrases = (
+        "verification state repeated",
+        "no new evidence was produced",
+        "next step must either change target, change validation evidence, or stop",
+    )
+    tool_result_user_indexes = [
+        idx
+        for idx, msg in enumerate(prepared)
+        if msg.get("role") == "user"
+        and isinstance(msg.get("content"), list)
+        and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in msg.get("content", []))
+    ]
+    keep_raw_indexes = set(tool_result_user_indexes[-2:])
+    for idx, msg in enumerate(prepared):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            raw = str(block.get("content", ""))
+            cleaned = raw
+            for phrase in legacy_verification_phrases:
+                cleaned = cleaned.replace(phrase, "")
+            cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip()).strip()
+            if idx not in keep_raw_indexes and len(cleaned) > 320:
+                block["content"] = cleaned[:280] + "\n...[compacted tool result; see mission state summary]"
+            else:
+                block["content"] = cleaned
     if runner.small_model:
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
@@ -968,6 +997,27 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         runner._last_verification_intentional = set(attributed_intentional)
         runner._last_verification_artifact_count = len(verification_artifacts)
 
+    validation_target = ",".join(sorted(attributed_intentional)[:4]) or "workspace"
+    validation_summary = (
+        "redundant validation attempt suppressed in prompt context"
+        if repeated_stale and runner._repeated_stale_verification_count >= 2
+        else f"{verification.status.value}: {verification.summary}"
+    )
+    if getattr(runner, "_mission_state", None) is not None:
+        runner._mission_state.validation_fingerprint = fingerprint
+        runner._mission_state.last_validation_target = validation_target
+        runner._mission_state.last_validation_summary = validation_summary[:260]
+        if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
+            runner._mission_state.last_failed_summary = verification.summary[:260]
+        if repeated_stale:
+            attempts = list(getattr(runner._mission_state, "attempted_actions", []))
+            attempts.append(f"validation:{trigger}:{validation_target}:redundant")
+            runner._mission_state.attempted_actions = list(dict.fromkeys([a for a in attempts if a]))[-18:]
+            strategies = list(getattr(runner._mission_state, "attempted_strategies", []))
+            strategies.append("Change target, evidence, or command before re-validating")
+            runner._mission_state.attempted_strategies = list(dict.fromkeys([s for s in strategies if s]))[-12:]
+        save_mission_state(runner.repo, runner._mission_state)
+
     if repeated_stale and runner._repeated_stale_verification_count >= 2:
         runner.event_callback(
             {
@@ -980,9 +1030,11 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         )
         return (
             "<verification>\n"
-            "verification state repeated\n"
-            "no new evidence was produced\n"
-            "next step must either change target, change validation evidence, or stop\n"
+            f"trigger: {trigger}\n"
+            f"target: {validation_target}\n"
+            "status: redundant\n"
+            f"fingerprint: {fingerprint[:140]}\n"
+            "summary: redundant validation; no new artifact state or evidence\n"
             "</verification>"
         )
 
@@ -990,6 +1042,8 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     if attributed_incidental:
         lines.append(f"incidental_changed: {json.dumps(sorted(attributed_incidental))}")
     lines.append(f"status: {verification.status.value}")
+    lines.append(f"target: {validation_target}")
+    lines.append(f"fingerprint: {fingerprint[:140]}")
     lines.append(f"confidence: {verification.confidence_score}")
     if verification.findings:
         lines.append("findings:")

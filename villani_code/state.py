@@ -69,6 +69,13 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return ordered
 
 
+def _compact_text(value: Any, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
 
 
 def _read_text_excerpt(path: Path, limit: int = 1400) -> str:
@@ -517,6 +524,8 @@ class Runner:
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
         self._last_verification_artifact_count = 0
+        self._last_failure_fingerprint = ""
+        self._last_failure_evidence_stamp = ""
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
@@ -1433,6 +1442,24 @@ class Runner:
                             "occurrence": failure.occurrence_count,
                         }
                     )
+                self._update_run_state_from_tool_result(tool_name, tool_input, result)
+                if self._mission_state is not None:
+                    self._update_mission_state(
+                        active_artifacts=list(self._mission_state.active_artifacts),
+                        helper_artifacts=list(self._mission_state.helper_artifacts),
+                        superseded_artifacts=list(self._mission_state.superseded_artifacts),
+                        final_targets=list(self._mission_state.final_targets),
+                        attempted_actions=list(self._mission_state.attempted_actions),
+                        attempted_strategies=list(self._mission_state.attempted_strategies),
+                        verified_facts=list(self._mission_state.verified_facts),
+                        environment_facts=list(self._mission_state.environment_facts),
+                        active_shell_form=self._mission_state.active_shell_form,
+                        working_interpreter_cmd=self._mission_state.working_interpreter_cmd,
+                        last_meaningful_tool_result=self._mission_state.last_meaningful_tool_result,
+                        last_failed_action=self._mission_state.last_failed_action,
+                        last_failed_artifact=self._mission_state.last_failed_artifact,
+                        compact_state_summary=self._mission_state.compact_state_summary,
+                    )
 
                 self.hooks.run_event(
                     "PostToolUse",
@@ -1586,6 +1613,132 @@ class Runner:
                 "mission_state_update",
                 turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else None,
             )
+
+    def _add_verified_fact(self, kind: str, value: str, source: str) -> None:
+        if self._mission_state is None:
+            return
+        value_text = _compact_text(value, limit=180)
+        if not value_text:
+            return
+        from villani_code.mission_state import VerifiedFact
+
+        for fact in self._mission_state.verified_facts:
+            if fact.kind == kind and fact.value == value_text:
+                return
+        self._mission_state.verified_facts.append(VerifiedFact(kind=kind, value=value_text, source=source))
+        self._mission_state.verified_facts = self._mission_state.verified_facts[-16:]
+
+    def _record_attempted_action(self, action: str) -> None:
+        if self._mission_state is None:
+            return
+        actions = list(self._mission_state.attempted_actions)
+        actions.append(_compact_text(action, limit=180))
+        self._mission_state.attempted_actions = _dedupe_preserve(actions)[-18:]
+
+    def _record_attempted_strategy(self, strategy: str) -> None:
+        if self._mission_state is None:
+            return
+        strategies = list(self._mission_state.attempted_strategies)
+        strategies.append(_compact_text(strategy, limit=160))
+        self._mission_state.attempted_strategies = _dedupe_preserve(strategies)[-12:]
+
+    def _refresh_compact_state_summary(self) -> None:
+        if self._mission_state is None:
+            return
+        state = self._mission_state
+        summary_bits: list[str] = []
+        if state.active_artifacts:
+            summary_bits.append(f"active={','.join(state.active_artifacts[:3])}")
+        if state.last_meaningful_tool_result:
+            summary_bits.append(f"last_ok={state.last_meaningful_tool_result}")
+        if state.last_failed_summary:
+            summary_bits.append(f"last_fail={_compact_text(state.last_failed_summary, limit=120)}")
+        if state.last_validation_summary:
+            summary_bits.append(f"validation={_compact_text(state.last_validation_summary, limit=120)}")
+        if state.working_interpreter_cmd:
+            summary_bits.append(f"interpreter={state.working_interpreter_cmd}")
+        if state.environment_facts:
+            summary_bits.append(f"env={'; '.join(state.environment_facts[:2])}")
+        if state.superseded_artifacts:
+            summary_bits.append(f"superseded={','.join(state.superseded_artifacts[:2])}")
+        state.compact_state_summary = " | ".join(summary_bits[:7])
+
+    def _track_artifact_lineage(self, tool_name: str, tool_input: dict[str, Any]) -> None:
+        if self._mission_state is None or tool_name not in {"Write", "Patch"}:
+            return
+        file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if not file_path:
+            return
+        state = self._mission_state
+        active = [p for p in state.active_artifacts if p != file_path]
+        if active:
+            for item in active:
+                if item not in state.superseded_artifacts:
+                    state.superseded_artifacts.append(item)
+        state.active_artifacts = _dedupe_preserve([file_path, *active])[:8]
+        if tool_name == "Write" and file_path not in state.final_targets:
+            state.final_targets = _dedupe_preserve([*state.final_targets, file_path])[:8]
+        if "helper" in file_path or "tmp" in file_path or "scratch" in file_path:
+            state.helper_artifacts = _dedupe_preserve([*state.helper_artifacts, file_path])[:8]
+        state.superseded_artifacts = [p for p in _dedupe_preserve(state.superseded_artifacts) if p != file_path][:12]
+
+    def _update_run_state_from_tool_result(self, tool_name: str, tool_input: dict[str, Any], result: dict[str, Any]) -> None:
+        if self._mission_state is None:
+            return
+        state = self._mission_state
+        self._record_attempted_action(f"{tool_name} {tool_input}")
+        if tool_name in {"Read", "Search", "Grep", "Glob", "Ls"}:
+            self._record_attempted_strategy("Inspect repository artifacts and evidence")
+        elif tool_name in {"Write", "Patch"}:
+            self._record_attempted_strategy("Apply bounded implementation change and re-validate")
+        elif tool_name == "Bash":
+            self._record_attempted_strategy("Execute command-level validation or environment probing")
+        state.changed_files = self._git_changed_files()
+        if result.get("is_error"):
+            state.last_failed_action = f"{tool_name} {tool_input}"
+            state.last_failed_summary = _compact_text(result.get("content", ""), limit=260)
+            state.last_failed_artifact = str(tool_input.get("file_path", "") or "")
+            failure_fingerprint = json.dumps(
+                {
+                    "action": tool_name,
+                    "input": tool_input,
+                    "artifact_state": state.changed_files,
+                    "summary": state.last_failed_summary,
+                },
+                sort_keys=True,
+            )
+            if failure_fingerprint == self._last_failure_fingerprint and self._last_failure_evidence_stamp == "|".join(state.changed_files):
+                self.event_callback({"type": "redundant_failed_action_detected", "action": tool_name, "redundant": True})
+                self._record_attempted_strategy("Avoid repeating unchanged failed action without new evidence")
+            self._last_failure_fingerprint = failure_fingerprint
+            self._last_failure_evidence_stamp = "|".join(state.changed_files)
+        else:
+            state.last_meaningful_tool_result = _compact_text(f"{tool_name} succeeded", limit=120)
+            if tool_name == "Bash":
+                try:
+                    decoded = json.loads(str(result.get("content", "{}")))
+                except json.JSONDecodeError:
+                    decoded = {}
+                command = str(decoded.get("command", "")).strip()
+                if command:
+                    state.active_shell_form = "shell=True command"
+                    self._add_verified_fact("shell_form", "shell=True command", f"Bash:{command}")
+                if command.startswith("python ") or command.startswith("python3 "):
+                    interp = command.split(" ", 1)[0]
+                    state.working_interpreter_cmd = interp
+                    self._add_verified_fact("interpreter", interp, f"Bash:{command}")
+                    state.environment_facts = _dedupe_preserve([*state.environment_facts, f"Interpreter command works: {interp}"])[:8]
+                if "No module named" in str(decoded.get("stderr", "")):
+                    missing = str(decoded.get("stderr", "")).split("No module named", 1)[-1].strip().strip(": ").strip("'\"")
+                    if missing:
+                        state.environment_facts = _dedupe_preserve([*state.environment_facts, f"Missing dependency: {missing}"])[:8]
+                        self._add_verified_fact("missing_dependency", missing, f"Bash:{command}")
+            if tool_name in {"Write", "Patch"}:
+                self._track_artifact_lineage(tool_name, tool_input)
+                file_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                if file_path:
+                    self._add_verified_fact("file_changed", file_path, tool_name)
+        self._refresh_compact_state_summary()
 
     def _inject_projected_context(self, messages: list[dict[str, Any]]) -> None:
         if not self._mission_state or self.benchmark_config.enabled:

@@ -48,8 +48,30 @@ def summarize_mission_state(mission_state: MissionState) -> str:
     ]
     if mission_state.changed_files:
         lines.append(f"Changed files: {', '.join(mission_state.changed_files[:6])}")
+    if mission_state.active_artifacts:
+        lines.append(f"Active artifacts: {', '.join(mission_state.active_artifacts[:6])}")
+    if mission_state.superseded_artifacts:
+        lines.append(f"Superseded artifacts: {', '.join(mission_state.superseded_artifacts[:6])}")
+    if mission_state.final_targets:
+        lines.append(f"Final targets: {', '.join(mission_state.final_targets[:6])}")
+    if mission_state.verified_facts:
+        lines.append(
+            "Verified facts: "
+            + "; ".join(f"{fact.kind}={fact.value}" for fact in mission_state.verified_facts[:4])
+        )
+    if mission_state.open_hypotheses:
+        lines.append(
+            "Open hypotheses: "
+            + "; ".join(h.statement for h in mission_state.open_hypotheses[:4])
+        )
+    if mission_state.attempted_strategies:
+        lines.append("Attempted strategies: " + "; ".join(mission_state.attempted_strategies[:4]))
+    if mission_state.last_validation_summary:
+        lines.append(f"Validation: {mission_state.last_validation_summary}")
     if mission_state.validation_failures:
         lines.append(f"Validation failures: {mission_state.validation_failures[0]}")
+    if mission_state.compact_state_summary:
+        lines.append(f"State summary: {mission_state.compact_state_summary}")
     if mission_state.autonomous_stop_reason:
         lines.append(f"Autonomous stop: {mission_state.autonomous_stop_reason}")
     return "\n".join(lines)

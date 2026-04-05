@@ -202,7 +202,8 @@ def test_repeated_stale_verification_returns_compact_block(tmp_path: Path, monke
     for _ in range(2):
         runner._run_verification("edit")
     third = runner._run_verification("edit")
-    assert "verification state repeated" in third
+    assert "status: redundant" in third
+    assert "summary: redundant validation" in third
     assert third.startswith("<verification>")
 
 
