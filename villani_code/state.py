@@ -517,6 +517,11 @@ class Runner:
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
         self._last_verification_artifact_count = 0
+        self._last_validation_target = ""
+        self._last_validation_summary = ""
+        self._validation_repeated_without_new_evidence = False
+        self._last_validation_artifact_signature = ""
+        self._last_emitted_validation_fingerprint = ""
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
@@ -886,6 +891,11 @@ class Runner:
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional = set()
         self._last_verification_artifact_count = 0
+        self._last_validation_target = ""
+        self._last_validation_summary = ""
+        self._validation_repeated_without_new_evidence = False
+        self._last_validation_artifact_signature = ""
+        self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read

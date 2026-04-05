@@ -151,6 +151,34 @@ class FakeClientToolUseThenDone:
         }
 
 
+class FakeClientTwoBashThenDone:
+    def __init__(self):
+        self.calls = 0
+        self.payloads: list[dict] = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls <= 2:
+            return {
+                "id": str(self.calls),
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"tool-{self.calls}",
+                        "name": "Bash",
+                        "input": {"command": "pwd"},
+                    }
+                ],
+            }
+        return {
+            "id": "3",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+        }
+
+
 class FakeClientTwoEmptyThenDone:
     def __init__(self):
         self.calls = 0
@@ -267,6 +295,38 @@ def test_anthropic_message_order_after_tool_use_with_pending_verification(tmp_pa
     assert next_user_message["content"][0]["type"] == "tool_result"
     assert all(block.get("type") == "tool_result" for block in next_user_message["content"])
     assert "<verification>order-check</verification>" in next_user_message["content"][-1]["content"]
+
+
+def test_loop_does_not_append_duplicate_validation_summary_when_dedup_returns_empty(tmp_path: Path):
+    client = FakeClientTwoBashThenDone()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+    summaries = iter(
+        [
+            "<validation_summary>\nlast_validation_target: []\nlast_validation_summary: ok\nvalidation_repeated_without_new_evidence: false\n</validation_summary>",
+            "",
+        ]
+    )
+    runner._run_verification = lambda trigger="edit": next(summaries)
+
+    runner.run("run bash twice")
+
+    assert len(client.payloads) == 3
+    second_request_messages = client.payloads[1]["messages"]
+    third_request_messages = client.payloads[2]["messages"]
+
+    second_tool_result = next(
+        m
+        for m in reversed(second_request_messages)
+        if m["role"] == "user" and m["content"] and m["content"][0].get("type") == "tool_result"
+    )
+    third_tool_result = next(
+        m
+        for m in reversed(third_request_messages)
+        if m["role"] == "user" and m["content"] and m["content"][0].get("type") == "tool_result"
+    )
+
+    assert "<validation_summary>" in second_tool_result["content"][-1]["content"]
+    assert "<validation_summary>" not in third_tool_result["content"][-1]["content"]
 
 def test_loop_retries_twice_then_succeeds(tmp_path: Path):
     client = FakeClientTwoEmptyThenDone()
