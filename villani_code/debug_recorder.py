@@ -9,7 +9,7 @@ from typing import Any
 
 from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_jsonl, append_text, create_debug_run_artifacts, write_json
 from villani_code.debug_mode import DebugConfig
-from villani_code.trace_summary import EventLogger, write_summary_from_events
+from villani_code.trace_summary import EventLogger, normalize_token_usage, write_summary_from_events, write_tool_calls_from_events
 
 
 class DebugRecorder:
@@ -28,6 +28,7 @@ class DebugRecorder:
         self._jsonl_paths = {k: self.artifacts.path(v) for k, v in DEBUG_JSONL_FILES.items()}
         self._event_logger = EventLogger(run_id=run_id, events_path=self._jsonl_paths["events"])
         self._tool_call_to_name: dict[str, str] = {}
+        self._current_turn_index: int | None = None
         self._safe_write_json(
             self.artifacts.path("session_meta.json"),
             {
@@ -65,20 +66,30 @@ class DebugRecorder:
         self._safe(write_json, path, payload)
 
     def _emit(self, event_type: str, payload: dict[str, Any], turn_index: int | None = None) -> None:
-        self._safe(self._event_logger.emit, event_type, payload, turn_index)
+        resolved_turn = self._current_turn_index if turn_index is None else turn_index
+        self._safe(self._event_logger.emit, event_type, payload, resolved_turn)
 
-    def record_event(self, event_type: str, summary: str, payload: dict[str, Any] | None = None, phase: str = "execution") -> None:
+    def record_event(
+        self,
+        event_type: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+        phase: str = "execution",
+        turn_index: int | None = None,
+    ) -> None:
         self._seq += 1
         # Preserve legacy compatibility by carrying generic events into the canonical stream.
-        self._emit(event_type, {"summary": summary, "phase": phase, **(payload or {})})
+        self._emit(event_type, {"summary": summary, "phase": phase, **(payload or {})}, turn_index=turn_index)
 
     def record_turn_start(self, turn_index: int, payload: dict[str, Any]) -> None:
+        self._current_turn_index = turn_index
         row = {"ts": self._ts(), "turn_index": turn_index, "payload": payload}
         self._safe_append_jsonl("turns", row)
-        self.record_event("turn_started", f"Turn {turn_index} started", payload)
+        self.record_event("turn_started", f"Turn {turn_index} started", payload, turn_index=turn_index)
 
     def record_turn_finish(self, turn_index: int, stop_reason: str = "") -> None:
-        self.record_event("turn_finished", f"Turn {turn_index} finished", {"turn_index": turn_index, "stop_reason": stop_reason})
+        self.record_event("turn_finished", f"Turn {turn_index} finished", {"turn_index": turn_index, "stop_reason": stop_reason}, turn_index=turn_index)
+        self._current_turn_index = None
 
     def record_model_request(self, payload: dict[str, Any]) -> None:
         data = payload if self.config.capture_model_io else {"model": payload.get("model"), "message_count": len(payload.get("messages", []))}
@@ -88,12 +99,14 @@ class DebugRecorder:
     def record_model_response(self, payload: dict[str, Any]) -> None:
         data = payload if self.config.capture_model_io else {"stop_reason": payload.get("stop_reason"), "content_blocks": len(payload.get("content", []))}
         self._safe_append_jsonl("model_responses", {"ts": self._ts(), "payload": data})
+        usage = normalize_token_usage(payload)
         self._emit(
             "model_request_completed",
             {
                 "stop_reason": payload.get("stop_reason"),
-                "tokens_input": payload.get("input_tokens"),
-                "tokens_output": payload.get("output_tokens"),
+                "tokens_input": usage.get("tokens_input"),
+                "tokens_output": usage.get("tokens_output"),
+                "tokens_total": usage.get("tokens_total"),
             },
         )
 
@@ -124,6 +137,7 @@ class DebugRecorder:
             "tool_call_id": tool_call_id,
             "summary": summary,
             "status": "failed" if is_error else "completed",
+            "result_summary": {"summary": summary},
         }
         if exit_code is not None:
             payload["exit_code"] = exit_code
@@ -133,10 +147,19 @@ class DebugRecorder:
         else:
             self._emit("tool_call_completed", payload)
 
-    def record_command_start(self, command: str, cwd: str) -> None:
-        self.record_event("command_started", f"Command started: {command}", {"command": command, "cwd": cwd})
+    def record_command_start(self, command: str, cwd: str, tool_call_id: str = "") -> None:
+        self.record_event("command_started", f"Command started: {command}", {"command": command, "cwd": cwd, "tool_call_id": tool_call_id})
 
-    def record_command_finish(self, command: str, cwd: str, exit_code: int, stdout: str = "", stderr: str = "", truncated: bool = False) -> None:
+    def record_command_finish(
+        self,
+        command: str,
+        cwd: str,
+        exit_code: int,
+        stdout: str = "",
+        stderr: str = "",
+        truncated: bool = False,
+        tool_call_id: str = "",
+    ) -> None:
         payload = {
             "ts": self._ts(),
             "command": command,
@@ -145,6 +168,7 @@ class DebugRecorder:
             "stdout": stdout if self.config.capture_command_output else stdout[:240],
             "stderr": stderr if self.config.capture_command_output else stderr[:240],
             "truncated": truncated,
+            "tool_call_id": tool_call_id,
         }
         self._safe_append_jsonl("commands", payload)
         self.record_event("command_finished", f"Command finished: {command}", payload)
@@ -227,6 +251,7 @@ class DebugRecorder:
         elif status == "failed":
             self._emit("run_failed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
 
+        self._safe(write_tool_calls_from_events, self.artifacts.run_dir)
         summary_path = self._safe(write_summary_from_events, self.artifacts.run_dir, status_override=status)
         if isinstance(summary_path, Path):
             self._emit("summary_generated", {"summary_path": str(summary_path)})
@@ -257,10 +282,10 @@ class DebugRecorder:
         etype = str(event.get("type", ""))
         if not etype:
             return
-        if etype in {"tool_use", "tool_started"}:
+        if etype == "tool_started":
             self.record_tool_call(str(event.get("name", "")), dict(event.get("input", {})), str(event.get("tool_use_id", event.get("tool_call_id", ""))))
             return
-        if etype in {"tool_result", "tool_finished"}:
+        if etype == "tool_finished":
             is_error = bool(event.get("is_error", False))
             exit_code = event.get("exit_code")
             self.record_tool_result(
@@ -275,7 +300,7 @@ class DebugRecorder:
             self.record_approval_requested(str(event.get("name", "")), dict(event.get("input", {})))
             return
         if etype in {"approval_resolved", "approval_auto_resolved"}:
-            self.record_approval_resolved(str(event.get("name", "")), True, dict(event.get("input", {})))
+            self.record_approval_resolved(str(event.get("name", "")), bool(event.get("approved", True)), dict(event.get("input", {})))
             return
         if etype == "validation_started":
             self.record_validation_start("post_execution", event)

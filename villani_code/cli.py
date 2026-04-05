@@ -19,7 +19,7 @@ from villani_code.cli_subcommands import register_benchmark_commands, register_m
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.debug_mode import DebugMode, build_debug_config
-from villani_code.trace_summary import write_summary_from_events
+from villani_code.trace_summary import write_summary_from_events, write_tool_calls_from_events
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -283,6 +283,14 @@ def trace_rebuild_summary_cmd(
     run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay=False, dir_okay=True, resolve_path=True),
 ) -> None:
     path = write_summary_from_events(run_dir)
+    console.print(str(path))
+
+
+@trace_app.command("rebuild-tool-calls")
+def trace_rebuild_tool_calls_cmd(
+    run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay=False, dir_okay=True, resolve_path=True),
+) -> None:
+    path = write_tool_calls_from_events(run_dir)
     console.print(str(path))
 
 

@@ -540,6 +540,7 @@ class Runner:
                 str(payload.get("file_path", "")),
                 int(payload.get("size_bytes", 0)),
                 bool(payload.get("ok", True)),
+                str(payload.get("tool_call_id", "") or ""),
             )
             return
         if event_type == "file_write":
@@ -547,18 +548,21 @@ class Runner:
                 str(payload.get("file_path", "")),
                 int(payload.get("size_bytes", 0)),
                 bool(payload.get("ok", True)),
+                str(payload.get("tool_call_id", "") or ""),
             )
             return
         if event_type == "patch_applied":
             self._debug_recorder.record_patch_applied(
                 str(payload.get("file_path", "")),
                 bool(payload.get("ok", True)),
+                str(payload.get("tool_call_id", "") or ""),
             )
             return
         if event_type == "command_started":
             self._debug_recorder.record_command_start(
                 str(payload.get("command", "")),
                 str(payload.get("cwd", ".")),
+                str(payload.get("tool_call_id", "") or ""),
             )
             return
         if event_type == "command_finished":
@@ -569,6 +573,7 @@ class Runner:
                 stdout=str(payload.get("stdout", "")),
                 stderr=str(payload.get("stderr", "")),
                 truncated=bool(payload.get("truncated", False)),
+                tool_call_id=str(payload.get("tool_call_id", "") or ""),
             )
 
 

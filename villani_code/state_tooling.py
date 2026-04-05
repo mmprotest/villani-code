@@ -614,5 +614,6 @@ def execute_tool_with_policy(
         runner.repo,
         unsafe=runner.unsafe,
         debug_callback=getattr(runner, "_debug_tool_callback", None),
+        tool_call_id=tool_use_id,
     )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)

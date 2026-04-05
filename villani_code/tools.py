@@ -137,6 +137,7 @@ def execute_tool(
     repo: Path,
     unsafe: bool = False,
     debug_callback: Any | None = None,
+    tool_call_id: str = "",
 ) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
@@ -150,7 +151,7 @@ def execute_tool(
         if name == "Ls":
             return _ok(_run_ls(parsed, repo))
         if name == "Read":
-            return _ok(_run_read(parsed, repo, debug_callback=debug_callback))
+            return _ok(_run_read(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Grep":
             return _ok(_run_grep(parsed, repo))
         if name == "Glob":
@@ -158,11 +159,11 @@ def execute_tool(
         if name == "Search":
             return _ok(_run_search(parsed, repo))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback))
+            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Write":
-            return _ok(_run_write(parsed, repo, debug_callback=debug_callback))
+            return _ok(_run_write(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Patch":
-            return _ok(_run_patch(parsed, repo, debug_callback=debug_callback))
+            return _ok(_run_patch(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "WebFetch":
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
@@ -194,11 +195,11 @@ def _run_ls(data: LsInput, repo: Path) -> str:
     return "\n".join(lines)
 
 
-def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None) -> str:
+def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
     path = _safe_path(repo, data.file_path)
     raw = path.read_bytes()[: data.max_bytes]
     if callable(debug_callback):
-        debug_callback("file_read", {"file_path": data.file_path, "size_bytes": len(raw), "ok": True})
+        debug_callback("file_read", {"file_path": data.file_path, "size_bytes": len(raw), "ok": True, "tool_call_id": tool_call_id})
     return raw.decode("utf-8", errors="replace")
 
 
@@ -229,7 +230,7 @@ def _run_search(data: SearchInput, repo: Path) -> str:
     return proc.stdout
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None) -> str:
+def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
@@ -237,7 +238,7 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 raise ValueError(f"Refusing command: {bad.strip()}")
     cwd = _safe_path(repo, data.cwd)
     if callable(debug_callback):
-        debug_callback("command_started", {"command": data.command, "cwd": data.cwd})
+        debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
     proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
     if callable(debug_callback):
         debug_callback(
@@ -249,22 +250,31 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 "stdout": proc.stdout,
                 "stderr": proc.stderr,
                 "truncated": False,
+                "tool_call_id": tool_call_id,
             },
         )
     return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
 
 
-def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None) -> str:
+def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
     path = _safe_path(repo, data.file_path)
     if data.mkdirs:
         path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data.content, encoding="utf-8")
     if callable(debug_callback):
-        debug_callback("file_write", {"file_path": data.file_path, "size_bytes": len(data.content.encode("utf-8")), "ok": True})
+        debug_callback(
+            "file_write",
+            {
+                "file_path": data.file_path,
+                "size_bytes": len(data.content.encode("utf-8")),
+                "ok": True,
+                "tool_call_id": tool_call_id,
+            },
+        )
     return f"Wrote {path}"
 
 
-def _run_patch(data: PatchInput, repo: Path, debug_callback: Any | None = None) -> str:
+def _run_patch(data: PatchInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
     if data.file_path:
         _safe_path(repo, data.file_path)
     try:
@@ -277,7 +287,12 @@ def _run_patch(data: PatchInput, repo: Path, debug_callback: Any | None = None) 
         for file_path in touched:
             debug_callback(
                 "patch_applied",
-                {"file_path": file_path, "ok": True, "used_fallback": file_path in diagnostics.fallback_files},
+                {
+                    "file_path": file_path,
+                    "ok": True,
+                    "used_fallback": file_path in diagnostics.fallback_files,
+                    "tool_call_id": tool_call_id,
+                },
             )
     if diagnostics.fallback_files:
         return (

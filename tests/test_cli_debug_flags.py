@@ -56,3 +56,18 @@ def test_cli_trace_rebuild_summary(tmp_path: Path) -> None:
     assert result.exit_code == 0
     summary = (run_dir / "summary.json").read_text(encoding="utf-8")
     assert '"total_tool_calls": 1' in summary
+
+
+def test_cli_trace_rebuild_tool_calls(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        '{"event_id":1,"run_id":"r1","ts":"2026-04-01T00:00:00+00:00","event_type":"tool_call_started","payload":{"tool_name":"Read","tool_call_id":"t1","args":{"file_path":"a.py"}}}\n'
+        '{"event_id":2,"run_id":"r1","ts":"2026-04-01T00:00:01+00:00","event_type":"tool_call_completed","payload":{"tool_name":"Read","tool_call_id":"t1","summary":"ok"}}\n',
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["trace", "rebuild-tool-calls", "--run-dir", str(run_dir)])
+    assert result.exit_code == 0
+    rows = (run_dir / "tool_calls.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
