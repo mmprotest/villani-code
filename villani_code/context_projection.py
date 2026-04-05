@@ -38,6 +38,11 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
         "intended_targets": _filter_model_facing_paths(list(getattr(mission, "intended_targets", []))),
         "changed_files": _filter_model_facing_paths(list(getattr(mission, "changed_files", []))),
         "last_failed_command": getattr(mission, "last_failed_command", ""),
+        "last_failed_action_summary": getattr(mission, "last_failed_action_summary", ""),
+        "redundant_failed_action_detected": bool(
+            getattr(mission, "redundant_failed_action_detected", False)
+        ),
+        "redundant_failed_action_summary": getattr(mission, "redundant_failed_action_summary", ""),
         "validation_failures": list(getattr(mission, "validation_failures", [])),
         "compact_recent_actions": getattr(mission, "compact_summary", ""),
         "constraints": constraints,
@@ -56,6 +61,9 @@ def render_model_context_packet(packet: dict[str, Any]) -> str:
         f"Intended targets: {', '.join(packet.get('intended_targets', []))}",
         f"Changed files: {', '.join(packet.get('changed_files', []))}",
         f"Last failed command: {packet.get('last_failed_command', '')}",
+        f"Last failed action: {packet.get('last_failed_action_summary', '')}",
+        f"Redundant failed action detected: {str(bool(packet.get('redundant_failed_action_detected', False))).lower()}",
+        f"Redundant failed action: {packet.get('redundant_failed_action_summary', '')}",
         f"Validation failures: {' | '.join(packet.get('validation_failures', []))}",
         f"Compact actions: {packet.get('compact_recent_actions', '')}",
     ]

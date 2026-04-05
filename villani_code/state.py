@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import time
@@ -496,6 +497,11 @@ class Runner:
         self._no_progress_cycles = 0
         self._recovery_count = 0
         self._last_failed_tool_sig = ""
+        self._recent_failed_action_records: list[dict[str, str]] = []
+        self._last_failed_action_fingerprint = ""
+        self._last_failed_action_summary = ""
+        self._redundant_failed_action_detected = False
+        self._redundant_failed_action_summary = ""
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
@@ -896,6 +902,11 @@ class Runner:
         self._validation_repeated_without_new_evidence = False
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
+        self._recent_failed_action_records = []
+        self._last_failed_action_fingerprint = ""
+        self._last_failed_action_summary = ""
+        self._redundant_failed_action_detected = False
+        self._redundant_failed_action_summary = ""
         self._scope_expansion_used = False
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
@@ -1406,7 +1417,11 @@ class Runner:
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
-                    self._update_mission_state(last_failed_command=f"{tool_name} {tool_input}", last_failed_summary=result_text[:500])
+                    self._record_failed_action(tool_name, tool_input, result_text)
+                    self._update_mission_state(
+                        last_failed_command=f"{tool_name} {tool_input}",
+                        last_failed_summary=result_text[:500],
+                    )
                     if (
                         self.benchmark_config.enabled
                         and tool_name in {"Write", "Patch"}
@@ -1596,6 +1611,174 @@ class Runner:
                 "mission_state_update",
                 turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else None,
             )
+
+    @staticmethod
+    def _short_hash(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _normalize_whitespace(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @staticmethod
+    def _failure_signature(result_text: str) -> str:
+        compact = Runner._normalize_whitespace(result_text)
+        if "Traceback" in result_text:
+            return f"traceback:{Runner._short_hash(compact)}"
+        return f"error:{Runner._short_hash(compact[:400])}"
+
+    def _normalize_repo_relative_path(self, raw_path: str) -> str:
+        normalized = str(raw_path or "").replace("\\", "/").strip()
+        if not normalized:
+            return ""
+        candidate = Path(normalized)
+        if candidate.is_absolute():
+            try:
+                rel = candidate.resolve().relative_to(self.repo.resolve())
+                normalized = str(rel).replace("\\", "/")
+            except Exception:
+                normalized = str(candidate).replace("\\", "/")
+        return normalized.lstrip("./")
+
+    def _collect_action_targets(self, tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+        if tool_name == "Write":
+            path = self._normalize_repo_relative_path(str(tool_input.get("file_path", "")))
+            return [path] if path else []
+        if tool_name == "Patch":
+            from villani_code.patch_apply import extract_unified_diff_targets
+
+            diff = str(tool_input.get("unified_diff", ""))
+            default_path = str(tool_input.get("file_path", "") or "")
+            try:
+                targets = extract_unified_diff_targets(diff, default_file_path=default_path or None)
+            except Exception:
+                targets = [default_path] if default_path else []
+            return sorted(
+                {
+                    self._normalize_repo_relative_path(target)
+                    for target in targets
+                    if self._normalize_repo_relative_path(target)
+                }
+            )
+        return []
+
+    def _artifact_state_signature(self, targets: list[str]) -> str:
+        if not targets:
+            return ""
+        rows: list[str] = []
+        for target in sorted(set(targets)):
+            path = (self.repo / target).resolve()
+            if not path.exists():
+                rows.append(f"{target}:missing")
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                rows.append(f"{target}:stat_error")
+                continue
+            rows.append(f"{target}:{stat.st_size}:{stat.st_mtime_ns}")
+        return self._short_hash("|".join(rows))
+
+    def _build_failed_action_signatures(
+        self, tool_name: str, tool_input: dict[str, Any], result_text: str
+    ) -> tuple[str, str, str, str]:
+        normalized_tool = str(tool_name or "").strip()
+        payload: dict[str, Any] = {"operation": normalized_tool.lower()}
+        targets: list[str] = []
+        summary = normalized_tool
+
+        if normalized_tool == "Bash":
+            command = self._normalize_whitespace(str(tool_input.get("command", "")))
+            cwd = self._normalize_repo_relative_path(str(tool_input.get("cwd", ".")))
+            shell = self._normalize_whitespace(str(tool_input.get("shell", "bash")))
+            payload = {
+                "operation": "shell_command",
+                "command": command,
+                "cwd": cwd,
+                "shell": shell,
+            }
+            summary = f"shell_command `{command}`"
+        elif normalized_tool == "Write":
+            path = self._normalize_repo_relative_path(str(tool_input.get("file_path", "")))
+            content_hash = self._short_hash(str(tool_input.get("content", "")))
+            targets = [path] if path else []
+            payload = {"operation": "write", "target_path": path, "content_hash": content_hash}
+            summary = f"write `{path}`"
+        elif normalized_tool == "Patch":
+            targets = self._collect_action_targets(normalized_tool, tool_input)
+            patch_signature = self._short_hash(self._normalize_whitespace(str(tool_input.get("unified_diff", ""))))
+            payload = {
+                "operation": "patch",
+                "target_paths": targets,
+                "patch_signature": patch_signature,
+            }
+            summary = f"patch `{', '.join(targets)}`" if targets else "patch"
+        else:
+            payload = {
+                "operation": normalized_tool.lower() or "unknown",
+                "input_signature": self._short_hash(json.dumps(tool_input, sort_keys=True, default=str)),
+            }
+
+        failure_signature = self._failure_signature(result_text)
+        evidence_payload = {
+            "artifact_state": self._artifact_state_signature(targets),
+            "validation_target": self._normalize_whitespace(self._last_validation_target),
+            "failure_signature": failure_signature,
+        }
+        action_fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        evidence_signature = json.dumps(evidence_payload, sort_keys=True, separators=(",", ":"))
+        action_summary = f"{summary} failed ({failure_signature})".strip()
+        return action_fingerprint, evidence_signature, failure_signature, action_summary
+
+    def _record_failed_action(self, tool_name: str, tool_input: dict[str, Any], result_text: str) -> None:
+        (
+            action_fingerprint,
+            evidence_signature,
+            failure_signature,
+            action_summary,
+        ) = self._build_failed_action_signatures(tool_name, tool_input, result_text)
+        matched = next(
+            (
+                item
+                for item in reversed(self._recent_failed_action_records)
+                if item.get("fingerprint") == action_fingerprint
+            ),
+            None,
+        )
+        redundant = bool(
+            matched
+            and matched.get("evidence_signature") == evidence_signature
+            and matched.get("failure_signature") == failure_signature
+        )
+        redundant_summary = ""
+        if redundant:
+            redundant_summary = (
+                f"same failed {action_summary}; no relevant artifact or failure evidence changed"
+            )[:280]
+        self._recent_failed_action_records.append(
+            {
+                "fingerprint": action_fingerprint,
+                "evidence_signature": evidence_signature,
+                "failure_signature": failure_signature,
+                "summary": action_summary[:280],
+            }
+        )
+        self._recent_failed_action_records = self._recent_failed_action_records[-12:]
+        self._last_failed_action_fingerprint = action_fingerprint
+        self._last_failed_action_summary = action_summary[:280]
+        self._redundant_failed_action_detected = redundant
+        self._redundant_failed_action_summary = redundant_summary
+        self._update_mission_state(
+            recent_failed_action_fingerprints=[
+                record.get("fingerprint", "")
+                for record in self._recent_failed_action_records[-12:]
+                if record.get("fingerprint", "")
+            ],
+            last_failed_action_fingerprint=action_fingerprint,
+            last_failed_action_summary=self._last_failed_action_summary,
+            redundant_failed_action_detected=redundant,
+            redundant_failed_action_summary=redundant_summary,
+        )
 
     def _inject_projected_context(self, messages: list[dict[str, Any]]) -> None:
         if not self._mission_state or self.benchmark_config.enabled:
