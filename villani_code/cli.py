@@ -19,14 +19,17 @@ from villani_code.cli_subcommands import register_benchmark_commands, register_m
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.debug_mode import DebugMode, build_debug_config
+from villani_code.trace_summary import write_summary_from_events
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
 plugin_app = typer.Typer(help="Manage local plugins")
 benchmark_app = typer.Typer(help="Objective repository benchmark tasks")
+trace_app = typer.Typer(help="Trace/debug artifact utilities")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(plugin_app, name="plugin")
 app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(trace_app, name="trace")
 console = Console()
 
 
@@ -273,6 +276,14 @@ def debug_bundle_cmd(
     console.print(str(bundle))
 
 
+
+
+@trace_app.command("rebuild-summary")
+def trace_rebuild_summary_cmd(
+    run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay=False, dir_okay=True, resolve_path=True),
+) -> None:
+    path = write_summary_from_events(run_dir)
+    console.print(str(path))
 
 
 @app.command("context")

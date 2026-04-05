@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 
 from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_jsonl, append_text, create_debug_run_artifacts, write_json
 from villani_code.debug_mode import DebugConfig
+from villani_code.trace_summary import EventLogger, write_summary_from_events
 
 
 class DebugRecorder:
@@ -19,12 +21,13 @@ class DebugRecorder:
         self._repo = str(repo)
         self._runtime_mode = mode
         self._model = model
-        self._counts: dict[str, int] = {}
         self._changed_files: set[str] = set()
         self._last_failed_command: str = ""
         self._last_failed_validation: str = ""
         self.artifacts = create_debug_run_artifacts(run_id=run_id, debug_root=config.debug_root)
         self._jsonl_paths = {k: self.artifacts.path(v) for k, v in DEBUG_JSONL_FILES.items()}
+        self._event_logger = EventLogger(run_id=run_id, events_path=self._jsonl_paths["events"])
+        self._tool_call_to_name: dict[str, str] = {}
         self._safe_write_json(
             self.artifacts.path("session_meta.json"),
             {
@@ -37,6 +40,7 @@ class DebugRecorder:
                 "created_at": self._ts(),
             },
         )
+        self._emit("run_started", {"objective": objective, "runtime_mode": mode, "model": model})
 
     def _ts(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -60,19 +64,13 @@ class DebugRecorder:
     def _safe_write_json(self, path: Path, payload: dict[str, Any]) -> None:
         self._safe(write_json, path, payload)
 
+    def _emit(self, event_type: str, payload: dict[str, Any], turn_index: int | None = None) -> None:
+        self._safe(self._event_logger.emit, event_type, payload, turn_index)
+
     def record_event(self, event_type: str, summary: str, payload: dict[str, Any] | None = None, phase: str = "execution") -> None:
         self._seq += 1
-        row = {
-            "ts": self._ts(),
-            "run_id": self.run_id,
-            "seq": self._seq,
-            "phase": phase,
-            "type": event_type,
-            "summary": summary,
-            "payload": payload or {},
-        }
-        self._safe_append_jsonl("events", row)
-        self._counts[event_type] = self._counts.get(event_type, 0) + 1
+        # Preserve legacy compatibility by carrying generic events into the canonical stream.
+        self._emit(event_type, {"summary": summary, "phase": phase, **(payload or {})})
 
     def record_turn_start(self, turn_index: int, payload: dict[str, Any]) -> None:
         row = {"ts": self._ts(), "turn_index": turn_index, "payload": payload}
@@ -85,21 +83,55 @@ class DebugRecorder:
     def record_model_request(self, payload: dict[str, Any]) -> None:
         data = payload if self.config.capture_model_io else {"model": payload.get("model"), "message_count": len(payload.get("messages", []))}
         self._safe_append_jsonl("model_requests", {"ts": self._ts(), "payload": data})
-        self.record_event("model_request", "Model request issued", data)
+        self._emit("model_request_started", {"model": payload.get("model"), "message_count": len(payload.get("messages", []))})
 
     def record_model_response(self, payload: dict[str, Any]) -> None:
         data = payload if self.config.capture_model_io else {"stop_reason": payload.get("stop_reason"), "content_blocks": len(payload.get("content", []))}
         self._safe_append_jsonl("model_responses", {"ts": self._ts(), "payload": data})
-        self.record_event("model_response", "Model response received", data)
+        self._emit(
+            "model_request_completed",
+            {
+                "stop_reason": payload.get("stop_reason"),
+                "tokens_input": payload.get("input_tokens"),
+                "tokens_output": payload.get("output_tokens"),
+            },
+        )
 
     def record_tool_call(self, name: str, args: dict[str, Any], tool_use_id: str = "") -> None:
         data = args if self.config.capture_full_tool_payloads else {k: args[k] for k in ("file_path", "command") if k in args}
-        row = {"ts": self._ts(), "name": name, "tool_use_id": tool_use_id, "args": data}
+        tool_call_id = tool_use_id or f"tool-{self._seq + 1}"
+        row = {"ts": self._ts(), "name": name, "tool_use_id": tool_call_id, "args": data}
+        self._tool_call_to_name[tool_call_id] = name
         self._safe_append_jsonl("tool_calls", row)
-        self.record_event("tool_call", f"Tool called: {name}", row)
+        self._emit(
+            "tool_call_started",
+            {
+                "tool_name": name,
+                "tool_call_id": tool_call_id,
+                "args": data,
+            },
+        )
 
-    def record_tool_result(self, name: str, is_error: bool, summary: str = "") -> None:
-        self.record_event("tool_result", f"Tool result: {name}", {"name": name, "is_error": is_error, "summary": summary})
+    def record_tool_result(self, name: str, is_error: bool, summary: str = "", tool_use_id: str = "", exit_code: int | None = None) -> None:
+        tool_call_id = tool_use_id or ""
+        if not tool_call_id:
+            for known_id, known_name in reversed(list(self._tool_call_to_name.items())):
+                if known_name == name:
+                    tool_call_id = known_id
+                    break
+        payload = {
+            "tool_name": name,
+            "tool_call_id": tool_call_id,
+            "summary": summary,
+            "status": "failed" if is_error else "completed",
+        }
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        if is_error:
+            payload["error_type"] = "tool_error"
+            self._emit("tool_call_failed", payload)
+        else:
+            self._emit("tool_call_completed", payload)
 
     def record_command_start(self, command: str, cwd: str) -> None:
         self.record_event("command_started", f"Command started: {command}", {"command": command, "cwd": cwd})
@@ -119,18 +151,27 @@ class DebugRecorder:
         if exit_code != 0:
             self._last_failed_command = command
 
-    def record_file_read(self, file_path: str, size_bytes: int, ok: bool = True) -> None:
-        self.record_event("file_read", f"Read {file_path}", {"file_path": file_path, "size_bytes": size_bytes, "ok": ok})
+    def record_file_read(self, file_path: str, size_bytes: int, ok: bool = True, tool_call_id: str | None = None) -> None:
+        self._emit(
+            "file_read",
+            {"file_path": file_path, "size_bytes": size_bytes, "ok": ok, "tool_call_id": tool_call_id or ""},
+        )
 
-    def record_file_write(self, file_path: str, size_bytes: int, ok: bool = True) -> None:
+    def record_file_write(self, file_path: str, size_bytes: int, ok: bool = True, tool_call_id: str | None = None) -> None:
         self._changed_files.add(file_path)
-        self.record_event("file_write", f"Write {file_path}", {"file_path": file_path, "size_bytes": size_bytes, "ok": ok})
+        self._emit(
+            "file_write",
+            {"file_path": file_path, "size_bytes": size_bytes, "ok": ok, "tool_call_id": tool_call_id or ""},
+        )
 
-    def record_patch_applied(self, file_path: str, ok: bool = True) -> None:
+    def record_patch_applied(self, file_path: str, ok: bool = True, tool_call_id: str | None = None) -> None:
         if file_path:
             self._changed_files.add(file_path)
         self._safe_append_jsonl("patches", {"ts": self._ts(), "file_path": file_path, "ok": ok})
-        self.record_event("patch_applied", f"Patch {file_path}", {"file_path": file_path, "ok": ok})
+        self._emit(
+            "file_patch_applied" if ok else "file_patch_failed",
+            {"file_path": file_path, "ok": ok, "tool_call_id": tool_call_id or ""},
+        )
 
     def record_approval_requested(self, tool_name: str, payload: dict[str, Any]) -> None:
         row = {"ts": self._ts(), "tool_name": tool_name, "payload": payload}
@@ -170,7 +211,9 @@ class DebugRecorder:
         self.record_event("subagent_finished", objective, payload or {})
 
     def record_error(self, summary: str, payload: dict[str, Any] | None = None) -> None:
-        self.record_event("error", summary, payload or {})
+        body = payload or {}
+        self._emit("run_failed", {"summary": summary, **body})
+        self.record_event("error", summary, body)
 
     def write_prompt_rendered(self, text: str) -> None:
         self._safe(append_text, self.artifacts.path("prompt_rendered.txt"), text)
@@ -179,41 +222,54 @@ class DebugRecorder:
         self._safe(append_text, self.artifacts.path("working_context.txt"), text)
 
     def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
-        summary = {
+        if status == "completed":
+            self._emit("run_completed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
+        elif status == "failed":
+            self._emit("run_failed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
+
+        summary_path = self._safe(write_summary_from_events, self.artifacts.run_dir, status_override=status)
+        if isinstance(summary_path, Path):
+            self._emit("summary_generated", {"summary_path": str(summary_path)})
+            summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary_payload["total_turns"] = total_turns
+            summary_payload["termination_reason"] = termination_reason
+            summary_payload["mission_id"] = mission_id
+            summary_payload["changed_files"] = sorted(self._changed_files)
+            summary_payload["last_failed_command"] = self._last_failed_command
+            summary_payload["last_failed_validation"] = self._last_failed_validation
+            final_path = self.artifacts.path("final_summary.json")
+            self._safe(write_json, final_path, summary_payload)
+            return final_path
+
+        fallback = {
             "run_id": self.run_id,
-            "objective": self._objective,
-            "runtime_mode": self._runtime_mode,
-            "debug_mode": self.config.mode.value,
             "status": status,
             "termination_reason": termination_reason,
             "total_turns": total_turns,
-            "total_tool_calls": self._counts.get("tool_call", 0),
-            "total_shell_commands": self._counts.get("command_finished", 0),
-            "total_file_reads": self._counts.get("file_read", 0),
-            "total_file_writes": self._counts.get("file_write", 0),
-            "total_patches": self._counts.get("patch_applied", 0),
-            "total_approvals": self._counts.get("approval_requested", 0),
-            "total_validations": self._counts.get("validation_finished", 0),
-            "changed_files": sorted(self._changed_files),
-            "last_failed_command": self._last_failed_command,
-            "last_failed_validation": self._last_failed_validation,
             "mission_id": mission_id,
-            "debug_artifact_directory": str(self.artifacts.run_dir),
-            "artifacts": {k: str(v) for k, v in self._jsonl_paths.items()},
+            "error": "failed to generate summary from events",
         }
         path = self.artifacts.path("final_summary.json")
-        self._safe_write_json(path, summary)
+        self._safe_write_json(path, fallback)
         return path
 
     def on_runner_event(self, event: dict[str, Any]) -> None:
         etype = str(event.get("type", ""))
         if not etype:
             return
-        if etype == "tool_use":
-            self.record_tool_call(str(event.get("name", "")), dict(event.get("input", {})), str(event.get("tool_use_id", "")))
+        if etype in {"tool_use", "tool_started"}:
+            self.record_tool_call(str(event.get("name", "")), dict(event.get("input", {})), str(event.get("tool_use_id", event.get("tool_call_id", ""))))
             return
-        if etype == "tool_result":
-            self.record_tool_result(str(event.get("name", "")), bool(event.get("is_error", False)))
+        if etype in {"tool_result", "tool_finished"}:
+            is_error = bool(event.get("is_error", False))
+            exit_code = event.get("exit_code")
+            self.record_tool_result(
+                str(event.get("name", "")),
+                is_error,
+                str(event.get("summary", "")),
+                str(event.get("tool_use_id", event.get("tool_call_id", ""))),
+                int(exit_code) if isinstance(exit_code, int) else None,
+            )
             return
         if etype == "approval_required":
             self.record_approval_requested(str(event.get("name", "")), dict(event.get("input", {})))
