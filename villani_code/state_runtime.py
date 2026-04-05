@@ -806,6 +806,26 @@ def _compact_patch_sanity_retry_hint(sanity: dict[str, Any]) -> str:
     )
 
 
+def _build_compact_validation_summary(
+    runner: Any,
+    *,
+    target: str,
+    summary: str,
+    repeated_without_new_evidence: bool,
+) -> str:
+    runner._last_validation_target = target
+    runner._last_validation_summary = summary
+    runner._validation_repeated_without_new_evidence = repeated_without_new_evidence
+    return (
+        "<validation_summary>\n"
+        f"last_validation_target: {target or 'none'}\n"
+        f"last_validation_summary: {summary or 'none'}\n"
+        "validation_repeated_without_new_evidence: "
+        f"{str(bool(repeated_without_new_evidence)).lower()}\n"
+        "</validation_summary>"
+    )
+
+
 def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
     had_pending_retry = bool(getattr(runner, "_patch_sanity_retry_pending", False))
     sanity = _run_patch_sanity_check(runner)
@@ -928,6 +948,13 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     verification_artifacts = [
         r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
     ]
+    validation_target_paths = sorted(set(runner._current_verification_targets) or set(attributed_intentional))
+    validation_target = json.dumps(validation_target_paths)
+    artifact_signature = json.dumps(sorted(verification_artifacts))
+    repeated_without_new_evidence = (
+        validation_target == getattr(runner, "_last_validation_target", "")
+        and artifact_signature == getattr(runner, "_last_validation_artifact_signature", "")
+    )
     verification = runner._verification_engine.verify(
         trigger,
         attributed_intentional,
@@ -967,6 +994,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         runner._last_verification_fingerprint = fingerprint
         runner._last_verification_intentional = set(attributed_intentional)
         runner._last_verification_artifact_count = len(verification_artifacts)
+    runner._last_validation_artifact_signature = artifact_signature
 
     if repeated_stale and runner._repeated_stale_verification_count >= 2:
         runner.event_callback(
@@ -978,12 +1006,25 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "occurrence": runner._repeated_stale_verification_count,
             }
         )
-        return (
-            "<verification>\n"
-            "verification state repeated\n"
-            "no new evidence was produced\n"
-            "next step must either change target, change validation evidence, or stop\n"
-            "</verification>"
+        summary = "status repeated without new validation evidence"
+        lines.append("verification state repeated")
+        lines.append("no new evidence was produced")
+        lines.append("next step must either change target, change validation evidence, or stop")
+        lines.append("</verification>")
+        runner.event_callback(
+            {
+                "type": "verification_detail",
+                "trigger": trigger,
+                "target": validation_target_paths,
+                "detail": "\n".join(lines),
+                "repeated_without_new_evidence": repeated_without_new_evidence,
+            }
+        )
+        return _build_compact_validation_summary(
+            runner,
+            target=validation_target,
+            summary=summary,
+            repeated_without_new_evidence=repeated_without_new_evidence,
         )
 
     lines.append(f"intentional_changed: {json.dumps(sorted(attributed_intentional))}")
@@ -996,6 +1037,18 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         for finding in verification.findings[:6]:
             lines.append(f"- {finding.category.value}: {finding.message}")
     lines.append("</verification>")
+    summary = f"status={verification.status.value}; confidence={verification.confidence_score}"
+    if verification.findings:
+        summary += f"; findings={len(verification.findings)}"
+    runner.event_callback(
+        {
+            "type": "verification_detail",
+            "trigger": trigger,
+            "target": validation_target_paths,
+            "detail": "\n".join(lines),
+            "repeated_without_new_evidence": repeated_without_new_evidence,
+        }
+    )
     runner.event_callback(
         {
             "type": "verification_ran",
@@ -1015,7 +1068,12 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "summary": verification.summary,
             }
         )
-    return "\n".join(lines)
+    return _build_compact_validation_summary(
+        runner,
+        target=validation_target,
+        summary=summary,
+        repeated_without_new_evidence=repeated_without_new_evidence,
+    )
 
 
 def emit_policy_event(

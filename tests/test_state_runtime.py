@@ -166,7 +166,8 @@ def test_run_verification_targets_touched_tests(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     out = runner._run_verification("edit")
-    assert "pytest -q tests/test_x.py" in out
+    assert "last_validation_target: [\"tests/test_x.py\"]" in out
+    assert "validation_repeated_without_new_evidence: false" in out
     assert any(cmd[:2] == ["pytest", "-q"] for cmd in seen)
 
 
@@ -189,7 +190,8 @@ def test_run_verification_uses_baseline_import_for_touched_python_source(tmp_pat
 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     out = runner._run_verification("edit")
-    assert "python -c" in out
+    assert "<validation_summary>" in out
+    assert "last_validation_target: [\"src/a.py\"]" in out
     assert any(cmd[:2] == ["bash", "-lc"] for cmd in seen)
 
 
@@ -202,8 +204,9 @@ def test_repeated_stale_verification_returns_compact_block(tmp_path: Path, monke
     for _ in range(2):
         runner._run_verification("edit")
     third = runner._run_verification("edit")
-    assert "verification state repeated" in third
-    assert third.startswith("<verification>")
+    assert third.startswith("<validation_summary>")
+    assert "validation_repeated_without_new_evidence: true" in third
+    assert "verification state repeated" not in third
 
 
 def test_verification_reports_locked_scope_without_attributable_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,7 +217,41 @@ def test_verification_reports_locked_scope_without_attributable_diff(tmp_path: P
     monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
 
     out = runner._run_verification("edit")
-    assert "no intentional diff is currently attributable in locked scope" in out
+    assert "last_validation_target: []" in out
+    assert "last_validation_summary:" in out
+
+
+def test_verification_detail_event_keeps_raw_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    events: list[dict[str, object]] = []
+    runner.event_callback = events.append
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
+
+    out = runner._run_verification("edit")
+
+    detail = next(e for e in events if e.get("type") == "verification_detail")
+    assert "<verification>" in str(detail.get("detail", ""))
+    assert "last_validation_summary:" in out
+
+
+def test_repeated_validation_updates_compact_state_without_repeated_prose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["villani_code/__init__.py"])
+
+    first = runner._run_verification("edit")
+    second = runner._run_verification("edit")
+    third = runner._run_verification("edit")
+
+    assert "validation_repeated_without_new_evidence: false" in first
+    assert "validation_repeated_without_new_evidence: true" in second
+    assert "verification state repeated" not in third
+    assert runner._validation_repeated_without_new_evidence is True
 
 
 def test_parse_pre_edit_diagnosis_accepts_strict_json() -> None:
