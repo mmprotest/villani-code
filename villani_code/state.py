@@ -451,7 +451,6 @@ class Runner:
         self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)
         self._user_event_callback = event_callback or (lambda _event: None)
-        self.event_callback = self._dispatch_event
         self.small_model = small_model
         self.villani_mode = villani_mode
         self.villani_objective = villani_objective
@@ -534,6 +533,14 @@ class Runner:
         self._current_turn_index: int | None = None
         if self.small_model:
             self._init_small_model_support()
+
+    @property
+    def event_callback(self) -> Callable[[dict[str, Any]], None]:
+        return self._dispatch_event
+
+    @event_callback.setter
+    def event_callback(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
+        self._user_event_callback = callback or (lambda _event: None)
 
     def _debug_tool_callback(self, event_type: str, payload: dict[str, Any]) -> None:
         if self._debug_recorder is None:
@@ -839,18 +846,6 @@ class Runner:
                 {"name": "Read", "input": forced_input, "id": forced_tool_use_id}
             )
             transcript["tool_results"].append(forced_result)
-            self.event_callback(
-                {
-                    "type": "tool_result",
-                    "name": "Read",
-                    "input": forced_input,
-                    "tool_use_id": forced_tool_use_id,
-                    "is_error": forced_result["is_error"],
-                    "result": self._build_tool_result_event_payload("Read", forced_tool_use_id, forced_result),
-                    "forced": True,
-                    "turn_index": self._current_turn_index if isinstance(self._current_turn_index, int) else 0,
-                }
-            )
             messages.append({"role": "assistant", "content": [forced_tool_use]})
             messages.append(
                 {
@@ -1453,17 +1448,6 @@ class Runner:
                     {"name": tool_name, "input": tool_input, "id": tool_use_id}
                 )
                 transcript["tool_results"].append(result)
-                self.event_callback(
-                    {
-                        "type": "tool_result",
-                        "name": tool_name,
-                        "input": tool_input,
-                        "tool_use_id": tool_use_id,
-                        "is_error": result["is_error"],
-                        "result": self._build_tool_result_event_payload(tool_name, tool_use_id, result),
-                        "turn_index": self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
-                    }
-                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -1634,16 +1618,19 @@ class Runner:
         self, tool_name: str, tool_use_id: str, result: dict[str, Any]
     ) -> dict[str, Any]:
         content = result.get("content", "")
-        payload: dict[str, Any] = {
+        is_error = bool(result.get("is_error", False))
+        base_result_payload: dict[str, Any] = {
             "tool_use_id": tool_use_id,
             "tool_call_id": tool_use_id,
             "tool_name": tool_name,
-            "is_error": bool(result.get("is_error", False)),
+            "is_error": is_error,
             "content": content,
-            "result_payload": content,
         }
-        if payload["is_error"]:
+        payload: dict[str, Any] = dict(base_result_payload)
+        payload["result_payload"] = dict(base_result_payload)
+        if is_error:
             payload["error"] = {"error_type": "tool_error", "message": str(content)}
+            payload["result_payload"]["error"] = payload["error"]
             return payload
         if tool_name == "Bash":
             try:
@@ -1655,14 +1642,17 @@ class Runner:
                 payload["exit_code"] = decoded.get("exit_code")
                 payload["stdout"] = decoded.get("stdout")
                 payload["stderr"] = decoded.get("stderr")
-                payload["result_payload"] = decoded
+                payload["result_payload"] = {
+                    **base_result_payload,
+                    "command": decoded.get("command"),
+                    "exit_code": decoded.get("exit_code"),
+                    "stdout": decoded.get("stdout"),
+                    "stderr": decoded.get("stderr"),
+                }
         elif tool_name == "Read":
             text_content = str(content)
             payload["result_payload"] = {
-                "tool_use_id": tool_use_id,
-                "tool_call_id": tool_use_id,
-                "tool_name": tool_name,
-                "is_error": False,
+                **base_result_payload,
                 "content": text_content,
                 "bytes_read": len(text_content.encode("utf-8", errors="replace")),
                 "preview": text_content[:240],
@@ -1670,19 +1660,13 @@ class Runner:
         elif tool_name == "Write":
             text_content = str(content)
             payload["result_payload"] = {
-                "tool_use_id": tool_use_id,
-                "tool_call_id": tool_use_id,
-                "tool_name": tool_name,
-                "is_error": False,
+                **base_result_payload,
                 "content": text_content,
             }
         elif tool_name == "Patch":
             text_content = str(content)
             payload["result_payload"] = {
-                "tool_use_id": tool_use_id,
-                "tool_call_id": tool_use_id,
-                "tool_name": tool_name,
-                "is_error": False,
+                **base_result_payload,
                 "content": text_content,
             }
         return payload

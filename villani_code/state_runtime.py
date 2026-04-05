@@ -17,7 +17,6 @@ from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
-from villani_code.tools import execute_tool
 from villani_code.validation_loop import run_validation
 from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
@@ -521,7 +520,20 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             if tool_name == "Write" and not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() and fp not in runner._files_read:
-                read_result = execute_tool("Read", {"file_path": fp, "max_bytes": 8000}, runner.repo, unsafe=runner.unsafe)
+                from villani_code import state_tooling
+
+                guard_turn_index = (
+                    runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0
+                )
+                guard_tool_use_id = f"guard-read-{guard_turn_index}-{fp.replace('/', '_')}"
+                read_result = state_tooling.execute_tool_with_lifecycle(
+                    runner=runner,
+                    tool_name="Read",
+                    tool_input={"file_path": fp, "max_bytes": 8000},
+                    tool_use_id=guard_tool_use_id,
+                    forced=True,
+                    turn_index=guard_turn_index,
+                )
                 if read_result.get("is_error"):
                     return f"Read-before-edit policy: failed to auto-read {fp}. Read it explicitly before editing."
                 runner._files_read.add(fp)

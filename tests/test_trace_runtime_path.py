@@ -168,3 +168,93 @@ def test_summary_generation_succeeds_for_normal_traced_run(tmp_path: Path) -> No
     assert summary["total_tool_calls"] > 0
     assert summary["commands_executed"] >= 0
 
+
+def test_small_model_guard_auto_read_uses_canonical_tool_lifecycle(tmp_path: Path) -> None:
+    debug_root = tmp_path / "debug"
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('before')\n", encoding="utf-8")
+    client = _SequenceClient([])
+    runner = Runner(
+        client=client,
+        repo=tmp_path,
+        model="m",
+        stream=False,
+        small_model=True,
+        debug_config=build_debug_config("trace", debug_root),
+    )
+    runner._ensure_mission("guard test")
+    runner._current_turn_index = 1
+    error = runner._small_model_tool_guard("Write", {"file_path": "src/app.py", "content": "print('after')\n"})
+    assert error is None
+    run_dir = _run_dir(debug_root)
+    events = _read_events(run_dir)
+
+    guard_start = next(
+        event
+        for event in events
+        if event["event_type"] == "tool_call_started"
+        and str(event["payload"].get("tool_call_id", "")).startswith("guard-read-")
+    )
+    guard_terminal = next(
+        event
+        for event in events
+        if event["event_type"] in {"tool_call_completed", "tool_call_failed"}
+        and event["payload"]["tool_call_id"] == guard_start["payload"]["tool_call_id"]
+    )
+    assert isinstance(guard_start.get("turn_index"), int)
+    assert isinstance(guard_terminal.get("turn_index"), int)
+    file_read = next(event for event in events if event["event_type"] == "file_read" and event["payload"]["tool_call_id"] == guard_start["payload"]["tool_call_id"])
+    assert file_read["payload"]["file_path"] == "src/app.py"
+
+
+def test_event_callback_override_still_routes_tool_lifecycle_to_debug_recorder(tmp_path: Path) -> None:
+    debug_root = tmp_path / "debug"
+    client = _SequenceClient(
+        [
+            {
+                "id": "1",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool-bash-override", "name": "Bash", "input": {"command": "pwd", "cwd": "."}}],
+            },
+            {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, debug_config=build_debug_config("trace", debug_root))
+    forwarded_events: list[dict] = []
+    runner.event_callback = forwarded_events.append
+    runner.run("override callback")
+
+    assert any(event.get("type") == "tool_started" for event in forwarded_events)
+    assert any(event.get("type") == "tool_result" for event in forwarded_events)
+
+    events = _read_events(_run_dir(debug_root))
+    started = next(event for event in events if event["event_type"] == "tool_call_started")
+    terminal = next(event for event in events if event["event_type"] in {"tool_call_completed", "tool_call_failed"})
+    assert started["payload"]["tool_call_id"] == terminal["payload"]["tool_call_id"] == "tool-bash-override"
+
+
+def test_regression_no_command_or_file_tool_ids_without_canonical_tool_rows(tmp_path: Path) -> None:
+    debug_root = tmp_path / "debug"
+    client = _SequenceClient(
+        [
+            {
+                "id": "1",
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tool-bash-regression", "name": "Bash", "input": {"command": "echo ok", "cwd": "."}},
+                    {"type": "tool_use", "id": "tool-write-regression", "name": "Write", "input": {"file_path": "note.txt", "content": "ok"}},
+                ],
+            },
+            {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, debug_config=build_debug_config("trace", debug_root))
+    runner.run("regression run")
+    run_dir = _run_dir(debug_root)
+
+    summary_path = write_summary_from_events(run_dir)
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    validation_errors = list(summary.get("validation_errors", []))
+    assert not any("without matching Bash tool-call records" in err for err in validation_errors)
+    assert not any("without matching tool-call records" in err for err in validation_errors)

@@ -614,22 +614,46 @@ def execute_tool_with_policy(
                     runner._before_contents[normalized_target] = before_text
                     runner._current_verification_before_contents[normalized_target] = before_text
             runner.checkpoints.create(checkpoint_paths, message_index=message_count)
-    start_turn_index = runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0
+    result = execute_tool_with_lifecycle(
+        runner=runner,
+        tool_name=tool_name,
+        tool_input=tool_input,
+        tool_use_id=tool_use_id,
+        forced=False,
+        turn_index=runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0,
+    )
+    return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
+
+
+def execute_tool_with_lifecycle(
+    *,
+    runner: Any,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    tool_use_id: str,
+    forced: bool = False,
+    turn_index: int | None = None,
+) -> dict[str, Any]:
+    stable_tool_use_id = str(tool_use_id or "").strip()
+    if not stable_tool_use_id:
+        current_turn = turn_index if isinstance(turn_index, int) else 0
+        stable_tool_use_id = f"tool-{tool_name.lower()}-{current_turn}-{len(str(tool_input))}"
+    emit_turn_index = turn_index if isinstance(turn_index, int) else 0
     runner.event_callback(
         {
             "type": "tool_started",
             "name": tool_name,
             "input": tool_input,
-            "tool_use_id": tool_use_id,
-            "turn_index": start_turn_index,
+            "tool_use_id": stable_tool_use_id,
+            "turn_index": emit_turn_index,
+            **({"forced": True} if forced else {}),
         }
     )
-    runner_turn_index = start_turn_index
 
     def _debug_callback_with_turn(event_type: str, payload: dict[str, Any]) -> None:
         callback_payload = dict(payload)
-        if runner_turn_index is not None and not isinstance(callback_payload.get("turn_index"), int):
-            callback_payload["turn_index"] = runner_turn_index
+        if not isinstance(callback_payload.get("turn_index"), int):
+            callback_payload["turn_index"] = emit_turn_index
         debug_callback = getattr(runner, "_debug_tool_callback", None)
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
@@ -640,6 +664,18 @@ def execute_tool_with_policy(
         runner.repo,
         unsafe=runner.unsafe,
         debug_callback=_debug_callback_with_turn,
-        tool_call_id=tool_use_id,
+        tool_call_id=stable_tool_use_id,
     )
-    return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
+    runner.event_callback(
+        {
+            "type": "tool_result",
+            "name": tool_name,
+            "input": tool_input,
+            "tool_use_id": stable_tool_use_id,
+            "is_error": bool(result.get("is_error", False)),
+            "result": runner._build_tool_result_event_payload(tool_name, stable_tool_use_id, result),
+            "turn_index": emit_turn_index,
+            **({"forced": True} if forced else {}),
+        }
+    )
+    return result
