@@ -13,6 +13,7 @@ class StatusBarWidget(Horizontal):
         yield SpinnerWidget()
         yield Static("Idle", id="status-text")
         yield Static("PLAN:OFF", id="plan-mode")
+        yield Static("AUTO-APPROVE:OFF", id="auto-approve-mode")
         yield Static("FOLLOW", id="follow-mode")
 
     def set_status(self, text: str) -> None:
@@ -26,3 +27,6 @@ class StatusBarWidget(Horizontal):
 
     def set_plan_mode(self, enabled: bool) -> None:
         self.query_one("#plan-mode", Static).update("PLAN:ON" if enabled else "PLAN:OFF")
+
+    def set_auto_approve_mode(self, enabled: bool) -> None:
+        self.query_one("#auto-approve-mode", Static).update("AUTO-APPROVE:ON" if enabled else "AUTO-APPROVE:OFF")
