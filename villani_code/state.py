@@ -19,6 +19,7 @@ from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
+from villani_code.execution_memory import ExecutionMemory
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
@@ -536,6 +537,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._execution_memory = ExecutionMemory()
         if self.small_model:
             self._init_small_model_support()
 
@@ -1072,10 +1074,25 @@ class Runner:
             self._live_stream_started = False
             self._coalescer = StreamCoalescer()
             turn_messages = self._prepare_messages_for_model(messages)
+            memory_summary = self._execution_memory.build_turn_summary()
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_event(
+                    "execution_memory_summary_injected",
+                    "Injected execution memory summary",
+                    {"summary": memory_summary, "memory": self._execution_memory.to_dict()},
+                    turn_index=turns_used + 1,
+                )
+            self.event_callback(
+                {
+                    "type": "execution_memory_summary_injected",
+                    "summary": memory_summary,
+                    "turn_index": turns_used + 1,
+                }
+            )
             payload = {
                 "model": self.model,
                 "messages": turn_messages,
-                "system": system,
+                "system": [*system, {"type": "text", "text": memory_summary}],
                 "tools": tools,
                 "max_tokens": self.max_tokens,
                 "stream": self.stream,
@@ -1386,6 +1403,51 @@ class Runner:
                         "transcript": transcript,
                     }
 
+                changed_files_now = set(self._git_changed_files())
+                repeat_assessment = self._execution_memory.assess_repeat(
+                    tool_name,
+                    tool_input,
+                    changed_files_now=changed_files_now,
+                )
+                repeat_message = "No strong repeat concern."
+                if repeat_assessment.matched and not repeat_assessment.material_change:
+                    if repeat_assessment.escalation_level <= 1:
+                        repeat_message = (
+                            "Mild warning: this action looks very similar to a recent failed attempt with no new evidence."
+                        )
+                    elif repeat_assessment.escalation_level <= 2:
+                        repeat_message = (
+                            "Stronger warning: repeated similar failures suggest low information gain unless new evidence is introduced."
+                        )
+                    else:
+                        repeat_message = (
+                            "High warning: multiple near-identical retries failed without material change; consider a different probe or code change."
+                        )
+                self._execution_memory.state.last_repeat_assessment = {
+                    "tool_name": tool_name,
+                    "input": tool_input,
+                    "matched": repeat_assessment.matched,
+                    "similarity": repeat_assessment.similarity,
+                    "material_change": repeat_assessment.material_change,
+                    "escalation_level": repeat_assessment.escalation_level,
+                    "reason": repeat_assessment.reason,
+                    "message": repeat_message,
+                }
+                self.event_callback(
+                    {
+                        "type": "execution_memory_repeat_assessed",
+                        "tool_name": tool_name,
+                        "repeat": self._execution_memory.state.last_repeat_assessment,
+                    }
+                )
+                if self._debug_recorder is not None:
+                    self._debug_recorder.record_event(
+                        "execution_memory_repeat_assessed",
+                        "Repeat assessment evaluated",
+                        self._execution_memory.state.last_repeat_assessment,
+                        turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
+                    )
+
                 result = self._execute_tool_with_policy(
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
@@ -1402,6 +1464,31 @@ class Runner:
                 elif tool_name == "Bash":
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
+                    )
+                self._execution_memory.register_artifact_state(
+                    {
+                        "pending_verification": bool(str(self._pending_verification).strip()),
+                        "changed_files_count": len(self._git_changed_files()),
+                    }
+                )
+                self._execution_memory.update_from_tool(
+                    turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    result=result,
+                    changed_files_now=set(self._git_changed_files()),
+                    repeat_assessment=repeat_assessment,
+                )
+                if result.get("is_error"):
+                    self._execution_memory.note_unfinished(
+                        f"Resolve failing {tool_name} attempt: {str(result.get('content', ''))[:120]}"
+                    )
+                if self._debug_recorder is not None:
+                    self._debug_recorder.record_event(
+                        "execution_memory_updated",
+                        "Execution memory updated after tool result",
+                        {"memory": self._execution_memory.to_dict()},
+                        turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
                     )
 
                 if result.get("is_error"):
