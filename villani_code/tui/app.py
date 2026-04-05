@@ -156,6 +156,8 @@ class VillaniTUI(App[None]):
         for line in LAUNCH_BANNER.splitlines():
             self._append_log_line(log, line)
         self._append_log_line(log, f"Model: {getattr(self.runner, 'model', 'unknown')}")
+        auto_approve = bool(getattr(self.runner, "auto_approve", False))
+        self._append_log_line(log, f"Auto-approval: {'ON' if auto_approve else 'OFF'}")
         if self.villani_mode:
             objective = self.villani_objective or "inspect and improve this repository autonomously"
             self._append_log_line(log, f"Villani mode active: {objective}")
@@ -168,6 +170,7 @@ class VillaniTUI(App[None]):
             self.query_one(Input).focus()
         self.query_one(StatusBarWidget).set_follow_mode(self.follow_tail)
         self.query_one(StatusBarWidget).set_plan_mode(self._is_plan_mode_active())
+        self.query_one(StatusBarWidget).set_auto_approve_mode(auto_approve)
 
     def _is_plan_mode_active(self) -> bool:
         return self.planning_session.stage in {"awaiting_prompt", "planning", "awaiting_clarification"}

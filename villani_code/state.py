@@ -421,6 +421,7 @@ class Runner:
         redact: bool = False,
         bypass_permissions: bool = False,
         auto_accept_edits: bool = False,
+        auto_approve: bool = False,
         plan_mode: Literal["off", "auto", "strict"] = "auto",
         max_repair_attempts: int = 2,
         approval_callback: Callable[[str, dict[str, Any]], bool] | None = None,
@@ -445,6 +446,7 @@ class Runner:
         self.redact = redact
         self.bypass_permissions = bypass_permissions
         self.auto_accept_edits = auto_accept_edits
+        self.auto_approve = auto_approve
         self.plan_mode = plan_mode
         self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)

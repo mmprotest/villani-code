@@ -315,6 +315,9 @@ class RunnerController:
         return f"Bash:exact:{normalized}"
 
     def request_approval(self, tool_name: str, payload: dict[str, Any]) -> bool:
+        if bool(getattr(self.runner, "auto_approve", False)):
+            self.app.post_message(StatusUpdate("Auto-approved"))
+            return True
         scope = self._approval_scope_for(tool_name, payload)
         if scope in self._approval_scopes:
             return True

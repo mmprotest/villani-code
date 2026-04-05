@@ -94,7 +94,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     return bool(getattr(settings, "villani_mode", False))
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, auto_approve: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> Runner:
     resolved_repo = repo.resolve()
     try:
         ensure_runtime_dependencies_not_shadowed(resolved_repo)
@@ -116,11 +116,13 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = thinking
     benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json) if benchmark_runtime_json else None
     debug_config = build_debug_config(debug_mode.value if isinstance(debug_mode, DebugMode) else str(debug_mode), debug_dir=debug_dir)
-    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, debug_config=debug_config)
+    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, auto_approve=auto_approve, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, debug_config=debug_config)
 
 
-def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, "auto", 2, small_model, provider, api_key, villani_mode=villani_mode, villani_objective=villani_objective, debug_mode=debug_mode, debug_dir=debug_dir)
+def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, auto_approve: bool = False, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> None:
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, auto_approve, "auto", 2, small_model, provider, api_key, villani_mode=villani_mode, villani_objective=villani_objective, debug_mode=debug_mode, debug_dir=debug_dir)
+    if auto_approve:
+        console.print("Auto-approval: ON")
     try:
         shell_cls, dependency_error = _load_interactive_shell()
         shell = shell_cls(runner, repo.resolve(), villani_mode=villani_mode, villani_objective=villani_objective)
@@ -164,12 +166,13 @@ def main(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Automatically approve all actions without prompting"),
 ) -> None:
     if ctx.invoked_subcommand is None:
         if not base_url or not model:
             raise typer.BadParameter("--base-url and --model are required when no subcommand is provided")
         resolved_villani = _resolve_villani_flag(repo, villani_mode)
-        _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani)
+        _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, auto_approve=auto_approve)
 
 
 @app.command()
@@ -187,6 +190,7 @@ def run(
     redact: bool = typer.Option(False, "--redact"),
     dangerously_skip_permissions: bool = typer.Option(False, "--dangerously-skip-permissions"),
     auto_accept_edits: bool = typer.Option(False, "--auto-accept-edits"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Automatically approve all actions without prompting"),
     plan_mode: Literal["off", "auto", "strict"] = typer.Option("auto", "--plan-mode"),
     max_repair_attempts: int = typer.Option(2, "--max-repair-attempts"),
     small_model: bool = typer.Option(False, "--small-model"),
@@ -197,7 +201,9 @@ def run(
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
 ) -> None:
     debug_mode = DebugMode(build_debug_config(debug).mode.value)
-    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir)
+    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, auto_approve, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir)
+    if auto_approve:
+        console.print("Auto-approval: ON")
     result = runner.run(instruction)
     _print_response_text_blocks(result)
 
@@ -212,6 +218,7 @@ def interactive(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     villani_mode: bool | None = typer.Option(None, "--villani-mode/--no-villani-mode"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Automatically approve all actions without prompting"),
     debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
     takeover: bool = typer.Option(False, "--takeover", hidden=True),
@@ -219,7 +226,7 @@ def interactive(
 ):
     resolved_villani = takeover or _resolve_villani_flag(repo, villani_mode)
     debug_mode = DebugMode(build_debug_config(debug).mode.value)
-    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, villani_objective=objective, debug_mode=debug_mode, debug_dir=debug_dir)
+    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, villani_objective=objective, auto_approve=auto_approve, debug_mode=debug_mode, debug_dir=debug_dir)
 
 
 @app.command("villani-mode")
@@ -232,11 +239,12 @@ def villani_mode_cmd(
     small_model: bool = typer.Option(False, "--small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Automatically approve all actions without prompting"),
     debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
 ) -> None:
     debug_mode = DebugMode(build_debug_config(debug).mode.value)
-    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=True, villani_objective=objective, debug_mode=debug_mode, debug_dir=debug_dir)
+    _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=True, villani_objective=objective, auto_approve=auto_approve, debug_mode=debug_mode, debug_dir=debug_dir)
 
 
 @app.command("takeover", hidden=True)
@@ -249,8 +257,11 @@ def takeover_cmd(
     small_model: bool = typer.Option(False, "--small-model"),
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Automatically approve all actions without prompting"),
 ) -> None:
-    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, "auto", 2, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+    runner = _build_runner(base_url, model, repo, max_tokens, True, None, False, False, None, False, False, False, auto_approve, "auto", 2, small_model, provider, api_key, villani_mode=True, villani_objective=objective)
+    if auto_approve:
+        console.print("Auto-approval: ON")
     result = runner.run_villani_mode()
     _print_response_text_blocks(result)
 

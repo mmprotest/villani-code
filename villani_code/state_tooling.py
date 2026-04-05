@@ -504,12 +504,26 @@ def execute_tool_with_policy(
     if policy.decision == Decision.DENY:
         return {"content": "Denied by permission policy", "is_error": True}
     if policy.decision == Decision.ASK:
-        if runner.villani_mode:
+        if getattr(runner, "auto_approve", False):
             runner.event_callback(
                 {
                     "type": "approval_auto_resolved",
                     "name": tool_name,
                     "input": tool_input,
+                    "approved": True,
+                    "approval_mode": "auto",
+                    "decision_source": "auto_approve_flag",
+                }
+            )
+        elif runner.villani_mode:
+            runner.event_callback(
+                {
+                    "type": "approval_auto_resolved",
+                    "name": tool_name,
+                    "input": tool_input,
+                    "approved": True,
+                    "approval_mode": "auto",
+                    "decision_source": "villani_mode",
                 }
             )
         else:
