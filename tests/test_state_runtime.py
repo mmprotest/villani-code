@@ -201,12 +201,14 @@ def test_repeated_stale_verification_returns_compact_block(tmp_path: Path, monke
     runner._verification_baseline_changed = set()
     monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
 
-    for _ in range(2):
-        runner._run_verification("edit")
+    first = runner._run_verification("edit")
+    second = runner._run_verification("edit")
     third = runner._run_verification("edit")
+    fourth = runner._run_verification("edit")
+    assert first.startswith("<validation_summary>")
+    assert second.startswith("<validation_summary>")
     assert third.startswith("<validation_summary>")
-    assert "validation_repeated_without_new_evidence: true" in third
-    assert "verification state repeated" not in third
+    assert fourth == ""
 
 
 def test_verification_reports_locked_scope_without_attributable_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -247,11 +249,90 @@ def test_repeated_validation_updates_compact_state_without_repeated_prose(
     first = runner._run_verification("edit")
     second = runner._run_verification("edit")
     third = runner._run_verification("edit")
+    fourth = runner._run_verification("edit")
 
     assert "validation_repeated_without_new_evidence: false" in first
     assert "validation_repeated_without_new_evidence: true" in second
-    assert "verification state repeated" not in third
+    assert "status repeated without new validation evidence" in third
+    assert fourth == ""
     assert runner._validation_repeated_without_new_evidence is True
+
+
+def test_changed_validation_state_emits_new_compact_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    changed_files = [["tests/test_x.py"], ["src/a.py"]]
+
+    def fake_changed(_repo: Path) -> list[str]:
+        return changed_files.pop(0)
+
+    monkeypatch.setattr(state_runtime, "git_changed_files", fake_changed)
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+
+    first = runner._run_verification("edit")
+    second = runner._run_verification("edit")
+
+    assert first.startswith("<validation_summary>")
+    assert second.startswith("<validation_summary>")
+    assert first != second
+
+
+def test_repeated_validation_keeps_raw_detail_events_when_live_summary_deduped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    events: list[dict[str, object]] = []
+    runner.event_callback = events.append
+    runner._verification_baseline_changed = set()
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
+
+    first = runner._run_verification("edit")
+    second = runner._run_verification("edit")
+    third = runner._run_verification("edit")
+    fourth = runner._run_verification("edit")
+
+    details = [event for event in events if event.get("type") == "verification_detail"]
+    assert first.startswith("<validation_summary>")
+    assert second.startswith("<validation_summary>")
+    assert third.startswith("<validation_summary>")
+    assert fourth == ""
+    assert len(details) == 4
+    assert all("<verification>" in str(event.get("detail", "")) for event in details)
+
+
+def test_validation_dedup_uses_structured_fingerprint_not_only_summary_text(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+
+    first = state_runtime._build_compact_validation_summary(
+        runner,
+        target='["src/a.py"]',
+        summary="status=pass",
+        repeated_without_new_evidence=False,
+        artifact_signature='["bash -lc import-check"]',
+    )
+    second = state_runtime._build_compact_validation_summary(
+        runner,
+        target='["src/a.py"]',
+        summary="status=pass",
+        repeated_without_new_evidence=False,
+        artifact_signature='["pytest -q tests/test_x.py"]',
+    )
+
+    assert first.startswith("<validation_summary>")
+    assert second.startswith("<validation_summary>")
 
 
 def test_parse_pre_edit_diagnosis_accepts_strict_json() -> None:
