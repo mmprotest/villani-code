@@ -870,7 +870,9 @@ class Runner:
             )
             initial_read_enforced = True
         self._save_session_snapshot(messages)
-        empty_turn_retries = 0
+        consecutive_empty_assistant_turns = 0
+        empty_recovery_injected = False
+        last_successful_concrete_action = "none yet"
         start = time.monotonic()
         turns_used = 0
         tool_calls_used = 1 if initial_read_enforced else 0
@@ -985,6 +987,30 @@ class Runner:
                 and self.benchmark_config.is_expected_or_support(path)
             ]
             return bool(meaningful)
+
+        def _assistant_text(blocks: list[dict[str, Any]]) -> str:
+            return "\n".join(
+                str(block.get("text", ""))
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+
+        def _has_meaningful_assistant_text(blocks: list[dict[str, Any]]) -> bool:
+            return bool(_assistant_text(blocks).strip())
+
+        def _build_empty_turn_recovery_message() -> str:
+            files_changed = _attributed_changed_files()
+            files_fragment = ", ".join(files_changed[:4]) if files_changed else "none yet"
+            if len(files_changed) > 4:
+                files_fragment = f"{files_fragment}, +{len(files_changed) - 4} more"
+            return (
+                "RECOVERY: blank turns detected. "
+                f"Objective: {instruction.strip() or 'complete the assigned mission'}. "
+                f"Last concrete action: {last_successful_concrete_action}. "
+                f"Changed files: {files_fragment}. "
+                "Missing milestone: next verifiable step toward completion. "
+                "Take exactly one concrete next action now and continue."
+            )
 
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
@@ -1117,33 +1143,45 @@ class Runner:
             )
             turns_used += 1
 
-            tool_uses = [
-                b for b in response.get("content", []) if b.get("type") == "tool_use"
-            ]
-            empty = is_effectively_empty_content(response.get("content", []))
-            if not tool_uses and empty and empty_turn_retries < 2:
-                empty_turn_retries += 1
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Continue. You ended your previous turn with no output. Resume the task from where you left off and either call the next tool or provide the next part of the answer.",
-                            }
-                        ],
-                    }
-                )
+            content_blocks = response.get("content", [])
+            tool_uses = [b for b in content_blocks if b.get("type") == "tool_use"]
+            has_meaningful_text = _has_meaningful_assistant_text(content_blocks)
+            empty = is_effectively_empty_content(content_blocks)
+            empty_assistant_turn = not tool_uses and not has_meaningful_text
+            if empty_assistant_turn:
+                consecutive_empty_assistant_turns += 1
+                if empty_recovery_injected:
+                    return _finish_bounded(response, "stalled_empty_responses", False)
+                if consecutive_empty_assistant_turns >= 2:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": _build_empty_turn_recovery_message()}
+                            ],
+                        }
+                    )
+                    empty_recovery_injected = True
+                    reason = _budget_reason()
+                    if reason:
+                        return _finish_bounded(response, reason, reason == "completed")
+                    continue
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 continue
-            if tool_uses or not empty:
-                empty_turn_retries = 0
+            else:
+                consecutive_empty_assistant_turns = 0
+                empty_recovery_injected = False
+                if tool_uses:
+                    last_successful_concrete_action = (
+                        f"assistant emitted {len(tool_uses)} tool call(s)"
+                    )
+                elif has_meaningful_text:
+                    last_successful_concrete_action = "assistant produced substantive text output"
             if benchmark_forced_read_no_progress_guard_active and tool_uses:
                 benchmark_forced_read_no_progress_guard_active = False
             if not tool_uses:
-                content_blocks = response.get("content", [])
                 only_textual_response = bool(content_blocks) and all(
                     isinstance(block, dict) and block.get("type") == "text"
                     for block in content_blocks
@@ -1487,6 +1525,11 @@ class Runner:
                 self._no_progress_cycles = 0
                 self._recovery_count = 0
                 self._last_failed_tool_sig = ""
+                consecutive_empty_assistant_turns = 0
+                empty_recovery_injected = False
+                last_successful_concrete_action = (
+                    f"executed tool(s): {', '.join(str(b.get('name', '')) for b in tool_uses)}"
+                )
             else:
                 sig = "|".join(f"{b.get('name')}:{b.get('input')}" for b in tool_uses)
                 if sig and sig == self._last_failed_tool_sig:
