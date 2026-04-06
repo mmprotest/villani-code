@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from villani_code.state import Runner
@@ -126,3 +127,61 @@ def test_patch_existing_file_rewrite_heavy_is_rejected(tmp_path: Path) -> None:
     result = execute_tool_with_policy(runner, "Patch", {"unified_diff": "\n".join(diff_lines)}, "1", 0)
     assert result["is_error"] is True
     assert "Rewrite-heavy mutation rejected" in str(result["content"])
+
+
+def test_failed_bash_command_is_blocked_on_immediate_retry(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    command = "python -c \"import sys; sys.exit(1)\""
+    first = execute_tool_with_policy(runner, "Bash", {"command": command}, "1", 0)
+    assert first["is_error"] is False
+    assert json.loads(str(first["content"]))["exit_code"] != 0
+    second = execute_tool_with_policy(runner, "Bash", {"command": command}, "2", 0)
+    assert second["is_error"] is True
+    assert "already failed" in str(second["content"])
+
+
+def test_failed_bash_retry_block_normalizes_whitespace(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    first = execute_tool_with_policy(runner, "Bash", {"command": "  python  -c \"import sys; sys.exit(1)\"  "}, "1", 0)
+    assert json.loads(str(first["content"]))["exit_code"] != 0
+    second = execute_tool_with_policy(runner, "Bash", {"command": "python -c   \"import sys; sys.exit(1)\""}, "2", 0)
+    assert second["is_error"] is True
+    assert "already failed" in str(second["content"])
+
+
+def test_failed_bash_retry_block_is_case_insensitive_on_windows(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    runner._shell_retry_case_insensitive = True
+    first = execute_tool_with_policy(runner, "Bash", {"command": "PyThOn -c \"import sys; sys.exit(1)\""}, "1", 0)
+    assert json.loads(str(first["content"]))["exit_code"] != 0
+    second = execute_tool_with_policy(runner, "Bash", {"command": "python -C \"import sys; sys.exit(1)\""}, "2", 0)
+    assert second["is_error"] is True
+
+
+def test_materially_different_bash_command_is_allowed_after_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    failed = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(1)\""}, "1", 0)
+    assert json.loads(str(failed["content"]))["exit_code"] != 0
+    allowed = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"print('ok')\""}, "2", 0)
+    assert allowed["is_error"] is False
+    assert json.loads(str(allowed["content"]))["exit_code"] == 0
+
+
+def test_successful_bash_command_clears_retry_block(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    command = "python -c \"import sys; sys.exit(1)\""
+    failed = execute_tool_with_policy(runner, "Bash", {"command": command}, "1", 0)
+    assert json.loads(str(failed["content"]))["exit_code"] != 0
+    success = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"print('reset')\""}, "2", 0)
+    assert json.loads(str(success["content"]))["exit_code"] == 0
+    retry = execute_tool_with_policy(runner, "Bash", {"command": command}, "3", 0)
+    assert retry["is_error"] is False
+    assert json.loads(str(retry["content"]))["exit_code"] != 0
+
+
+def test_non_shell_tools_are_unaffected_by_failed_shell_retry_memory(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    _ = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(1)\""}, "1", 0)
+    read = execute_tool_with_policy(runner, "Read", {"file_path": "missing.txt"}, "2", 0)
+    assert read["is_error"] is True
+    assert "No such file" in str(read["content"])

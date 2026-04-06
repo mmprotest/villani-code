@@ -496,6 +496,7 @@ class Runner:
         self._no_progress_cycles = 0
         self._recovery_count = 0
         self._last_failed_tool_sig = ""
+        self._last_failed_shell_command: dict[str, Any] | None = None
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
