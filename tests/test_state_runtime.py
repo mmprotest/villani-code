@@ -238,6 +238,92 @@ def test_verification_detail_event_keeps_raw_trace(tmp_path: Path, monkeypatch: 
     assert "last_validation_summary:" in out
 
 
+def test_git_changed_files_keeps_git_status_behavior(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class Proc:
+        returncode = 0
+        stdout = " M src/a.py\n?? tests/test_a.py\n"
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    assert state_runtime.git_changed_files(tmp_path) == ["src/a.py", "tests/test_a.py"]
+
+
+def test_git_changed_files_non_git_first_call_returns_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(state_runtime, "_NON_GIT_SNAPSHOT_BY_REPO", {})
+    assert state_runtime.git_changed_files(tmp_path) == []
+
+
+def test_git_changed_files_non_git_detects_new_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(state_runtime, "_NON_GIT_SNAPSHOT_BY_REPO", {})
+    assert state_runtime.git_changed_files(tmp_path) == []
+    (tmp_path / "created.txt").write_text("hello", encoding="utf-8")
+    assert state_runtime.git_changed_files(tmp_path) == ["created.txt"]
+
+
+def test_git_changed_files_non_git_detects_modified_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 128
+        stdout = ""
+
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("one", encoding="utf-8")
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(state_runtime, "_NON_GIT_SNAPSHOT_BY_REPO", {})
+    assert state_runtime.git_changed_files(tmp_path) == []
+    file_path.write_text("three", encoding="utf-8")
+    assert state_runtime.git_changed_files(tmp_path) == ["file.txt"]
+
+
+def test_git_changed_files_non_git_detects_deleted_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 128
+        stdout = ""
+
+    file_path = tmp_path / "deleted.txt"
+    file_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(state_runtime, "_NON_GIT_SNAPSHOT_BY_REPO", {})
+    assert state_runtime.git_changed_files(tmp_path) == []
+    file_path.unlink()
+    assert state_runtime.git_changed_files(tmp_path) == ["deleted.txt"]
+
+
+def test_git_changed_files_non_git_ignores_repo_ignored_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(state_runtime, "_NON_GIT_SNAPSHOT_BY_REPO", {})
+    assert state_runtime.git_changed_files(tmp_path) == []
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("x", encoding="utf-8")
+    assert state_runtime.git_changed_files(tmp_path) == []
+
+
+def test_git_changed_files_non_git_returns_posix_relative_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr(state_runtime, "_NON_GIT_SNAPSHOT_BY_REPO", {})
+    assert state_runtime.git_changed_files(tmp_path) == []
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    (nested / "c.txt").write_text("x", encoding="utf-8")
+    assert state_runtime.git_changed_files(tmp_path) == ["a/b/c.txt"]
+
+
 def test_repeated_validation_updates_compact_state_without_repeated_prose(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
