@@ -182,9 +182,11 @@ class FakeClientTwoBashThenDone:
 class FakeClientTwoEmptyThenDone:
     def __init__(self):
         self.calls = 0
+        self.payloads = []
 
     def create_message(self, payload, stream):
         self.calls += 1
+        self.payloads.append(payload)
         if self.calls <= 2:
             return {
                 "id": str(self.calls),
@@ -203,9 +205,11 @@ class FakeClientTwoEmptyThenDone:
 class FakeClientThreeEmpty:
     def __init__(self):
         self.calls = 0
+        self.payloads = []
 
     def create_message(self, payload, stream):
         self.calls += 1
+        self.payloads.append(payload)
         return {
             "id": str(self.calls),
             "role": "assistant",
@@ -214,7 +218,7 @@ class FakeClientThreeEmpty:
         }
 
 
-def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
+def test_single_empty_turn_does_not_stall_run(tmp_path: Path):
     client = FakeClientEmptyThenDone()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
 
@@ -222,15 +226,46 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
 
     assert client.calls == 2
     assert result["response"]["content"] == [{"type": "text", "text": "ok continuing"}]
-    assert client.second_payload is not None
-    continuation_messages = [
-        m
-        for m in client.second_payload["messages"]
-        if m["role"] == "user"
-        and m["content"]
-        and "Continue. You ended your previous turn with no output." in m["content"][0].get("text", "")
+    assert result["response"]["content"][0]["text"] == "ok continuing"
+
+
+class FakeClientEmptyToolEmptyThenDone:
+    def __init__(self):
+        self.calls = 0
+        self.payloads = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return {"id": "1", "role": "assistant", "content": []}
+        if self.calls == 2:
+            return {
+                "id": "2",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool-1", "name": "Ls", "input": {"path": "."}}],
+            }
+        if self.calls == 3:
+            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "   "}]}
+        return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+
+def test_empty_turn_counter_resets_after_tool_turn(tmp_path: Path):
+    client = FakeClientEmptyToolEmptyThenDone()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    result = runner.run("list and continue")
+
+    assert client.calls == 4
+    assert result["response"]["content"] == [{"type": "text", "text": "done"}]
+    all_texts = [
+        b.get("text", "")
+        for payload in client.payloads
+        for message in payload.get("messages", [])
+        for b in message.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "text"
     ]
-    assert continuation_messages
+    assert not any("RECOVERY: blank turns detected." in text for text in all_texts)
 
 
 def test_tool_result_followup_is_pure_tool_result_message(tmp_path: Path):
@@ -336,6 +371,14 @@ def test_loop_retries_twice_then_succeeds(tmp_path: Path):
 
     assert client.calls == 3
     assert result["response"]["content"] == [{"type": "text", "text": "ok after two empties"}]
+    recovery_messages = [
+        b.get("text", "")
+        for m in client.payloads[2]["messages"]
+        if m.get("role") == "user"
+        for b in m.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    assert any("RECOVERY: blank turns detected." in text for text in recovery_messages)
 
 
 def test_loop_stops_after_retry_limit_on_empty_turns(tmp_path: Path):
@@ -345,6 +388,8 @@ def test_loop_stops_after_retry_limit_on_empty_turns(tmp_path: Path):
     result = runner.run("whatever")
 
     assert client.calls == 3
+    assert result["execution"]["terminated_reason"] == "stalled_empty_responses"
+    assert result["execution"]["completed"] is False
     assert result["response"]["content"] == []
 
 
