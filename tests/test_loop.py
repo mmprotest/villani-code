@@ -200,6 +200,36 @@ class FakeClientTwoEmptyThenDone:
         }
 
 
+class SequencedToolClient:
+    def __init__(self, tool_sequence: list[dict[str, object]]):
+        self.calls = 0
+        self.tool_sequence = list(tool_sequence)
+        self.payloads: list[dict] = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls <= len(self.tool_sequence):
+            spec = self.tool_sequence[self.calls - 1]
+            return {
+                "id": str(self.calls),
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"tool-{self.calls}",
+                        "name": str(spec["name"]),
+                        "input": dict(spec["input"]),
+                    }
+                ],
+            }
+        return {
+            "id": f"done-{self.calls}",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+        }
+
+
 class FakeClientThreeEmpty:
     def __init__(self):
         self.calls = 0
@@ -231,6 +261,105 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
         and "Continue. You ended your previous turn with no output." in m["content"][0].get("text", "")
     ]
     assert continuation_messages
+
+
+def _tool_result_message_from_payload(payload: dict) -> dict:
+    return next(
+        msg
+        for msg in reversed(payload["messages"])
+        if msg["role"] == "user"
+        and isinstance(msg.get("content"), list)
+        and msg["content"]
+        and msg["content"][0].get("type") == "tool_result"
+    )
+
+
+def test_no_recovery_message_on_single_malformed_invocation(tmp_path: Path) -> None:
+    client = SequencedToolClient([{"name": "Ls", "input": {"path": 7}}])
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    runner.run("run")
+
+    msg = _tool_result_message_from_payload(client.payloads[1])
+    assert msg["content"][0]["is_error"] is True
+    assert "Invalid input for Ls" in msg["content"][0]["content"]
+    assert "Re-ground before retrying normally." not in msg["content"][0]["content"]
+
+
+def test_recovery_triggers_after_repeated_malformed_invocations(tmp_path: Path) -> None:
+    client = SequencedToolClient(
+        [
+            {"name": "Ls", "input": {"path": 7}},
+            {"name": "Ls", "input": {"path": 8}},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    runner.run("run")
+
+    msg = _tool_result_message_from_payload(client.payloads[2])
+    assert msg["content"][0]["is_error"] is True
+    assert msg["content"][0]["content"] == "Invalid Ls invocation. Re-ground before retrying normally."
+
+
+def test_degraded_state_clears_after_valid_invocation(tmp_path: Path) -> None:
+    client = SequencedToolClient(
+        [
+            {"name": "Ls", "input": {"path": 7}},
+            {"name": "Ls", "input": {"path": 8}},
+            {"name": "Ls", "input": {"path": "."}},
+            {"name": "Ls", "input": {"path": 9}},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    runner.run("run")
+
+    post_recovery_msg = _tool_result_message_from_payload(client.payloads[4])
+    assert "Invalid input for Ls" in post_recovery_msg["content"][0]["content"]
+    assert "Re-ground before retrying normally." not in post_recovery_msg["content"][0]["content"]
+
+
+def test_immediate_relapse_after_recovery_escalates(tmp_path: Path) -> None:
+    client = SequencedToolClient(
+        [
+            {"name": "Ls", "input": {"path": 7}},
+            {"name": "Ls", "input": {"path": 8}},
+            {"name": "Ls", "input": {"path": 9}},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    runner.run("run")
+
+    escalated_msg = _tool_result_message_from_payload(client.payloads[3])
+    assert (
+        escalated_msg["content"][0]["content"]
+        == "Invalid Ls invocation. Still malformed after recovery; re-ground before retrying normally."
+    )
+
+
+def test_ordinary_execution_failures_do_not_count_as_malformed(tmp_path: Path) -> None:
+    client = SequencedToolClient(
+        [
+            {"name": "Bash", "input": {"command": "echo hello"}},
+            {"name": "Bash", "input": {"command": "echo world"}},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    original_execute = runner._execute_tool_with_policy
+
+    def _force_execution_error(tool_name, tool_input, tool_use_id, message_count):
+        if tool_name == "Bash":
+            return {"content": "simulated execution failure", "is_error": True}
+        return original_execute(tool_name, tool_input, tool_use_id, message_count)
+
+    runner._execute_tool_with_policy = _force_execution_error
+    runner.run("run")
+
+    msg = _tool_result_message_from_payload(client.payloads[2])
+    assert str(msg["content"][0]["content"]).startswith("simulated execution failure")
 
 
 def test_tool_result_followup_is_pure_tool_result_message(tmp_path: Path):
