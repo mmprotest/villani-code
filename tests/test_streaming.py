@@ -69,3 +69,48 @@ def test_assemble_input_json_delta_malformed_keeps_raw_string():
     msg = assemble_anthropic_stream(events)
 
     assert msg["content"][0]["input"] == '{"file_path":"a.txt"'
+
+
+def test_assemble_preserves_usage_from_message_stop():
+    events = [
+        {"type": "message_start", "message": {"id": "m", "role": "assistant"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop", "usage": {"input_tokens": 12, "output_tokens": 7}},
+    ]
+
+    msg = assemble_anthropic_stream(events)
+
+    assert msg["usage"]["input_tokens"] == 12
+    assert msg["usage"]["output_tokens"] == 7
+
+
+def test_assemble_preserves_stop_metadata_from_message_stop():
+    events = [
+        {"type": "message_start", "message": {"id": "m", "role": "assistant"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop", "stop_reason": "end_turn", "stop_sequence": None},
+    ]
+
+    msg = assemble_anthropic_stream(events)
+
+    assert msg["stop_reason"] == "end_turn"
+    assert msg.get("stop_sequence") is None
+
+
+def test_assemble_preserves_usage_from_message_start():
+    events = [
+        {
+            "type": "message_start",
+            "message": {"id": "m", "role": "assistant"},
+            "usage": {"input_tokens": 3},
+        },
+        {"type": "message_stop"},
+    ]
+
+    msg = assemble_anthropic_stream(events)
+
+    assert msg["usage"]["input_tokens"] == 3

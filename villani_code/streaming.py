@@ -34,10 +34,24 @@ def assemble_anthropic_stream(events: Iterable[dict[str, Any]]) -> dict[str, Any
     partial_json: dict[int, str] = {}
 
     for event in events:
+        if "usage" in event:
+            response["usage"] = event["usage"]
+        if "stop_reason" in event:
+            response["stop_reason"] = event["stop_reason"]
+        if "stop_sequence" in event:
+            response["stop_sequence"] = event["stop_sequence"]
+
         etype = event.get("type")
         if etype == "message_start":
-            msg = event.get("message", {})
-            response = dict(msg)
+            msg = event.get("message")
+            if isinstance(msg, dict):
+                prior_meta = {
+                    key: value
+                    for key, value in response.items()
+                    if key in {"usage", "stop_reason", "stop_sequence"}
+                }
+                response = dict(msg)
+                response.update(prior_meta)
             response["content"] = []
         elif etype == "content_block_start":
             index = event.get("index", 0)
@@ -71,9 +85,13 @@ def assemble_anthropic_stream(events: Iterable[dict[str, Any]]) -> dict[str, Any
             delta = event.get("delta", {})
             if isinstance(delta, dict):
                 response.update(delta)
+        elif etype == "message_stop":
             if "usage" in event:
                 response["usage"] = event["usage"]
-        elif etype == "message_stop":
+            if "stop_reason" in event:
+                response["stop_reason"] = event["stop_reason"]
+            if "stop_sequence" in event:
+                response["stop_sequence"] = event["stop_sequence"]
             break
 
     return response
