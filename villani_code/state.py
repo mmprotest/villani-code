@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
@@ -498,6 +499,12 @@ class Runner:
         self._no_progress_cycles = 0
         self._recovery_count = 0
         self._last_failed_tool_sig = ""
+        self._recent_failed_actions: deque[dict[str, str]] = deque(maxlen=5)
+        self._surface_grounding_block: str | None = None
+        self._surface_grounding_block_message = ""
+        self._pending_recovery_message = ""
+        self._recent_failed_shell_forms: deque[str] = deque(maxlen=3)
+        self._shell_retry_block_form: str | None = None
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
@@ -1445,6 +1452,7 @@ class Runner:
                             "occurrence": failure.occurrence_count,
                         }
                     )
+                self._record_failure_and_update_guards(tool_name, tool_input, result)
 
                 self.hooks.run_event(
                     "PostToolUse",
@@ -1528,6 +1536,14 @@ class Runner:
                     else self._pending_verification
                 )
                 self._pending_verification = ""
+            if self._pending_recovery_message and next_user_content:
+                existing = str(next_user_content[-1].get("content", ""))
+                next_user_content[-1]["content"] = (
+                    f"{existing}\n\n{self._pending_recovery_message}"
+                    if existing
+                    else self._pending_recovery_message
+                )
+                self._pending_recovery_message = ""
             messages.append({"role": "user", "content": next_user_content})
 
             reason = _budget_reason()
@@ -1554,6 +1570,172 @@ class Runner:
             )
             return not command.startswith(readonly_prefixes)
         return False
+
+    def _normalize_failure_reason(self, content: str) -> str:
+        text = str(content or "").strip().lower()
+        if not text:
+            return "unknown_failure"
+        if "invalid input" in text or "missing" in text or "must " in text or "tool_result" in text:
+            return "invalid_input"
+        if "denied by permission policy" in text or "user denied tool execution" in text:
+            return "permission_denied"
+        if "benchmark policy blocked this mutation" in text:
+            return "policy_blocked"
+        if "no such file" in text or "filenotfounderror" in text:
+            return "path_not_found"
+        if "timeout" in text:
+            return "timeout"
+        compact = re.sub(r"'[^']*'|\"[^\"]*\"", "\"x\"", text)
+        compact = re.sub(r"\b\d+\b", "#", compact)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        return compact[:96] or "runtime_error"
+
+    def _failure_kind(self, content: str) -> str:
+        lowered = str(content or "").lower()
+        if any(
+            token in lowered
+            for token in ("invalid input", "missing required", "unknown tool", "tool_result", "must ")
+        ):
+            return "protocol"
+        return "runtime"
+
+    def _shell_failure_from_result(self, result: dict[str, Any]) -> tuple[bool, str, str]:
+        if bool(result.get("is_error", False)):
+            reason = self._normalize_failure_reason(str(result.get("content", "")))
+            return True, reason, ""
+        try:
+            payload = json.loads(str(result.get("content", "")))
+        except Exception:
+            return False, "", ""
+        if not isinstance(payload, dict):
+            return False, "", ""
+        exit_code = payload.get("exit_code")
+        command = str(payload.get("command", ""))
+        if isinstance(exit_code, int) and exit_code != 0:
+            return True, f"exit_{exit_code}", self._normalize_shell_command(command)
+        return False, "", ""
+
+    def _normalize_shell_command(self, command: str) -> str:
+        normalized = str(command or "").strip()
+        normalized = normalized.replace('"', "").replace("'", "")
+        normalized = re.sub(r"\b\d+\b", "#", normalized)
+        normalized = re.sub(r"\s+", " ", normalized.lower()).strip()
+        return normalized
+
+    def _is_brittle_shell_command(self, command: str) -> bool:
+        cmd = str(command or "")
+        lowered = cmd.lower()
+        return (
+            len(cmd) > 220
+            or "<<" in cmd
+            or "\\n" in cmd
+            or lowered.count("'") + lowered.count('"') > 8
+            or any(marker in lowered for marker in ("python -c", "node -e", "perl -e", "ruby -e"))
+            or any(marker in lowered for marker in ("&&", "||", ";"))
+            or bool(re.search(r"(>\s*[^ ]+\s*2>&1|2>\s*[^ ]+)", lowered))
+        )
+
+    def _is_grounding_action(self, tool_name: str, tool_input: dict[str, Any]) -> bool:
+        if tool_name in {"Read", "Ls", "Grep", "Search", "Glob", "GitStatus", "GitDiff", "GitLog", "GitBranch"}:
+            return True
+        if tool_name != "Bash":
+            return False
+        command = str(tool_input.get("command", "")).strip().lower()
+        return bool(command) and not self._is_mutating_tool_call("Bash", tool_input)
+
+    def _record_failure_and_update_guards(self, tool_name: str, tool_input: dict[str, Any], result: dict[str, Any]) -> None:
+        surface = "shell" if tool_name == "Bash" else "tool"
+        action_name = "shell" if surface == "shell" else tool_name
+        content = str(result.get("content", ""))
+        normalized_reason = self._normalize_failure_reason(content)
+        if surface == "shell":
+            failed, shell_reason, shell_form = self._shell_failure_from_result(result)
+            if not failed:
+                return
+            normalized_reason = shell_reason or normalized_reason
+            if shell_form:
+                self._recent_failed_shell_forms.append(shell_form)
+        elif not bool(result.get("is_error", False)):
+            return
+
+        self._recent_failed_actions.append(
+            {
+                "surface": surface,
+                "action_name": action_name,
+                "normalized_reason": normalized_reason,
+                "failure_kind": self._failure_kind(content),
+            }
+        )
+
+        last3 = list(self._recent_failed_actions)[-3:]
+        last5 = list(self._recent_failed_actions)[-5:]
+        trigger = False
+        if surface == "tool":
+            same_tool = sum(1 for item in last3 if item["surface"] == "tool" and item["action_name"] == action_name)
+            trigger = same_tool >= 2
+        else:
+            same_shell_reason = sum(
+                1
+                for item in last3
+                if item["surface"] == "shell" and item["normalized_reason"] == normalized_reason
+            )
+            trigger = same_shell_reason >= 2
+        if not trigger and len(last5) >= 3:
+            counts: dict[tuple[str, str], int] = {}
+            for item in last5:
+                key = (item["surface"], item["normalized_reason"])
+                counts[key] = counts.get(key, 0) + 1
+            trigger = len(last5) >= 3 and any(count >= 2 for count in counts.values())
+        if trigger:
+            self._surface_grounding_block = surface
+            self._surface_grounding_block_message = (
+                f"Recent {surface} attempts keep failing. Reground with one read/inspect step before retrying risky {surface} mutations."
+            )
+            self._pending_recovery_message = self._surface_grounding_block_message
+
+    def _check_transient_action_guards(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+        if self._surface_grounding_block:
+            if self._is_grounding_action(tool_name, tool_input):
+                self._surface_grounding_block = None
+                self._surface_grounding_block_message = ""
+            elif (
+                self._surface_grounding_block == "tool"
+                and tool_name != "Bash"
+                and self._is_mutating_tool_call(tool_name, tool_input)
+            ):
+                return self._surface_grounding_block_message or "Recent tool attempts are failing; reground with one read/inspect action first."
+            elif (
+                self._surface_grounding_block == "shell"
+                and tool_name == "Bash"
+                and self._is_mutating_tool_call(tool_name, tool_input)
+            ):
+                return self._surface_grounding_block_message or "Recent shell attempts are failing; reground with one read/inspect action first."
+
+        if tool_name != "Bash":
+            if self._shell_retry_block_form:
+                self._shell_retry_block_form = None
+                self._recent_failed_shell_forms.clear()
+            return None
+        command = str(tool_input.get("command", ""))
+        normalized = self._normalize_shell_command(command)
+        near_duplicate = bool(normalized) and (
+            normalized in self._recent_failed_shell_forms
+            or (self._shell_retry_block_form is not None and normalized == self._shell_retry_block_form)
+        )
+        brittle = self._is_brittle_shell_command(command)
+        if self._shell_retry_block_form is not None and near_duplicate and brittle:
+            return (
+                "Blocked brittle shell retry after recent failure. Use a simpler command, a temp script, a read step, or a non-shell edit path."
+            )
+        if self._recent_failed_shell_forms and near_duplicate and brittle:
+            self._shell_retry_block_form = normalized
+            return (
+                "Current shell form is brittle after recent failure. Use a simpler command, a temp script, a read step, or a non-shell edit path."
+            )
+        if self._shell_retry_block_form and (not near_duplicate or not brittle):
+            self._shell_retry_block_form = None
+            self._recent_failed_shell_forms.clear()
+        return None
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if "turn_index" not in event and isinstance(self._current_turn_index, int):

@@ -493,6 +493,17 @@ def execute_tool_with_policy(
             runner._tighten_tool_input(tool_name, tool_input)
     if tool_name in {"Write", "Patch"}:
         _normalize_mutation_payload(tool_name, tool_input)
+    guard_message = runner._check_transient_action_guards(tool_name, tool_input)
+    if guard_message:
+        runner.event_callback(
+            {
+                "type": "transient_action_guard_blocked",
+                "tool": tool_name,
+                "input": tool_input,
+                "message": guard_message,
+            }
+        )
+        return {"content": guard_message, "is_error": True}
 
     policy = runner.permissions.evaluate_with_reason(
         tool_name,
