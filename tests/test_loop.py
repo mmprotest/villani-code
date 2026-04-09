@@ -681,3 +681,128 @@ def test_benchmark_repeated_mutation_denials_fast_fail(tmp_path: Path) -> None:
 
     assert out['execution']['terminated_reason'] == 'benchmark_repeated_mutation_denials'
     assert any(e.get('type') == 'benchmark_repeated_mutation_denials' for e in events)
+
+
+def test_failure_loop_guard_blocks_mutation_until_grounding(tmp_path: Path) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.payloads: list[dict] = []
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            self.payloads.append(payload)
+            if self.calls <= 3:
+                return {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"patch-{self.calls}",
+                            "name": "Patch",
+                            "input": {"file_path": "note.txt", "unified_diff": "not-a-diff"},
+                        }
+                    ],
+                }
+            if self.calls == 4:
+                return {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "write-blocked",
+                            "name": "Write",
+                            "input": {"file_path": "note.txt", "content": "blocked"},
+                        }
+                    ],
+                }
+            if self.calls == 5:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "read-ground", "name": "Read", "input": {"file_path": "note.txt"}}],
+                }
+            if self.calls == 6:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "write-allowed", "name": "Write", "input": {"file_path": "note.txt", "content": "ok"}}],
+                }
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    (tmp_path / "note.txt").write_text("start\n", encoding="utf-8")
+    client = Client()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, plan_mode="off")
+    out = runner.run("apply minimal fix")
+
+    tool_results = out["transcript"]["tool_results"]
+    assert any("Recent tool attempts keep failing." in str(item.get("content", "")) for item in tool_results)
+    assert "Recent tool attempts keep failing." in str(tool_results[3]["content"])
+    assert "read/inspect step" in str(tool_results[3]["content"])
+    assert tool_results[4]["is_error"] is False
+    assert tool_results[5]["is_error"] is False
+
+
+def test_brittle_near_duplicate_shell_retry_guard_and_clear(tmp_path: Path) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "bash-1", "name": "Bash", "input": {"command": "python -c \"import sys; sys.exit(1)\""}}],
+                }
+            if self.calls == 2:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "bash-2", "name": "Bash", "input": {"command": "python -c 'import sys; sys.exit(2)'"}}],
+                }
+            if self.calls == 3:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "bash-3", "name": "Bash", "input": {"command": "pwd"}}],
+                }
+            if self.calls == 4:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "bash-4", "name": "Bash", "input": {"command": "python -c \"print('ok')\""}}],
+                }
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False)
+    out = runner.run("inspect and run shell checks")
+    results = out["transcript"]["tool_results"]
+
+    assert "exit_code" in str(results[0]["content"])
+    assert "brittle after recent failure" in str(results[1]["content"])
+    assert results[1]["is_error"] is True
+    assert results[2]["is_error"] is False
+    assert results[3]["is_error"] is False
+
+
+def test_single_failures_do_not_trigger_thrash_guards(tmp_path: Path) -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "read-1", "name": "Read", "input": {"file_path": "missing.txt"}}],
+                }
+            if self.calls == 2:
+                return {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "ls-1", "name": "Ls", "input": {"path": "."}}],
+                }
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False)
+    out = runner.run("inspect files")
+    tool_results = out["transcript"]["tool_results"]
+    assert tool_results[0]["is_error"] is True
+    assert "Recent tool attempts keep failing." not in str(tool_results[0]["content"])
+    assert all("brittle shell retry" not in str(item.get("content", "")) for item in tool_results)
