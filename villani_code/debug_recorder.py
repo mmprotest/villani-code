@@ -21,7 +21,7 @@ _RESULT_PREVIEW_LIMIT = 240
 
 
 class DebugRecorder:
-    def __init__(self, config: DebugConfig, run_id: str, objective: str, repo: Path, mode: str, model: str):
+    def __init__(self, config: DebugConfig, run_id: str, objective: str, repo: Path, mode: str, model: str, provider: str | None = None):
         self.config = config
         self.run_id = run_id
         self._seq = 0
@@ -29,6 +29,7 @@ class DebugRecorder:
         self._repo = str(repo)
         self._runtime_mode = mode
         self._model = model
+        self._provider = provider
         self._changed_files: set[str] = set()
         self._last_failed_command: str = ""
         self._last_failed_validation: str = ""
@@ -48,10 +49,11 @@ class DebugRecorder:
                 "debug_mode": config.mode.value,
                 "runtime_mode": mode,
                 "model": model,
+                "provider": provider,
                 "created_at": self._ts(),
             },
         )
-        self._emit("run_started", {"objective": objective, "runtime_mode": mode, "model": model})
+        self._emit("run_started", {"objective": objective, "runtime_mode": mode, "model": model, "provider": provider})
 
     def _normalize_changed_path(self, file_path: str) -> str:
         return normalize_repo_path(file_path, Path(self._repo))

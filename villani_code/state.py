@@ -431,6 +431,7 @@ class Runner:
         villani_objective: str | None = None,
         benchmark_config: BenchmarkRuntimeConfig | None = None,
         debug_config: DebugConfig | None = None,
+        provider: str | None = None,
     ):
         self.client = client
         self.repo = repo
@@ -459,6 +460,7 @@ class Runner:
         )
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
         self._debug_config = debug_config or DebugConfig(mode=DebugMode.OFF)
+        self.provider = provider
         self._debug_recorder: DebugRecorder | None = None
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
@@ -1577,6 +1579,7 @@ class Runner:
                     repo=self.repo,
                     mode=mode,
                     model=self.model,
+                    provider=self.provider,
                 )
         self._update_mission_state(objective=instruction, mode=mode, status="active")
 

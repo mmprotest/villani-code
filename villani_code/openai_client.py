@@ -81,13 +81,29 @@ def build_openai_payload(payload: dict[str, Any], stream: bool) -> dict[str, Any
     }
     if payload.get("tools"):
         out["tools"] = convert_tools_to_openai(payload["tools"])
+    if stream:
+        out["stream_options"] = {"include_usage": True}
     return out
+
+
+def _map_openai_finish_reason_to_anthropic(finish_reason: str | None) -> str | None:
+    mapping = {
+        "stop": "end_turn",
+        "tool_calls": "tool_use",
+        "length": "max_tokens",
+        "content_filter": "stop",
+    }
+    if finish_reason is None:
+        return None
+    return mapping.get(finish_reason, finish_reason)
 
 
 def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) -> Generator[dict[str, Any], None, None]:
     yield {"type": "message_start", "message": {"id": "openai", "type": "message", "role": "assistant", "model": model, "content": []}}
     text_started = False
     tool_indices: dict[int, int] = {}
+    last_usage: dict[str, Any] | None = None
+    last_finish_reason: str | None = None
 
     for raw in lines:
         line = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
@@ -101,9 +117,15 @@ def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) 
             data = json.loads(data_str)
         except json.JSONDecodeError:
             continue
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            last_usage = usage
         choices = data.get("choices", [])
         if not choices:
             continue
+        finish_reason = choices[0].get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason:
+            last_finish_reason = finish_reason
         delta = choices[0].get("delta", {})
         text_delta = delta.get("content")
         if isinstance(text_delta, str) and text_delta:
@@ -140,11 +162,18 @@ def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) 
         yield {"type": "content_block_stop", "index": 0}
     for block_index in tool_indices.values():
         yield {"type": "content_block_stop", "index": block_index}
-    yield {"type": "message_stop"}
+    message_stop: dict[str, Any] = {"type": "message_stop"}
+    if last_usage is not None:
+        message_stop["usage"] = last_usage
+    mapped_stop_reason = _map_openai_finish_reason_to_anthropic(last_finish_reason)
+    if mapped_stop_reason is not None:
+        message_stop["stop_reason"] = mapped_stop_reason
+    yield message_stop
 
 
 def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, Any]:
     message = ((response.get("choices") or [{}])[0]).get("message", {})
+    finish_reason = ((response.get("choices") or [{}])[0]).get("finish_reason")
     content: list[dict[str, Any]] = []
     text = message.get("content")
     if isinstance(text, str) and text:
@@ -164,7 +193,20 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
                 "input": parsed_arguments,
             }
         )
-    return {"role": "assistant", "content": content}
+    out: dict[str, Any] = {
+        "id": response.get("id"),
+        "type": "message",
+        "role": str(message.get("role", "assistant")),
+        "model": response.get("model"),
+        "content": content,
+    }
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        out["usage"] = usage
+    stop_reason = _map_openai_finish_reason_to_anthropic(finish_reason if isinstance(finish_reason, str) else None)
+    if stop_reason is not None:
+        out["stop_reason"] = stop_reason
+    return out
 
 
 class OpenAIClient:
@@ -191,4 +233,3 @@ class OpenAIClient:
                     yield from openai_stream_to_anthropic_events(response.iter_lines(), str(payload.get("model", "")))
 
         return gen()
-

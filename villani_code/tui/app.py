@@ -156,6 +156,7 @@ class VillaniTUI(App[None]):
         for line in LAUNCH_BANNER.splitlines():
             self._append_log_line(log, line)
         self._append_log_line(log, f"Model: {getattr(self.runner, 'model', 'unknown')}")
+        self._append_log_line(log, f"Provider: {getattr(self.runner, 'provider', 'unknown') or 'unknown'}")
         auto_approve = bool(getattr(self.runner, "auto_approve", False))
         self._append_log_line(log, f"Auto-approval: {'ON' if auto_approve else 'OFF'}")
         if self.villani_mode:
