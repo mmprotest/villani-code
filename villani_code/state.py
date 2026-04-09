@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable
 
@@ -406,6 +407,9 @@ def _format_answer(plan_answer: PlanAnswer) -> str:
 
 
 class Runner:
+    _MALFORMED_TOOL_WINDOW = 4
+    _MALFORMED_TOOL_THRESHOLD = 2
+
     def __init__(
         self,
         client: LLMClient,
@@ -498,6 +502,9 @@ class Runner:
         self._no_progress_cycles = 0
         self._recovery_count = 0
         self._last_failed_tool_sig = ""
+        self._tool_malformed_failures: dict[str, deque[int]] = defaultdict(deque)
+        self._tool_degradation_levels: dict[str, int] = {}
+        self._tool_recovery_turns: dict[str, int] = {}
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
@@ -540,6 +547,58 @@ class Runner:
         self._current_turn_index: int | None = None
         if self.small_model:
             self._init_small_model_support()
+
+    def _is_malformed_tool_invocation_failure(self, tool_name: str, result: dict[str, Any]) -> bool:
+        if not result.get("is_error"):
+            return False
+        content = str(result.get("content", "")).strip()
+        if content.startswith(f"Invalid input for {tool_name}:"):
+            return True
+        return content.startswith("Unknown tool:")
+
+    def _record_malformed_tool_invocation(self, tool_name: str, turn_index: int) -> tuple[bool, bool]:
+        recent = self._tool_malformed_failures[tool_name]
+        recent.append(turn_index)
+        while recent and (turn_index - recent[0]) > self._MALFORMED_TOOL_WINDOW:
+            recent.popleft()
+
+        triggered_recovery = len(recent) >= self._MALFORMED_TOOL_THRESHOLD
+        escalated = False
+        if not triggered_recovery:
+            return False, False
+
+        previous_level = self._tool_degradation_levels.get(tool_name, 0)
+        previous_recovery_turn = self._tool_recovery_turns.get(tool_name)
+        if previous_level > 0 and previous_recovery_turn is not None and (turn_index - previous_recovery_turn) <= 1:
+            self._tool_degradation_levels[tool_name] = min(previous_level + 1, 2)
+            escalated = True
+        else:
+            self._tool_degradation_levels[tool_name] = 1
+        self._tool_recovery_turns[tool_name] = turn_index
+        return True, escalated
+
+    def _clear_tool_degradation(self, tool_name: str) -> None:
+        self._tool_degradation_levels.pop(tool_name, None)
+        self._tool_recovery_turns.pop(tool_name, None)
+        self._tool_malformed_failures.pop(tool_name, None)
+
+    def _recovery_message_for_tool(self, tool_name: str, escalated: bool) -> str:
+        if escalated:
+            return (
+                f"Invalid {tool_name} invocation. Still malformed after recovery; re-ground before retrying normally."
+            )
+        return f"Invalid {tool_name} invocation. Re-ground before retrying normally."
+
+    def _apply_malformed_tool_recovery(self, tool_name: str, result: dict[str, Any], turn_index: int) -> dict[str, Any]:
+        if not self._is_malformed_tool_invocation_failure(tool_name, result):
+            self._clear_tool_degradation(tool_name)
+            return result
+        triggered, escalated = self._record_malformed_tool_invocation(tool_name, turn_index)
+        if not triggered:
+            return result
+        repaired = dict(result)
+        repaired["content"] = self._recovery_message_for_tool(tool_name, escalated)
+        return repaired
 
     @property
     def event_callback(self) -> Callable[[dict[str, Any]], None]:
@@ -1391,6 +1450,7 @@ class Runner:
                 result = self._execute_tool_with_policy(
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
+                result = self._apply_malformed_tool_recovery(tool_name, result, turns_used)
                 tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
