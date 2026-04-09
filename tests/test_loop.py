@@ -214,6 +214,59 @@ class FakeClientThreeEmpty:
         }
 
 
+class FakeClientMalformedWriteRecovery:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.payloads: list[dict] = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls <= 3:
+            return {
+                "id": str(self.calls),
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": f"tool-{self.calls}", "name": "Write", "input": {}}],
+            }
+        return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+
+class FakeClientMalformedThenValidWrite:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.payloads: list[dict] = []
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls <= 3:
+            return {
+                "id": f"bad-{self.calls}",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": f"tool-bad-{self.calls}", "name": "Write", "input": {}}],
+            }
+        if self.calls == 4:
+            return {
+                "id": "good",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-good",
+                        "name": "Write",
+                        "input": {"file_path": "ok.txt", "content": "ok"},
+                    }
+                ],
+            }
+        if self.calls == 5:
+            return {
+                "id": "bad-again",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool-bad-again", "name": "Write", "input": {}}],
+            }
+        return {"id": "done", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+
+
 def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
     client = FakeClientEmptyThenDone()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
@@ -231,6 +284,42 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
         and "Continue. You ended your previous turn with no output." in m["content"][0].get("text", "")
     ]
     assert continuation_messages
+
+
+def test_repeated_malformed_tool_calls_inject_compact_recovery_message(tmp_path: Path) -> None:
+    client = FakeClientMalformedWriteRecovery()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    runner.run("write a file")
+
+    recovery_messages = [
+        block.get("text", "")
+        for payload in client.payloads[1:]
+        for message in payload.get("messages", [])
+        if message.get("role") == "user"
+        for block in message.get("content", [])
+        if block.get("type") == "text" and "Recent Write calls were invalid" in block.get("text", "")
+    ]
+    assert recovery_messages
+    assert "Issue one valid Write call using the tool schema, or inspect relevant context/files before retrying." in recovery_messages[-1]
+
+
+def test_malformed_tool_recovery_state_clears_after_valid_call(tmp_path: Path) -> None:
+    client = FakeClientMalformedThenValidWrite()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+    runner.run("write a file")
+
+    recovery_injections = [
+        payload
+        for payload in client.payloads
+        if payload.get("messages")
+        and payload["messages"][-1].get("role") == "user"
+        and payload["messages"][-1].get("content")
+        and payload["messages"][-1]["content"][0].get("type") == "text"
+        and "Recent Write calls were invalid"
+        in payload["messages"][-1]["content"][0].get("text", "")
+    ]
+    assert len(recovery_injections) == 1
 
 
 def test_tool_result_followup_is_pure_tool_result_message(tmp_path: Path):

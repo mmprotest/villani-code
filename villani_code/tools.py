@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import glob
 import json
+import os
+import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -113,6 +116,10 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
 }
 
 DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
+_WINDOWS_HEREDOC_RE = re.compile(r"<<\s*[A-Za-z0-9_'-]+")
+_WINDOWS_BASH_ONLY_RE = re.compile(r"(^|\s)(set -euo pipefail|\[\[|2>/dev/null|\|\s*tail\b)")
+_WINDOWS_COMMAND_LENGTH_LIMIT = 8000
+_GENERIC_COMMAND_LENGTH_LIMIT = 32768
 
 
 def _error(message: str) -> dict[str, Any]:
@@ -236,6 +243,9 @@ def _run_search(data: SearchInput, repo: Path) -> str:
 
 
 def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+    guard_error = _preflight_shell_command(data.command)
+    if guard_error:
+        raise ValueError(guard_error)
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
@@ -259,6 +269,38 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
             },
         )
     return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+
+
+def _detect_shell_environment() -> tuple[str, str]:
+    shell_hint = str(os.environ.get("COMSPEC") or os.environ.get("SHELL") or "").lower()
+    platform_hint = platform.system().lower()
+    if os.name == "nt" or platform_hint.startswith("win") or "powershell" in shell_hint or "cmd" in shell_hint:
+        if "powershell" in shell_hint or "pwsh" in shell_hint:
+            return "windows", "powershell"
+        return "windows", "cmd"
+    return "posix", "bash"
+
+
+def _preflight_shell_command(command: str, env: tuple[str, str] | None = None) -> str | None:
+    family, shell_name = env or _detect_shell_environment()
+    raw = str(command or "")
+    if len(raw) > _GENERIC_COMMAND_LENGTH_LIMIT:
+        return (
+            "Rejected command: this command form is likely to exceed shell command-length limits. "
+            "Use a smaller command or another method."
+        )
+    if family != "windows":
+        return None
+    if len(raw) > _WINDOWS_COMMAND_LENGTH_LIMIT:
+        return (
+            "Rejected command: this command form is likely to exceed shell command-length limits. "
+            "Use a smaller command or another method."
+        )
+    if _WINDOWS_HEREDOC_RE.search(raw):
+        return "Rejected command: heredoc-style redirection is incompatible with this Windows shell environment."
+    if shell_name in {"cmd", "powershell"} and _WINDOWS_BASH_ONLY_RE.search(raw):
+        return "Rejected command: this bash-specific form is incompatible with this Windows shell environment."
+    return None
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
