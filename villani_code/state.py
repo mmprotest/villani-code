@@ -498,6 +498,9 @@ class Runner:
         self._no_progress_cycles = 0
         self._recovery_count = 0
         self._last_failed_tool_sig = ""
+        self._tool_attempt_counter = 0
+        self._malformed_tool_attempts: dict[str, list[int]] = {}
+        self._malformed_tool_last_recovery_turn: dict[str, int] = {}
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
@@ -1355,6 +1358,7 @@ class Runner:
                 }
 
             tool_results: list[dict[str, Any]] = []
+            protocol_recovery_messages: list[str] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
@@ -1391,6 +1395,9 @@ class Runner:
                 result = self._execute_tool_with_policy(
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
+                recovery_message = self._track_malformed_tool_call_and_recovery(tool_name, result)
+                if recovery_message:
+                    protocol_recovery_messages.append(recovery_message)
                 tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
@@ -1529,6 +1536,13 @@ class Runner:
                 )
                 self._pending_verification = ""
             messages.append({"role": "user", "content": next_user_content})
+            for recovery_message in _dedupe_preserve(protocol_recovery_messages):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": recovery_message}],
+                    }
+                )
 
             reason = _budget_reason()
             if reason:
@@ -1639,6 +1653,41 @@ class Runner:
             tool_use_id,
             message_count,
         )
+
+    def _is_malformed_tool_result(self, tool_name: str, result: dict[str, Any]) -> bool:
+        if not result.get("is_error"):
+            return False
+        content = str(result.get("content", ""))
+        return f"Invalid input for {tool_name}:" in content
+
+    def _track_malformed_tool_call_and_recovery(self, tool_name: str, result: dict[str, Any]) -> str:
+        self._tool_attempt_counter += 1
+        malformed = self._is_malformed_tool_result(tool_name, result)
+        attempts = self._malformed_tool_attempts.setdefault(tool_name, [])
+        window = 6
+        threshold = 3
+        if malformed:
+            attempts.append(self._tool_attempt_counter)
+            cutoff = self._tool_attempt_counter - window + 1
+            self._malformed_tool_attempts[tool_name] = [idx for idx in attempts if idx >= cutoff]
+            if len(self._malformed_tool_attempts[tool_name]) >= threshold:
+                last_recovery_turn = self._malformed_tool_last_recovery_turn.get(tool_name, -1)
+                if self._tool_attempt_counter != last_recovery_turn:
+                    self._malformed_tool_last_recovery_turn[tool_name] = self._tool_attempt_counter
+                    return (
+                        f"Recent {tool_name} calls were invalid because required fields were missing or malformed. "
+                        f"Issue one valid {tool_name} call using the tool schema, or inspect relevant context/files before retrying."
+                    )
+            return ""
+
+        if not result.get("is_error"):
+            self._malformed_tool_attempts.pop(tool_name, None)
+            self._malformed_tool_last_recovery_turn.pop(tool_name, None)
+            return ""
+
+        cutoff = self._tool_attempt_counter - window + 1
+        self._malformed_tool_attempts[tool_name] = [idx for idx in attempts if idx >= cutoff]
+        return ""
 
     def _build_tool_result_event_payload(
         self, tool_name: str, tool_use_id: str, result: dict[str, Any]

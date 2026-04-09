@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from villani_code.tools import GitSimpleInput, LsInput, _safe_path
+from villani_code.tools import GitSimpleInput, LsInput, _preflight_shell_command, _safe_path
 
 
 def test_safe_path_accepts_in_repo_path(tmp_path: Path) -> None:
@@ -29,3 +29,25 @@ def test_model_defaults_do_not_share_list_state() -> None:
     git_two = GitSimpleInput()
     git_one.args.append("status")
     assert git_two.args == []
+
+
+def test_shell_preflight_rejects_windows_heredoc() -> None:
+    reason = _preflight_shell_command("python <<EOF\nprint('x')\nEOF", env=("windows", "powershell"))
+    assert reason is not None
+    assert "heredoc-style redirection" in reason
+
+
+def test_shell_preflight_does_not_overblock_posix_heredoc() -> None:
+    assert _preflight_shell_command("python <<EOF\nprint('x')\nEOF", env=("posix", "bash")) is None
+
+
+def test_shell_preflight_rejects_excessive_command_length() -> None:
+    reason = _preflight_shell_command("x" * 9000, env=("windows", "cmd"))
+    assert reason is not None
+    assert "command-length limits" in reason
+
+
+def test_shell_preflight_rejects_clearly_bash_specific_windows_form() -> None:
+    reason = _preflight_shell_command("set -euo pipefail && echo ok", env=("windows", "cmd"))
+    assert reason is not None
+    assert "bash-specific" in reason
