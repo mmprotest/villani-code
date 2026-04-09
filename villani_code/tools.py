@@ -4,6 +4,7 @@ import glob
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ from villani_code.patch_apply import (
     extract_unified_diff_targets,
     parse_unified_diff,
 )
+from villani_code.shells import shell_family_for_platform, validate_shell_form
 
 
 class LsInput(BaseModel):
@@ -241,6 +243,21 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
+    shell_family = shell_family_for_platform(sys.platform)
+    guard_error = validate_shell_form(data.command, shell_family)
+    if guard_error:
+        if callable(debug_callback):
+            debug_callback(
+                "command_rejected",
+                {
+                    "command": data.command,
+                    "cwd": data.cwd,
+                    "tool_call_id": tool_call_id,
+                    "reason": guard_error,
+                    "shell_family": shell_family.value,
+                },
+            )
+        raise ValueError(f"{guard_error} Choose a command form compatible with {shell_family.value} shells.")
     cwd = _safe_path(repo, data.cwd)
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
