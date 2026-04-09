@@ -50,7 +50,6 @@ from villani_code.state_execution import (
     collect_validation_artifacts,
     summarize_changes,
 )
-from villani_code.completion_audit import run_completion_audit
 from villani_code.utils import (
     is_path_within,
     is_effectively_empty_content,
@@ -1223,27 +1222,6 @@ class Runner:
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
-                    audit = run_completion_audit(
-                        repo=self.repo,
-                        instruction=instruction,
-                        response_content=response.get("content", []),
-                        transcript=transcript,
-                    )
-                    if not audit.passed:
-                        self.event_callback(
-                            {
-                                "type": "completion_audit_blocked",
-                                "issues": audit.issues,
-                                "repair_brief": audit.repair_brief,
-                            }
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": [{"type": "text", "text": audit.repair_brief}],
-                            }
-                        )
-                        continue
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
@@ -1372,27 +1350,6 @@ class Runner:
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                audit = run_completion_audit(
-                    repo=self.repo,
-                    instruction=instruction,
-                    response_content=response.get("content", []),
-                    transcript=transcript,
-                )
-                if not audit.passed:
-                    self.event_callback(
-                        {
-                            "type": "completion_audit_blocked",
-                            "issues": audit.issues,
-                            "repair_brief": audit.repair_brief,
-                        }
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": [{"type": "text", "text": audit.repair_brief}],
-                        }
-                    )
-                    continue
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
