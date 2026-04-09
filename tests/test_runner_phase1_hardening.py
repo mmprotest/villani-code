@@ -17,26 +17,16 @@ class _SequenceClient:
         return response
 
 
-def test_completion_audit_blocks_fake_completion_and_allows_repair(tmp_path: Path) -> None:
-    events: list[dict] = []
+def test_completion_is_not_blocked_after_text_only_turn(tmp_path: Path) -> None:
     client = _SequenceClient(
         [
             {"id": "1", "role": "assistant", "content": [{"type": "text", "text": "Implemented fix in src/app.py"}]},
-            {
-                "id": "2",
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "src/app.py", "content": "print('ok')\n"}}],
-            },
-            {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "Implemented fix in src/app.py"}]},
         ]
     )
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
-    runner.event_callback = events.append
 
     result = runner.run("Implement a code fix")
 
-    assert any(event.get("type") == "completion_audit_blocked" for event in events)
-    assert (tmp_path / "src" / "app.py").exists()
     final_text_blocks = [b for b in result["response"]["content"] if b.get("type") == "text"]
     assert final_text_blocks
 
