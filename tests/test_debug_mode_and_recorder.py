@@ -128,3 +128,13 @@ def test_mission_state_event_records_turn_index_when_available(tmp_path: Path) -
     events = [json.loads(line) for line in (tmp_path / "mission" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     mission_event = next(e for e in events if e["event_type"] == "mission_state_updated")
     assert mission_event["turn_index"] == 3
+
+
+def test_debug_metadata_records_configured_provider_not_internal_format(tmp_path: Path) -> None:
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "prov", "obj", tmp_path, "execution", "m", provider="openai")
+    session_meta = json.loads((tmp_path / "prov" / "session_meta.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (tmp_path / "prov" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    run_started = next(e for e in events if e["event_type"] == "run_started")
+
+    assert session_meta["provider"] == "openai"
+    assert run_started["payload"]["provider"] == "openai"
