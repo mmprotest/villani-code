@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,6 +50,7 @@ from villani_code.state_execution import (
     collect_validation_artifacts,
     summarize_changes,
 )
+from villani_code.completion_audit import run_completion_audit
 from villani_code.utils import (
     is_path_within,
     is_effectively_empty_content,
@@ -525,6 +527,8 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._failure_classifier = FailureClassifier()
+        self._tool_schema_error_turns: dict[str, list[int]] = defaultdict(list)
+        self._tool_schema_degradation: dict[str, int] = defaultdict(int)
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
@@ -600,6 +604,20 @@ class Runner:
                 stderr=str(payload.get("stderr", "")),
                 truncated=bool(payload.get("truncated", False)),
                 tool_call_id=str(payload.get("tool_call_id", "") or ""),
+                turn_index=turn_index,
+            )
+            return
+        if event_type == "command_rejected":
+            self._debug_recorder.record_event(
+                "command_rejected",
+                "Command rejected by shell guardrail",
+                {
+                    "command": str(payload.get("command", "")),
+                    "cwd": str(payload.get("cwd", ".")),
+                    "reason": str(payload.get("reason", "")),
+                    "shell_family": str(payload.get("shell_family", "")),
+                    "tool_call_id": str(payload.get("tool_call_id", "") or ""),
+                },
                 turn_index=turn_index,
             )
 
@@ -883,6 +901,7 @@ class Runner:
         # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
         benchmark_mutation_denials = 0
         benchmark_denial_limit = 3
+        schema_recovery_notice = ""
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
@@ -1204,6 +1223,27 @@ class Runner:
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
+                    audit = run_completion_audit(
+                        repo=self.repo,
+                        instruction=instruction,
+                        response_content=response.get("content", []),
+                        transcript=transcript,
+                    )
+                    if not audit.passed:
+                        self.event_callback(
+                            {
+                                "type": "completion_audit_blocked",
+                                "issues": audit.issues,
+                                "repair_brief": audit.repair_brief,
+                            }
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [{"type": "text", "text": audit.repair_brief}],
+                            }
+                        )
+                        continue
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
@@ -1332,6 +1372,27 @@ class Runner:
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                audit = run_completion_audit(
+                    repo=self.repo,
+                    instruction=instruction,
+                    response_content=response.get("content", []),
+                    transcript=transcript,
+                )
+                if not audit.passed:
+                    self.event_callback(
+                        {
+                            "type": "completion_audit_blocked",
+                            "issues": audit.issues,
+                            "repair_brief": audit.repair_brief,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": audit.repair_brief}],
+                        }
+                    )
+                    continue
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
@@ -1408,6 +1469,11 @@ class Runner:
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
+                    schema_recovery_notice = self._handle_schema_tool_degradation(
+                        tool_name=tool_name,
+                        result_text=result_text,
+                        current_turn=turns_used,
+                    )
                     self._update_mission_state(last_failed_command=f"{tool_name} {tool_input}", last_failed_summary=result_text[:500])
                     if (
                         self.benchmark_config.enabled
@@ -1445,6 +1511,9 @@ class Runner:
                             "occurrence": failure.occurrence_count,
                         }
                     )
+                else:
+                    self._tool_schema_error_turns.pop(tool_name, None)
+                    self._tool_schema_degradation.pop(tool_name, None)
 
                 self.hooks.run_event(
                     "PostToolUse",
@@ -1529,6 +1598,14 @@ class Runner:
                 )
                 self._pending_verification = ""
             messages.append({"role": "user", "content": next_user_content})
+            if schema_recovery_notice:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": schema_recovery_notice}],
+                    }
+                )
+                schema_recovery_notice = ""
 
             reason = _budget_reason()
             if reason:
@@ -1554,6 +1631,45 @@ class Runner:
             )
             return not command.startswith(readonly_prefixes)
         return False
+
+    def _handle_schema_tool_degradation(
+        self, *, tool_name: str, result_text: str, current_turn: int
+    ) -> str:
+        prefix = f"invalid input for {tool_name}:"
+        if not result_text.lower().startswith(prefix.lower()):
+            return ""
+        turns = self._tool_schema_error_turns[tool_name]
+        turns.append(current_turn)
+        self._tool_schema_error_turns[tool_name] = [
+            turn for turn in turns if current_turn - turn <= 3
+        ]
+        recent_count = len(self._tool_schema_error_turns[tool_name])
+        if recent_count < 2:
+            return ""
+        self._tool_schema_degradation[tool_name] += 1
+        severity = self._tool_schema_degradation[tool_name]
+        event_type = (
+            "tool_schema_recovery_triggered"
+            if severity == 1
+            else "tool_schema_degradation_escalated"
+        )
+        self.event_callback(
+            {
+                "type": event_type,
+                "tool": tool_name,
+                "severity": severity,
+                "recent_invalid_calls": recent_count,
+            }
+        )
+        missing_hint = (
+            "Missing required fields in the tool input schema."
+            if "Field required" in result_text
+            else "The tool input did not match schema requirements."
+        )
+        return (
+            f"Recent {tool_name} calls were invalid. {missing_hint} "
+            "Issue one valid call or re-ground by reading relevant files/context first."
+        )
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if "turn_index" not in event and isinstance(self._current_turn_index, int):
