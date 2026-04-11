@@ -33,6 +33,7 @@ class ShellEnvironment:
 class ShellCommandDecision:
     classification: str
     command: str
+    offending_token: str = ""
     offending_pattern: str = ""
     short_reason: str = ""
     suggested_equivalent: str = ""
@@ -42,6 +43,8 @@ class ShellCommandDecision:
             "classification": self.classification,
             "command": self.command,
         }
+        if self.offending_token:
+            payload["offending_token"] = self.offending_token
         if self.offending_pattern:
             payload["offending_pattern"] = self.offending_pattern
         if self.short_reason:
@@ -96,14 +99,34 @@ def classify_and_rewrite_command(command: str, shell_family: str) -> ShellComman
     raw = str(command or "").strip()
     if not raw:
         return ShellCommandDecision(classification="allowed", command=raw)
+    lowered = raw.lower()
 
     if shell_family == "cmd":
         if _has_bash_heredoc(raw):
             return ShellCommandDecision(
                 classification="blocked",
                 command=raw,
+                offending_token="<<",
                 offending_pattern="<<EOF",
                 short_reason="bash heredoc is not valid in cmd",
+            )
+        head_pipeline_match = re.search(r"\|\s*head(?:\s+-n?\s*\d+)?\b", raw, re.IGNORECASE)
+        if head_pipeline_match:
+            return ShellCommandDecision(
+                classification="blocked",
+                command=raw,
+                offending_token="head",
+                offending_pattern=head_pipeline_match.group(0).strip(),
+                short_reason="unix head pipeline is not valid in cmd",
+            )
+        embedded_head_match = re.search(r"(^|[;&()\n\t ])head(?:\s|$)", lowered)
+        if embedded_head_match and not re.match(r"^\s*head(?:\s|$)", lowered):
+            return ShellCommandDecision(
+                classification="blocked",
+                command=raw,
+                offending_token="head",
+                offending_pattern=" embedded head ",
+                short_reason="unix head token is not valid in cmd",
             )
         if re.search(r"\|\s*(ForEach-Object|Where-Object|Select-Object)\b", raw, re.IGNORECASE):
             return ShellCommandDecision(
@@ -151,7 +174,9 @@ def classify_and_rewrite_command(command: str, shell_family: str) -> ShellComman
 
 
 def _has_bash_heredoc(command: str) -> bool:
-    return bool(re.search(r"<<\s*'?EOF'?", command, re.IGNORECASE))
+    if "<<" in command:
+        return True
+    return bool(re.search(r"<<\s*'?\w+'?", command, re.IGNORECASE))
 
 
 def _rewrite_for_cmd(command: str) -> str:
@@ -168,6 +193,15 @@ def _rewrite_for_cmd(command: str) -> str:
         num = tail_match.group(1)
         file_part = tail_match.group(2).strip().strip('"').strip("'")
         return f'powershell -NoProfile -Command "Get-Content \'{file_part}\' -Tail {num}"'
+    head_n_match = re.match(r"^\s*head\s+-n\s+(\d+)\s+(.+)$", command)
+    if head_n_match:
+        num = head_n_match.group(1)
+        file_part = head_n_match.group(2).strip().strip('"').strip("'")
+        return f'powershell -NoProfile -Command "Get-Content \'{file_part}\' -TotalCount {num}"'
+    head_match = re.match(r"^\s*head\s+(.+)$", command)
+    if head_match:
+        file_part = head_match.group(1).strip().strip('"').strip("'")
+        return f'powershell -NoProfile -Command "Get-Content \'{file_part}\' -TotalCount 10"'
     return command
 
 

@@ -70,6 +70,20 @@ class _RunnerStub:
         self._retriever = _RetrieverStub()
 
 
+class _ContextGovernanceStub:
+    def load_inventory(self):
+        return SimpleNamespace(task_id="")
+
+    def register_item(self, *_args, **_kwargs) -> None:
+        return None
+
+    def prune_for_budget(self, _inventory) -> None:
+        return None
+
+    def save_inventory(self, _inventory) -> None:
+        return None
+
+
 def test_inject_retrieval_briefing_skips_tool_result_user_turn() -> None:
     runner = _RunnerStub()
     messages = [
@@ -101,6 +115,22 @@ def test_inject_retrieval_briefing_inserts_for_plain_text_user_turn() -> None:
     assert messages[0]["content"][0]["type"] == "text"
     assert "<retrieval-briefing>" in messages[0]["content"][0]["text"]
     assert messages[0]["content"][1] == {"type": "text", "text": "Need context on runtime."}
+
+
+def test_prepare_messages_for_model_injects_cmd_shell_reminder() -> None:
+    runner = SimpleNamespace(
+        small_model=False,
+        _context_budget=None,
+        _context_governance=_ContextGovernanceStub(),
+        _execution_plan=None,
+        _shell_environment={"shell_family": "cmd"},
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "check logs"}]}]
+
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+
+    assert prepared[-1]["content"][0]["type"] == "text"
+    assert prepared[-1]["content"][0]["text"].startswith("Shell: Windows cmd.")
 
 
 def test_validate_anthropic_tool_sequence_rejects_text_after_tool_result() -> None:
