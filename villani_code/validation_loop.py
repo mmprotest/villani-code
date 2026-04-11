@@ -10,6 +10,14 @@ from typing import Any
 from villani_code.planning import ActionClass, ChangeImpact, TaskMode, compact_failure_output
 from villani_code.project_memory import ValidationConfig, ValidationStep, load_repo_map, load_validation_config
 
+VALIDATION_STRENGTH_ORDER = {
+    "structural_only": 0,
+    "indirect_probe": 1,
+    "helper_wrapper": 2,
+    "direct_import_or_compile": 3,
+    "direct_run_or_task_validation": 4,
+}
+
 
 @dataclass(slots=True)
 class ValidationTarget:
@@ -164,6 +172,27 @@ def infer_targeted_command(step: ValidationStep, changed_files: list[str], repo_
     return f"python -m pytest -q {quoted}".strip()
 
 
+def classify_validation_step_strength(step: ValidationStep, *, changed_files: list[str] | None = None) -> str:
+    command = str(step.command or "").strip().lower()
+    if step.kind == "inspection" and command.startswith("git diff"):
+        return "structural_only"
+    if any(tok in command for tok in ("helper", "wrapper", "probe", "verify_", "smoke", "sanity")):
+        return "helper_wrapper"
+    if step.kind in {"build", "test"}:
+        return "direct_run_or_task_validation"
+    if step.kind in {"typecheck", "lint"} or any(tok in command for tok in ("py_compile", "compileall", " import ")):
+        return "direct_import_or_compile"
+    if step.kind == "inspection":
+        return "indirect_probe"
+    if changed_files and step.scope_hint == "targeted":
+        return "indirect_probe"
+    return "structural_only"
+
+
+def validation_step_strength_value(step: ValidationStep, *, changed_files: list[str] | None = None) -> int:
+    return VALIDATION_STRENGTH_ORDER.get(classify_validation_step_strength(step, changed_files=changed_files), 0)
+
+
 def _step_order(step: ValidationStep) -> tuple[int, int, str]:
     kind_order = {"format": 0, "lint": 1, "typecheck": 2, "test": 3, "build": 4, "inspection": 5}
     return (step.cost_level, kind_order.get(step.kind, 9), step.name)
@@ -189,7 +218,10 @@ def _impact_from_inputs(scope: ValidationScope, change_impact: str | None, actio
 
 def plan_validation(config: ValidationConfig, changed_files: list[str], repo_map: dict[str, Any] | None = None, change_impact: str | None = None, action_classes: list[str] | None = None, task_mode: str = TaskMode.GENERAL.value) -> ValidationPlan:
     scope = infer_validation_scope(changed_files)
-    enabled = sorted([s for s in config.steps if s.enabled], key=_step_order)
+    enabled = sorted(
+        [s for s in config.steps if s.enabled],
+        key=lambda step: (_step_order(step), -validation_step_strength_value(step, changed_files=changed_files)),
+    )
     impact = _impact_from_inputs(scope, change_impact, action_classes)
     targets = infer_validation_targets(changed_files, repo_map)
 
@@ -330,4 +362,8 @@ def run_validation(repo: Path, changed_files: list[str], event_callback: Any | N
 
 
 def select_validation_steps(config: ValidationConfig, changed_files: list[str]) -> list[ValidationStep]:
-    return [row.step for row in plan_validation(config, changed_files).selected_steps]
+    selected = [row.step for row in plan_validation(config, changed_files).selected_steps]
+    return sorted(
+        selected,
+        key=lambda step: (_step_order(step), -validation_step_strength_value(step, changed_files=changed_files)),
+    )

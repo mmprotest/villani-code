@@ -5,12 +5,14 @@ from pathlib import Path
 
 
 from villani_code.planning import PlanRiskLevel, generate_execution_plan
-from villani_code.project_memory import SessionState, init_project_memory, load_repo_map, load_validation_config
+from villani_code.project_memory import SessionState, ValidationStep, init_project_memory, load_repo_map, load_validation_config
 from villani_code.state import Runner
 from villani_code import state_runtime
 from villani_code.validation_loop import (
+    classify_validation_step_strength,
     infer_targeted_command,
     plan_validation,
+    select_validation_steps,
     summarize_validation_failure,
 )
 
@@ -114,6 +116,34 @@ def test_cost_aware_ordering_and_failure_summary(tmp_path: Path) -> None:
     failure = summarize_validation_failure("pytest", "\n".join([f"line {i}" for i in range(120)]), "")
     assert "pytest failed" == failure.headline
     assert len(failure.compact_output) < 1500
+
+
+def test_validation_step_strength_prefers_direct_over_helper() -> None:
+    direct = ValidationStep(
+        name="direct",
+        command="python service.py",
+        kind="test",
+        cost_level=2,
+        is_mutating=False,
+    )
+    helper = ValidationStep(
+        name="helper",
+        command="python helper_wrapper.py",
+        kind="inspection",
+        cost_level=2,
+        is_mutating=False,
+    )
+    assert classify_validation_step_strength(direct) == "direct_run_or_task_validation"
+    assert classify_validation_step_strength(helper) == "helper_wrapper"
+
+
+def test_select_validation_steps_keeps_stronger_steps_available(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    init_project_memory(tmp_path)
+    cfg = load_validation_config(tmp_path)
+    selected = select_validation_steps(cfg, ["villani_code/mod.py"])
+    kinds = [step.kind for step in selected]
+    assert "test" in kinds
 
 
 def test_dedicated_repair_executor_is_bounded(tmp_path: Path) -> None:

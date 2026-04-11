@@ -610,11 +610,43 @@ def _extract_command_python_target(command: str) -> str:
     return ""
 
 
+def _classify_validation_strength(command: str, *, primary_contract: dict[str, str] | None = None) -> str:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return "structural_only"
+    if lowered.startswith("git diff") or lowered.startswith("ls ") or lowered.startswith("find "):
+        return "structural_only"
+    if any(tok in lowered for tok in ("helper", "wrapper", "probe", "verify_", "smoke", "sanity")):
+        return "helper_wrapper"
+    target = _extract_command_python_target(command)
+    primary_target = str((primary_contract or {}).get("target", "")).strip()
+    if target and primary_target and target == primary_target:
+        return "direct_run_or_task_validation"
+    if "pytest" in lowered and primary_target and (primary_target in lowered or "tests/" in lowered):
+        return "direct_run_or_task_validation"
+    if any(tok in lowered for tok in ("py_compile", "compileall", " import ")):
+        return "direct_import_or_compile"
+    if any(tok in lowered for tok in ("pytest", "unittest", "python ", "python3 ", "uv run", "poetry run")):
+        return "indirect_probe"
+    return "structural_only"
+
+
+def _validation_strength_value(kind: str) -> int:
+    return _VALIDATION_STRENGTH_ORDER.get(str(kind), 0)
+
+
 def _primary_execution_target(runner: Any) -> str:
     return str(getattr(runner, "_primary_execution_target", "")).replace("\\", "/").lstrip("./")
 
 
 _TARGET_EVIDENCE_ORDER = {"none": 0, "write_only": 1, "indirect_validation": 2, "direct_validation": 3, "direct_run": 4}
+_VALIDATION_STRENGTH_ORDER = {
+    "structural_only": 0,
+    "indirect_probe": 1,
+    "helper_wrapper": 2,
+    "direct_import_or_compile": 3,
+    "direct_run_or_task_validation": 4,
+}
 
 
 def _normalize_contract_cwd(runner: Any, cwd: str | None) -> str:
@@ -1372,11 +1404,17 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         if stderr_lines:
             lines.append(f"key stderr:\n{stderr_lines}")
 
-    verification_artifacts = [
-        r.get("command", "")
-        for r in cmd_results
-        if int(r.get("exit", 1)) == 0 and not _command_has_masking_patterns(str(r.get("command", "")))
-    ]
+    primary_contract = _primary_execution_contract(runner)
+    verification_artifacts: list[str] = []
+    strongest_artifact_strength = "structural_only"
+    for result in cmd_results:
+        rendered = str(result.get("command", ""))
+        if int(result.get("exit", 1)) != 0 or _command_has_masking_patterns(rendered):
+            continue
+        strength = _classify_validation_strength(rendered, primary_contract=primary_contract)
+        if _validation_strength_value(strength) > _validation_strength_value(strongest_artifact_strength):
+            strongest_artifact_strength = strength
+        verification_artifacts.append(rendered)
     if verification_artifacts:
         live_targets = sorted(set(getattr(runner, "_current_verification_targets", set())) or set(attributed_intentional))
         refresh_live_validation_candidates(
@@ -1417,7 +1455,12 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         if fallback_target:
             active_solution_file = fallback_target
             runner._active_solution_file = fallback_target
-    evidence_kind = "direct_run" if direct_target else "indirect_validation"
+    evidence_kind = (
+        "direct_run"
+        if _validation_strength_value(strongest_artifact_strength)
+        >= _validation_strength_value("direct_run_or_task_validation")
+        else "indirect_validation"
+    )
     primary_target = _seed_primary_execution_target(runner, active_solution_file or direct_target, cwd=str(runner.repo), evidence=evidence_kind)
     validation_targets = set(validation_target_paths)
     active_cmd_results = [
@@ -1429,12 +1472,22 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             validation_targets,
         )
     ]
+    strong_primary_proof = False
     if active_cmd_results:
         latest = active_cmd_results[-1]
         exit_code = int(latest.get("exit", 0))
         stdout = str(latest.get("stdout", "") or "")
         stderr = str(latest.get("stderr", "") or "")
         has_failure = _has_hard_failure_signal(stdout, stderr, exit_code)
+        latest_strength = _classify_validation_strength(
+            str(latest.get("command", "")),
+            primary_contract=_primary_execution_contract(runner),
+        )
+        strong_primary_proof = (
+            not has_failure
+            and _validation_strength_value(latest_strength)
+            >= _validation_strength_value("direct_run_or_task_validation")
+        )
         if has_failure:
             runner._active_solution_last_validation_ok = False
             evidence_lines = [ln.strip() for ln in (stderr or stdout or f"exit={exit_code}").splitlines() if ln.strip()]
@@ -1442,9 +1495,13 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             runner._active_solution_last_validation_summary = summary_line
             verification.status = VerificationStatus.FAIL
         else:
-            runner._active_solution_last_validation_ok = True
-            runner._active_solution_last_validation_summary = "validation passed"
-            if primary_target and active_solution_file and primary_target == active_solution_file:
+            runner._active_solution_last_validation_ok = strong_primary_proof
+            runner._active_solution_last_validation_summary = (
+                "validation passed (direct)"
+                if strong_primary_proof
+                else "validation passed (weak evidence)"
+            )
+            if strong_primary_proof and primary_target and active_solution_file and primary_target == active_solution_file:
                 runner._primary_target_minimally_valid = True
                 _sync_recovery_state_to_mission(runner)
 
@@ -1521,6 +1578,15 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                     str(result.get("stderr", "") or ""),
                     int(result.get("exit", 0)),
                 )
+                for result in targeted_results
+            ) and all(
+                _validation_strength_value(
+                    _classify_validation_strength(
+                        str(result.get("command", "")),
+                        primary_contract=_primary_execution_contract(runner),
+                    )
+                )
+                >= _validation_strength_value("direct_run_or_task_validation")
                 for result in targeted_results
             )
         if validated_primary:
@@ -1609,7 +1675,10 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         for finding in verification.findings[:6]:
             lines.append(f"- {finding.category.value}: {finding.message}")
     lines.append("</verification>")
-    summary = f"status={verification.status.value}; confidence={verification.confidence_score}"
+    summary = (
+        f"status={verification.status.value}; confidence={verification.confidence_score}; "
+        f"strongest_validation={strongest_artifact_strength}"
+    )
     if verification.findings:
         summary += f"; findings={len(verification.findings)}"
     runner.event_callback(
@@ -1964,6 +2033,17 @@ def refresh_live_validation_candidates(
         normalized.add(primary_target)
     combined = current | normalized
     runner._current_verification_targets = combined
-    live_suggestions = _suggest_live_validation_commands(combined, list(observed_commands or []))
+    observed = list(observed_commands or [])
+    contract = _primary_execution_contract(runner)
+    ordered_observed = sorted(
+        [cmd for cmd in observed if str(cmd).strip()],
+        key=lambda cmd: _validation_strength_value(_classify_validation_strength(str(cmd), primary_contract=contract)),
+        reverse=True,
+    )
+    live_suggestions = _suggest_live_validation_commands(combined, ordered_observed)
     if live_suggestions:
-        augment_validation_config_with_live_commands(runner.repo, live_suggestions)
+        augment_validation_config_with_live_commands(
+            runner.repo,
+            live_suggestions,
+            primary_target=contract.get("target", ""),
+        )
