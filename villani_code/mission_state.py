@@ -52,6 +52,9 @@ class MissionState:
     validation_failures: list[str] = field(default_factory=list)
     last_failed_command: str = ""
     last_failed_summary: str = ""
+    recovery_mode: bool = False
+    primary_execution_target: str = ""
+    primary_target_minimally_valid: bool = False
     last_checkpoint_id: str = ""
     last_transcript_path: str = ""
     compact_summary: str = ""
@@ -83,6 +86,9 @@ class MissionState:
             validation_failures=[str(v) for v in payload.get("validation_failures", [])],
             last_failed_command=str(payload.get("last_failed_command", "")),
             last_failed_summary=str(payload.get("last_failed_summary", "")),
+            recovery_mode=bool(payload.get("recovery_mode", False)),
+            primary_execution_target=str(payload.get("primary_execution_target", "")),
+            primary_target_minimally_valid=bool(payload.get("primary_target_minimally_valid", False)),
             last_checkpoint_id=str(payload.get("last_checkpoint_id", "")),
             last_transcript_path=str(payload.get("last_transcript_path", "")),
             compact_summary=str(payload.get("compact_summary", "")),

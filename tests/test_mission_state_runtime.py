@@ -34,6 +34,9 @@ def test_mission_state_roundtrip(tmp_path: Path) -> None:
         mode="execution",
         repo_root=str(tmp_path),
         status="active",
+        recovery_mode=True,
+        primary_execution_target="app.py",
+        primary_target_minimally_valid=False,
         verified_facts=[VerifiedFact(kind="k", value="v", source="s")],
         open_hypotheses=[OpenHypothesis(hypothesis_id="h1", statement="maybe", confidence=0.4, status="open")],
     )
@@ -41,6 +44,8 @@ def test_mission_state_roundtrip(tmp_path: Path) -> None:
     loaded = load_mission_state(tmp_path, "m1")
     assert loaded.verified_facts[0].value == "v"
     assert loaded.open_hypotheses[0].hypothesis_id == "h1"
+    assert loaded.recovery_mode is True
+    assert loaded.primary_execution_target == "app.py"
 
 
 def test_mission_directory_and_current_pointer(tmp_path: Path) -> None:

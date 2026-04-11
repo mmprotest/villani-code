@@ -533,11 +533,14 @@ class Runner:
         self._failing_file = ""
         self._active_solution_file = ""
         self._primary_execution_target = ""
+        self._primary_target_minimally_valid = False
         self._active_solution_last_validation_ok: bool | None = None
         self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
         self._failing_command = ""
         self._file_was_read_since_failure = False
+        self._recovery_files_at_failure: set[str] = set()
+        self._recovery_created_artifacts: set[str] = set()
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -916,11 +919,14 @@ class Runner:
         self._failing_file = ""
         self._active_solution_file = ""
         self._primary_execution_target = ""
+        self._primary_target_minimally_valid = False
         self._active_solution_last_validation_ok = None
         self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
         self._failing_command = ""
         self._file_was_read_since_failure = False
+        self._recovery_files_at_failure = set()
+        self._recovery_created_artifacts = set()
         if self._first_attempt_write_lock_active:
             self.event_callback(
                 {
@@ -1588,6 +1594,9 @@ class Runner:
             if hasattr(self._mission_state, key):
                 setattr(self._mission_state, key, value)
         self._mission_state.intended_targets = sorted(self._intended_targets)
+        self._mission_state.recovery_mode = bool(getattr(self, "_recovery_mode", False))
+        self._mission_state.primary_execution_target = str(getattr(self, "_primary_execution_target", ""))
+        self._mission_state.primary_target_minimally_valid = bool(getattr(self, "_primary_target_minimally_valid", False))
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()
         save_mission_state(self.repo, self._mission_state)

@@ -344,6 +344,7 @@ def test_hard_failure_sets_recovery_mode_state(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._recovery_mode is True
+    assert runner._primary_target_minimally_valid is False
     assert runner._failing_file == "legal_review_app.py"
     assert runner._active_solution_file == "legal_review_app.py"
     assert runner._primary_execution_target == "legal_review_app.py"
@@ -432,6 +433,7 @@ def test_first_meaningful_validation_sets_primary_execution_target(tmp_path: Pat
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._primary_execution_target == "service.py"
+    assert runner._primary_target_minimally_valid is True
 
 
 def test_recovery_does_not_clear_until_primary_target_validates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -458,6 +460,29 @@ def test_recovery_does_not_clear_until_primary_target_validates(tmp_path: Path, 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._recovery_mode is True
+
+
+def test_mission_state_tracks_live_primary_target_and_recovery_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "service.py").write_text("print('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._ensure_mission("fix service")
+    runner._verification_baseline_changed = set()
+    runner._current_verification_targets = {"service.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["service.py"])
+
+    class FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = 'Traceback (most recent call last):\n  File "service.py", line 1\nRuntimeError: boom\n'
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda cmd, **kwargs: FailProc())
+    runner._run_verification("edit")
+
+    assert runner._mission_state is not None
+    assert runner._mission_state.primary_execution_target == "service.py"
+    assert runner._mission_state.recovery_mode is True
+    assert runner._mission_state.primary_target_minimally_valid is False
 
 
 def test_changed_validation_state_emits_new_compact_summary(
