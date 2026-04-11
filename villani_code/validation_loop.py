@@ -18,6 +18,9 @@ VALIDATION_STRENGTH_ORDER = {
     "direct_run_or_task_validation": 4,
 }
 
+LONG_LIVED_LAUNCH_OBSERVATION_SECONDS = 4.0
+FINITE_VALIDATION_TIMEOUT_SECONDS = 300.0
+
 
 @dataclass(slots=True)
 class ValidationTarget:
@@ -87,6 +90,8 @@ class ValidationStepResult:
     stdout: str
     stderr: str
     duration_seconds: float
+    run_shape: str = "finite_run"
+    observed_alive_after_window: bool = False
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -109,6 +114,34 @@ class ValidationResult:
     failure_summary: str = ""
     structured_failure: ValidationFailureSummary | None = None
     run_summary: ValidationRunSummary | None = None
+
+
+def _looks_like_process_launch_command(command: str) -> bool:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return False
+    if any(tok in lowered for tok in ("pytest", "unittest", "ruff", "mypy", "py_compile", "compileall", "lint", "test", "check", "verify")):
+        return False
+    return any(tok in lowered for tok in ("python ", "python3 ", "uv run", "poetry run", "node ", "npm run", "yarn ", "pnpm ", "cargo run", "go run"))
+
+
+def _execute_validation_command(command: str, repo: Path) -> tuple[int, str, str, str, bool]:
+    short_observation = _looks_like_process_launch_command(command)
+    timeout_seconds = LONG_LIVED_LAUNCH_OBSERVATION_SECONDS if short_observation else FINITE_VALIDATION_TIMEOUT_SECONDS
+    proc = subprocess.Popen(command, shell=True, cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        return int(proc.returncode or 0), stdout, stderr, "finite_run", False
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            stdout, stderr = proc.communicate(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        if short_observation:
+            return 124, stdout, stderr, "long_lived_launch", True
+        return 124, stdout, stderr, "finite_run", False
 
 
 def _normalize(files: list[str]) -> list[str]:
@@ -375,13 +408,39 @@ def run_validation(repo: Path, changed_files: list[str], event_callback: Any | N
         if event_callback:
             event_callback({"type": "validation_step_started", "name": step.name, "command": command, "reasons": planned_step.reasons})
         started = time.monotonic()
-        proc = subprocess.run(command, shell=True, cwd=repo, text=True, capture_output=True)
-        result = ValidationStepResult(step, command, proc.returncode, proc.stdout, proc.stderr, time.monotonic() - started, planned_step.reasons)
+        exit_code, stdout, stderr, run_shape, observed_alive = _execute_validation_command(command, repo)
+        result = ValidationStepResult(
+            step,
+            command,
+            exit_code,
+            stdout,
+            stderr,
+            time.monotonic() - started,
+            run_shape=run_shape,
+            observed_alive_after_window=observed_alive,
+            reasons=planned_step.reasons,
+        )
         results.append(result)
         if event_callback:
-            event_callback({"type": "validation_step_finished", "name": step.name, "exit_code": proc.returncode, "duration": result.duration_seconds})
-        if proc.returncode != 0:
-            failure = summarize_validation_failure(step.name, proc.stdout, proc.stderr)
+            event_callback({
+                "type": "validation_step_finished",
+                "name": step.name,
+                "exit_code": exit_code,
+                "duration": result.duration_seconds,
+                "run_shape": run_shape,
+                "observed_alive_after_window": observed_alive,
+            })
+        if result.run_shape == "long_lived_launch":
+            failure = summarize_validation_failure(
+                step.name,
+                result.stdout,
+                (result.stderr + "\n[long-lived-launch] command remained alive beyond bounded observation window").strip(),
+            )
+            if event_callback:
+                event_callback({"type": "validation_step_failed", "name": step.name, "summary": failure.concise_summary, "run_shape": result.run_shape})
+            return ValidationResult(False, plan, results, f"{failure.headline}\n{failure.compact_output}", failure, ValidationRunSummary(False, [s.step.name for s in results], False))
+        if exit_code != 0:
+            failure = summarize_validation_failure(step.name, stdout, stderr)
             if event_callback:
                 event_callback({"type": "validation_step_failed", "name": step.name, "summary": failure.concise_summary})
             return ValidationResult(False, plan, results, f"{failure.headline}\n{failure.compact_output}", failure, ValidationRunSummary(False, [s.step.name for s in results], False))
