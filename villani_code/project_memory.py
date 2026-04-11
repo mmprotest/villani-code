@@ -398,12 +398,19 @@ def load_repo_map(repo: Path) -> dict[str, Any]:
 
 def load_validation_config(repo: Path) -> ValidationConfig:
     path = repo / VILLANI_DIR / "validation.json"
-    if not path.exists():
+    if path.exists():
+        cfg = ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        if cfg.steps:
+            return cfg
+    repo_map, generated, _rules = scan_repo(repo)
+    if not repo_map.languages and not generated.steps:
         return ValidationConfig(steps=[])
-    return ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(generated.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return generated
 
 
-def augment_validation_config_with_live_commands(repo: Path, commands: list[str]) -> ValidationConfig:
+def augment_validation_config_with_live_commands(repo: Path, commands: list[str], *, primary_target: str = "") -> ValidationConfig:
     """Persist a small set of live-observed validation commands into validation.json.
 
     This keeps startup fallback configs (for example, only git diff) from remaining stale
@@ -419,12 +426,21 @@ def augment_validation_config_with_live_commands(repo: Path, commands: list[str]
         if command in existing_commands:
             continue
         lowered = command.lower()
-        if "pytest" in lowered:
+        if "pytest" in lowered and primary_target and primary_target in lowered:
+            kind = "test"
+            strategy = "primary_target"
+        elif "pytest" in lowered:
             kind = "test"
             strategy = "related_tests"
+        elif any(token in lowered for token in ("helper", "wrapper", "probe", "verify_", "smoke", "sanity")):
+            kind = "inspection"
+            strategy = "helper_wrapper"
         elif any(token in lowered for token in ("ruff", "mypy", "lint", "typecheck")):
             kind = "lint"
             strategy = "changed_files"
+        elif (lowered.startswith("python ") or lowered.startswith("python3 ")) and primary_target and primary_target in lowered:
+            kind = "test"
+            strategy = "primary_target"
         elif lowered.startswith("python ") or lowered.startswith("python3 "):
             kind = "inspection"
             strategy = "targeted"

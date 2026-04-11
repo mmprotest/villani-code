@@ -192,8 +192,10 @@ def test_model_context_packet_includes_compact_live_recovery_contract() -> None:
         _primary_execution_target_evidence="direct_validation",
         _recovery_mode=True,
         _failing_target_contract_summary="service.py @ services",
+        _failing_error_summary="NameError: x",
         _primary_target_minimally_valid=False,
         _recovery_target_switch_blocked=True,
+        _active_solution_last_validation_ok=False,
     )
     packet = build_model_context_packet(runner)
     rendered = render_model_context_packet(packet)
@@ -202,6 +204,8 @@ def test_model_context_packet_includes_compact_live_recovery_contract() -> None:
     assert "Recovery contract:" in rendered
     assert "target=service.py" in rendered
     assert "cwd=services" in rendered
+    assert "active_validation_ok=False" in rendered
+    assert "failure=NameError: x" in rendered
 
 
 def test_validate_anthropic_tool_sequence_rejects_text_after_tool_result() -> None:
@@ -455,10 +459,10 @@ def test_successful_rerun_clears_recovery_mode(tmp_path: Path, monkeypatch: pyte
     assert runner._primary_execution_target == "legal_review_app.py"
     assert runner._active_solution_last_validation_ok is False
     runner._run_verification("edit")
-    assert runner._recovery_mode is False
+    assert runner._recovery_mode is True
     assert runner._active_solution_file == "legal_review_app.py"
     assert runner._primary_execution_target == "legal_review_app.py"
-    assert runner._active_solution_last_validation_ok is True
+    assert runner._active_solution_last_validation_ok is False
 
 
 def test_helper_failure_does_not_switch_active_solution_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -504,7 +508,8 @@ def test_first_meaningful_validation_sets_primary_execution_target(tmp_path: Pat
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._primary_execution_target == "service.py"
-    assert runner._primary_target_minimally_valid is True
+    assert runner._primary_target_minimally_valid is False
+    assert runner._active_solution_last_validation_ok is False
 
 
 def test_single_file_write_seed_is_replaceable_by_stronger_direct_signal(tmp_path: Path) -> None:
@@ -555,6 +560,21 @@ def test_live_validation_candidates_refresh_after_material_changes(tmp_path: Pat
     assert any(step.command == "python new_script.py" for step in cfg.steps)
 
 
+def test_direct_live_validation_candidate_is_ranked_ahead_of_helper_wrapper(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._primary_execution_target = "service.py"
+    state_runtime.refresh_live_validation_candidates(
+        runner,
+        ["service.py"],
+        observed_commands=["python helper_wrapper.py", "python service.py"],
+    )
+    cfg = load_validation_config(tmp_path)
+    live_steps = [step for step in cfg.steps if step.name.startswith("live-")]
+    live_commands = [step.command for step in live_steps]
+    assert live_commands.index("python service.py") < live_commands.index("python helper_wrapper.py")
+
+
 def test_recovery_does_not_clear_until_primary_target_validates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
@@ -579,6 +599,53 @@ def test_recovery_does_not_clear_until_primary_target_validates(tmp_path: Path, 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._recovery_mode is True
+
+
+def test_recovery_requires_strong_primary_validation_to_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    (tmp_path / "helper_wrapper.py").write_text("print('helper')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._recovery_mode = True
+    runner._primary_execution_target = "web_app.py"
+    runner._active_solution_file = "web_app.py"
+    runner._current_verification_targets = {"web_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["web_app.py"])
+    original_verify = runner._verification_engine.verify
+
+    def force_pass(*args, **kwargs):
+        verified = original_verify(*args, **kwargs)
+        verified.status = state_runtime.VerificationStatus.PASS
+        return verified
+
+    monkeypatch.setattr(runner._verification_engine, "verify", force_pass)
+
+    class P:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        rendered = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        if rendered.startswith("git "):
+            return P()
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return P()
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._run_verification("edit")
+    assert runner._recovery_mode is True
+    assert runner._primary_target_minimally_valid is False
+
+    runner._current_verification_targets = {"web_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["tests/test_web_app.py"])
+    runner._run_verification("edit")
+    assert runner._active_solution_last_validation_ok is True
 
 
 def test_mission_state_tracks_live_primary_target_and_recovery_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

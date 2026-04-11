@@ -32,16 +32,19 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
     primary_target = str(getattr(runner, "_primary_execution_target", "")).replace("\\", "/").lstrip("./")
     recovery_block: dict[str, Any] | None = None
     if recovery_mode and primary_target:
+        failing_summary = str(getattr(runner, "_failing_error_summary", "") or "")
+        failing_target_summary = str(getattr(runner, "_failing_target_contract_summary", "") or "")
         recovery_block = {
             "primary_execution_target": primary_target,
             "primary_execution_cwd": str(getattr(runner, "_primary_execution_target_cwd", "") or "."),
             "primary_execution_evidence": str(getattr(runner, "_primary_execution_target_evidence", "none")),
             "recovery_mode": True,
-            "failing_target_summary": str(
-                getattr(runner, "_failing_target_contract_summary", "") or getattr(runner, "_failing_error_summary", "")
-            ),
+            "failing_target_summary": failing_target_summary,
+            "failing_error_summary": failing_summary,
             "primary_target_minimally_valid": bool(getattr(runner, "_primary_target_minimally_valid", False)),
             "switch_blocked": bool(getattr(runner, "_recovery_target_switch_blocked", False)),
+            "active_solution_last_validation_ok": getattr(runner, "_active_solution_last_validation_ok", None),
+            "needs_direct_validation": not bool(getattr(runner, "_primary_target_minimally_valid", False)),
         }
     return {
         "objective": getattr(mission, "objective", ""),
@@ -85,6 +88,7 @@ def render_model_context_packet(packet: dict[str, Any]) -> str:
         lines.extend(f"- {g}" for g in guidance[:6])
     recovery = packet.get("recovery", {})
     if isinstance(recovery, dict) and recovery:
+        failure_summary = str(recovery.get("failing_error_summary", "") or recovery.get("failing_target_summary", ""))
         lines.append(
             "Recovery contract: "
             f"target={recovery.get('primary_execution_target', '')}; "
@@ -93,6 +97,8 @@ def render_model_context_packet(packet: dict[str, Any]) -> str:
             f"mode={bool(recovery.get('recovery_mode', False))}; "
             f"min_valid={bool(recovery.get('primary_target_minimally_valid', False))}; "
             f"switch_blocked={bool(recovery.get('switch_blocked', False))}; "
-            f"failure={recovery.get('failing_target_summary', '')}"
+            f"active_validation_ok={recovery.get('active_solution_last_validation_ok', None)}; "
+            f"needs_direct_validation={bool(recovery.get('needs_direct_validation', True))}; "
+            f"failure={failure_summary}"
         )
     return "\n".join(lines)

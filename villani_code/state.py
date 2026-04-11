@@ -1025,6 +1025,16 @@ class Runner:
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
         ) -> dict[str, Any]:
+            def _evidence_guard_prefix() -> str:
+                primary_target = str(getattr(self, "_primary_execution_target", "")).strip()
+                primary_ok = bool(getattr(self, "_primary_target_minimally_valid", False))
+                if not primary_target or primary_ok:
+                    return ""
+                return (
+                    "[Execution status] Incomplete: primary execution target does not yet have clean direct validation. "
+                    "Treat results as partial until direct validation succeeds."
+                )
+
             elapsed = time.monotonic() - start
             intentional_changes, incidental_changes, all_changes = _change_summary()
             final_text = "\n".join(
@@ -1032,13 +1042,11 @@ class Runner:
                 for block in response.get("content", [])
                 if block.get("type") == "text"
             )
-            primary_target = str(getattr(self, "_primary_execution_target", "")).strip()
-            primary_ok = getattr(self, "_primary_target_minimally_valid", False)
-            if primary_target and not primary_ok:
-                final_text = (
-                    "[Execution status] Incomplete: primary execution target does not yet have clean direct validation.\n\n"
-                    + final_text
-                ).strip()
+            guard_prefix = _evidence_guard_prefix()
+            if guard_prefix:
+                final_text = f"{guard_prefix}\n\n{final_text}".strip()
+                response.setdefault("content", [])
+                response["content"].insert(0, {"type": "text", "text": guard_prefix})
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,
