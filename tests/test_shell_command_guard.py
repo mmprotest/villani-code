@@ -65,6 +65,13 @@ def test_cmd_classifier_scans_full_command_string(tmp_path: Path) -> None:
     assert decision.classification == "blocked"
 
 
+def test_cmd_embedded_tail_or_wc_fragments_are_blocked(tmp_path: Path) -> None:
+    tail_decision = classify_and_rewrite_command("echo ok && type app.log | tail -20", "cmd")
+    wc_decision = classify_and_rewrite_command("echo ok && type app.log | wc -l", "cmd")
+    assert tail_decision.classification == "blocked"
+    assert wc_decision.classification == "blocked"
+
+
 def test_powershell_grep_rewrites_to_select_string(tmp_path: Path) -> None:
     decision = classify_and_rewrite_command("grep hello notes.txt", "powershell")
     assert decision.classification == "needs_rewrite"
@@ -98,6 +105,11 @@ def test_cmd_invalid_detached_launch_pattern_is_blocked() -> None:
     assert decision.classification == "blocked"
     assert decision.offending_pattern
     assert "detached" in decision.short_reason
+
+
+def test_cmd_ampersand_detached_assumption_is_blocked() -> None:
+    decision = classify_and_rewrite_command("python app.py & dir", "cmd")
+    assert decision.classification == "blocked"
 
 
 def test_cmd_invalid_detached_launch_feedback_is_compact_structured(tmp_path: Path) -> None:

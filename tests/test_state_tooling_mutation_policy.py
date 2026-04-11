@@ -216,7 +216,10 @@ def test_recovery_mode_blocks_new_validation_artifact_entrypoint_launch(tmp_path
     )
     assert result["is_error"] is True
     assert '"classification": "blocked"' in str(result["content"])
-    assert '"short_reason": "recovery_target_switch_blocked"' in str(result["content"])
+    assert (
+        '"short_reason": "recovery_target_switch_blocked"' in str(result["content"])
+        or '"short_reason": "recovery_new_wrapper_target_blocked"' in str(result["content"])
+    )
     assert '"primary_execution_target": "web_app.py"' in str(result["content"])
     assert '"attempted_target": "web_server.py"' in str(result["content"])
 
@@ -236,6 +239,46 @@ def test_recovery_mode_allows_rerun_of_same_primary_target(tmp_path: Path) -> No
         0,
     )
     assert result["is_error"] is False
+
+
+def test_recovery_e2e_blocks_drift_after_scaffold_then_real_target_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    scaffold = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "app/__init__.py", "content": ""},
+        "s1",
+        0,
+    )
+    assert scaffold["is_error"] is False
+    assert runner._primary_execution_target == ""
+
+    (tmp_path / "service.py").write_text("def broken(:\n  pass\n", encoding="utf-8")
+    runner._primary_execution_target = "service.py"
+    runner._primary_execution_target_cwd = "."
+    runner._primary_execution_target_evidence = "direct_run"
+    failed = execute_tool_with_lifecycle(
+        runner=runner,
+        tool_name="Bash",
+        tool_input={"command": "python service.py", "timeout_sec": 30},
+        tool_use_id="b1",
+        turn_index=0,
+    )
+    assert failed["is_error"] is False
+    assert runner._recovery_mode is True
+
+    blocked = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python helper.py", "timeout_sec": 30},
+        "b2",
+        1,
+    )
+    assert blocked["is_error"] is True
+    assert (
+        "recovery_target_switch_blocked" in str(blocked["content"])
+        or "recovery_new_wrapper_target_blocked" in str(blocked["content"])
+    )
 
 
 def test_bash_hard_failure_on_primary_sets_live_recovery_state(tmp_path: Path) -> None:

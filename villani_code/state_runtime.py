@@ -546,10 +546,10 @@ def _recovery_blocked_feedback(reason: str, tool: str, path: str, detail: str = 
     return json.dumps(payload, sort_keys=True)
 
 
-def _recovery_target_switch_blocked_feedback(primary_target: str, attempted_target: str) -> str:
+def _recovery_target_switch_blocked_feedback(primary_target: str, attempted_target: str, *, reason: str = "recovery_target_switch_blocked") -> str:
     payload = {
         "classification": "blocked",
-        "short_reason": "recovery_target_switch_blocked",
+        "short_reason": reason,
         "primary_execution_target": primary_target,
         "attempted_target": attempted_target,
         "recovery_blocked": True,
@@ -608,12 +608,48 @@ def _primary_execution_target(runner: Any) -> str:
     return str(getattr(runner, "_primary_execution_target", "")).replace("\\", "/").lstrip("./")
 
 
+_TARGET_EVIDENCE_ORDER = {"none": 0, "write_only": 1, "indirect_validation": 2, "direct_validation": 3, "direct_run": 4}
+
+
+def _normalize_contract_cwd(runner: Any, cwd: str | None) -> str:
+    raw = str(cwd or "").strip()
+    if not raw:
+        return "."
+    try:
+        repo_root = Path(getattr(runner, "repo", ".")).resolve()
+        resolved = Path(raw).resolve()
+        return str(resolved.relative_to(repo_root)).replace("\\", "/").lstrip("./") or "."
+    except Exception:
+        return _normalize_repo_path(raw) or "."
+
+
+def _target_contract(runner: Any, target: str, cwd: str | None = None) -> dict[str, str]:
+    return {"target": _normalize_repo_path(target), "cwd": _normalize_contract_cwd(runner, cwd)}
+
+
+def _primary_execution_contract(runner: Any) -> dict[str, str]:
+    return {
+        "target": _primary_execution_target(runner),
+        "cwd": _normalize_contract_cwd(runner, str(getattr(runner, "_primary_execution_target_cwd", "") or ".")),
+    }
+
+
+def _same_target_contract(a: dict[str, str], b: dict[str, str]) -> bool:
+    return str(a.get("target", "")) == str(b.get("target", "")) and str(a.get("cwd", ".")) == str(b.get("cwd", "."))
+
+
+def _target_contract_summary(contract: dict[str, str]) -> str:
+    return f"{contract.get('target', '') or 'none'} @ {contract.get('cwd', '.') or '.'}"
+
+
 def _sync_recovery_state_to_mission(runner: Any) -> None:
     mission_state = getattr(runner, "_mission_state", None)
     if mission_state is None:
         return
     mission_state.recovery_mode = bool(getattr(runner, "_recovery_mode", False))
     mission_state.primary_execution_target = _primary_execution_target(runner)
+    mission_state.primary_execution_cwd = str(getattr(runner, "_primary_execution_target_cwd", "") or ".")
+    mission_state.primary_execution_evidence = str(getattr(runner, "_primary_execution_target_evidence", "none"))
     mission_state.primary_target_minimally_valid = bool(getattr(runner, "_primary_target_minimally_valid", False))
     save_mission_state(runner.repo, mission_state)
 
@@ -630,14 +666,23 @@ def _snapshot_repo_files(repo: Path) -> set[str]:
     return collected
 
 
-def _seed_primary_execution_target(runner: Any, target: str) -> str:
-    normalized = _normalize_repo_path(target)
+def _seed_primary_execution_target(runner: Any, target: str, *, cwd: str | None = None, evidence: str = "write_only") -> str:
+    contract = _target_contract(runner, target, cwd)
+    normalized = contract["target"]
     if not normalized:
         return _primary_execution_target(runner)
-    current = _primary_execution_target(runner)
-    if current:
-        return current
+    current = _primary_execution_contract(runner)
+    current_evidence = str(getattr(runner, "_primary_execution_target_evidence", "none"))
+    current_strength = _TARGET_EVIDENCE_ORDER.get(current_evidence, 0)
+    incoming_strength = _TARGET_EVIDENCE_ORDER.get(str(evidence or "none"), 0)
+    if current["target"]:
+        if incoming_strength < current_strength:
+            return current["target"]
+        if incoming_strength == current_strength and not _same_target_contract(current, contract):
+            return current["target"]
     runner._primary_execution_target = normalized
+    runner._primary_execution_target_cwd = contract["cwd"]
+    runner._primary_execution_target_evidence = str(evidence or "none")
     runner._primary_target_minimally_valid = bool(getattr(runner, "_active_solution_last_validation_ok", False))
     _sync_recovery_state_to_mission(runner)
     return normalized
@@ -687,7 +732,7 @@ def _command_targets_active_solution(command: str, active_solution_file: str, va
     cmd = str(command or "")
     if active in cmd:
         return True
-    return active in normalized_targets
+    return len(normalized_targets) == 1 and active in normalized_targets
 
 
 def _has_hard_failure_signal(stdout: str, stderr: str, exit_code: int) -> bool:
@@ -709,10 +754,11 @@ def activate_live_recovery_on_primary_failure(
     stdout: str,
     stderr: str,
     attempted_target: str = "",
+    attempted_cwd: str | None = None,
 ) -> bool:
-    normalized_target = _normalize_repo_path(attempted_target)
-    primary_target = _seed_primary_execution_target(runner, normalized_target) if normalized_target else _primary_execution_target(runner)
-    if not normalized_target or not primary_target or normalized_target != primary_target:
+    attempted_contract = _target_contract(runner, attempted_target, attempted_cwd)
+    primary_contract = _primary_execution_contract(runner)
+    if not attempted_contract["target"] or not primary_contract["target"] or not _same_target_contract(attempted_contract, primary_contract):
         return False
     if not _is_validation_or_launch_command(command):
         return False
@@ -723,27 +769,30 @@ def activate_live_recovery_on_primary_failure(
     if not summary:
         summary = (stderr or stdout or f"Command failed with exit {exit_code}").splitlines()[0][:220]
     traceback_file = _normalize_repo_path(str(evidence.get("traceback_file", "")).strip())
-    if traceback_file and (traceback_file == primary_target or traceback_file.endswith(f"/{primary_target}")):
-        failing_file = primary_target
+    if traceback_file and (traceback_file == primary_contract["target"] or traceback_file.endswith(f"/{primary_contract['target']}")):
+        failing_file = primary_contract["target"]
     else:
-        failing_file = primary_target
+        failing_file = primary_contract["target"]
     runner._recovery_mode = True
+    runner._recovery_target_switch_blocked = False
     runner._primary_target_minimally_valid = False
     runner._failing_file = failing_file
+    runner._failing_target_contract_summary = _target_contract_summary(primary_contract)
     runner._failing_error_summary = summary[:220]
     runner._failing_command = str(command or "")[:200]
     runner._file_was_read_since_failure = False
     runner._recovery_files_at_failure = _snapshot_repo_files(runner.repo)
     runner._recovery_created_artifacts = set()
-    runner._active_solution_file = primary_target
+    runner._active_solution_file = primary_contract["target"]
     runner._active_solution_last_validation_ok = False
     runner._active_solution_last_validation_summary = summary[:220]
     runner.event_callback(
         {
             "type": "recovery_mode_activated",
             "failing_file": failing_file,
-            "active_solution_file": primary_target,
-            "primary_execution_target": primary_target,
+            "active_solution_file": primary_contract["target"],
+            "primary_execution_target": primary_contract["target"],
+            "primary_execution_cwd": primary_contract["cwd"],
             "failing_error_summary": summary[:220],
             "failing_command": runner._failing_command,
         }
@@ -813,27 +862,31 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
         if _is_validation_or_launch_command(command) and _command_has_masking_patterns(command):
             return _recovery_blocked_feedback("suspicious_validation_command", tool_name, "", "masked failure patterns detected")
         target = _extract_command_python_target(command)
+        attempted_contract = _target_contract(runner, target, tool_input.get("cwd"))
         active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
-        primary_target = _primary_execution_target(runner)
+        primary_contract = _primary_execution_contract(runner)
+        primary_target = primary_contract["target"]
         if _is_validation_or_launch_command(command) and target and not active_solution_file:
             runner._active_solution_file = target
         if _is_validation_or_launch_command(command) and target:
-            _seed_primary_execution_target(runner, target)
+            _seed_primary_execution_target(runner, target, cwd=tool_input.get("cwd"), evidence="direct_run")
         if (
             bool(getattr(runner, "_recovery_mode", False))
             and _is_validation_or_launch_command(command)
             and target
             and primary_target
-            and target != primary_target
+            and not _same_target_contract(attempted_contract, primary_contract)
             and not bool(getattr(runner, "_primary_target_minimally_valid", False))
         ):
+            runner._recovery_target_switch_blocked = True
             recovery_created_artifacts = set(getattr(runner, "_recovery_created_artifacts", set()))
             recovery_files_at_failure = set(getattr(runner, "_recovery_files_at_failure", set()))
             confidently_new_target = target in recovery_created_artifacts or (
                 bool(recovery_files_at_failure) and target not in recovery_files_at_failure
             )
             if confidently_new_target:
-                return _recovery_target_switch_blocked_feedback(primary_target, target)
+                return _recovery_target_switch_blocked_feedback(primary_target, target, reason="recovery_new_wrapper_target_blocked")
+            return _recovery_target_switch_blocked_feedback(primary_target, target)
 
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:
@@ -1254,6 +1307,8 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
 
     touched_tests = [p for p in attributed_intentional if p.startswith("tests/") and p.endswith(".py")]
     touched_sources = [p for p in attributed_intentional if p.endswith(".py") and not p.startswith("tests/")]
+    if attributed_intentional:
+        refresh_live_validation_candidates(runner, attributed_intentional)
     task_mode = getattr(runner, "_task_mode", TaskMode.GENERAL)
     if touched_tests:
         commands.append(["pytest", "-q", *touched_tests])
@@ -1288,16 +1343,6 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         if stderr_lines:
             lines.append(f"key stderr:\n{stderr_lines}")
 
-    if not str(getattr(runner, "_active_solution_file", "")).strip():
-        seed_active = (
-            _single_clear_file(sorted(runner._current_verification_targets))
-            or _single_clear_file(attributed_intentional)
-        )
-        if seed_active:
-            runner._active_solution_file = seed_active
-    if str(getattr(runner, "_active_solution_file", "")).strip():
-        _seed_primary_execution_target(runner, str(getattr(runner, "_active_solution_file", "")))
-
     verification_artifacts = [
         r.get("command", "")
         for r in cmd_results
@@ -1319,14 +1364,25 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         before_contents=dict(runner._current_verification_before_contents),
     )
     active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
-    if not active_solution_file:
-        for result in cmd_results:
-            seeded_target = _extract_command_python_target(str(result.get("command", "")))
-            if seeded_target:
-                runner._active_solution_file = seeded_target
-                active_solution_file = seeded_target
-                break
-    primary_target = _seed_primary_execution_target(runner, active_solution_file)
+    direct_target = ""
+    for result in cmd_results:
+        rendered_command = str(result.get("command", ""))
+        if not _is_validation_or_launch_command(rendered_command):
+            continue
+        seeded_target = _extract_command_python_target(rendered_command)
+        if seeded_target:
+            direct_target = seeded_target
+            break
+    if direct_target and not active_solution_file:
+        runner._active_solution_file = direct_target
+        active_solution_file = direct_target
+    if not active_solution_file and not direct_target:
+        fallback_target = _single_clear_file(validation_target_paths)
+        if fallback_target:
+            active_solution_file = fallback_target
+            runner._active_solution_file = fallback_target
+    evidence_kind = "direct_run" if direct_target else "indirect_validation"
+    primary_target = _seed_primary_execution_target(runner, active_solution_file or direct_target, cwd=str(runner.repo), evidence=evidence_kind)
     validation_targets = set(validation_target_paths)
     active_cmd_results = [
         result
@@ -1371,10 +1427,14 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         elif not active_solution_file and failing_file:
             runner._active_solution_file = failing_file
             active_solution_file = failing_file
-        primary_target = _seed_primary_execution_target(runner, active_solution_file or failing_file)
+        primary_target = _seed_primary_execution_target(
+            runner, active_solution_file or failing_file, cwd=str(runner.repo), evidence="direct_validation"
+        )
         runner._recovery_mode = True
+        runner._recovery_target_switch_blocked = False
         runner._primary_target_minimally_valid = False
         runner._failing_file = failing_file
+        runner._failing_target_contract_summary = _target_contract_summary(_primary_execution_contract(runner))
         runner._failing_error_summary = summary
         runner._failing_command = hard_failure.get("failing_command", "")
         runner._file_was_read_since_failure = False
@@ -1400,6 +1460,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "failing_file": failing_file,
                 "active_solution_file": str(getattr(runner, "_active_solution_file", "")),
                 "primary_execution_target": primary_target,
+                "primary_execution_cwd": str(getattr(runner, "_primary_execution_target_cwd", "") or "."),
                 "failing_error_summary": summary,
                 "failing_command": runner._failing_command,
             }
@@ -1429,7 +1490,9 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         if validated_primary:
             runner._primary_target_minimally_valid = True
             runner._recovery_mode = False
+            runner._recovery_target_switch_blocked = False
             runner._failing_file = ""
+            runner._failing_target_contract_summary = ""
             runner._failing_error_summary = ""
             runner._failing_command = ""
             runner._file_was_read_since_failure = False
@@ -1844,3 +1907,18 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
         save_mission_state(runner.repo, runner._mission_state)
     return outcome.message
+
+
+def refresh_live_validation_candidates(runner: Any, changed_or_created_targets: list[str]) -> None:
+    normalized = {
+        _normalize_repo_path(path)
+        for path in changed_or_created_targets
+        if _normalize_repo_path(path)
+    }
+    if not normalized:
+        return
+    current = set(getattr(runner, "_current_verification_targets", set()))
+    primary_target = _primary_execution_target(runner)
+    if primary_target:
+        normalized.add(primary_target)
+    runner._current_verification_targets = current | normalized

@@ -28,6 +28,16 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
         constraints.append(f"Success predicate: {contract.get('success_predicate', '')}")
         constraints.extend([f"No-go: {p}" for p in contract.get("no_go_paths", [])[:4]])
     skill_guidance = [getattr(skill, "guidance", "") for skill in getattr(runner, "skills", []) if getattr(skill, "guidance", "")]
+    recovery_block = {
+        "primary_target_contract": {
+            "target": str(getattr(runner, "_primary_execution_target", "")),
+            "cwd": str(getattr(runner, "_primary_execution_target_cwd", "") or "."),
+        },
+        "recovery_mode": bool(getattr(runner, "_recovery_mode", False)),
+        "failing_target_summary": str(getattr(runner, "_failing_target_contract_summary", "") or getattr(runner, "_failing_error_summary", "")),
+        "primary_target_minimally_valid": bool(getattr(runner, "_primary_target_minimally_valid", False)),
+        "switch_blocked": bool(getattr(runner, "_recovery_target_switch_blocked", False)),
+    }
     return {
         "objective": getattr(mission, "objective", ""),
         "runtime_mode": getattr(mission, "mode", getattr(runner, "_runtime_mode", "execution")),
@@ -43,6 +53,7 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
         "constraints": constraints,
         "repo_root": str(getattr(runner, "repo", "")),
         "skill_guidance": [s for s in skill_guidance if s][:8],
+        "recovery": recovery_block,
     }
 
 
@@ -67,4 +78,15 @@ def render_model_context_packet(packet: dict[str, Any]) -> str:
     if guidance:
         lines.append("Skill guidance:")
         lines.extend(f"- {g}" for g in guidance[:6])
+    recovery = packet.get("recovery", {})
+    if isinstance(recovery, dict):
+        contract = recovery.get("primary_target_contract", {})
+        lines.append(
+            "Recovery: "
+            f"mode={bool(recovery.get('recovery_mode', False))}; "
+            f"primary={contract.get('target', '')}@{contract.get('cwd', '.')}; "
+            f"min_valid={bool(recovery.get('primary_target_minimally_valid', False))}; "
+            f"switch_blocked={bool(recovery.get('switch_blocked', False))}; "
+            f"failure={recovery.get('failing_target_summary', '')}"
+        )
     return "\n".join(lines)

@@ -7,6 +7,7 @@ import pytest
 
 from villani_code.state import Runner
 from villani_code import state_runtime
+from villani_code.context_projection import build_model_context_packet
 
 
 class DummyClient:
@@ -131,6 +132,37 @@ def test_prepare_messages_for_model_injects_cmd_shell_reminder() -> None:
 
     assert prepared[-1]["content"][0]["type"] == "text"
     assert prepared[-1]["content"][0]["text"].startswith("Shell: Windows cmd.")
+
+
+def test_model_context_packet_includes_recovery_block() -> None:
+    runner = SimpleNamespace(
+        _mission_state=SimpleNamespace(
+            objective="o",
+            mode="execution",
+            current_step_id="",
+            plan_summary="",
+            verified_facts=[],
+            open_hypotheses=[],
+            intended_targets=[],
+            changed_files=[],
+            last_failed_command="",
+            validation_failures=[],
+            compact_summary="",
+        ),
+        _task_contract={},
+        skills=[],
+        repo=Path("."),
+        _runtime_mode="execution",
+        _primary_execution_target="service.py",
+        _primary_execution_target_cwd=".",
+        _recovery_mode=True,
+        _failing_target_contract_summary="service.py @ .",
+        _primary_target_minimally_valid=False,
+        _recovery_target_switch_blocked=True,
+    )
+    packet = build_model_context_packet(runner)
+    assert packet["recovery"]["recovery_mode"] is True
+    assert packet["recovery"]["primary_target_contract"]["target"] == "service.py"
 
 
 def test_validate_anthropic_tool_sequence_rejects_text_after_tool_result() -> None:
@@ -434,6 +466,48 @@ def test_first_meaningful_validation_sets_primary_execution_target(tmp_path: Pat
     runner._run_verification("edit")
     assert runner._primary_execution_target == "service.py"
     assert runner._primary_target_minimally_valid is True
+
+
+def test_single_file_write_seed_is_replaceable_by_stronger_direct_signal(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    state_runtime._seed_primary_execution_target(runner, "__init__.py", cwd=str(tmp_path), evidence="write_only")
+    state_runtime._seed_primary_execution_target(runner, "service.py", cwd=str(tmp_path), evidence="direct_run")
+    assert runner._primary_execution_target == "service.py"
+    assert runner._primary_execution_target_evidence == "direct_run"
+
+
+def test_primary_target_contract_distinguishes_same_file_different_cwd(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    state_runtime._seed_primary_execution_target(runner, "service.py", cwd=str(tmp_path / "a"), evidence="direct_validation")
+    state_runtime._seed_primary_execution_target(runner, "service.py", cwd=str(tmp_path / "b"), evidence="direct_validation")
+    assert runner._primary_execution_target == "service.py"
+    assert runner._primary_execution_target_cwd == "a"
+
+
+def test_hard_failure_activation_requires_same_primary_contract(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    state_runtime._seed_primary_execution_target(runner, "service.py", cwd=str(tmp_path / "svc"), evidence="direct_run")
+    armed = state_runtime.activate_live_recovery_on_primary_failure(
+        runner,
+        command="python service.py",
+        exit_code=1,
+        stdout="",
+        stderr="Traceback (most recent call last):\n  File \"service.py\", line 1\nNameError: x\n",
+        attempted_target="service.py",
+        attempted_cwd=str(tmp_path / "other"),
+    )
+    assert armed is False
+
+
+def test_live_validation_candidates_refresh_after_material_changes(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._current_verification_targets = {"old.py"}
+    state_runtime.refresh_live_validation_candidates(runner, ["new_script.py"])
+    assert runner._current_verification_targets == {"old.py", "new_script.py"}
 
 
 def test_recovery_does_not_clear_until_primary_target_validates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
