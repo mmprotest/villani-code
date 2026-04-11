@@ -196,6 +196,7 @@ def test_recovery_mode_blocks_parallel_entrypoint_launch(tmp_path: Path) -> None
     (tmp_path / "web_server.py").write_text("print('x')\n", encoding="utf-8")
     runner._recovery_mode = True
     runner._active_solution_file = "web_app.py"
+    runner._primary_execution_target = "web_app.py"
 
     result = execute_tool_with_policy(
         runner,
@@ -206,6 +207,24 @@ def test_recovery_mode_blocks_parallel_entrypoint_launch(tmp_path: Path) -> None
     )
     assert result["is_error"] is True
     assert "recovery_entrypoint_switch_blocked" in str(result["content"])
+    assert "primary_execution_target=web_app.py" in str(result["content"])
+
+
+def test_recovery_mode_allows_rerun_of_same_primary_target(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._primary_execution_target = "web_app.py"
+    runner._active_solution_file = "web_app.py"
+
+    result = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python web_app.py", "timeout_sec": 30},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
 
 
 def test_recovery_mode_allows_helper_file_edit_with_active_solution(tmp_path: Path) -> None:

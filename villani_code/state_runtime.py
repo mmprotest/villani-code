@@ -593,6 +593,21 @@ def _extract_command_python_target(command: str) -> str:
     return ""
 
 
+def _primary_execution_target(runner: Any) -> str:
+    return str(getattr(runner, "_primary_execution_target", "")).replace("\\", "/").lstrip("./")
+
+
+def _seed_primary_execution_target(runner: Any, target: str) -> str:
+    normalized = _normalize_repo_path(target)
+    if not normalized:
+        return _primary_execution_target(runner)
+    current = _primary_execution_target(runner)
+    if current:
+        return current
+    runner._primary_execution_target = normalized
+    return normalized
+
+
 def _detect_hard_failure(cmd_results: list[dict[str, Any]]) -> dict[str, str] | None:
     for result in cmd_results:
         command = str(result.get("command", "")).strip()
@@ -713,20 +728,23 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             return _recovery_blocked_feedback("suspicious_validation_command", tool_name, "", "masked failure patterns detected")
         target = _extract_command_python_target(command)
         active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
+        primary_target = _primary_execution_target(runner)
         if _is_validation_or_launch_command(command) and target and not active_solution_file:
             runner._active_solution_file = target
+        if _is_validation_or_launch_command(command) and target:
+            _seed_primary_execution_target(runner, target)
         if (
             bool(getattr(runner, "_recovery_mode", False))
             and _is_validation_or_launch_command(command)
             and target
-            and active_solution_file
-            and target != active_solution_file
+            and primary_target
+            and target != primary_target
         ):
             return _recovery_blocked_feedback(
                 "recovery_entrypoint_switch_blocked",
                 tool_name,
                 target,
-                f"active_solution_file={active_solution_file}",
+                f"primary_execution_target={primary_target}",
             )
 
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
@@ -1189,6 +1207,8 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         )
         if seed_active:
             runner._active_solution_file = seed_active
+    if str(getattr(runner, "_active_solution_file", "")).strip():
+        _seed_primary_execution_target(runner, str(getattr(runner, "_active_solution_file", "")))
 
     verification_artifacts = [
         r.get("command", "")
@@ -1218,6 +1238,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 runner._active_solution_file = seeded_target
                 active_solution_file = seeded_target
                 break
+    primary_target = _seed_primary_execution_target(runner, active_solution_file)
     validation_targets = set(validation_target_paths)
     active_cmd_results = [
         result
@@ -1259,6 +1280,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         elif not active_solution_file and failing_file:
             runner._active_solution_file = failing_file
             active_solution_file = failing_file
+        primary_target = _seed_primary_execution_target(runner, active_solution_file or failing_file)
         runner._recovery_mode = True
         runner._failing_file = failing_file
         runner._failing_error_summary = summary
@@ -1283,17 +1305,30 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "type": "recovery_mode_activated",
                 "failing_file": failing_file,
                 "active_solution_file": str(getattr(runner, "_active_solution_file", "")),
+                "primary_execution_target": primary_target,
                 "failing_error_summary": summary,
                 "failing_command": runner._failing_command,
             }
         )
     elif bool(getattr(runner, "_recovery_mode", False)) and verification.status in {VerificationStatus.PASS, VerificationStatus.REPAIRED}:
-        runner._recovery_mode = False
-        runner._failing_file = ""
-        runner._failing_error_summary = ""
-        runner._failing_command = ""
-        runner._file_was_read_since_failure = False
-        runner.event_callback({"type": "recovery_mode_cleared"})
+        primary_target = _primary_execution_target(runner)
+        validated_primary = False
+        if primary_target:
+            validated_primary = any(
+                _command_targets_active_solution(
+                    str(result.get("command", "")),
+                    primary_target,
+                    validation_targets,
+                )
+                for result in cmd_results
+            )
+        if not primary_target or validated_primary:
+            runner._recovery_mode = False
+            runner._failing_file = ""
+            runner._failing_error_summary = ""
+            runner._failing_command = ""
+            runner._file_was_read_since_failure = False
+            runner.event_callback({"type": "recovery_mode_cleared"})
     finding_fingerprints = sorted(
         "|".join(
             [

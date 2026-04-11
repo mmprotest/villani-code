@@ -532,6 +532,7 @@ class Runner:
         self._recovery_mode = False
         self._failing_file = ""
         self._active_solution_file = ""
+        self._primary_execution_target = ""
         self._active_solution_last_validation_ok: bool | None = None
         self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
@@ -914,6 +915,7 @@ class Runner:
         self._recovery_mode = False
         self._failing_file = ""
         self._active_solution_file = ""
+        self._primary_execution_target = ""
         self._active_solution_last_validation_ok = None
         self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
@@ -1065,7 +1067,9 @@ class Runner:
             completed: bool = False, model_idle: bool = False
         ) -> str | None:
             if completed:
-                active_solution_file = str(getattr(self, "_active_solution_file", "")).strip()
+                active_solution_file = str(
+                    getattr(self, "_primary_execution_target", "") or getattr(self, "_active_solution_file", "")
+                ).strip()
                 active_validation_ok = getattr(self, "_active_solution_last_validation_ok", None)
                 if active_solution_file and active_validation_ok is not True:
                     return "active_solution_validation_missing" if active_validation_ok is None else "active_solution_validation_failed"
