@@ -485,10 +485,10 @@ def execute_tool_with_policy(
             if not any(command.startswith(prefix) for prefix in readonly_prefixes):
                 return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
+    policy_error = runner._small_model_tool_guard(tool_name, tool_input)
+    if policy_error:
+        return {"content": policy_error, "is_error": True}
     if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
-        policy_error = runner._small_model_tool_guard(tool_name, tool_input)
-        if policy_error:
-            return {"content": policy_error, "is_error": True}
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
     if tool_name in {"Write", "Patch"}:
@@ -679,4 +679,12 @@ def execute_tool_with_lifecycle(
             **({"forced": True} if forced else {}),
         }
     )
+    if (
+        tool_name == "Read"
+        and not result.get("is_error")
+        and bool(getattr(runner, "_recovery_mode", False))
+    ):
+        read_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if read_path and read_path == str(getattr(runner, "_failing_file", "")):
+            runner._file_was_read_since_failure = True
     return result

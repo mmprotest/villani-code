@@ -529,6 +529,11 @@ class Runner:
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
+        self._recovery_mode = False
+        self._failing_file = ""
+        self._failing_error_summary = ""
+        self._failing_command = ""
+        self._file_was_read_since_failure = False
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -903,6 +908,11 @@ class Runner:
         self._scope_expansion_used = False
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
+        self._recovery_mode = False
+        self._failing_file = ""
+        self._failing_error_summary = ""
+        self._failing_command = ""
+        self._file_was_read_since_failure = False
         if self._first_attempt_write_lock_active:
             self.event_callback(
                 {
@@ -1396,10 +1406,21 @@ class Runner:
                 tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
-                    if tool_name == "Read" and not result.get("is_error"):
-                        self._files_read.add(str(tool_input.get("file_path", "")))
+                if tool_name == "Read" and not result.get("is_error"):
+                    read_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                    self._files_read.add(read_path)
+                    if (
+                        getattr(self, "_recovery_mode", False)
+                        and read_path
+                        and read_path == str(getattr(self, "_failing_file", ""))
+                    ):
+                        self._file_was_read_since_failure = True
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    if getattr(self, "_recovery_mode", False):
+                        target_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                        if target_path and target_path == str(getattr(self, "_failing_file", "")):
+                            self._file_was_read_since_failure = False
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )

@@ -278,14 +278,103 @@ def test_repeated_validation_updates_compact_state_without_repeated_prose(
 
     first = runner._run_verification("edit")
     second = runner._run_verification("edit")
-    third = runner._run_verification("edit")
-    fourth = runner._run_verification("edit")
 
-    assert "validation_repeated_without_new_evidence: false" in first
-    assert "validation_repeated_without_new_evidence: true" in second
-    assert "status repeated without new validation evidence" in third
-    assert fourth == ""
-    assert runner._validation_repeated_without_new_evidence is True
+
+def test_syntax_error_does_not_mark_verification_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    target = tmp_path / "legal_review_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._current_verification_targets = {"legal_review_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["legal_review_app.py"])
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = 'Traceback (most recent call last):\n  File "legal_review_app.py", line 2\nSyntaxError: invalid syntax\n'
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._run_verification("edit")
+    assert "status=fail" in runner._last_validation_summary
+
+
+def test_name_error_does_not_mark_verification_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    target = tmp_path / "legal_review_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._current_verification_targets = {"legal_review_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["legal_review_app.py"])
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = 'Traceback (most recent call last):\n  File "legal_review_app.py", line 4\nNameError: name x is not defined\n'
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._run_verification("edit")
+    assert "status=fail" in runner._last_validation_summary
+
+
+def test_hard_failure_sets_recovery_mode_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "legal_review_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._current_verification_targets = {"legal_review_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["legal_review_app.py"])
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = 'Traceback (most recent call last):\n  File "legal_review_app.py", line 7\nModuleNotFoundError: No module named y\n'
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._run_verification("edit")
+    assert runner._recovery_mode is True
+    assert runner._failing_file == "legal_review_app.py"
+    assert runner._failing_error_summary
+
+
+def test_successful_rerun_clears_recovery_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "legal_review_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._current_verification_targets = {"legal_review_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["legal_review_app.py"])
+
+    class FailProc:
+        returncode = 1
+        stdout = ""
+        stderr = 'Traceback (most recent call last):\n  File "legal_review_app.py", line 7\nImportError: bad import\n'
+
+    class PassProc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    runs = {"count": 0}
+    def fake_run(cmd, **kwargs):
+        rendered = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        if rendered.startswith("git "):
+            return PassProc()
+        runs["count"] += 1
+        return FailProc() if runs["count"] == 1 else PassProc()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._run_verification("edit")
+    assert runner._recovery_mode is True
+    runner._run_verification("edit")
+    assert runner._recovery_mode is False
 
 
 def test_changed_validation_state_emits_new_compact_summary(

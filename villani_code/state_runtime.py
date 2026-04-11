@@ -12,6 +12,7 @@ import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
+from villani_code.autonomy import FindingCategory, VerificationFinding
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
@@ -20,6 +21,7 @@ from villani_code.context_governance import ContextCompactor, ContextInclusionRe
 from villani_code.validation_loop import run_validation
 from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
+from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets, parse_unified_diff
 from villani_code.repo_map import build_repo_map
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
@@ -532,7 +534,114 @@ def _is_strongly_adjacent_path(candidate: str, locked_paths: set[str]) -> bool:
     return False
 
 
+def _recovery_blocked_feedback(reason: str, tool: str, path: str, detail: str = "") -> str:
+    payload = {
+        "recovery_blocked": True,
+        "reason": reason,
+        "tool": tool,
+        "path": path,
+    }
+    if detail:
+        payload["detail"] = detail
+    return json.dumps(payload, sort_keys=True)
+
+
+def _patch_deletes_target_file(unified_diff: str, failing_file: str) -> bool:
+    try:
+        parsed = parse_unified_diff(unified_diff)
+    except PatchApplyError:
+        return False
+    for file_patch in parsed:
+        old_path = str(file_patch.old_path).replace("\\", "/").lstrip("./")
+        new_path = str(file_patch.new_path).replace("\\", "/").lstrip("./")
+        if old_path == failing_file and file_patch.new_path == "/dev/null":
+            return True
+        if new_path == failing_file and file_patch.old_path == "/dev/null":
+            continue
+    return False
+
+
+def _detect_hard_failure(cmd_results: list[dict[str, Any]]) -> dict[str, str] | None:
+    for result in cmd_results:
+        command = str(result.get("command", "")).strip()
+        exit_code = int(result.get("exit", 0))
+        stdout = str(result.get("stdout", "") or "")
+        stderr = str(result.get("stderr", "") or "")
+        combined = f"{stdout}\n{stderr}".strip()
+        lower = combined.lower()
+        has_crash_signal = any(
+            token in combined
+            for token in [
+                "SyntaxError",
+                "NameError",
+                "ImportError",
+                "ModuleNotFoundError",
+            ]
+        ) or ("traceback (most recent call last)" in lower) or ("unhandled exception" in lower)
+        if exit_code != 0 or has_crash_signal:
+            evidence = parse_failure_signal(stdout, stderr)
+            summary = str(evidence.get("error_summary", "")).strip()
+            if not summary:
+                summary = (stderr or stdout or f"Command failed with exit {exit_code}").splitlines()[0][:200]
+            failing_file = str(evidence.get("traceback_file", "")).strip()
+            return {
+                "failing_command": command[:200],
+                "failing_file": failing_file,
+                "error_summary": summary[:220],
+            }
+    return None
+
+
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    if tool_name in {"Write", "Patch"} and bool(getattr(runner, "_recovery_mode", False)):
+        failing_file = str(getattr(runner, "_failing_file", "")).replace("\\", "/").lstrip("./")
+        if failing_file:
+            targets: set[str] = set()
+            if tool_name == "Write":
+                target = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                if target:
+                    targets.add(target)
+            else:
+                diff_text = str(tool_input.get("unified_diff", ""))
+                default_path = str(tool_input.get("file_path", "") or "") or None
+                try:
+                    targets = {
+                        str(path).replace("\\", "/").lstrip("./")
+                        for path in extract_unified_diff_targets(diff_text, default_file_path=default_path)
+                    }
+                except PatchApplyError:
+                    if default_path:
+                        targets = {str(default_path).replace("\\", "/").lstrip("./")}
+            if targets and failing_file not in targets:
+                return _recovery_blocked_feedback(
+                    "must_fix_active_failing_file",
+                    tool_name,
+                    ",".join(sorted(targets)),
+                    f"active_failing_file={failing_file}",
+                )
+            if failing_file in targets and not bool(getattr(runner, "_file_was_read_since_failure", False)):
+                return _recovery_blocked_feedback(
+                    "read_required_before_edit",
+                    tool_name,
+                    failing_file,
+                    "read the failing file before editing",
+                )
+            if tool_name == "Write" and failing_file in targets:
+                content = str(tool_input.get("content", ""))
+                existing_path = (runner.repo / failing_file).resolve()
+                before_text = existing_path.read_text(encoding="utf-8", errors="replace") if existing_path.exists() and existing_path.is_file() else ""
+                if not content.strip():
+                    return _recovery_blocked_feedback("delete_blocked_for_failing_file", tool_name, failing_file)
+                before_lines = before_text.splitlines()
+                after_lines = content.splitlines()
+                changed_lines = sum(1 for a, b in zip(before_lines, after_lines) if a != b) + abs(len(before_lines) - len(after_lines))
+                if before_lines and changed_lines > max(120, int(len(before_lines) * 0.8)):
+                    return _recovery_blocked_feedback("rewrite_blocked_for_failing_file", tool_name, failing_file)
+            if tool_name == "Patch" and failing_file in targets:
+                diff_text = str(tool_input.get("unified_diff", ""))
+                if _patch_deletes_target_file(diff_text, failing_file):
+                    return _recovery_blocked_feedback("delete_blocked_for_failing_file", tool_name, failing_file)
+
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:
         return None
@@ -1004,6 +1113,46 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         intended_targets=sorted(runner._current_verification_targets),
         before_contents=dict(runner._current_verification_before_contents),
     )
+    hard_failure = _detect_hard_failure(cmd_results)
+    if hard_failure:
+        summary = hard_failure.get("error_summary", "") or "runtime/validation command failed"
+        failing_file = (
+            hard_failure.get("failing_file", "")
+            or _single_clear_file(attributed_intentional)
+            or _single_clear_file(sorted(runner._current_verification_targets))
+            or ""
+        )
+        runner._recovery_mode = True
+        runner._failing_file = failing_file
+        runner._failing_error_summary = summary
+        runner._failing_command = hard_failure.get("failing_command", "")
+        runner._file_was_read_since_failure = False
+        verification.status = VerificationStatus.FAIL
+        verification.confidence_score = min(float(getattr(verification, "confidence_score", 0.5)), 0.05)
+        verification.summary = f"Hard failure detected: {summary}"
+        verification.findings.append(
+            VerificationFinding(
+                category=FindingCategory.REGRESSION,
+                message=f"Hard failure: {summary}",
+                file_path=failing_file or None,
+                severity="high",
+            )
+        )
+        runner.event_callback(
+            {
+                "type": "recovery_mode_activated",
+                "failing_file": failing_file,
+                "failing_error_summary": summary,
+                "failing_command": runner._failing_command,
+            }
+        )
+    elif bool(getattr(runner, "_recovery_mode", False)) and verification.status in {VerificationStatus.PASS, VerificationStatus.REPAIRED}:
+        runner._recovery_mode = False
+        runner._failing_file = ""
+        runner._failing_error_summary = ""
+        runner._failing_command = ""
+        runner._file_was_read_since_failure = False
+        runner.event_callback({"type": "recovery_mode_cleared"})
     finding_fingerprints = sorted(
         "|".join(
             [

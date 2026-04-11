@@ -126,3 +126,63 @@ def test_patch_existing_file_rewrite_heavy_is_rejected(tmp_path: Path) -> None:
     result = execute_tool_with_policy(runner, "Patch", {"unified_diff": "\n".join(diff_lines)}, "1", 0)
     assert result["is_error"] is True
     assert "Rewrite-heavy mutation rejected" in str(result["content"])
+
+
+def test_recovery_mode_blocks_delete_of_active_failing_file(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "legal_review_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._failing_file = "legal_review_app.py"
+    runner._failing_error_summary = "SyntaxError"
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/legal_review_app.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-print('x')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert '"recovery_blocked": true' in str(result["content"])
+    assert "delete_blocked_for_failing_file" in str(result["content"])
+
+
+def test_recovery_mode_blocks_edit_without_read_first(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "legal_review_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._failing_file = "legal_review_app.py"
+    runner._failing_error_summary = "NameError"
+    runner._file_was_read_since_failure = False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "legal_review_app.py", "content": "print('fixed')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "read_required_before_edit" in str(result["content"])
+
+
+def test_read_failing_file_flips_recovery_read_flag(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "legal_review_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._failing_file = "legal_review_app.py"
+    runner._failing_error_summary = "ImportError"
+    runner._file_was_read_since_failure = False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Read",
+        {"file_path": "legal_review_app.py", "max_bytes": 1000},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
+    assert runner._file_was_read_since_failure is True
