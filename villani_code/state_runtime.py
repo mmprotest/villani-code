@@ -597,6 +597,28 @@ def _primary_execution_target(runner: Any) -> str:
     return str(getattr(runner, "_primary_execution_target", "")).replace("\\", "/").lstrip("./")
 
 
+def _sync_recovery_state_to_mission(runner: Any) -> None:
+    mission_state = getattr(runner, "_mission_state", None)
+    if mission_state is None:
+        return
+    mission_state.recovery_mode = bool(getattr(runner, "_recovery_mode", False))
+    mission_state.primary_execution_target = _primary_execution_target(runner)
+    mission_state.primary_target_minimally_valid = bool(getattr(runner, "_primary_target_minimally_valid", False))
+    save_mission_state(runner.repo, mission_state)
+
+
+def _snapshot_repo_files(repo: Path) -> set[str]:
+    collected: set[str] = set()
+    for path in repo.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(repo)).replace("\\", "/").lstrip("./")
+        if rel.startswith(".git/") or rel.startswith(".villani_code/"):
+            continue
+        collected.add(rel)
+    return collected
+
+
 def _seed_primary_execution_target(runner: Any, target: str) -> str:
     normalized = _normalize_repo_path(target)
     if not normalized:
@@ -605,6 +627,8 @@ def _seed_primary_execution_target(runner: Any, target: str) -> str:
     if current:
         return current
     runner._primary_execution_target = normalized
+    runner._primary_target_minimally_valid = bool(getattr(runner, "_active_solution_last_validation_ok", False))
+    _sync_recovery_state_to_mission(runner)
     return normalized
 
 
@@ -740,12 +764,18 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             and primary_target
             and target != primary_target
         ):
-            return _recovery_blocked_feedback(
-                "recovery_entrypoint_switch_blocked",
-                tool_name,
-                target,
-                f"primary_execution_target={primary_target}",
+            recovery_created_artifacts = set(getattr(runner, "_recovery_created_artifacts", set()))
+            recovery_files_at_failure = set(getattr(runner, "_recovery_files_at_failure", set()))
+            confidently_new_target = target in recovery_created_artifacts or (
+                bool(recovery_files_at_failure) and target not in recovery_files_at_failure
             )
+            if confidently_new_target:
+                return _recovery_blocked_feedback(
+                    "recovery_new_validation_artifact_blocked",
+                    tool_name,
+                    target,
+                    f"primary_execution_target={primary_target}",
+                )
 
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:
@@ -1264,6 +1294,9 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         else:
             runner._active_solution_last_validation_ok = True
             runner._active_solution_last_validation_summary = "validation passed"
+            if primary_target and active_solution_file and primary_target == active_solution_file:
+                runner._primary_target_minimally_valid = True
+                _sync_recovery_state_to_mission(runner)
 
     hard_failure = _detect_hard_failure(cmd_results)
     if hard_failure:
@@ -1282,10 +1315,13 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             active_solution_file = failing_file
         primary_target = _seed_primary_execution_target(runner, active_solution_file or failing_file)
         runner._recovery_mode = True
+        runner._primary_target_minimally_valid = False
         runner._failing_file = failing_file
         runner._failing_error_summary = summary
         runner._failing_command = hard_failure.get("failing_command", "")
         runner._file_was_read_since_failure = False
+        runner._recovery_files_at_failure = _snapshot_repo_files(runner.repo)
+        runner._recovery_created_artifacts = set()
         if active_solution_file and failing_file == active_solution_file:
             runner._active_solution_last_validation_ok = False
             runner._active_solution_last_validation_summary = summary[:220]
@@ -1310,25 +1346,39 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "failing_command": runner._failing_command,
             }
         )
+        _sync_recovery_state_to_mission(runner)
     elif bool(getattr(runner, "_recovery_mode", False)) and verification.status in {VerificationStatus.PASS, VerificationStatus.REPAIRED}:
         primary_target = _primary_execution_target(runner)
         validated_primary = False
         if primary_target:
-            validated_primary = any(
-                _command_targets_active_solution(
+            targeted_results = [
+                result
+                for result in cmd_results
+                if _command_targets_active_solution(
                     str(result.get("command", "")),
                     primary_target,
                     validation_targets,
                 )
-                for result in cmd_results
+            ]
+            validated_primary = bool(targeted_results) and all(
+                not _has_hard_failure_signal(
+                    str(result.get("stdout", "") or ""),
+                    str(result.get("stderr", "") or ""),
+                    int(result.get("exit", 0)),
+                )
+                for result in targeted_results
             )
-        if not primary_target or validated_primary:
+        if validated_primary:
+            runner._primary_target_minimally_valid = True
             runner._recovery_mode = False
             runner._failing_file = ""
             runner._failing_error_summary = ""
             runner._failing_command = ""
             runner._file_was_read_since_failure = False
+            runner._recovery_files_at_failure = set()
+            runner._recovery_created_artifacts = set()
             runner.event_callback({"type": "recovery_mode_cleared"})
+            _sync_recovery_state_to_mission(runner)
     finding_fingerprints = sorted(
         "|".join(
             [

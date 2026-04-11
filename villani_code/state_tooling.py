@@ -662,6 +662,12 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    write_target = ""
+    write_target_existed = False
+    if tool_name == "Write":
+        write_target = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if write_target:
+            write_target_existed = (runner.repo / write_target).exists()
     result = execute_tool(
         tool_name,
         tool_input,
@@ -691,4 +697,14 @@ def execute_tool_with_lifecycle(
         read_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
         if read_path and read_path == str(getattr(runner, "_failing_file", "")):
             runner._file_was_read_since_failure = True
+    if (
+        tool_name == "Write"
+        and not result.get("is_error")
+        and bool(getattr(runner, "_recovery_mode", False))
+        and write_target
+        and not write_target_existed
+    ):
+        created_artifacts = set(getattr(runner, "_recovery_created_artifacts", set()))
+        created_artifacts.add(write_target)
+        runner._recovery_created_artifacts = created_artifacts
     return result

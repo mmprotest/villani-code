@@ -190,13 +190,22 @@ def test_recovery_mode_blocks_edit_without_read_first(tmp_path: Path) -> None:
     assert "read_required_before_edit" in str(result["content"])
 
 
-def test_recovery_mode_blocks_parallel_entrypoint_launch(tmp_path: Path) -> None:
+def test_recovery_mode_blocks_new_validation_artifact_entrypoint_launch(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
-    (tmp_path / "web_server.py").write_text("print('x')\n", encoding="utf-8")
     runner._recovery_mode = True
     runner._active_solution_file = "web_app.py"
     runner._primary_execution_target = "web_app.py"
+    runner._recovery_files_at_failure = {"web_app.py"}
+
+    create = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "web_server.py", "content": "print('x')\n"},
+        "1a",
+        0,
+    )
+    assert create["is_error"] is False
 
     result = execute_tool_with_policy(
         runner,
@@ -206,7 +215,7 @@ def test_recovery_mode_blocks_parallel_entrypoint_launch(tmp_path: Path) -> None
         0,
     )
     assert result["is_error"] is True
-    assert "recovery_entrypoint_switch_blocked" in str(result["content"])
+    assert "recovery_new_validation_artifact_blocked" in str(result["content"])
     assert "primary_execution_target=web_app.py" in str(result["content"])
 
 
