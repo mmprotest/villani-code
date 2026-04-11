@@ -299,6 +299,8 @@ def test_syntax_error_does_not_mark_verification_pass(tmp_path: Path, monkeypatc
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert "status=fail" in runner._last_validation_summary
+    assert runner._active_solution_last_validation_ok is False
+    assert runner._active_solution_last_validation_summary
 
 
 def test_name_error_does_not_mark_verification_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -320,6 +322,8 @@ def test_name_error_does_not_mark_verification_pass(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert "status=fail" in runner._last_validation_summary
+    assert runner._active_solution_last_validation_ok is False
+    assert runner._active_solution_last_validation_summary
 
 
 def test_hard_failure_sets_recovery_mode_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -375,9 +379,11 @@ def test_successful_rerun_clears_recovery_mode(tmp_path: Path, monkeypatch: pyte
     runner._run_verification("edit")
     assert runner._recovery_mode is True
     assert runner._active_solution_file == "legal_review_app.py"
+    assert runner._active_solution_last_validation_ok is False
     runner._run_verification("edit")
     assert runner._recovery_mode is False
     assert runner._active_solution_file == "legal_review_app.py"
+    assert runner._active_solution_last_validation_ok is True
 
 
 def test_helper_failure_does_not_switch_active_solution_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

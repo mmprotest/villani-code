@@ -624,6 +624,33 @@ def _detect_hard_failure(cmd_results: list[dict[str, Any]]) -> dict[str, str] | 
     return None
 
 
+def _command_targets_active_solution(command: str, active_solution_file: str, validation_targets: set[str]) -> bool:
+    active = str(active_solution_file or "").replace("\\", "/").lstrip("./")
+    if not active:
+        return False
+    if not _is_validation_or_launch_command(command):
+        return False
+    normalized_targets = {str(t).replace("\\", "/").lstrip("./") for t in validation_targets if str(t).strip()}
+    explicit_target = _extract_command_python_target(command)
+    if explicit_target:
+        return explicit_target == active
+    cmd = str(command or "")
+    if active in cmd:
+        return True
+    return active in normalized_targets
+
+
+def _has_hard_failure_signal(stdout: str, stderr: str, exit_code: int) -> bool:
+    combined = f"{stdout}\n{stderr}".strip()
+    lower = combined.lower()
+    return (
+        exit_code != 0
+        or any(token in combined for token in ("SyntaxError", "NameError", "ImportError", "ModuleNotFoundError"))
+        or ("traceback (most recent call last)" in lower)
+        or ("unhandled exception" in lower)
+    )
+
+
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
     if tool_name in {"Write", "Patch"} and bool(getattr(runner, "_recovery_mode", False)):
         failing_file = str(getattr(runner, "_failing_file", "")).replace("\\", "/").lstrip("./")
@@ -655,6 +682,18 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 )
             if tool_name == "Write" and locked_file in targets:
                 content = str(tool_input.get("content", ""))
+                active_is_failed = (
+                    locked_file == active_solution_file
+                    and bool(getattr(runner, "_recovery_mode", False))
+                    and getattr(runner, "_active_solution_last_validation_ok", None) is False
+                )
+                if active_is_failed and content.strip():
+                    return _recovery_blocked_feedback(
+                        "full_write_blocked_for_active_solution",
+                        tool_name,
+                        locked_file,
+                        "use a bounded patch/edit while recovering from hard failure",
+                    )
                 existing_path = (runner.repo / locked_file).resolve()
                 before_text = existing_path.read_text(encoding="utf-8", errors="replace") if existing_path.exists() and existing_path.is_file() else ""
                 if not content.strip():
@@ -1171,10 +1210,43 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         intended_targets=sorted(runner._current_verification_targets),
         before_contents=dict(runner._current_verification_before_contents),
     )
+    active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
+    if not active_solution_file:
+        for result in cmd_results:
+            seeded_target = _extract_command_python_target(str(result.get("command", "")))
+            if seeded_target:
+                runner._active_solution_file = seeded_target
+                active_solution_file = seeded_target
+                break
+    validation_targets = set(validation_target_paths)
+    active_cmd_results = [
+        result
+        for result in cmd_results
+        if _command_targets_active_solution(
+            str(result.get("command", "")),
+            active_solution_file,
+            validation_targets,
+        )
+    ]
+    if active_cmd_results:
+        latest = active_cmd_results[-1]
+        exit_code = int(latest.get("exit", 0))
+        stdout = str(latest.get("stdout", "") or "")
+        stderr = str(latest.get("stderr", "") or "")
+        has_failure = _has_hard_failure_signal(stdout, stderr, exit_code)
+        if has_failure:
+            runner._active_solution_last_validation_ok = False
+            evidence_lines = [ln.strip() for ln in (stderr or stdout or f"exit={exit_code}").splitlines() if ln.strip()]
+            summary_line = (evidence_lines[-1] if evidence_lines else f"exit={exit_code}")[:220]
+            runner._active_solution_last_validation_summary = summary_line
+            verification.status = VerificationStatus.FAIL
+        else:
+            runner._active_solution_last_validation_ok = True
+            runner._active_solution_last_validation_summary = "validation passed"
+
     hard_failure = _detect_hard_failure(cmd_results)
     if hard_failure:
         summary = hard_failure.get("error_summary", "") or "runtime/validation command failed"
-        active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
         failing_file = (
             hard_failure.get("failing_file", "")
             or _single_clear_file(attributed_intentional)
@@ -1186,11 +1258,15 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             failing_file = active_solution_file
         elif not active_solution_file and failing_file:
             runner._active_solution_file = failing_file
+            active_solution_file = failing_file
         runner._recovery_mode = True
         runner._failing_file = failing_file
         runner._failing_error_summary = summary
         runner._failing_command = hard_failure.get("failing_command", "")
         runner._file_was_read_since_failure = False
+        if active_solution_file and failing_file == active_solution_file:
+            runner._active_solution_last_validation_ok = False
+            runner._active_solution_last_validation_summary = summary[:220]
         verification.status = VerificationStatus.FAIL
         verification.confidence_score = min(float(getattr(verification, "confidence_score", 0.5)), 0.05)
         verification.summary = f"Hard failure detected: {summary}"
