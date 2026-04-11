@@ -201,11 +201,14 @@ def test_model_context_packet_includes_compact_live_recovery_contract() -> None:
     rendered = render_model_context_packet(packet)
     assert packet["recovery"]["primary_execution_target"] == "service.py"
     assert packet["recovery"]["primary_execution_cwd"] == "services"
-    assert "Recovery contract:" in rendered
+    assert "Recovery contract (repair before drift):" in rendered
     assert "target=service.py" in rendered
     assert "cwd=services" in rendered
     assert "active_validation_ok=False" in rendered
     assert "failure=NameError: x" in rendered
+    recovery_lines = [line for line in rendered.splitlines() if line.startswith("Recovery contract")]
+    assert len(recovery_lines) == 1
+    assert len(recovery_lines[0]) < 420
 
 
 def test_validate_anthropic_tool_sequence_rejects_text_after_tool_result() -> None:
@@ -599,6 +602,33 @@ def test_recovery_does_not_clear_until_primary_target_validates(tmp_path: Path, 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._recovery_mode is True
+
+
+def test_helper_wrapper_validation_does_not_mark_primary_minimally_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "service.py").write_text("print('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._primary_execution_target = "service.py"
+    runner._active_solution_file = "service.py"
+    runner._current_verification_targets = {"service.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["service.py"])
+
+    class P:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *_args, **_kwargs: P())
+    runner._run_verification("edit")
+    assert runner._active_solution_last_validation_ok is False
+    assert runner._primary_target_minimally_valid is False
+
+
+def test_direct_primary_command_is_treated_as_strong_proof() -> None:
+    contract = {"target": "service.py", "cwd": "."}
+    assert state_runtime._is_strong_primary_validation_command("python service.py", primary_contract=contract) is True
+    assert state_runtime._is_strong_primary_validation_command("python helper_wrapper.py", primary_contract=contract) is False
 
 
 def test_recovery_requires_strong_primary_validation_to_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

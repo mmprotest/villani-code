@@ -419,6 +419,22 @@ def augment_validation_config_with_live_commands(repo: Path, commands: list[str]
     normalized_commands = [str(cmd).strip() for cmd in commands if str(cmd).strip()]
     if not normalized_commands:
         return load_validation_config(repo)
+    def _quality_value(command: str) -> int:
+        lowered = command.lower()
+        if primary_target and primary_target in lowered and any(token in lowered for token in ("python ", "python3 ", "pytest", "unittest")):
+            return 5
+        if any(token in lowered for token in ("pytest", "unittest")):
+            return 4
+        if any(token in lowered for token in ("py_compile", "compileall", " import ")):
+            return 3
+        if any(token in lowered for token in ("helper", "wrapper", "probe", "verify_", "smoke", "sanity")):
+            return 2
+        if any(token in lowered for token in ("python ", "python3 ", "uv run", "poetry run", "go test", "cargo test", "cargo run")):
+            return 1
+        return 0
+    normalized_commands = sorted(normalized_commands, key=lambda command: _quality_value(command), reverse=True)
+    if any(_quality_value(command) >= 4 for command in normalized_commands):
+        normalized_commands = [command for command in normalized_commands if _quality_value(command) >= 2]
     cfg = load_validation_config(repo)
     existing_commands = {str(step.command).strip() for step in cfg.steps if str(step.command).strip()}
     added = False

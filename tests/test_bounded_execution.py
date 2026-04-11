@@ -172,7 +172,7 @@ def test_final_summary_is_honest_when_primary_validation_missing(tmp_path: Path,
     result = runner.run("work")
     final_text = result["execution"]["final_text"]
     assert "Incomplete: primary execution target does not yet have clean direct validation" in final_text
-    assert "Fully functional and thoroughly tested." in final_text
+    assert "Fully functional and thoroughly tested." not in final_text
 
 
 def test_final_summary_can_remain_positive_when_primary_validation_is_strong(tmp_path: Path, monkeypatch) -> None:
@@ -196,3 +196,53 @@ def test_final_summary_can_remain_positive_when_primary_validation_is_strong(tmp
     final_text = result["execution"]["final_text"]
     assert "Incomplete: primary execution target does not yet have clean direct validation" not in final_text
     assert "Fully functional and thoroughly tested." in final_text
+
+
+def test_recovery_with_weak_helper_then_later_strong_validation_updates_final_narrative(tmp_path: Path, monkeypatch) -> None:
+    weak_runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python helper_wrapper.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Fully functional and thoroughly tested."}]},
+        ],
+    )
+
+    def weak_verify(*_args, **_kwargs) -> str:
+        weak_runner._primary_execution_target = "service.py"
+        weak_runner._primary_execution_target_cwd = "."
+        weak_runner._recovery_mode = True
+        weak_runner._primary_target_minimally_valid = False
+        weak_runner._active_solution_file = "service.py"
+        weak_runner._active_solution_last_validation_ok = False
+        return ""
+
+    monkeypatch.setattr(weak_runner, "_run_verification", weak_verify)
+    monkeypatch.setattr(weak_runner, "_run_post_execution_validation", lambda _changed: "")
+    weak_result = weak_runner.run("work")
+    assert weak_result["execution"]["completed"] is False
+    assert "Incomplete: primary execution target does not yet have clean direct validation" in weak_result["execution"]["final_text"]
+    assert "Fully functional and thoroughly tested." not in weak_result["execution"]["final_text"]
+
+    strong_runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "2", "name": "Bash", "input": {"command": "python service.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Fully functional and thoroughly tested."}]},
+        ],
+    )
+
+    def strong_verify(*_args, **_kwargs) -> str:
+        strong_runner._primary_execution_target = "service.py"
+        strong_runner._primary_execution_target_cwd = "."
+        strong_runner._recovery_mode = False
+        strong_runner._primary_target_minimally_valid = True
+        strong_runner._active_solution_file = "service.py"
+        strong_runner._active_solution_last_validation_ok = True
+        return ""
+
+    monkeypatch.setattr(strong_runner, "_run_verification", strong_verify)
+    monkeypatch.setattr(strong_runner, "_run_post_execution_validation", lambda _changed: "")
+    strong_result = strong_runner.run("work")
+    assert strong_result["execution"]["completed"] is True
+    assert "Incomplete: primary execution target does not yet have clean direct validation" not in strong_result["execution"]["final_text"]
+    assert "Fully functional and thoroughly tested." in strong_result["execution"]["final_text"]

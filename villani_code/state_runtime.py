@@ -631,6 +631,23 @@ def _classify_validation_strength(command: str, *, primary_contract: dict[str, s
     return "structural_only"
 
 
+def _is_strong_primary_validation_command(command: str, *, primary_contract: dict[str, str] | None = None) -> bool:
+    contract = primary_contract or {}
+    primary_target = _normalize_repo_path(str(contract.get("target", "")))
+    if not primary_target:
+        return False
+    strength = _classify_validation_strength(command, primary_contract=contract)
+    if _validation_strength_value(strength) < _validation_strength_value("direct_run_or_task_validation"):
+        return False
+    extracted_target = _extract_command_python_target(command)
+    if extracted_target:
+        return extracted_target == primary_target
+    lowered = str(command or "").strip().lower()
+    if "pytest" in lowered and ("tests/" in lowered or primary_target in lowered):
+        return True
+    return primary_target in str(command or "")
+
+
 def _validation_strength_value(kind: str) -> int:
     return _VALIDATION_STRENGTH_ORDER.get(str(kind), 0)
 
@@ -792,7 +809,19 @@ def _suggest_live_validation_commands(targets: set[str], observed_commands: list
             if candidate not in seen:
                 seen.add(candidate)
                 suggestions.append(candidate)
-    return suggestions[:8]
+    strong_seen = any(
+        _validation_strength_value(_classify_validation_strength(cmd)) >= _validation_strength_value("direct_run_or_task_validation")
+        for cmd in suggestions
+    )
+    if not strong_seen:
+        return suggestions[:8]
+    filtered: list[str] = []
+    for cmd in suggestions:
+        kind = _classify_validation_strength(cmd)
+        if _validation_strength_value(kind) < _validation_strength_value("helper_wrapper"):
+            continue
+        filtered.append(cmd)
+    return filtered[:8] if filtered else suggestions[:8]
 
 
 def _has_hard_failure_signal(stdout: str, stderr: str, exit_code: int) -> bool:
@@ -1479,14 +1508,15 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         stdout = str(latest.get("stdout", "") or "")
         stderr = str(latest.get("stderr", "") or "")
         has_failure = _has_hard_failure_signal(stdout, stderr, exit_code)
-        latest_strength = _classify_validation_strength(
-            str(latest.get("command", "")),
+        rendered_latest = str(latest.get("command", ""))
+        latest_strength = _classify_validation_strength(rendered_latest, primary_contract=_primary_execution_contract(runner))
+        latest_is_strong_primary = _is_strong_primary_validation_command(
+            rendered_latest,
             primary_contract=_primary_execution_contract(runner),
         )
         strong_primary_proof = (
             not has_failure
-            and _validation_strength_value(latest_strength)
-            >= _validation_strength_value("direct_run_or_task_validation")
+            and latest_is_strong_primary
         )
         if has_failure:
             runner._active_solution_last_validation_ok = False
@@ -1499,7 +1529,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             runner._active_solution_last_validation_summary = (
                 "validation passed (direct)"
                 if strong_primary_proof
-                else "validation passed (weak evidence)"
+                else f"validation passed (weak evidence: {latest_strength})"
             )
             if strong_primary_proof and primary_target and active_solution_file and primary_target == active_solution_file:
                 runner._primary_target_minimally_valid = True
@@ -1580,13 +1610,10 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 )
                 for result in targeted_results
             ) and all(
-                _validation_strength_value(
-                    _classify_validation_strength(
-                        str(result.get("command", "")),
-                        primary_contract=_primary_execution_contract(runner),
-                    )
+                _is_strong_primary_validation_command(
+                    str(result.get("command", "")),
+                    primary_contract=_primary_execution_contract(runner),
                 )
-                >= _validation_strength_value("direct_run_or_task_validation")
                 for result in targeted_results
             )
         if validated_primary:
@@ -2037,7 +2064,10 @@ def refresh_live_validation_candidates(
     contract = _primary_execution_contract(runner)
     ordered_observed = sorted(
         [cmd for cmd in observed if str(cmd).strip()],
-        key=lambda cmd: _validation_strength_value(_classify_validation_strength(str(cmd), primary_contract=contract)),
+        key=lambda cmd: (
+            1 if _is_strong_primary_validation_command(str(cmd), primary_contract=contract) else 0,
+            _validation_strength_value(_classify_validation_strength(str(cmd), primary_contract=contract)),
+        ),
         reverse=True,
     )
     live_suggestions = _suggest_live_validation_commands(combined, ordered_observed)
