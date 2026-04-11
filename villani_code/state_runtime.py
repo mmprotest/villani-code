@@ -546,6 +546,17 @@ def _recovery_blocked_feedback(reason: str, tool: str, path: str, detail: str = 
     return json.dumps(payload, sort_keys=True)
 
 
+def _recovery_target_switch_blocked_feedback(primary_target: str, attempted_target: str) -> str:
+    payload = {
+        "classification": "blocked",
+        "short_reason": "recovery_target_switch_blocked",
+        "primary_execution_target": primary_target,
+        "attempted_target": attempted_target,
+        "recovery_blocked": True,
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
 def _patch_deletes_target_file(unified_diff: str, failing_file: str) -> bool:
     try:
         parsed = parse_unified_diff(unified_diff)
@@ -690,6 +701,57 @@ def _has_hard_failure_signal(stdout: str, stderr: str, exit_code: int) -> bool:
     )
 
 
+def activate_live_recovery_on_primary_failure(
+    runner: Any,
+    *,
+    command: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    attempted_target: str = "",
+) -> bool:
+    normalized_target = _normalize_repo_path(attempted_target)
+    primary_target = _seed_primary_execution_target(runner, normalized_target) if normalized_target else _primary_execution_target(runner)
+    if not normalized_target or not primary_target or normalized_target != primary_target:
+        return False
+    if not _is_validation_or_launch_command(command):
+        return False
+    if not _has_hard_failure_signal(stdout, stderr, exit_code):
+        return False
+    evidence = parse_failure_signal(stdout, stderr)
+    summary = str(evidence.get("error_summary", "")).strip()
+    if not summary:
+        summary = (stderr or stdout or f"Command failed with exit {exit_code}").splitlines()[0][:220]
+    traceback_file = _normalize_repo_path(str(evidence.get("traceback_file", "")).strip())
+    if traceback_file and (traceback_file == primary_target or traceback_file.endswith(f"/{primary_target}")):
+        failing_file = primary_target
+    else:
+        failing_file = primary_target
+    runner._recovery_mode = True
+    runner._primary_target_minimally_valid = False
+    runner._failing_file = failing_file
+    runner._failing_error_summary = summary[:220]
+    runner._failing_command = str(command or "")[:200]
+    runner._file_was_read_since_failure = False
+    runner._recovery_files_at_failure = _snapshot_repo_files(runner.repo)
+    runner._recovery_created_artifacts = set()
+    runner._active_solution_file = primary_target
+    runner._active_solution_last_validation_ok = False
+    runner._active_solution_last_validation_summary = summary[:220]
+    runner.event_callback(
+        {
+            "type": "recovery_mode_activated",
+            "failing_file": failing_file,
+            "active_solution_file": primary_target,
+            "primary_execution_target": primary_target,
+            "failing_error_summary": summary[:220],
+            "failing_command": runner._failing_command,
+        }
+    )
+    _sync_recovery_state_to_mission(runner)
+    return True
+
+
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
     if tool_name in {"Write", "Patch"} and bool(getattr(runner, "_recovery_mode", False)):
         failing_file = str(getattr(runner, "_failing_file", "")).replace("\\", "/").lstrip("./")
@@ -763,6 +825,7 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             and target
             and primary_target
             and target != primary_target
+            and not bool(getattr(runner, "_primary_target_minimally_valid", False))
         ):
             recovery_created_artifacts = set(getattr(runner, "_recovery_created_artifacts", set()))
             recovery_files_at_failure = set(getattr(runner, "_recovery_files_at_failure", set()))
@@ -770,12 +833,7 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 bool(recovery_files_at_failure) and target not in recovery_files_at_failure
             )
             if confidently_new_target:
-                return _recovery_blocked_feedback(
-                    "recovery_new_validation_artifact_blocked",
-                    tool_name,
-                    target,
-                    f"primary_execution_target={primary_target}",
-                )
+                return _recovery_target_switch_blocked_feedback(primary_target, target)
 
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:

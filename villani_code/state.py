@@ -1406,6 +1406,23 @@ class Runner:
                         trigger=f"{tool_name} execution"
                     )
                 elif tool_name == "Bash":
+                    try:
+                        decoded = json.loads(str(result.get("content", "")))
+                    except Exception:
+                        decoded = {}
+                    if isinstance(decoded, dict):
+                        from villani_code import state_runtime
+
+                        state_runtime.activate_live_recovery_on_primary_failure(
+                            self,
+                            command=str(decoded.get("command", "") or str(tool_input.get("command", ""))),
+                            exit_code=int(decoded.get("exit_code", 0)),
+                            stdout=str(decoded.get("stdout", "") or ""),
+                            stderr=str(decoded.get("stderr", "") or ""),
+                            attempted_target=state_runtime._extract_command_python_target(
+                                str(decoded.get("command", "") or str(tool_input.get("command", "")))
+                            ),
+                        )
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )

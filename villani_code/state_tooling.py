@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import py_compile
 import re
 from dataclasses import dataclass
@@ -689,6 +690,23 @@ def execute_tool_with_lifecycle(
             **({"forced": True} if forced else {}),
         }
     )
+    if tool_name == "Bash" and not result.get("is_error"):
+        try:
+            decoded = json.loads(str(result.get("content", "")))
+        except Exception:
+            decoded = {}
+        if isinstance(decoded, dict):
+            from villani_code import state_runtime
+
+            command = str(decoded.get("command", "") or str(tool_input.get("command", "")))
+            state_runtime.activate_live_recovery_on_primary_failure(
+                runner,
+                command=command,
+                exit_code=int(decoded.get("exit_code", 0)),
+                stdout=str(decoded.get("stdout", "") or ""),
+                stderr=str(decoded.get("stderr", "") or ""),
+                attempted_target=state_runtime._extract_command_python_target(command),
+            )
     if (
         tool_name == "Read"
         and not result.get("is_error")
