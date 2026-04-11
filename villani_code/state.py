@@ -533,6 +533,8 @@ class Runner:
         self._failing_file = ""
         self._active_solution_file = ""
         self._primary_execution_target = ""
+        self._primary_execution_target_cwd = ""
+        self._primary_execution_target_evidence = "none"
         self._primary_target_minimally_valid = False
         self._active_solution_last_validation_ok: bool | None = None
         self._active_solution_last_validation_summary = ""
@@ -541,6 +543,8 @@ class Runner:
         self._file_was_read_since_failure = False
         self._recovery_files_at_failure: set[str] = set()
         self._recovery_created_artifacts: set[str] = set()
+        self._recovery_target_switch_blocked = False
+        self._failing_target_contract_summary = ""
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -919,6 +923,8 @@ class Runner:
         self._failing_file = ""
         self._active_solution_file = ""
         self._primary_execution_target = ""
+        self._primary_execution_target_cwd = ""
+        self._primary_execution_target_evidence = "none"
         self._primary_target_minimally_valid = False
         self._active_solution_last_validation_ok = None
         self._active_solution_last_validation_summary = ""
@@ -927,6 +933,8 @@ class Runner:
         self._file_was_read_since_failure = False
         self._recovery_files_at_failure = set()
         self._recovery_created_artifacts = set()
+        self._recovery_target_switch_blocked = False
+        self._failing_target_contract_summary = ""
         if self._first_attempt_write_lock_active:
             self.event_callback(
                 {
@@ -1024,6 +1032,13 @@ class Runner:
                 for block in response.get("content", [])
                 if block.get("type") == "text"
             )
+            primary_target = str(getattr(self, "_primary_execution_target", "")).strip()
+            primary_ok = getattr(self, "_primary_target_minimally_valid", False)
+            if primary_target and not primary_ok:
+                final_text = (
+                    "[Execution status] Incomplete: primary execution target does not yet have clean direct validation.\n\n"
+                    + final_text
+                ).strip()
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,
@@ -1613,6 +1628,8 @@ class Runner:
         self._mission_state.intended_targets = sorted(self._intended_targets)
         self._mission_state.recovery_mode = bool(getattr(self, "_recovery_mode", False))
         self._mission_state.primary_execution_target = str(getattr(self, "_primary_execution_target", ""))
+        self._mission_state.primary_execution_cwd = str(getattr(self, "_primary_execution_target_cwd", ""))
+        self._mission_state.primary_execution_evidence = str(getattr(self, "_primary_execution_target_evidence", "none"))
         self._mission_state.primary_target_minimally_valid = bool(getattr(self, "_primary_target_minimally_valid", False))
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()

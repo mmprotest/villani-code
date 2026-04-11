@@ -54,6 +54,8 @@ class MissionState:
     last_failed_summary: str = ""
     recovery_mode: bool = False
     primary_execution_target: str = ""
+    primary_execution_cwd: str = ""
+    primary_execution_evidence: str = "none"
     primary_target_minimally_valid: bool = False
     last_checkpoint_id: str = ""
     last_transcript_path: str = ""
@@ -88,6 +90,8 @@ class MissionState:
             last_failed_summary=str(payload.get("last_failed_summary", "")),
             recovery_mode=bool(payload.get("recovery_mode", False)),
             primary_execution_target=str(payload.get("primary_execution_target", "")),
+            primary_execution_cwd=str(payload.get("primary_execution_cwd", "")),
+            primary_execution_evidence=str(payload.get("primary_execution_evidence", "none")),
             primary_target_minimally_valid=bool(payload.get("primary_target_minimally_valid", False)),
             last_checkpoint_id=str(payload.get("last_checkpoint_id", "")),
             last_transcript_path=str(payload.get("last_transcript_path", "")),

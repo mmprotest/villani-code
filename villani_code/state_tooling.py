@@ -604,11 +604,7 @@ def execute_tool_with_policy(
         )
         if normalized_targets:
             runner._intended_targets.update(normalized_targets)
-            runner._current_verification_targets = set(normalized_targets)
-            if not str(getattr(runner, "_active_solution_file", "")).strip():
-                seed_target = normalized_targets[0] if len(normalized_targets) == 1 else ""
-                if seed_target:
-                    runner._active_solution_file = seed_target
+            runner._current_verification_targets.update(normalized_targets)
             runner._current_verification_before_contents = {}
             checkpoint_paths: list[Path] = []
             for normalized_target in normalized_targets:
@@ -619,6 +615,9 @@ def execute_tool_with_policy(
                     runner._before_contents[normalized_target] = before_text
                     runner._current_verification_before_contents[normalized_target] = before_text
             runner.checkpoints.create(checkpoint_paths, message_index=message_count)
+            from villani_code import state_runtime
+
+            state_runtime.refresh_live_validation_candidates(runner, normalized_targets)
     result = execute_tool_with_lifecycle(
         runner=runner,
         tool_name=tool_name,
@@ -706,6 +705,7 @@ def execute_tool_with_lifecycle(
                 stdout=str(decoded.get("stdout", "") or ""),
                 stderr=str(decoded.get("stderr", "") or ""),
                 attempted_target=state_runtime._extract_command_python_target(command),
+                attempted_cwd=str(tool_input.get("cwd", "") or runner.repo),
             )
     if (
         tool_name == "Read"

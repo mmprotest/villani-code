@@ -136,6 +136,23 @@ def classify_and_rewrite_command(command: str, shell_family: str) -> ShellComman
                 offending_pattern=" embedded head ",
                 short_reason="unix head token is not valid in cmd",
             )
+        embedded_tail_match = re.search(r"(^|[|;&()\n\t ])tail(?:\s|$)", lowered)
+        if embedded_tail_match and not re.match(r"^\s*tail(?:\s|$)", lowered):
+            return ShellCommandDecision(
+                classification="blocked",
+                command=raw,
+                offending_token="tail",
+                offending_pattern=" embedded tail ",
+                short_reason="unix tail token is not valid in cmd",
+            )
+        if re.search(r"(^|[|;&()\n\t ])wc(?:\s|$)", lowered):
+            return ShellCommandDecision(
+                classification="blocked",
+                command=raw,
+                offending_token="wc",
+                offending_pattern=" embedded wc ",
+                short_reason="unix wc token is not valid in cmd",
+            )
         if re.search(r"\|\s*(ForEach-Object|Where-Object|Select-Object)\b", raw, re.IGNORECASE):
             return ShellCommandDecision(
                 classification="blocked",
@@ -192,7 +209,13 @@ def _detect_invalid_cmd_detached_launch(command: str) -> str:
     if not raw:
         return ""
     lowered = raw.lower()
-    if not re.search(r"\s&\s", raw):
+    if "&" not in raw:
+        return ""
+    if "&&" in raw:
+        cleaned = raw.replace("&&", "")
+    else:
+        cleaned = raw
+    if "&" not in cleaned:
         return ""
     if re.search(r"\s&\s*echo\b", lowered):
         if re.search(r"\b(start\s+\"[^\"]*\"\s+/b|start\s+/b)\b", lowered):
@@ -202,7 +225,7 @@ def _detect_invalid_cmd_detached_launch(command: str) -> str:
         return "& echo launch marker"
     if re.search(r"\s*>\s*\S+\s+2>&1\s+&\s*", lowered):
         return "2>&1 & command chaining"
-    if lowered.endswith("&"):
+    if lowered.endswith("&") or re.search(r"\s&\s+\S", raw):
         return "trailing & background assumption"
     return ""
 
