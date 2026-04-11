@@ -536,6 +536,8 @@ class Runner:
         self._primary_execution_target_cwd = ""
         self._primary_execution_target_evidence = "none"
         self._primary_target_minimally_valid = False
+        self._primary_solution_targets: set[str] = set()
+        self._primary_target_handoff_count = 0
         self._active_solution_last_validation_ok: bool | None = None
         self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
@@ -926,6 +928,8 @@ class Runner:
         self._primary_execution_target_cwd = ""
         self._primary_execution_target_evidence = "none"
         self._primary_target_minimally_valid = False
+        self._primary_solution_targets = set()
+        self._primary_target_handoff_count = 0
         self._active_solution_last_validation_ok = None
         self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
@@ -1142,6 +1146,13 @@ class Runner:
                     getattr(self, "_primary_execution_target", "") or getattr(self, "_active_solution_file", "")
                 ).strip()
                 active_validation_ok = getattr(self, "_active_solution_last_validation_ok", None)
+                primary_targets = sorted(
+                    str(path).replace("\\", "/").lstrip("./")
+                    for path in getattr(self, "_primary_solution_targets", set())
+                    if str(path).strip()
+                )
+                if len(primary_targets) > 1:
+                    return "ambiguous_primary_target"
                 if active_solution_file and active_validation_ok is not True:
                     return "active_solution_validation_missing" if active_validation_ok is None else "active_solution_validation_failed"
             if execution_budget is None:
@@ -1413,6 +1424,7 @@ class Runner:
                 return _finish_bounded(response, "completed", True)
 
             tool_results: list[dict[str, Any]] = []
+            stop_after_tool_results = False
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
@@ -1470,6 +1482,21 @@ class Runner:
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    if "patch_sanity_gate: failed" in str(self._pending_verification):
+                        self.event_callback(
+                            {
+                                "type": "post_write_regression_gate_failed",
+                                "tool": tool_name,
+                                "target": str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./"),
+                            }
+                        )
+                        result["is_error"] = True
+                        result["content"] = (
+                            str(result.get("content", ""))
+                            + "\n\nImmediate regression gate failed after this write. "
+                            "Repair this file and re-run the cheap validation before further expansion."
+                        ).strip()
+                        stop_after_tool_results = True
                 elif tool_name == "Bash":
                     try:
                         decoded = json.loads(str(result.get("content", "")))
@@ -1567,6 +1594,8 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                if stop_after_tool_results:
+                    break
 
             if tool_results and any(
                 not r.get("is_error")

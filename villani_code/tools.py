@@ -259,8 +259,12 @@ def _run_bash(
                 raise ValueError(f"Refusing command: {bad.strip()}")
     shell_state = (runtime_state or {}).get("shell_environment", {}) if isinstance(runtime_state, dict) else {}
     shell_family = str(shell_state.get("shell_family", "")).strip() if isinstance(shell_state, dict) else ""
+    shell_exe = str(shell_state.get("shell_exe", "")).strip() if isinstance(shell_state, dict) else ""
     if not shell_family:
-        shell_family = detect_shell_environment(cwd=str(repo)).shell_family
+        detected = detect_shell_environment(cwd=str(repo))
+        shell_family = detected.shell_family
+        if not shell_exe:
+            shell_exe = detected.shell_exe
     decision = classify_and_rewrite_command(data.command, shell_family)
     if decision.classification == "blocked":
         blocked_payload = {
@@ -279,7 +283,17 @@ def _run_bash(
     cwd = _safe_path(repo, data.cwd)
     if callable(debug_callback):
         debug_callback("command_started", {"command": command_to_run, "cwd": data.cwd, "tool_call_id": tool_call_id})
-    proc = subprocess.run(command_to_run, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    run_kwargs: dict[str, Any] = {
+        "args": command_to_run,
+        "shell": True,
+        "cwd": str(cwd),
+        "capture_output": True,
+        "text": True,
+        "timeout": data.timeout_sec,
+    }
+    if shell_exe:
+        run_kwargs["executable"] = shell_exe
+    proc = subprocess.run(**run_kwargs)
     if callable(debug_callback):
         debug_callback(
             "command_finished",
@@ -299,6 +313,8 @@ def _run_bash(
                 "command": command_to_run,
                 "original_command": data.command,
                 "classification": decision.classification,
+                "shell_family": shell_family,
+                "shell_exe": shell_exe,
                 "exit_code": proc.returncode,
                 "stdout": proc.stdout,
                 "stderr": proc.stderr,

@@ -407,14 +407,23 @@ def _inject_shell_reminder(runner: Any, messages: list[dict[str, Any]]) -> None:
         return
     shell_env = dict(getattr(runner, "_shell_environment", {}) or {})
     shell_family = str(shell_env.get("shell_family", "")).strip().lower()
+    shell_exe = str(shell_env.get("shell_exe", "")).strip()
     if shell_family == "cmd":
-        reminder = "Shell: Windows cmd. Do not use Unix tools like head, grep, tail, rm, or heredocs."
+        reminder = (
+            "Shell: Windows cmd. Use cmd syntax (e.g., %VAR%, dir, findstr); "
+            "do not use Unix tools like head/grep/tail/rm or bash heredocs."
+        )
     elif shell_family == "powershell":
-        reminder = "Shell: Windows PowerShell. Avoid bash heredocs and bash-only syntax."
+        reminder = (
+            "Shell: Windows PowerShell. Use PowerShell syntax ($env:VAR, Get-ChildItem, Select-String) "
+            "and avoid bash heredocs/bash-only syntax."
+        )
     elif shell_family in {"bash", "zsh"}:
         reminder = f"Shell: {shell_family}. Use POSIX shell syntax."
     else:
         return
+    if shell_exe:
+        reminder = f"{reminder} Active executable: {shell_exe}."
     last = messages[-1]
     if last.get("role") != "user":
         return

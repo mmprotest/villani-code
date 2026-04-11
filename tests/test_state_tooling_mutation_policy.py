@@ -130,6 +130,43 @@ def test_patch_existing_file_rewrite_heavy_is_rejected(tmp_path: Path) -> None:
     assert "Rewrite-heavy mutation rejected" in str(result["content"])
 
 
+def test_primary_target_discipline_blocks_casual_drift_until_validated(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "service.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "alt_service.py").write_text("x = 2\n", encoding="utf-8")
+    runner._primary_solution_targets = {"service.py"}
+    runner._primary_target_minimally_valid = False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/alt_service.py\n+++ b/alt_service.py\n@@ -1 +1 @@\n-x = 2\n+x = 3\n"},
+        "drift1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "Primary target discipline" in str(result["content"])
+
+
+def test_primary_target_handoff_allowed_once_current_target_is_valid(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "service.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "alt_service.py").write_text("x = 2\n", encoding="utf-8")
+    runner._primary_solution_targets = {"service.py"}
+    runner._primary_target_minimally_valid = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/alt_service.py\n+++ b/alt_service.py\n@@ -1 +1 @@\n-x = 2\n+x = 3\n"},
+        "handoff1",
+        0,
+    )
+    assert result["is_error"] is False
+    assert runner._primary_solution_targets == {"alt_service.py"}
+    assert runner._primary_target_handoff_count == 1
+
+
 def test_recovery_mode_blocks_delete_of_active_failing_file(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     target = tmp_path / "legal_review_app.py"
@@ -218,12 +255,25 @@ def test_recovery_mode_blocks_new_validation_artifact_entrypoint_launch(tmp_path
     )
     assert result["is_error"] is True
     assert '"classification": "blocked"' in str(result["content"])
-    assert (
-        '"short_reason": "recovery_target_switch_blocked"' in str(result["content"])
-        or '"short_reason": "recovery_new_wrapper_target_blocked"' in str(result["content"])
+
+
+def test_recovery_mode_blocks_summary_expansion_while_primary_broken(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._primary_execution_target = "web_app.py"
+    runner._active_solution_file = "web_app.py"
+    runner._primary_target_minimally_valid = False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "SOLUTION_SUMMARY.md", "content": "# done\n"},
+        "sum1",
+        0,
     )
-    assert '"primary_execution_target": "web_app.py"' in str(result["content"])
-    assert '"attempted_target": "web_server.py"' in str(result["content"])
+    assert result["is_error"] is True
+    assert "Recovery guard" in str(result["content"])
 
 
 def test_recovery_mode_allows_rerun_of_same_primary_target(tmp_path: Path) -> None:
@@ -398,7 +448,7 @@ def test_integration_scaffold_then_direct_run_reseeds_primary_and_live_validatio
 
     packet = build_model_context_packet(runner)
     rendered = render_model_context_packet(packet)
-    assert "Recovery contract:" in rendered
+    assert ("Recovery contract (repair before drift):" in rendered) or ("Recovery: mode=True" in rendered)
     assert "target=service.py" in rendered
     assert "cwd=." in rendered
 

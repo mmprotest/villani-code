@@ -242,6 +242,98 @@ def _is_validation_candidate_target(path: str) -> bool:
     }
 
 
+def _is_source_like_primary_candidate(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    if not normalized or normalized.startswith("tests/"):
+        return False
+    return _is_validation_candidate_target(normalized)
+
+
+def _mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+    return [
+        str(path or "").replace("\\", "/").lstrip("./")
+        for path in _benchmark_mutation_targets(tool_name, tool_input)
+        if str(path or "").strip()
+    ]
+
+
+def _enforce_primary_target_discipline(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    if tool_name not in {"Write", "Patch"}:
+        return None
+    normalized_targets = _mutation_targets(tool_name, tool_input)
+    candidate_targets = [path for path in normalized_targets if _is_source_like_primary_candidate(path)]
+    if not candidate_targets:
+        return None
+
+    current_primary = {
+        str(path).replace("\\", "/").lstrip("./")
+        for path in getattr(runner, "_primary_solution_targets", set())
+        if str(path).strip()
+    }
+    incoming = set(candidate_targets[:2])
+    if not current_primary:
+        runner._primary_solution_targets = set(incoming)
+        runner.event_callback({"type": "primary_target_seeded", "targets": sorted(incoming)})
+        return None
+    if current_primary & incoming:
+        runner._primary_solution_targets = set(sorted(current_primary | incoming)[:2])
+        return None
+
+    if bool(getattr(runner, "_recovery_mode", False)) or not bool(getattr(runner, "_primary_target_minimally_valid", False)):
+        runner.event_callback(
+            {
+                "type": "primary_target_drift_blocked",
+                "current_primary_targets": sorted(current_primary),
+                "attempted_targets": sorted(incoming),
+                "recovery_mode": bool(getattr(runner, "_recovery_mode", False)),
+                "primary_target_minimally_valid": bool(getattr(runner, "_primary_target_minimally_valid", False)),
+            }
+        )
+        return (
+            "Primary target discipline: blocked target drift while current primary target is unresolved. "
+            f"Current primary targets: {sorted(current_primary)}. Attempted targets: {sorted(incoming)}. "
+            "Repair and minimally validate the active primary implementation before switching."
+        )
+
+    runner._primary_target_handoff_count = int(getattr(runner, "_primary_target_handoff_count", 0)) + 1
+    runner._primary_solution_targets = set(incoming)
+    runner.event_callback(
+        {
+            "type": "primary_target_handoff",
+            "from_targets": sorted(current_primary),
+            "to_targets": sorted(incoming),
+            "handoff_count": int(getattr(runner, "_primary_target_handoff_count", 0)),
+        }
+    )
+    return None
+
+
+def _enforce_recovery_expansion_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    if tool_name not in {"Write", "Patch"}:
+        return None
+    if not bool(getattr(runner, "_recovery_mode", False)) or bool(getattr(runner, "_primary_target_minimally_valid", False)):
+        return None
+    primary = str(getattr(runner, "_primary_execution_target", "") or getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
+    failing = str(getattr(runner, "_failing_file", "")).replace("\\", "/").lstrip("./")
+    protected = {path for path in [primary, failing] if path}
+    targets = _mutation_targets(tool_name, tool_input)
+    if not targets:
+        return None
+    for path in targets:
+        if path in protected:
+            continue
+        lower = path.lower()
+        suffix = Path(path).suffix.lower()
+        is_doc_or_summary = suffix in {".md", ".rst"} or any(token in lower for token in ("summary", "completion", "solution"))
+        is_test_harness = path.startswith("tests/") or any(token in lower for token in ("harness", "verify_", "smoke", "sanity"))
+        if is_doc_or_summary or is_test_harness:
+            return (
+                "Recovery guard: primary target is currently broken. "
+                f"Focus on repairing {sorted(protected) or ['current primary file']} before creating/editing {path}."
+            )
+    return None
+
+
 def _normalize_mutation_payload(tool_name: str, tool_input: dict[str, Any]) -> None:
     if tool_name == "Write":
         content = str(tool_input.get("content", ""))
@@ -511,6 +603,12 @@ def execute_tool_with_policy(
     policy_error = runner._small_model_tool_guard(tool_name, tool_input)
     if policy_error:
         return {"content": policy_error, "is_error": True}
+    primary_discipline_error = _enforce_primary_target_discipline(runner, tool_name, tool_input)
+    if primary_discipline_error:
+        return {"content": primary_discipline_error, "is_error": True}
+    recovery_expansion_error = _enforce_recovery_expansion_guard(runner, tool_name, tool_input)
+    if recovery_expansion_error:
+        return {"content": recovery_expansion_error, "is_error": True}
     if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
