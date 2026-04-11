@@ -91,3 +91,50 @@ def test_blocked_commands_produce_compact_structured_feedback(tmp_path: Path) ->
     assert payload["offending_token"] == "<<"
     assert payload["offending_pattern"] == "<<EOF"
     assert "short_reason" in payload
+
+
+def test_cmd_invalid_detached_launch_pattern_is_blocked() -> None:
+    decision = classify_and_rewrite_command("python app.py > out.txt 2>&1 & echo STARTED", "cmd")
+    assert decision.classification == "blocked"
+    assert decision.offending_pattern
+    assert "detached" in decision.short_reason
+
+
+def test_cmd_invalid_detached_launch_feedback_is_compact_structured(tmp_path: Path) -> None:
+    result = execute_tool(
+        "Bash",
+        {"command": "python app.py > out.txt 2>&1 & echo STARTED", "cwd": ".", "timeout_sec": 5},
+        tmp_path,
+        runtime_state={"shell_environment": {"shell_family": "cmd"}},
+    )
+    assert result["is_error"] is True
+    payload = json.loads(result["content"])
+    assert payload["shell_family"] == "cmd"
+    assert payload["classification"] == "blocked"
+    assert payload["short_reason"] == "detached/background launch syntax is not safe in cmd"
+    assert payload["offending_pattern"]
+    assert set(payload) == {"shell_family", "classification", "short_reason", "offending_pattern"}
+
+
+def test_cmd_ordinary_command_unaffected() -> None:
+    decision = classify_and_rewrite_command("echo hello", "cmd")
+    assert decision.classification == "allowed"
+    assert decision.command == "echo hello"
+
+
+def test_cmd_blocked_detached_launch_does_not_execute(tmp_path: Path, monkeypatch) -> None:
+    called = {"value": False}
+
+    def _fail_if_called(*_args, **_kwargs):
+        called["value"] = True
+        raise AssertionError("subprocess.run should not be called for blocked detached cmd launch")
+
+    monkeypatch.setattr("villani_code.tools.subprocess.run", _fail_if_called)
+    result = execute_tool(
+        "Bash",
+        {"command": "python app.py > out.txt 2>&1 & echo STARTED", "cwd": ".", "timeout_sec": 5},
+        tmp_path,
+        runtime_state={"shell_environment": {"shell_family": "cmd"}},
+    )
+    assert result["is_error"] is True
+    assert called["value"] is False

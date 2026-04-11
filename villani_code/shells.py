@@ -102,6 +102,14 @@ def classify_and_rewrite_command(command: str, shell_family: str) -> ShellComman
     lowered = raw.lower()
 
     if shell_family == "cmd":
+        detached_pattern = _detect_invalid_cmd_detached_launch(raw)
+        if detached_pattern:
+            return ShellCommandDecision(
+                classification="blocked",
+                command=raw,
+                offending_pattern=detached_pattern,
+                short_reason="detached/background launch syntax is not safe in cmd",
+            )
         if _has_bash_heredoc(raw):
             return ShellCommandDecision(
                 classification="blocked",
@@ -177,6 +185,26 @@ def _has_bash_heredoc(command: str) -> bool:
     if "<<" in command:
         return True
     return bool(re.search(r"<<\s*'?\w+'?", command, re.IGNORECASE))
+
+
+def _detect_invalid_cmd_detached_launch(command: str) -> str:
+    raw = str(command or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if not re.search(r"\s&\s", raw):
+        return ""
+    if re.search(r"\s&\s*echo\b", lowered):
+        if re.search(r"\b(start\s+\"[^\"]*\"\s+/b|start\s+/b)\b", lowered):
+            return ""
+        if re.search(r"\s*>\s*\S+\s+2>&1\s+&\s*", lowered) or re.search(r"\s*>\s*\S+\s+&\s*", lowered):
+            return "& echo after redirection"
+        return "& echo launch marker"
+    if re.search(r"\s*>\s*\S+\s+2>&1\s+&\s*", lowered):
+        return "2>&1 & command chaining"
+    if lowered.endswith("&"):
+        return "trailing & background assumption"
+    return ""
 
 
 def _rewrite_for_cmd(command: str) -> str:
