@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.state import Runner
-from villani_code.state_tooling import execute_tool_with_policy
+from villani_code.state_tooling import execute_tool_with_lifecycle, execute_tool_with_policy
 
 
 class _Client:
@@ -215,8 +215,10 @@ def test_recovery_mode_blocks_new_validation_artifact_entrypoint_launch(tmp_path
         0,
     )
     assert result["is_error"] is True
-    assert "recovery_new_validation_artifact_blocked" in str(result["content"])
-    assert "primary_execution_target=web_app.py" in str(result["content"])
+    assert '"classification": "blocked"' in str(result["content"])
+    assert '"short_reason": "recovery_target_switch_blocked"' in str(result["content"])
+    assert '"primary_execution_target": "web_app.py"' in str(result["content"])
+    assert '"attempted_target": "web_server.py"' in str(result["content"])
 
 
 def test_recovery_mode_allows_rerun_of_same_primary_target(tmp_path: Path) -> None:
@@ -234,6 +236,27 @@ def test_recovery_mode_allows_rerun_of_same_primary_target(tmp_path: Path) -> No
         0,
     )
     assert result["is_error"] is False
+
+
+def test_bash_hard_failure_on_primary_sets_live_recovery_state(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+    runner._primary_execution_target = "web_app.py"
+    runner._active_solution_file = "web_app.py"
+    runner._recovery_mode = False
+
+    result = execute_tool_with_lifecycle(
+        runner=runner,
+        tool_name="Bash",
+        tool_input={"command": "python web_app.py", "timeout_sec": 30},
+        tool_use_id="fail-1",
+        turn_index=0,
+    )
+    assert result["is_error"] is False
+    assert runner._recovery_mode is True
+    assert runner._failing_file == "web_app.py"
+    assert runner._primary_execution_target == "web_app.py"
+    assert runner._primary_target_minimally_valid is False
 
 
 def test_recovery_mode_allows_helper_file_edit_with_active_solution(tmp_path: Path) -> None:
