@@ -561,6 +561,38 @@ def _patch_deletes_target_file(unified_diff: str, failing_file: str) -> bool:
     return False
 
 
+def _command_has_masking_patterns(command: str) -> bool:
+    cmd = str(command or "").strip().lower()
+    if not cmd:
+        return False
+    if "||" in cmd:
+        return True
+    if "&& echo" in cmd:
+        return True
+    if "2>&1 |" in cmd:
+        return True
+    if "timeout" in cmd and "echo" in cmd:
+        return True
+    return False
+
+
+def _is_validation_or_launch_command(command: str) -> bool:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return False
+    markers = ("pytest", "unittest", "test", "validate", "verification", "python ", "python3 ", "uv run", "poetry run")
+    return any(marker in lowered for marker in markers)
+
+
+def _extract_command_python_target(command: str) -> str:
+    matches = re.findall(r"([\w./-]+\.py)\b", str(command or ""))
+    for match in matches:
+        normalized = _normalize_repo_path(match)
+        if normalized and not normalized.startswith("tests/"):
+            return normalized
+    return ""
+
+
 def _detect_hard_failure(cmd_results: list[dict[str, Any]]) -> dict[str, str] | None:
     for result in cmd_results:
         command = str(result.get("command", "")).strip()
@@ -595,7 +627,9 @@ def _detect_hard_failure(cmd_results: list[dict[str, Any]]) -> dict[str, str] | 
 def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> str | None:
     if tool_name in {"Write", "Patch"} and bool(getattr(runner, "_recovery_mode", False)):
         failing_file = str(getattr(runner, "_failing_file", "")).replace("\\", "/").lstrip("./")
-        if failing_file:
+        active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
+        locked_file = active_solution_file or failing_file
+        if locked_file:
             targets: set[str] = set()
             if tool_name == "Write":
                 target = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
@@ -612,35 +646,49 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 except PatchApplyError:
                     if default_path:
                         targets = {str(default_path).replace("\\", "/").lstrip("./")}
-            if targets and failing_file not in targets:
-                return _recovery_blocked_feedback(
-                    "must_fix_active_failing_file",
-                    tool_name,
-                    ",".join(sorted(targets)),
-                    f"active_failing_file={failing_file}",
-                )
-            if failing_file in targets and not bool(getattr(runner, "_file_was_read_since_failure", False)):
+            if locked_file in targets and not bool(getattr(runner, "_file_was_read_since_failure", False)):
                 return _recovery_blocked_feedback(
                     "read_required_before_edit",
                     tool_name,
-                    failing_file,
+                    locked_file,
                     "read the failing file before editing",
                 )
-            if tool_name == "Write" and failing_file in targets:
+            if tool_name == "Write" and locked_file in targets:
                 content = str(tool_input.get("content", ""))
-                existing_path = (runner.repo / failing_file).resolve()
+                existing_path = (runner.repo / locked_file).resolve()
                 before_text = existing_path.read_text(encoding="utf-8", errors="replace") if existing_path.exists() and existing_path.is_file() else ""
                 if not content.strip():
-                    return _recovery_blocked_feedback("delete_blocked_for_failing_file", tool_name, failing_file)
+                    return _recovery_blocked_feedback("delete_blocked_for_failing_file", tool_name, locked_file)
                 before_lines = before_text.splitlines()
                 after_lines = content.splitlines()
                 changed_lines = sum(1 for a, b in zip(before_lines, after_lines) if a != b) + abs(len(before_lines) - len(after_lines))
                 if before_lines and changed_lines > max(120, int(len(before_lines) * 0.8)):
-                    return _recovery_blocked_feedback("rewrite_blocked_for_failing_file", tool_name, failing_file)
-            if tool_name == "Patch" and failing_file in targets:
+                    return _recovery_blocked_feedback("rewrite_blocked_for_failing_file", tool_name, locked_file)
+            if tool_name == "Patch" and locked_file in targets:
                 diff_text = str(tool_input.get("unified_diff", ""))
-                if _patch_deletes_target_file(diff_text, failing_file):
-                    return _recovery_blocked_feedback("delete_blocked_for_failing_file", tool_name, failing_file)
+                if _patch_deletes_target_file(diff_text, locked_file):
+                    return _recovery_blocked_feedback("delete_blocked_for_failing_file", tool_name, locked_file)
+    if tool_name == "Bash":
+        command = str(tool_input.get("command", "")).strip()
+        if _is_validation_or_launch_command(command) and _command_has_masking_patterns(command):
+            return _recovery_blocked_feedback("suspicious_validation_command", tool_name, "", "masked failure patterns detected")
+        target = _extract_command_python_target(command)
+        active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
+        if _is_validation_or_launch_command(command) and target and not active_solution_file:
+            runner._active_solution_file = target
+        if (
+            bool(getattr(runner, "_recovery_mode", False))
+            and _is_validation_or_launch_command(command)
+            and target
+            and active_solution_file
+            and target != active_solution_file
+        ):
+            return _recovery_blocked_feedback(
+                "recovery_entrypoint_switch_blocked",
+                tool_name,
+                target,
+                f"active_solution_file={active_solution_file}",
+            )
 
     constrained = runner.small_model or runner.villani_mode or runner.benchmark_config.enabled
     if not constrained:
@@ -1095,8 +1143,18 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         if stderr_lines:
             lines.append(f"key stderr:\n{stderr_lines}")
 
+    if not str(getattr(runner, "_active_solution_file", "")).strip():
+        seed_active = (
+            _single_clear_file(sorted(runner._current_verification_targets))
+            or _single_clear_file(attributed_intentional)
+        )
+        if seed_active:
+            runner._active_solution_file = seed_active
+
     verification_artifacts = [
-        r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
+        r.get("command", "")
+        for r in cmd_results
+        if int(r.get("exit", 1)) == 0 and not _command_has_masking_patterns(str(r.get("command", "")))
     ]
     validation_target_paths = sorted(set(runner._current_verification_targets) or set(attributed_intentional))
     validation_target = json.dumps(validation_target_paths)
@@ -1116,12 +1174,18 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     hard_failure = _detect_hard_failure(cmd_results)
     if hard_failure:
         summary = hard_failure.get("error_summary", "") or "runtime/validation command failed"
+        active_solution_file = str(getattr(runner, "_active_solution_file", "")).replace("\\", "/").lstrip("./")
         failing_file = (
             hard_failure.get("failing_file", "")
             or _single_clear_file(attributed_intentional)
             or _single_clear_file(sorted(runner._current_verification_targets))
             or ""
         )
+        failing_file = _normalize_repo_path(failing_file)
+        if active_solution_file and failing_file == active_solution_file:
+            failing_file = active_solution_file
+        elif not active_solution_file and failing_file:
+            runner._active_solution_file = failing_file
         runner._recovery_mode = True
         runner._failing_file = failing_file
         runner._failing_error_summary = summary
@@ -1142,6 +1206,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             {
                 "type": "recovery_mode_activated",
                 "failing_file": failing_file,
+                "active_solution_file": str(getattr(runner, "_active_solution_file", "")),
                 "failing_error_summary": summary,
                 "failing_command": runner._failing_command,
             }
