@@ -16,7 +16,13 @@ from villani_code.autonomy import FindingCategory, VerificationFinding
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
-from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
+from villani_code.project_memory import (
+    SessionState,
+    augment_validation_config_with_live_commands,
+    ensure_project_memory,
+    load_repo_map,
+    update_session_state,
+)
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
 from villani_code.validation_loop import run_validation
 from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
@@ -735,6 +741,28 @@ def _command_targets_active_solution(command: str, active_solution_file: str, va
     return len(normalized_targets) == 1 and active in normalized_targets
 
 
+def _suggest_live_validation_commands(targets: set[str], observed_commands: list[str]) -> list[str]:
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    for command in observed_commands:
+        trimmed = str(command or "").strip()
+        if not trimmed or trimmed in seen:
+            continue
+        if _is_validation_or_launch_command(trimmed):
+            seen.add(trimmed)
+            suggestions.append(trimmed)
+    for target in sorted(targets):
+        normalized = _normalize_repo_path(target)
+        if not normalized:
+            continue
+        if normalized.endswith(".py"):
+            candidate = f"python {normalized}"
+            if candidate not in seen:
+                seen.add(candidate)
+                suggestions.append(candidate)
+    return suggestions[:8]
+
+
 def _has_hard_failure_signal(stdout: str, stderr: str, exit_code: int) -> bool:
     combined = f"{stdout}\n{stderr}".strip()
     lower = combined.lower()
@@ -870,6 +898,7 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
             runner._active_solution_file = target
         if _is_validation_or_launch_command(command) and target:
             _seed_primary_execution_target(runner, target, cwd=tool_input.get("cwd"), evidence="direct_run")
+            refresh_live_validation_candidates(runner, [target], observed_commands=[command])
         if (
             bool(getattr(runner, "_recovery_mode", False))
             and _is_validation_or_launch_command(command)
@@ -1348,6 +1377,13 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         for r in cmd_results
         if int(r.get("exit", 1)) == 0 and not _command_has_masking_patterns(str(r.get("command", "")))
     ]
+    if verification_artifacts:
+        live_targets = sorted(set(getattr(runner, "_current_verification_targets", set())) or set(attributed_intentional))
+        refresh_live_validation_candidates(
+            runner,
+            live_targets,
+            observed_commands=[str(command) for command in verification_artifacts if str(command).strip()],
+        )
     validation_target_paths = sorted(set(runner._current_verification_targets) or set(attributed_intentional))
     validation_target = json.dumps(validation_target_paths)
     artifact_signature = json.dumps(sorted(verification_artifacts))
@@ -1909,7 +1945,12 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     return outcome.message
 
 
-def refresh_live_validation_candidates(runner: Any, changed_or_created_targets: list[str]) -> None:
+def refresh_live_validation_candidates(
+    runner: Any,
+    changed_or_created_targets: list[str],
+    *,
+    observed_commands: list[str] | None = None,
+) -> None:
     normalized = {
         _normalize_repo_path(path)
         for path in changed_or_created_targets
@@ -1921,4 +1962,8 @@ def refresh_live_validation_candidates(runner: Any, changed_or_created_targets: 
     primary_target = _primary_execution_target(runner)
     if primary_target:
         normalized.add(primary_target)
-    runner._current_verification_targets = current | normalized
+    combined = current | normalized
+    runner._current_verification_targets = combined
+    live_suggestions = _suggest_live_validation_commands(combined, list(observed_commands or []))
+    if live_suggestions:
+        augment_validation_config_with_live_commands(runner.repo, live_suggestions)
