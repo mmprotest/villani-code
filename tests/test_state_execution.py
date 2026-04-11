@@ -27,3 +27,16 @@ def test_collect_validation_artifacts_keeps_clean_command() -> None:
     }
     artifacts = collect_validation_artifacts(transcript)
     assert artifacts == ["python web_app.py (exit=0)"]
+
+
+def test_collect_validation_artifacts_skips_error_results_even_with_command_shape() -> None:
+    transcript = {
+        "tool_results": [
+            {
+                "content": '{"command":"python app.py > out.txt 2>&1 & echo STARTED","exit_code":0}',
+                "is_error": True,
+            }
+        ]
+    }
+    artifacts = collect_validation_artifacts(transcript)
+    assert artifacts == []

@@ -38,6 +38,8 @@ def summarize_changes(changed_files: list[str]) -> ChangeSummary:
 def collect_validation_artifacts(transcript: dict[str, Any]) -> list[str]:
     artifacts: list[str] = []
     for tool_result in transcript.get("tool_results", []):
+        if bool(tool_result.get("is_error")):
+            continue
         for record in parse_command_evidence(str(tool_result.get("content", ""))):
             if _has_masking_pattern(str(record.get("command", ""))):
                 continue
