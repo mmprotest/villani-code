@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from villani_code.context_projection import build_model_context_packet, render_model_context_packet
+from villani_code.project_memory import load_validation_config
 from villani_code.state import Runner
 from villani_code.state_tooling import execute_tool_with_lifecycle, execute_tool_with_policy
 
@@ -361,6 +363,47 @@ def test_recovery_mode_allows_bounded_patch_of_active_solution_after_hard_failur
         0,
     )
     assert result["is_error"] is False
+
+
+def test_integration_scaffold_then_direct_run_reseeds_primary_and_live_validation(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / ".villani").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".villani" / "validation.json").write_text(
+        '{"steps":[{"name":"git-diff","command":"git diff --stat","kind":"inspection","cost_level":1,"is_mutating":false}]}',
+        encoding="utf-8",
+    )
+    scaffold = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "app/__init__.py", "content": ""},
+        "s1",
+        0,
+    )
+    assert scaffold["is_error"] is False
+    assert runner._primary_execution_target == ""
+
+    (tmp_path / "service.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+    run = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python service.py", "timeout_sec": 30, "cwd": str(tmp_path)},
+        "b1",
+        1,
+    )
+    assert run["is_error"] is False
+    assert runner._primary_execution_target == "service.py"
+    assert runner._primary_execution_target_evidence == "direct_run"
+    assert runner._primary_execution_target_cwd == "."
+    assert runner._recovery_mode is True
+
+    packet = build_model_context_packet(runner)
+    rendered = render_model_context_packet(packet)
+    assert "Recovery contract:" in rendered
+    assert "target=service.py" in rendered
+    assert "cwd=." in rendered
+
+    cfg = load_validation_config(tmp_path)
+    assert any(step.command == "python service.py" for step in cfg.steps)
 
 
 def test_read_failing_file_flips_recovery_read_flag(tmp_path: Path) -> None:

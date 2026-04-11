@@ -220,6 +220,28 @@ def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> l
     return []
 
 
+def _is_validation_candidate_target(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    if not normalized:
+        return False
+    suffix = Path(normalized).suffix.lower()
+    return suffix in {
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".rs",
+        ".go",
+        ".toml",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".ini",
+        ".cfg",
+    }
+
+
 def _normalize_mutation_payload(tool_name: str, tool_input: dict[str, Any]) -> None:
     if tool_name == "Write":
         content = str(tool_input.get("content", ""))
@@ -604,7 +626,8 @@ def execute_tool_with_policy(
         )
         if normalized_targets:
             runner._intended_targets.update(normalized_targets)
-            runner._current_verification_targets.update(normalized_targets)
+            verification_candidates = [target for target in normalized_targets if _is_validation_candidate_target(target)]
+            runner._current_verification_targets.update(verification_candidates)
             runner._current_verification_before_contents = {}
             checkpoint_paths: list[Path] = []
             for normalized_target in normalized_targets:
@@ -617,7 +640,7 @@ def execute_tool_with_policy(
             runner.checkpoints.create(checkpoint_paths, message_index=message_count)
             from villani_code import state_runtime
 
-            state_runtime.refresh_live_validation_candidates(runner, normalized_targets)
+            state_runtime.refresh_live_validation_candidates(runner, verification_candidates or normalized_targets)
     result = execute_tool_with_lifecycle(
         runner=runner,
         tool_name=tool_name,
