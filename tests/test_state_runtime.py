@@ -341,6 +341,7 @@ def test_hard_failure_sets_recovery_mode_state(tmp_path: Path, monkeypatch: pyte
     runner._run_verification("edit")
     assert runner._recovery_mode is True
     assert runner._failing_file == "legal_review_app.py"
+    assert runner._active_solution_file == "legal_review_app.py"
     assert runner._failing_error_summary
 
 
@@ -373,8 +374,34 @@ def test_successful_rerun_clears_recovery_mode(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     runner._run_verification("edit")
     assert runner._recovery_mode is True
+    assert runner._active_solution_file == "legal_review_app.py"
     runner._run_verification("edit")
     assert runner._recovery_mode is False
+    assert runner._active_solution_file == "legal_review_app.py"
+
+
+def test_helper_failure_does_not_switch_active_solution_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("raise RuntimeError('x')\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    runner._active_solution_file = "web_app.py"
+    runner._current_verification_targets = {"web_app.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["helper.py"])
+
+    def fake_run(cmd, **kwargs):
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = 'Traceback (most recent call last):\n  File "helper.py", line 1\nRuntimeError: x\n'
+        return P()
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._run_verification("edit")
+    assert runner._recovery_mode is True
+    assert runner._failing_file == "helper.py"
+    assert runner._active_solution_file == "web_app.py"
 
 
 def test_changed_validation_state_emits_new_compact_summary(

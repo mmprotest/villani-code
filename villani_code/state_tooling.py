@@ -604,6 +604,10 @@ def execute_tool_with_policy(
         if normalized_targets:
             runner._intended_targets.update(normalized_targets)
             runner._current_verification_targets = set(normalized_targets)
+            if not str(getattr(runner, "_active_solution_file", "")).strip():
+                seed_target = normalized_targets[0] if len(normalized_targets) == 1 else ""
+                if seed_target:
+                    runner._active_solution_file = seed_target
             runner._current_verification_before_contents = {}
             checkpoint_paths: list[Path] = []
             for normalized_target in normalized_targets:

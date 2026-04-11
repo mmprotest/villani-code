@@ -531,6 +531,7 @@ class Runner:
         self._first_attempt_locked_target = ""
         self._recovery_mode = False
         self._failing_file = ""
+        self._active_solution_file = ""
         self._failing_error_summary = ""
         self._failing_command = ""
         self._file_was_read_since_failure = False
@@ -910,6 +911,7 @@ class Runner:
         self._first_attempt_locked_target = required_initial_read
         self._recovery_mode = False
         self._failing_file = ""
+        self._active_solution_file = ""
         self._failing_error_summary = ""
         self._failing_command = ""
         self._file_was_read_since_failure = False

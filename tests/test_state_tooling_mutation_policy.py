@@ -149,6 +149,27 @@ def test_recovery_mode_blocks_delete_of_active_failing_file(tmp_path: Path) -> N
     assert "delete_blocked_for_failing_file" in str(result["content"])
 
 
+def test_recovery_mode_blocks_delete_of_active_solution_file(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "web_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_app.py"
+    runner._failing_file = "helper.py"
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/web_app.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-print('x')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "delete_blocked_for_failing_file" in str(result["content"])
+    assert '"recovery_blocked": true' in str(result["content"])
+
+
 def test_recovery_mode_blocks_edit_without_read_first(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     target = tmp_path / "legal_review_app.py"
@@ -167,6 +188,43 @@ def test_recovery_mode_blocks_edit_without_read_first(tmp_path: Path) -> None:
     )
     assert result["is_error"] is True
     assert "read_required_before_edit" in str(result["content"])
+
+
+def test_recovery_mode_blocks_parallel_entrypoint_launch(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    (tmp_path / "web_server.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_app.py"
+
+    result = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python web_server.py", "timeout_sec": 30},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "recovery_entrypoint_switch_blocked" in str(result["content"])
+
+
+def test_recovery_mode_allows_helper_file_edit_with_active_solution(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    helper = tmp_path / "utils.py"
+    helper.write_text("x=1\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_app.py"
+    runner._failing_file = "web_app.py"
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/utils.py\n+++ b/utils.py\n@@ -1 +1 @@\n-x=1\n+x=2\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
 
 
 def test_read_failing_file_flips_recovery_read_flag(tmp_path: Path) -> None:
