@@ -160,6 +160,7 @@ class SessionState:
     outcome_status: str = "pending"
     next_step_hints: list[str] = field(default_factory=list)
     handoff_checkpoint: str = ""
+    shell_environment: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

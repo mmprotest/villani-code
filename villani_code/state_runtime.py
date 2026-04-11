@@ -1204,6 +1204,12 @@ def _build_session_state_from_plan(instruction: str, plan: Any) -> SessionState:
     )
 
 
+def _with_shell_environment(runner: Any, session: SessionState) -> SessionState:
+    shell_env = dict(getattr(runner, "_shell_environment", {}) or {})
+    session.shell_environment = {str(k): str(v) for k, v in shell_env.items() if str(k).strip()}
+    return session
+
+
 def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     if getattr(runner, "_planning_read_only", False):
         return
@@ -1256,12 +1262,12 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
 
     if runner.plan_mode == "off" or not plan.non_trivial:
         runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
-        update_session_state(runner.repo, session)
+        update_session_state(runner.repo, _with_shell_environment(runner, session))
         return
 
     if runner.villani_mode:
         runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
-        update_session_state(runner.repo, session)
+        update_session_state(runner.repo, _with_shell_environment(runner, session))
         return
 
     runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
@@ -1270,10 +1276,10 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         runner.event_callback({"type": "plan_rejected"})
         session.outcome_status = "rejected"
         session.next_step_hints = ["Revise plan scope or lower risk before retrying"]
-        update_session_state(runner.repo, session)
+        update_session_state(runner.repo, _with_shell_environment(runner, session))
         raise RuntimeError("Execution plan rejected by user.")
     runner.event_callback({"type": "plan_approved", "risk": plan.risk_level.value})
-    update_session_state(runner.repo, session)
+    update_session_state(runner.repo, _with_shell_environment(runner, session))
 
 
 
@@ -1318,14 +1324,14 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     if result.passed:
         checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed"])
         runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "validation_passed"})
-        update_session_state(runner.repo, SessionState(
+        update_session_state(runner.repo, _with_shell_environment(runner, SessionState(
             affected_files=changed_files,
             validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
             validation_summary="passed",
             outcome_status="success",
             next_step_hints=["Finalize and report output"],
             handoff_checkpoint="validation_passed",
-        ))
+        )))
         if getattr(runner, "_mission_state", None) is not None:
             runner._mission_state.validation_failures = []
             runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
@@ -1345,7 +1351,7 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     if outcome.recovered:
         checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed after repair"])
         runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_recovered"})
-        update_session_state(runner.repo, SessionState(
+        update_session_state(runner.repo, _with_shell_environment(runner, SessionState(
             affected_files=changed_files,
             validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
             validation_summary="passed after repair",
@@ -1353,7 +1359,7 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             outcome_status="recovered",
             next_step_hints=["Report repaired validation and summarize edits"],
             handoff_checkpoint="repair_recovered",
-        ))
+        )))
         if getattr(runner, "_mission_state", None) is not None:
             runner._mission_state.validation_failures = []
             runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
@@ -1362,7 +1368,7 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
 
     checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"])
     runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_exhausted"})
-    update_session_state(runner.repo, SessionState(
+    update_session_state(runner.repo, _with_shell_environment(runner, SessionState(
         affected_files=changed_files,
         validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
         validation_summary="failed",
@@ -1371,7 +1377,7 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         outcome_status="failed",
         next_step_hints=["Inspect failing step and rerun with interactive guidance"],
         handoff_checkpoint="repair_exhausted",
-    ))
+    )))
     if getattr(runner, "_mission_state", None) is not None:
         runner._mission_state.validation_failures = [result.failure_summary]
         runner._mission_state.last_failed_summary = outcome.message

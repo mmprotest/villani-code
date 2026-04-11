@@ -35,6 +35,7 @@ from villani_code.llm_client import LLMClient
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
+from villani_code.shells import detect_shell_environment
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
@@ -538,6 +539,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._shell_environment = detect_shell_environment(str(self.repo)).to_dict()
         if self.small_model:
             self._init_small_model_support()
 

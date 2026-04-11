@@ -17,6 +17,7 @@ from villani_code.patch_apply import (
     extract_unified_diff_targets,
     parse_unified_diff,
 )
+from villani_code.shells import classify_and_rewrite_command, detect_shell_environment
 
 
 class LsInput(BaseModel):
@@ -143,6 +144,7 @@ def execute_tool(
     unsafe: bool = False,
     debug_callback: Any | None = None,
     tool_call_id: str = "",
+    runtime_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
@@ -164,7 +166,14 @@ def execute_tool(
         if name == "Search":
             return _ok(_run_search(parsed, repo))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id))
+            return _run_bash(
+                parsed,
+                repo,
+                unsafe=unsafe,
+                debug_callback=debug_callback,
+                tool_call_id=tool_call_id,
+                runtime_state=runtime_state,
+            )
         if name == "Write":
             return _ok(_run_write(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Patch":
@@ -235,21 +244,44 @@ def _run_search(data: SearchInput, repo: Path) -> str:
     return proc.stdout
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+def _run_bash(
+    data: BashInput,
+    repo: Path,
+    unsafe: bool,
+    debug_callback: Any | None = None,
+    tool_call_id: str = "",
+    runtime_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
+    shell_state = (runtime_state or {}).get("shell_environment", {}) if isinstance(runtime_state, dict) else {}
+    shell_family = str(shell_state.get("shell_family", "")).strip() if isinstance(shell_state, dict) else ""
+    if not shell_family:
+        shell_family = detect_shell_environment(cwd=str(repo)).shell_family
+    decision = classify_and_rewrite_command(data.command, shell_family)
+    if decision.classification == "blocked":
+        blocked_payload = {
+            "shell_family": shell_family,
+            "classification": "blocked",
+            "offending_pattern": decision.offending_pattern,
+            "short_reason": decision.short_reason,
+        }
+        if decision.suggested_equivalent:
+            blocked_payload["suggested_equivalent"] = decision.suggested_equivalent
+        return {"content": json.dumps(blocked_payload, separators=(",", ":")), "is_error": True}
+    command_to_run = decision.command
     cwd = _safe_path(repo, data.cwd)
     if callable(debug_callback):
-        debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
-    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+        debug_callback("command_started", {"command": command_to_run, "cwd": data.cwd, "tool_call_id": tool_call_id})
+    proc = subprocess.run(command_to_run, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
     if callable(debug_callback):
         debug_callback(
             "command_finished",
             {
-                "command": data.command,
+                "command": command_to_run,
                 "cwd": data.cwd,
                 "exit_code": proc.returncode,
                 "stdout": proc.stdout,
@@ -258,7 +290,19 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 "tool_call_id": tool_call_id,
             },
         )
-    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+    return _ok(
+        json.dumps(
+            {
+                "command": command_to_run,
+                "original_command": data.command,
+                "classification": decision.classification,
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            },
+            indent=2,
+        )
+    )
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:

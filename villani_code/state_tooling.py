@@ -665,6 +665,7 @@ def execute_tool_with_lifecycle(
         unsafe=runner.unsafe,
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
+        runtime_state={"shell_environment": dict(getattr(runner, "_shell_environment", {}))},
     )
     runner.event_callback(
         {
