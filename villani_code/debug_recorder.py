@@ -391,7 +391,14 @@ class DebugRecorder:
         summary_path = self._safe(write_summary_from_events, self.artifacts.run_dir, status_override=status)
         if isinstance(summary_path, Path):
             self._emit("summary_generated", {"summary_path": str(summary_path)})
-            summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            try:
+                summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                summary_payload = {
+                    "run_id": self.run_id,
+                    "status": status,
+                    "error": "summary_json_unreadable",
+                }
             summary_payload["total_turns"] = total_turns
             summary_payload["termination_reason"] = termination_reason
             summary_payload["mission_id"] = mission_id

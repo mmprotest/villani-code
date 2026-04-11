@@ -138,3 +138,32 @@ def test_debug_metadata_records_configured_provider_not_internal_format(tmp_path
 
     assert session_meta["provider"] == "openai"
     assert run_started["payload"]["provider"] == "openai"
+
+
+def test_event_recording_sanitizes_binary_like_summaries(tmp_path: Path) -> None:
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "bin", "obj", tmp_path, "execution", "m")
+    recorder.record_turn_start(1, {"message_count": 1})
+    recorder.record_tool_call("Read", {"file_path": "a.bin"}, "tool-1")
+    recorder.record_tool_result("Read", False, "ok\x00\x01\x02boom", "tool-1", result_payload={"content": "ok\x00\x01\x02boom"})
+    recorder.record_turn_finish(1, "end_turn")
+    summary_path = recorder.write_final_summary(status="completed", termination_reason="completed", total_turns=1, mission_id="m")
+
+    events = [json.loads(line) for line in (tmp_path / "bin" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    terminal = next(event for event in events if event["event_type"] == "tool_call_completed")
+    assert terminal["payload"]["summary"] == "[sanitized-binary-content]"
+    assert summary_path.exists()
+
+
+def test_event_recording_handles_undecodable_payload_objects(tmp_path: Path) -> None:
+    class BadString:
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "bad", "obj", tmp_path, "execution", "m")
+    recorder.record_event("custom", "ok", {"payload": BadString()})
+    summary_path = recorder.write_final_summary(status="completed", termination_reason="completed", total_turns=1, mission_id="m")
+
+    events = [json.loads(line) for line in (tmp_path / "bad" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    custom = next(event for event in events if event["event_type"] == "custom")
+    assert custom["payload"]["payload"] == "[unserializable]"
+    assert summary_path.exists()

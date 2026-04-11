@@ -172,6 +172,27 @@ def infer_targeted_command(step: ValidationStep, changed_files: list[str], repo_
     return f"python -m pytest -q {quoted}".strip()
 
 
+def _classify_command_quality(command: str) -> str:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return "structural_only"
+    if lowered.startswith("git diff") or lowered.startswith("ls ") or lowered.startswith("find "):
+        return "structural_only"
+    if any(tok in lowered for tok in ("helper", "wrapper", "probe", "verify_", "smoke", "sanity")):
+        return "helper_wrapper"
+    if any(tok in lowered for tok in ("pytest", "unittest")):
+        return "direct_run_or_task_validation"
+    if any(tok in lowered for tok in ("py_compile", "compileall", " import ")):
+        return "direct_import_or_compile"
+    if any(tok in lowered for tok in ("python ", "python3 ", "uv run", "poetry run", "node ", "go test", "cargo test", "cargo run")):
+        return "indirect_probe"
+    return "structural_only"
+
+
+def _command_quality_value(command: str) -> int:
+    return VALIDATION_STRENGTH_ORDER.get(_classify_command_quality(command), 0)
+
+
 def classify_validation_step_strength(step: ValidationStep, *, changed_files: list[str] | None = None) -> str:
     command = str(step.command or "").strip().lower()
     if step.kind == "inspection" and command.startswith("git diff"):
@@ -196,6 +217,12 @@ def validation_step_strength_value(step: ValidationStep, *, changed_files: list[
 def _step_order(step: ValidationStep) -> tuple[int, int, str]:
     kind_order = {"format": 0, "lint": 1, "typecheck": 2, "test": 3, "build": 4, "inspection": 5}
     return (step.cost_level, kind_order.get(step.kind, 9), step.name)
+
+
+def _planned_step_order(row: ValidationPlanStep) -> tuple[int, int, int, str]:
+    quality = _command_quality_value(row.command)
+    target_bonus = 1 if str(getattr(row.step, "target_strategy", "")) == "primary_target" else 0
+    return (-quality, -target_bonus, row.step.cost_level, row.step.name)
 
 
 def _impact_from_inputs(scope: ValidationScope, change_impact: str | None, action_classes: list[str] | None) -> ChangeImpact:
@@ -308,6 +335,7 @@ def plan_validation(config: ValidationConfig, changed_files: list[str], repo_map
         force_broad=force_broad,
         reason="config_or_dependency_change" if force_broad else "targeted_then_broaden",
     )
+    selected = sorted(selected, key=_planned_step_order)
     return ValidationPlan(scope, selected, reasons, targets, escalation)
 
 
@@ -362,8 +390,13 @@ def run_validation(repo: Path, changed_files: list[str], event_callback: Any | N
 
 
 def select_validation_steps(config: ValidationConfig, changed_files: list[str]) -> list[ValidationStep]:
-    selected = [row.step for row in plan_validation(config, changed_files).selected_steps]
+    plan = plan_validation(config, changed_files)
+    selected = [row.step for row in plan.selected_steps]
     return sorted(
         selected,
-        key=lambda step: (_step_order(step), -validation_step_strength_value(step, changed_files=changed_files)),
+        key=lambda step: (
+            -_command_quality_value(step.command),
+            _step_order(step),
+            -validation_step_strength_value(step, changed_files=changed_files),
+        ),
     )

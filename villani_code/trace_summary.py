@@ -11,6 +11,7 @@ from villani_code.debug_artifacts import DEBUG_JSONL_FILES
 AGGREGATION_VERSION = "v2"
 TOOL_CALL_SCHEMA_VERSION = "v1"
 SHELL_TOOL_NAMES = {"bash", "shell", "sh", "zsh", "ls"}
+_MAX_EVENT_TEXT = 2000
 
 
 class EventLogger:
@@ -36,18 +37,52 @@ class EventLogger:
         return next_id
 
     def emit(self, event_type: str, payload: dict[str, Any], turn_index: int | None = None, *, ts: str | None = None) -> dict[str, Any]:
+        safe_payload = _sanitize_event_value(payload)
         row: dict[str, Any] = {
             "event_id": self._next_event_id,
             "run_id": self.run_id,
             "ts": ts or datetime.now(timezone.utc).isoformat(),
             "turn_index": turn_index,
             "event_type": event_type,
-            "payload": payload,
+            "payload": safe_payload,
         }
         self._next_event_id += 1
         with self.events_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         return row
+
+
+def _is_binary_like(text: str) -> bool:
+    if not text:
+        return False
+    control_chars = sum(1 for char in text if ord(char) < 32 and char not in "\n\r\t")
+    return ("\x00" in text) or (control_chars > max(3, len(text) // 20))
+
+
+def _sanitize_text(text: str) -> str:
+    if _is_binary_like(text):
+        return "[sanitized-binary-content]"
+    if len(text) > _MAX_EVENT_TEXT:
+        return text[:_MAX_EVENT_TEXT] + "…[truncated]"
+    return text
+
+
+def _sanitize_event_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, bytes):
+        return f"[binary-bytes:{len(value)}]"
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, dict):
+        return {str(k): _sanitize_event_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_event_value(v) for v in value]
+    try:
+        coerced = str(value)
+    except Exception:
+        return "[unserializable]"
+    return _sanitize_text(coerced)
 
 
 def load_events(events_path: Path) -> list[dict[str, Any]]:

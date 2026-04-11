@@ -1025,6 +1025,27 @@ class Runner:
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
         ) -> dict[str, Any]:
+            def _temper_unverified_claims(text: str) -> str:
+                lowered = text.lower()
+                risky_markers = (
+                    "fully functional",
+                    "all requirements met",
+                    "thoroughly tested",
+                    "ready to use",
+                    "production-ready",
+                    "production ready",
+                )
+                if not any(marker in lowered for marker in risky_markers):
+                    return text
+                safe_lines = [
+                    line
+                    for line in text.splitlines()
+                    if not any(marker in line.lower() for marker in risky_markers)
+                ]
+                if not safe_lines:
+                    safe_lines = ["Implementation is partial and still pending direct validation of the primary target contract."]
+                return "\n".join(safe_lines).strip()
+
             def _evidence_guard_prefix() -> str:
                 primary_target = str(getattr(self, "_primary_execution_target", "")).strip()
                 primary_ok = bool(getattr(self, "_primary_target_minimally_valid", False))
@@ -1044,9 +1065,30 @@ class Runner:
             )
             guard_prefix = _evidence_guard_prefix()
             if guard_prefix:
+                final_text = _temper_unverified_claims(final_text)
                 final_text = f"{guard_prefix}\n\n{final_text}".strip()
                 response.setdefault("content", [])
+                response["content"] = [
+                    block
+                    for block in response["content"]
+                    if not (
+                        block.get("type") == "text"
+                        and any(
+                            marker in str(block.get("text", "")).lower()
+                            for marker in (
+                                "fully functional",
+                                "all requirements met",
+                                "thoroughly tested",
+                                "ready to use",
+                                "production-ready",
+                                "production ready",
+                            )
+                        )
+                    )
+                ]
                 response["content"].insert(0, {"type": "text", "text": guard_prefix})
+                if len(response["content"]) == 1:
+                    response["content"].append({"type": "text", "text": "Implementation is partial and not yet fully verified."})
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,

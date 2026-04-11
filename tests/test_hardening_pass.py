@@ -110,8 +110,8 @@ def test_cost_aware_ordering_and_failure_summary(tmp_path: Path) -> None:
     init_project_memory(tmp_path)
     cfg = load_validation_config(tmp_path)
     plan = plan_validation(cfg, ["villani_code/mod.py"])
-    costs = [s.step.cost_level for s in plan.selected_steps]
-    assert costs == sorted(costs)
+    strengths = [classify_validation_step_strength(s.step, changed_files=["villani_code/mod.py"]) for s in plan.selected_steps]
+    assert "direct_run_or_task_validation" in strengths
 
     failure = summarize_validation_failure("pytest", "\n".join([f"line {i}" for i in range(120)]), "")
     assert "pytest failed" == failure.headline
@@ -135,6 +135,37 @@ def test_validation_step_strength_prefers_direct_over_helper() -> None:
     )
     assert classify_validation_step_strength(direct) == "direct_run_or_task_validation"
     assert classify_validation_step_strength(helper) == "helper_wrapper"
+
+
+def test_plan_validation_prefers_primary_target_live_steps_over_helper_noise(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    init_project_memory(tmp_path)
+    cfg = load_validation_config(tmp_path)
+    cfg.steps.extend(
+        [
+            ValidationStep(
+                name="live-helper",
+                command="python helper_wrapper.py",
+                kind="inspection",
+                cost_level=1,
+                is_mutating=False,
+                scope_hint="targeted",
+                target_strategy="helper_wrapper",
+            ),
+            ValidationStep(
+                name="live-primary",
+                command="python -m pytest -q tests/test_mod.py",
+                kind="test",
+                cost_level=2,
+                is_mutating=False,
+                scope_hint="targeted",
+                target_strategy="primary_target",
+            ),
+        ]
+    )
+    plan = plan_validation(cfg, ["villani_code/mod.py"])
+    names = [row.step.name for row in plan.selected_steps]
+    assert names.index("live-primary") < names.index("live-helper")
 
 
 def test_select_validation_steps_keeps_stronger_steps_available(tmp_path: Path) -> None:
