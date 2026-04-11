@@ -266,9 +266,12 @@ def _run_bash(
         blocked_payload = {
             "shell_family": shell_family,
             "classification": "blocked",
-            "offending_pattern": decision.offending_pattern,
             "short_reason": decision.short_reason,
         }
+        if decision.offending_token:
+            blocked_payload["offending_token"] = decision.offending_token
+        if decision.offending_pattern:
+            blocked_payload["offending_pattern"] = decision.offending_pattern
         if decision.suggested_equivalent:
             blocked_payload["suggested_equivalent"] = decision.suggested_equivalent
         return {"content": json.dumps(blocked_payload, separators=(",", ":")), "is_error": True}

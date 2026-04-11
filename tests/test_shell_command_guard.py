@@ -36,6 +36,35 @@ def test_cmd_heredoc_blocked(tmp_path: Path) -> None:
     assert decision.offending_pattern == "<<EOF"
 
 
+def test_cmd_embedded_head_pipeline_is_blocked(tmp_path: Path) -> None:
+    decision = classify_and_rewrite_command("echo ok && type app.log | head -50", "cmd")
+    assert decision.classification == "blocked"
+    assert decision.offending_token == "head"
+
+
+def test_cmd_head_n_rewrites_to_powershell_totalcount(tmp_path: Path) -> None:
+    decision = classify_and_rewrite_command("head -n 20 app.log", "cmd")
+    assert decision.classification == "needs_rewrite"
+    assert decision.command == 'powershell -NoProfile -Command "Get-Content \'app.log\' -TotalCount 20"'
+
+
+def test_cmd_head_default_rewrites_to_powershell_totalcount_10(tmp_path: Path) -> None:
+    decision = classify_and_rewrite_command("head app.log", "cmd")
+    assert decision.classification == "needs_rewrite"
+    assert decision.command == 'powershell -NoProfile -Command "Get-Content \'app.log\' -TotalCount 10"'
+
+
+def test_cmd_heredoc_anywhere_is_blocked(tmp_path: Path) -> None:
+    decision = classify_and_rewrite_command("echo start && python - <<'EOF'\nprint(1)\nEOF", "cmd")
+    assert decision.classification == "blocked"
+    assert decision.offending_token == "<<"
+
+
+def test_cmd_classifier_scans_full_command_string(tmp_path: Path) -> None:
+    decision = classify_and_rewrite_command("echo ok && dir | head -30", "cmd")
+    assert decision.classification == "blocked"
+
+
 def test_powershell_grep_rewrites_to_select_string(tmp_path: Path) -> None:
     decision = classify_and_rewrite_command("grep hello notes.txt", "powershell")
     assert decision.classification == "needs_rewrite"
@@ -59,5 +88,6 @@ def test_blocked_commands_produce_compact_structured_feedback(tmp_path: Path) ->
     payload = json.loads(result["content"])
     assert payload["shell_family"] == "cmd"
     assert payload["classification"] == "blocked"
+    assert payload["offending_token"] == "<<"
     assert payload["offending_pattern"] == "<<EOF"
     assert "short_reason" in payload

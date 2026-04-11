@@ -371,6 +371,7 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = deepcopy(messages)
+    _inject_shell_reminder(runner, prepared)
     if runner.small_model:
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
@@ -391,6 +392,32 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
     runner._context_governance.save_inventory(inventory)
     validate_anthropic_tool_sequence(prepared)
     return prepared
+
+
+def _inject_shell_reminder(runner: Any, messages: list[dict[str, Any]]) -> None:
+    if not messages:
+        return
+    shell_env = dict(getattr(runner, "_shell_environment", {}) or {})
+    shell_family = str(shell_env.get("shell_family", "")).strip().lower()
+    if shell_family == "cmd":
+        reminder = "Shell: Windows cmd. Do not use Unix tools like head, grep, tail, rm, or heredocs."
+    elif shell_family == "powershell":
+        reminder = "Shell: Windows PowerShell. Avoid bash heredocs and bash-only syntax."
+    elif shell_family in {"bash", "zsh"}:
+        reminder = f"Shell: {shell_family}. Use POSIX shell syntax."
+    else:
+        return
+    last = messages[-1]
+    if last.get("role") != "user":
+        return
+    content = last.get("content", [])
+    if not isinstance(content, list):
+        return
+    if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+        return
+    if any(isinstance(block, dict) and block.get("type") == "text" and str(block.get("text", "")).startswith("Shell: ") for block in content):
+        return
+    content.insert(0, {"type": "text", "text": reminder})
 
 
 def validate_anthropic_tool_sequence(messages: list[dict[str, Any]]) -> None:
