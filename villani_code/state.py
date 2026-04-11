@@ -532,6 +532,8 @@ class Runner:
         self._recovery_mode = False
         self._failing_file = ""
         self._active_solution_file = ""
+        self._active_solution_last_validation_ok: bool | None = None
+        self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
         self._failing_command = ""
         self._file_was_read_since_failure = False
@@ -912,6 +914,8 @@ class Runner:
         self._recovery_mode = False
         self._failing_file = ""
         self._active_solution_file = ""
+        self._active_solution_last_validation_ok = None
+        self._active_solution_last_validation_summary = ""
         self._failing_error_summary = ""
         self._failing_command = ""
         self._file_was_read_since_failure = False
@@ -1060,6 +1064,11 @@ class Runner:
         def _budget_reason(
             completed: bool = False, model_idle: bool = False
         ) -> str | None:
+            if completed:
+                active_solution_file = str(getattr(self, "_active_solution_file", "")).strip()
+                active_validation_ok = getattr(self, "_active_solution_last_validation_ok", None)
+                if active_solution_file and active_validation_ok is not True:
+                    return "active_solution_validation_missing" if active_validation_ok is None else "active_solution_validation_failed"
             if execution_budget is None:
                 return None
             elapsed = time.monotonic() - start
@@ -1218,27 +1227,7 @@ class Runner:
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
-                    transcript["final_assistant_content"] = response.get("content", [])
-                    transcript_path = self._save_transcript_and_link(transcript)
-                    post = self._run_post_execution_validation(_change_summary()[2])
-                    if post:
-                        response.setdefault("content", []).append({"type": "text", "text": post})
-                    self._save_session_snapshot(messages)
-                    if self._event_recorder is not None:
-                        self._event_recorder.write_digest()
-                    if self._debug_recorder is not None:
-                        self._debug_recorder.write_final_summary(
-                            status="completed",
-                            termination_reason="completed",
-                            total_turns=turns_used,
-                            mission_id=self._mission_id,
-                        )
-                    return {
-                        "response": response,
-                        "messages": messages,
-                        "transcript_path": str(transcript_path),
-                        "transcript": transcript,
-                    }
+                    return _finish_bounded(response, "completed", True)
                 proposal = self._capture_edit_proposal(response)
                 if proposal:
                     self.event_callback(
@@ -1346,27 +1335,7 @@ class Runner:
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                transcript["final_assistant_content"] = response.get("content", [])
-                transcript_path = None
-                if not self._planning_read_only:
-                    transcript_path = self._save_transcript_and_link(transcript)
-                    self._save_session_snapshot(messages)
-                self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
-                if self._event_recorder is not None:
-                    self._event_recorder.write_digest()
-                if self._debug_recorder is not None:
-                    self._debug_recorder.write_final_summary(
-                        status="completed",
-                        termination_reason="completed",
-                        total_turns=turns_used,
-                        mission_id=self._mission_id,
-                    )
-                return {
-                    "response": response,
-                    "messages": messages,
-                    "transcript_path": str(transcript_path) if transcript_path is not None else "",
-                    "transcript": transcript,
-                }
+                return _finish_bounded(response, "completed", True)
 
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:

@@ -227,6 +227,48 @@ def test_recovery_mode_allows_helper_file_edit_with_active_solution(tmp_path: Pa
     assert result["is_error"] is False
 
 
+def test_recovery_mode_blocks_full_write_of_active_solution_after_hard_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "web_server.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_server.py"
+    runner._failing_file = "web_server.py"
+    runner._active_solution_last_validation_ok = False
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "web_server.py", "content": "print('rewritten')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "full_write_blocked_for_active_solution" in str(result["content"])
+    assert '"recovery_blocked": true' in str(result["content"])
+
+
+def test_recovery_mode_allows_bounded_patch_of_active_solution_after_hard_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "web_server.py"
+    target.write_text("x=1\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_server.py"
+    runner._failing_file = "web_server.py"
+    runner._active_solution_last_validation_ok = False
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/web_server.py\n+++ b/web_server.py\n@@ -1 +1 @@\n-x=1\n+x=2\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
+
+
 def test_read_failing_file_flips_recovery_read_flag(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     (tmp_path / "legal_review_app.py").write_text("print('x')\n", encoding="utf-8")

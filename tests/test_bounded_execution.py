@@ -110,3 +110,43 @@ def test_villani_task_reports_completed_when_done(tmp_path: Path) -> None:
 
     assert result["execution"]["completed"] is True
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_active_solution_failed_validation_blocks_completed_status(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python web_server.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "all done"}]},
+        ],
+    )
+    def fake_verify(*_args, **_kwargs) -> str:
+        runner._active_solution_file = "web_server.py"
+        runner._active_solution_last_validation_ok = False
+        return ""
+    monkeypatch.setattr(runner, "_run_verification", fake_verify)
+
+    result = runner.run("work")
+
+    assert result["execution"]["completed"] is False
+    assert result["execution"]["terminated_reason"] == "active_solution_validation_failed"
+
+
+def test_active_solution_successful_validation_allows_completed_status(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python web_server.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "all done"}]},
+        ],
+    )
+    def fake_verify(*_args, **_kwargs) -> str:
+        runner._active_solution_file = "web_server.py"
+        runner._active_solution_last_validation_ok = True
+        return ""
+    monkeypatch.setattr(runner, "_run_verification", fake_verify)
+
+    result = runner.run("work")
+
+    assert result["execution"]["completed"] is True
+    assert result["execution"]["terminated_reason"] == "completed"
