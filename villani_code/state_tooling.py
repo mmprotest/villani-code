@@ -11,6 +11,7 @@ from typing import Any
 from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets, parse_unified_diff
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
+from villani_code.tool_validation import ToolCallValidator, render_validation_error_content
 from villani_code.tools import execute_tool
 
 
@@ -516,6 +517,36 @@ def execute_tool_with_policy(
             runner._tighten_tool_input(tool_name, tool_input)
     if tool_name in {"Write", "Patch"}:
         _normalize_mutation_payload(tool_name, tool_input)
+    validator = ToolCallValidator(runner.repo)
+    validation_result = validator.validate(
+        tool_name,
+        tool_input,
+        shell_environment=dict(getattr(runner, "_shell_environment", {}) or {}),
+    )
+    if not validation_result.valid:
+        fingerprint = validation_result.fingerprint or f"{tool_name}:{validation_result.reason_code}"
+        last_fingerprint = str(getattr(runner, "_last_invalid_tool_fingerprint", "") or "")
+        if fingerprint == last_fingerprint:
+            retry_count = int(getattr(runner, "_last_invalid_tool_retry_count", 0) or 0) + 1
+        else:
+            retry_count = 1
+        runner._last_invalid_tool_fingerprint = fingerprint
+        runner._last_invalid_tool_retry_count = retry_count
+        rejection_event = {
+            "type": "tool_validation_rejected",
+            "name": tool_name,
+            "input": tool_input,
+            "tool_use_id": tool_use_id,
+            "reason_code": validation_result.reason_code,
+            "reason": validation_result.reason,
+            "retry_count": retry_count,
+        }
+        if validation_result.details:
+            rejection_event["details"] = validation_result.details
+        runner.event_callback(rejection_event)
+        return {"content": render_validation_error_content(validation_result, retry_count), "is_error": True}
+    runner._last_invalid_tool_fingerprint = ""
+    runner._last_invalid_tool_retry_count = 0
 
     policy = runner.permissions.evaluate_with_reason(
         tool_name,

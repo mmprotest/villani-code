@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from villani_code.autonomy import FailureCategory, FailureClassifier, TaskContract, VerificationEngine
@@ -377,6 +378,94 @@ diff --git a/src/b.py b/src/b.py
     assert result["is_error"] is True
     assert "first_attempt_scope_violation" in str(result["content"])
     assert any(e.get("type") == "first_attempt_scope_violation" for e in events)
+
+
+def test_tool_validation_rejects_empty_write_before_execution(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner.small_model = False
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_execute(*args, **kwargs):
+        calls.append((str(kwargs.get("tool_name", "")), dict(kwargs.get("tool_input", {}))))
+        return {"content": "should not run", "is_error": False}
+
+    monkeypatch.setattr("villani_code.state_tooling.execute_tool_with_lifecycle", fake_execute)
+    events: list[dict] = []
+    runner.event_callback = events.append
+
+    result = runner._execute_tool_with_policy("Write", {"file_path": "src/a.py", "content": "   "}, "toolu_3", 0)
+
+    assert result["is_error"] is True
+    parsed = json.loads(str(result["content"]))
+    assert parsed["reason_code"] == "write_empty_content"
+    assert calls == []
+    assert any(e.get("type") == "tool_validation_rejected" for e in events)
+
+
+def test_tool_validation_rejects_malformed_patch_before_execution(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "src" / "a.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x = 1\n", encoding="utf-8")
+    runner = _runner(tmp_path)
+    runner.small_model = False
+    calls: list[tuple[str, dict]] = []
+
+    def fake_execute(*args, **kwargs):
+        calls.append((str(kwargs.get("tool_name", "")), dict(kwargs.get("tool_input", {}))))
+        return {"content": "should not run", "is_error": False}
+
+    monkeypatch.setattr("villani_code.state_tooling.execute_tool_with_lifecycle", fake_execute)
+
+    result = runner._execute_tool_with_policy(
+        "Patch",
+        {"file_path": "src/a.py", "unified_diff": "--- a/src/a.py\n@@ -1 +1 @@\n-x\n+y\n"},
+        "toolu_4",
+        0,
+    )
+
+    assert result["is_error"] is True
+    parsed = json.loads(str(result["content"]))
+    assert parsed["reason_code"] == "patch_malformed_unified_diff"
+    assert calls == []
+
+
+def test_tool_validation_rejects_blocked_bash_before_execution(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    runner.small_model = False
+    runner._shell_environment = {"shell_family": "bash", "os_family": "linux"}
+    calls: list[tuple[str, dict]] = []
+
+    def fake_execute(*args, **kwargs):
+        calls.append((str(kwargs.get("tool_name", "")), dict(kwargs.get("tool_input", {}))))
+        return {"content": "should not run", "is_error": False}
+
+    monkeypatch.setattr("villani_code.state_tooling.execute_tool_with_lifecycle", fake_execute)
+
+    result = runner._execute_tool_with_policy("Bash", {"command": "del /q foo.txt"}, "toolu_5", 0)
+
+    assert result["is_error"] is True
+    parsed = json.loads(str(result["content"]))
+    assert parsed["reason_code"] == "bash_blocked_by_shell_policy"
+    assert parsed["details"]["shell_family"] == "bash"
+    assert calls == []
+
+
+def test_tool_validation_retry_count_increments_for_same_invalid_shape(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    runner.small_model = False
+
+    first = runner._execute_tool_with_policy("Write", {"file_path": "src/a.py", "content": " "}, "toolu_6", 0)
+    second = runner._execute_tool_with_policy("Write", {"file_path": "src/a.py", "content": "\n"}, "toolu_7", 1)
+
+    first_payload = json.loads(str(first["content"]))
+    second_payload = json.loads(str(second["content"]))
+    assert first_payload["retry_count"] == 1
+    assert second_payload["retry_count"] == 2
+    assert "guidance" in second_payload
 
 
 def test_patch_sanity_gate_catches_pytest_collection_failure(tmp_path: Path, monkeypatch) -> None:
