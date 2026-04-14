@@ -70,6 +70,64 @@ def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
     except Exception:  # noqa: BLE001
         return
 
+
+def _extract_machine_response_json(result: dict[str, Any] | None) -> dict[str, Any]:
+    def _candidate_texts(value: Any) -> list[str]:
+        texts: list[str] = []
+        if isinstance(value, str):
+            texts.append(value)
+            return texts
+        if not isinstance(value, list):
+            return texts
+        for block in value:
+            if isinstance(block, str):
+                texts.append(block)
+                continue
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str):
+                texts.append(text)
+        return texts
+
+    def _parse_json_blob(text: str) -> dict[str, Any] | None:
+        candidate = text.strip()
+        if not candidate:
+            return None
+        try:
+            payload = json.loads(candidate)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            payload = json.loads(candidate[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    if not isinstance(result, dict):
+        return {}
+    candidates: list[str] = []
+    response = result.get("response")
+    if isinstance(response, str):
+        candidates.append(response)
+    elif isinstance(response, dict):
+        candidates.extend(_candidate_texts(response.get("content")))
+    candidates.extend(_candidate_texts(result.get("content")))
+    for text in candidates:
+        payload = _parse_json_blob(text)
+        if payload is not None:
+            return payload
+    return {}
+
+
 def _load_settings_manager() -> Any | None:
     try:
         from villani_code.tui.components.settings import SettingsManager
@@ -216,31 +274,12 @@ def run(
     if parent_mission_id:
         set_current_mission_id(repo.resolve(), parent_mission_id)
     if result_json_path:
-        response_json: dict[str, Any] | None = None
-        if isinstance(result, dict):
-            content = result.get("response")
-            if isinstance(content, dict):
-                blocks = content.get("content", [])
-                if isinstance(blocks, list):
-                    for block in blocks:
-                        if not isinstance(block, dict) or block.get("type") != "text":
-                            continue
-                        text = block.get("text")
-                        if not isinstance(text, str):
-                            continue
-                        try:
-                            parsed = json.loads(text)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(parsed, dict):
-                            response_json = parsed
-                            break
         payload = {
             "status": "ok",
             "role": role or "",
             "parent_mission_id": parent_mission_id or "",
             "mission_id": getattr(runner, "_mission_id", "") or "",
-            "response_json": response_json or {},
+            "response_json": _extract_machine_response_json(result),
         }
         result_json_path.parent.mkdir(parents=True, exist_ok=True)
         result_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

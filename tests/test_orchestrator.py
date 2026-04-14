@@ -300,3 +300,27 @@ def test_no_final_verification_when_no_worker_accepted(monkeypatch, tmp_path: Pa
     )
     assert summary["status"] == "failed"
     assert called["n"] == 0
+
+
+def test_supervisor_subprocess_failure_reports_real_error(monkeypatch, tmp_path: Path) -> None:
+    _patch_common(monkeypatch, tmp_path)
+
+    def _run(**kwargs):
+        path = Path(kwargs["result_json_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return {
+            "exit_code": 2,
+            "run_dir": str(path.parent / "run"),
+            "result_path": str(path),
+            "stdout": "",
+            "stderr": "No such option: --foo",
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(orchestrator, "run_villani_subprocess", _run)
+    summary = orchestrator.run_orchestrator(
+        instruction="x", repo=tmp_path, model="m", base_url="", provider="anthropic", api_key=None, max_tokens=1, small_model=False,
+        debug_mode=False, debug_dir=None, max_subtasks=3, max_worker_retries=0, supervisor_timeout_seconds=60, worker_timeout_seconds=60
+    )
+    assert summary["status"] == "failed"
+    assert "exit code 2" in summary["summary"]

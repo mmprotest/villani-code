@@ -43,6 +43,18 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _subprocess_failure_summary(run: dict[str, Any], phase: str) -> str:
+    if run.get("timed_out"):
+        return f"{phase} subprocess timed out"
+    exit_code = int(run.get("exit_code", 0))
+    if exit_code == 0:
+        return ""
+    stderr = str(run.get("stderr", "")).strip()
+    stdout = str(run.get("stdout", "")).strip()
+    details = stderr or stdout or "no stderr/stdout captured"
+    return f"{phase} subprocess failed with exit code {exit_code}: {details[:500]}"
+
+
 def run_villani_subprocess(
     *,
     instruction: str,
@@ -173,6 +185,12 @@ def run_orchestrator(
     state.supervisor_run_dir = str((orch_dir / "supervisor" / "run"))
     state.supervisor_result_json_path = str(supervisor_result_path)
     save_orchestrator_state(state_path, state)
+    failure_summary = _subprocess_failure_summary(sup, "Supervisor")
+    if failure_summary:
+        state.status = "failed"
+        state.final_summary = failure_summary
+        save_orchestrator_state(state_path, state)
+        return {"status": state.status, "summary": state.final_summary, "mission_id": mission_id}
 
     sup_payload = _load_json(supervisor_result_path)
     plan = supervisor_plan_from_dict((sup_payload or {}).get("response_json", {}))
@@ -242,11 +260,12 @@ def run_orchestrator(
                 parent_mission_id=mission_id,
                 timeout_seconds=worker_timeout_seconds,
             )
+            subprocess_failure = _subprocess_failure_summary(run, f"Worker {task.id} attempt {attempt_num}")
             result_payload = _load_json(result_path) or {}
             response_payload = result_payload.get("response_json", {})
             recommended = response_payload.get("recommended_verification", []) if isinstance(response_payload, dict) else []
-            if run["timed_out"]:
-                verification = {"status": "retryable_failure", "summary": "Worker timed out", "commands_run": [], "files_touched": []}
+            if subprocess_failure:
+                verification = {"status": "retryable_failure", "summary": subprocess_failure, "commands_run": [], "files_touched": []}
             else:
                 verification_obj = verify_worker_result(worktree_path, task, recommended if isinstance(recommended, list) else None)
                 verification = {
