@@ -19,6 +19,8 @@ from villani_code.cli_subcommands import register_benchmark_commands, register_m
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.debug_mode import DebugMode, build_debug_config
+from villani_code.mission_state import set_current_mission_id
+from villani_code.orchestrator import run_orchestrator
 from villani_code.trace_summary import write_summary_from_events, write_tool_calls_from_events
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
@@ -197,15 +199,91 @@ def run(
     provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
     api_key: Optional[str] = typer.Option(None, "--api-key"),
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
+    role: Optional[str] = typer.Option(None, "--role", hidden=True),
+    result_json_path: Optional[Path] = typer.Option(None, "--result-json-path", hidden=True),
+    parent_mission_id: Optional[str] = typer.Option(None, "--parent-mission-id", hidden=True),
     debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
 ) -> None:
+    effective_instruction = instruction
+    if role:
+        effective_instruction = f"[ORCHESTRATOR ROLE={role}]\\n{instruction}"
     debug_mode = DebugMode(build_debug_config(debug).mode.value)
     runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, auto_approve, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir)
     if auto_approve:
         console.print("Auto-approval: ON")
-    result = runner.run(instruction)
+    result = runner.run(effective_instruction)
+    if parent_mission_id:
+        set_current_mission_id(repo.resolve(), parent_mission_id)
+    if result_json_path:
+        response_json: dict[str, Any] | None = None
+        if isinstance(result, dict):
+            content = result.get("response")
+            if isinstance(content, dict):
+                blocks = content.get("content", [])
+                if isinstance(blocks, list):
+                    for block in blocks:
+                        if not isinstance(block, dict) or block.get("type") != "text":
+                            continue
+                        text = block.get("text")
+                        if not isinstance(text, str):
+                            continue
+                        try:
+                            parsed = json.loads(text)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(parsed, dict):
+                            response_json = parsed
+                            break
+        payload = {
+            "status": "ok",
+            "role": role or "",
+            "parent_mission_id": parent_mission_id or "",
+            "mission_id": getattr(runner, "_mission_id", "") or "",
+            "response_json": response_json or {},
+        }
+        result_json_path.parent.mkdir(parents=True, exist_ok=True)
+        result_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _print_response_text_blocks(result)
+
+
+@app.command()
+def orchestrate(
+    instruction: str = typer.Argument(..., help="Top-level orchestration objective"),
+    base_url: str = typer.Option(..., "--base-url", help="Base URL for compatible messages API server"),
+    model: str = typer.Option(..., "--model", help="Model name"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository path"),
+    max_tokens: int = typer.Option(4096, "--max-tokens"),
+    small_model: bool = typer.Option(False, "--small-model"),
+    provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+    max_subtasks: int = typer.Option(3, "--max-subtasks"),
+    max_worker_retries: int = typer.Option(1, "--max-worker-retries"),
+    supervisor_timeout_seconds: int = typer.Option(300, "--supervisor-timeout-seconds"),
+    worker_timeout_seconds: int = typer.Option(600, "--worker-timeout-seconds"),
+    debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
+    debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
+) -> None:
+    debug_mode = DebugMode(build_debug_config(debug).mode.value)
+    summary = run_orchestrator(
+        instruction=instruction,
+        repo=repo,
+        model=model,
+        base_url=base_url,
+        provider=provider,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        small_model=small_model,
+        debug_mode=debug_mode != DebugMode.OFF,
+        debug_dir=debug_dir,
+        max_subtasks=max_subtasks,
+        max_worker_retries=max_worker_retries,
+        supervisor_timeout_seconds=supervisor_timeout_seconds,
+        worker_timeout_seconds=worker_timeout_seconds,
+    )
+    console.print(f"Orchestration status: {summary.get('status', 'unknown')}")
+    console.print(f"Mission: {summary.get('mission_id', '')}")
+    console.print(f"Summary: {summary.get('summary', '')}")
 
 
 @app.command()
