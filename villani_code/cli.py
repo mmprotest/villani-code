@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import typer
 from rich.console import Console
+from pydantic import BaseModel, ValidationError
 
 from villani_code.interrupts import InterruptController
 from villani_code.optional_tui import OptionalTUIDependencyError, TUI_INSTALL_HINT
@@ -20,6 +21,8 @@ from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.debug_mode import DebugMode, build_debug_config
 from villani_code.trace_summary import write_summary_from_events, write_tool_calls_from_events
+from villani_code.orchestrator import OrchestratorConfig, run_orchestrator
+from villani_code.mission_state import set_current_mission_id
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -31,6 +34,28 @@ app.add_typer(plugin_app, name="plugin")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(trace_app, name="trace")
 console = Console()
+
+BaseUrlOption = Annotated[str, typer.Option(..., "--base-url", help="Base URL for compatible messages API server")]
+ModelOption = Annotated[str, typer.Option(..., "--model", help="Model name")]
+RepoOption = Annotated[Path, typer.Option("--repo", help="Repository path")]
+MaxTokensOption = Annotated[int, typer.Option("--max-tokens")]
+StreamOption = Annotated[bool, typer.Option("--stream/--no-stream")]
+ThinkingOption = Annotated[Optional[str], typer.Option("--thinking")]
+UnsafeOption = Annotated[bool, typer.Option("--unsafe")]
+VerboseOption = Annotated[bool, typer.Option("--verbose")]
+ExtraJsonOption = Annotated[Optional[str], typer.Option("--extra-json")]
+RedactOption = Annotated[bool, typer.Option("--redact")]
+SkipPermissionsOption = Annotated[bool, typer.Option("--dangerously-skip-permissions")]
+AutoAcceptEditsOption = Annotated[bool, typer.Option("--auto-accept-edits")]
+AutoApproveOption = Annotated[bool, typer.Option("--auto-approve", help="Automatically approve all actions without prompting")]
+PlanModeOption = Annotated[Literal["off", "auto", "strict"], typer.Option("--plan-mode")]
+MaxRepairAttemptsOption = Annotated[int, typer.Option("--max-repair-attempts")]
+SmallModelOption = Annotated[bool, typer.Option("--small-model")]
+ProviderOption = Annotated[Literal["anthropic", "openai"], typer.Option("--provider")]
+ApiKeyOption = Annotated[Optional[str], typer.Option("--api-key")]
+BenchmarkRuntimeOption = Annotated[Optional[str], typer.Option("--benchmark-runtime-json", hidden=True)]
+DebugOption = Annotated[Optional[str], typer.Option("--debug", flag_value="normal")]
+DebugDirOption = Annotated[Optional[Path], typer.Option("--debug-dir")]
 
 
 def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
@@ -67,6 +92,69 @@ def _print_response_text_blocks(result: dict[str, Any] | None) -> None:
             _print_content(result.get("content"))
     except Exception:  # noqa: BLE001
         return
+
+
+def _extract_response_text(result: dict[str, Any] | None) -> str:
+    chunks: list[str] = []
+    if not isinstance(result, dict):
+        return ""
+    response = result.get("response")
+    if isinstance(response, str):
+        chunks.append(response)
+    if isinstance(response, dict):
+        content = response.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    chunks.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    chunks.append(str(block.get("text", "")))
+    direct_content = result.get("content")
+    if isinstance(direct_content, list):
+        for block in direct_content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                chunks.append(str(block.get("text", "")))
+    return "\n".join(c for c in chunks if c.strip()).strip()
+
+
+class _SupervisorArtifact(BaseModel):
+    subtasks: list[dict[str, Any]]
+
+
+class _WorkerArtifact(BaseModel):
+    status: str
+    summary: str
+    files_touched: list[str] = []
+    recommended_verification: list[str] = []
+
+
+def _write_result_artifact(path: Path, role: str, result: dict[str, Any] | None) -> None:
+    raw = _extract_response_text(result)
+    parsed: dict[str, Any] = {}
+    try:
+        parsed_candidate = json.loads(raw) if raw else {}
+        if isinstance(parsed_candidate, dict):
+            parsed = parsed_candidate
+    except json.JSONDecodeError:
+        parsed = {}
+    if role == "supervisor":
+        try:
+            payload = _SupervisorArtifact.model_validate(parsed).model_dump()
+        except ValidationError:
+            payload = {"subtasks": []}
+    elif role == "worker":
+        try:
+            candidate = _WorkerArtifact.model_validate(parsed).model_dump()
+            if candidate["status"] in {"success", "blocked_environment", "blocked_scope", "failed"}:
+                payload = candidate
+            else:
+                payload = {"status": "failed", "summary": "invalid worker json", "files_touched": [], "recommended_verification": []}
+        except ValidationError:
+            payload = {"status": "failed", "summary": "invalid worker json", "files_touched": [], "recommended_verification": []}
+    else:
+        payload = parsed if parsed else {"result": raw}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 def _load_settings_manager() -> Any | None:
     try:
@@ -155,6 +243,71 @@ def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, sma
             console.print("Interrupted current session. Press Ctrl+C again to exit Villani Code.")
 
 
+def _build_inherited_run_args(
+    *,
+    base_url: str,
+    model: str,
+    repo: Path,
+    max_tokens: int,
+    stream: bool,
+    thinking: Optional[str],
+    unsafe: bool,
+    verbose: bool,
+    extra_json: Optional[str],
+    redact: bool,
+    dangerously_skip_permissions: bool,
+    auto_accept_edits: bool,
+    auto_approve: bool,
+    plan_mode: Literal["off", "auto", "strict"],
+    max_repair_attempts: int,
+    small_model: bool,
+    provider: Literal["anthropic", "openai"],
+    api_key: Optional[str],
+    benchmark_runtime_json: Optional[str],
+    debug: Optional[str],
+    debug_dir: Optional[Path],
+    passthrough_args: list[str],
+) -> list[str]:
+    args: list[str] = [
+        "--base-url", base_url,
+        "--model", model,
+        "--repo", str(repo),
+        "--max-tokens", str(max_tokens),
+        "--plan-mode", plan_mode,
+        "--max-repair-attempts", str(max_repair_attempts),
+        "--provider", provider,
+    ]
+    args.append("--stream" if stream else "--no-stream")
+    if thinking is not None:
+        args.extend(["--thinking", thinking])
+    if unsafe:
+        args.append("--unsafe")
+    if verbose:
+        args.append("--verbose")
+    if extra_json is not None:
+        args.extend(["--extra-json", extra_json])
+    if redact:
+        args.append("--redact")
+    if dangerously_skip_permissions:
+        args.append("--dangerously-skip-permissions")
+    if auto_accept_edits:
+        args.append("--auto-accept-edits")
+    if auto_approve:
+        args.append("--auto-approve")
+    if small_model:
+        args.append("--small-model")
+    if api_key is not None:
+        args.extend(["--api-key", api_key])
+    if benchmark_runtime_json is not None:
+        args.extend(["--benchmark-runtime-json", benchmark_runtime_json])
+    if debug is not None:
+        args.extend(["--debug", debug])
+    if debug_dir is not None:
+        args.extend(["--debug-dir", str(debug_dir)])
+    args.extend(passthrough_args)
+    return args
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -177,35 +330,111 @@ def main(
 
 @app.command()
 def run(
-    instruction: str = typer.Argument(..., help="User instruction"),
-    base_url: str = typer.Option(..., "--base-url", help="Base URL for compatible messages API server"),
-    model: str = typer.Option(..., "--model", help="Model name"),
-    repo: Path = typer.Option(Path("."), "--repo", help="Repository path"),
-    max_tokens: int = typer.Option(4096, "--max-tokens"),
-    stream: bool = typer.Option(True, "--stream/--no-stream"),
-    thinking: Optional[str] = typer.Option(None, "--thinking"),
-    unsafe: bool = typer.Option(False, "--unsafe"),
-    verbose: bool = typer.Option(False, "--verbose"),
-    extra_json: Optional[str] = typer.Option(None, "--extra-json"),
-    redact: bool = typer.Option(False, "--redact"),
-    dangerously_skip_permissions: bool = typer.Option(False, "--dangerously-skip-permissions"),
-    auto_accept_edits: bool = typer.Option(False, "--auto-accept-edits"),
-    auto_approve: bool = typer.Option(False, "--auto-approve", help="Automatically approve all actions without prompting"),
-    plan_mode: Literal["off", "auto", "strict"] = typer.Option("auto", "--plan-mode"),
-    max_repair_attempts: int = typer.Option(2, "--max-repair-attempts"),
-    small_model: bool = typer.Option(False, "--small-model"),
-    provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
-    api_key: Optional[str] = typer.Option(None, "--api-key"),
-    benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
-    debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
-    debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
+    instruction: Annotated[str, typer.Argument(help="User instruction")],
+    base_url: BaseUrlOption,
+    model: ModelOption,
+    repo: RepoOption = Path("."),
+    max_tokens: MaxTokensOption = 4096,
+    stream: StreamOption = True,
+    thinking: ThinkingOption = None,
+    unsafe: UnsafeOption = False,
+    verbose: VerboseOption = False,
+    extra_json: ExtraJsonOption = None,
+    redact: RedactOption = False,
+    dangerously_skip_permissions: SkipPermissionsOption = False,
+    auto_accept_edits: AutoAcceptEditsOption = False,
+    auto_approve: AutoApproveOption = False,
+    plan_mode: PlanModeOption = "auto",
+    max_repair_attempts: MaxRepairAttemptsOption = 2,
+    small_model: SmallModelOption = False,
+    provider: ProviderOption = "anthropic",
+    api_key: ApiKeyOption = None,
+    benchmark_runtime_json: BenchmarkRuntimeOption = None,
+    debug: DebugOption = None,
+    debug_dir: DebugDirOption = None,
+    role: str = typer.Option("default", "--role", hidden=True),
+    result_json_path: Optional[Path] = typer.Option(None, "--result-json-path", hidden=True),
+    parent_mission_id: Optional[str] = typer.Option(None, "--parent-mission-id", hidden=True),
 ) -> None:
     debug_mode = DebugMode(build_debug_config(debug).mode.value)
     runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, auto_approve, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir)
     if auto_approve:
         console.print("Auto-approval: ON")
     result = runner.run(instruction)
+    if parent_mission_id:
+        set_current_mission_id(repo.resolve(), parent_mission_id)
+    if result_json_path:
+        _write_result_artifact(result_json_path, role=role, result=result)
+        return
     _print_response_text_blocks(result)
+
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def orchestrate(
+    ctx: typer.Context,
+    instruction: Annotated[str, typer.Argument(help="User instruction")],
+    base_url: BaseUrlOption,
+    model: ModelOption,
+    repo: RepoOption = Path("."),
+    max_tokens: MaxTokensOption = 4096,
+    stream: StreamOption = True,
+    thinking: ThinkingOption = None,
+    unsafe: UnsafeOption = False,
+    verbose: VerboseOption = False,
+    extra_json: ExtraJsonOption = None,
+    redact: RedactOption = False,
+    dangerously_skip_permissions: SkipPermissionsOption = False,
+    auto_accept_edits: AutoAcceptEditsOption = False,
+    auto_approve: AutoApproveOption = False,
+    plan_mode: PlanModeOption = "auto",
+    max_repair_attempts: MaxRepairAttemptsOption = 2,
+    small_model: SmallModelOption = False,
+    provider: ProviderOption = "anthropic",
+    api_key: ApiKeyOption = None,
+    benchmark_runtime_json: BenchmarkRuntimeOption = None,
+    debug: DebugOption = None,
+    debug_dir: DebugDirOption = None,
+    max_workers: int = typer.Option(3, "--max-workers"),
+    max_worker_retries: int = typer.Option(1, "--max-worker-retries"),
+    supervisor_timeout_seconds: Optional[int] = typer.Option(None, "--supervisor-timeout-seconds"),
+    worker_timeout_seconds: Optional[int] = typer.Option(None, "--worker-timeout-seconds"),
+) -> None:
+    inherited_args = _build_inherited_run_args(
+        base_url=base_url,
+        model=model,
+        repo=repo,
+        max_tokens=max_tokens,
+        stream=stream,
+        thinking=thinking,
+        unsafe=unsafe,
+        verbose=verbose,
+        extra_json=extra_json,
+        redact=redact,
+        dangerously_skip_permissions=dangerously_skip_permissions,
+        auto_accept_edits=auto_accept_edits,
+        auto_approve=auto_approve,
+        plan_mode=plan_mode,
+        max_repair_attempts=max_repair_attempts,
+        small_model=small_model,
+        provider=provider,
+        api_key=api_key,
+        benchmark_runtime_json=benchmark_runtime_json,
+        debug=debug,
+        debug_dir=debug_dir,
+        passthrough_args=list(ctx.args),
+    )
+    summary = run_orchestrator(
+        OrchestratorConfig(
+            instruction=instruction,
+            repo=repo,
+            inherited_run_args=inherited_args,
+            max_workers=max_workers,
+            max_worker_retries=max_worker_retries,
+            supervisor_timeout_seconds=supervisor_timeout_seconds,
+            worker_timeout_seconds=worker_timeout_seconds,
+        )
+    )
+    console.print(json.dumps(summary, indent=2))
 
 
 @app.command()
