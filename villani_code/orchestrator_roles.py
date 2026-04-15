@@ -23,6 +23,12 @@ def build_supervisor_instruction(objective: str, max_workers: int) -> str:
         "Return strict JSON only with this shape: "
         f"{json.dumps(asdict(example), separators=(',', ':'))}. "
         f"Produce between 1 and {max_workers} subtasks. "
+        "Return as few subtasks as necessary; prefer fewer, larger bounded subtasks. "
+        "Each subtask must be independently executable against the current repo state. "
+        "Do not create subtasks that depend on unfinished future subtasks. "
+        "Do not split presentation-layer work before core ingestion/parsing works. "
+        "If unsure, return fewer subtasks. "
+        "Environment is Windows/PowerShell-first; avoid Unix-only command assumptions. "
         "No markdown. No prose. No code edits. "
         f"Top-level objective:\n{objective}"
     )
@@ -39,6 +45,10 @@ def build_worker_instruction(
     return (
         "You are the worker role for Villani Code orchestrator. "
         "Edit files directly in this repository to complete the bounded subtask. "
+        "Environment is Windows/PowerShell-first: prefer Python scripts or PowerShell-safe commands. "
+        "Avoid Unix-only commands unless a compatible shell is clearly available. "
+        "Do not start long-lived foreground servers unless explicitly required. "
+        "Prefer short verification commands that terminate cleanly. "
         "Return strict JSON only with keys: status, summary, files_touched, recommended_verification. "
         "Allowed status values: success, blocked_environment, blocked_scope, failed. "
         "No markdown. No prose outside JSON. "
