@@ -1,0 +1,1 @@
+The CLI command `report --date today` returns tomorrow's date in some timezones. Fix the bug and verify the behavior.

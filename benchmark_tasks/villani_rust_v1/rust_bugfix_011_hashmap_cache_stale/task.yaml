@@ -1,0 +1,26 @@
+id: rust_bugfix_011_hashmap_cache_stale
+family: bugfix
+difficulty: medium
+language: rust
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- cargo test --test test_fix -q
+hidden_verification:
+- cargo test -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+allowed_paths:
+- src/
+- tests/
+expected_touched_max: 3
+task_type: single_file_bugfix
+benchmark_track: core

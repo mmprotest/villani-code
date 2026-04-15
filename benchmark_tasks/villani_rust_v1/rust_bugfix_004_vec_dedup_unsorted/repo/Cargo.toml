@@ -1,0 +1,10 @@
+[package]
+name = "dedup-util"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[test]]
+name = "test_fix"
+path = "tests/test_fix.rs"

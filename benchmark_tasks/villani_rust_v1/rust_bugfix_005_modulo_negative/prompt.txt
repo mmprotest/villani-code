@@ -1,0 +1,1 @@
+The wrap_index function returns negative indices for some inputs, causing out-of-bounds access when used to index a collection. Fix it so the result is always a valid non-negative index, then verify the behavior.

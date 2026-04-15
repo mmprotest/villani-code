@@ -1,0 +1,1 @@
+The config file resolver ignores the base directory and always resolves paths relative to the filesystem root. When given a base of "/home/app" and a filename of "config/app.toml", the returned path should be "/home/app/config/app.toml", but the function returns a path that discards the base entirely. Fix the path construction so the base directory is respected.

@@ -1,0 +1,1 @@
+The validation tool reports success even when given invalid input. Fix the validator so it returns an error for invalid data and verify the behavior.

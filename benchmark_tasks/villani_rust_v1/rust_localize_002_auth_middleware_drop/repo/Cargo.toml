@@ -1,0 +1,8 @@
+[package]
+name = "auth-middleware"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "test_auth"
+path = "tests/test_auth.rs"

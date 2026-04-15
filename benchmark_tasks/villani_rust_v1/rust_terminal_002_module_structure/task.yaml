@@ -1,0 +1,28 @@
+id: rust_terminal_002_module_structure
+family: terminal_workflow
+difficulty: medium
+language: rust
+max_minutes: 5
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- cargo test -q
+hidden_verification:
+- cargo test -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+- Cargo.toml
+allowed_paths:
+- src/
+- tests/
+- Cargo.toml
+expected_touched_max: 3
+task_type: terminal
+benchmark_track: core

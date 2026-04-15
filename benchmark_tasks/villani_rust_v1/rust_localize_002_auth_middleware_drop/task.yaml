@@ -1,0 +1,27 @@
+id: rust_localize_002_auth_middleware_drop
+family: localize_patch
+difficulty: hard
+language: rust
+max_minutes: 6
+max_files_touched: 4
+expected_artifacts:
+- patch
+visible_verification:
+- cargo test --test test_auth -q
+hidden_verification:
+- cargo test -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+allowed_paths:
+- src/
+forbidden_paths:
+- tests/
+- Cargo.toml
+expected_touched_max: 4
+task_type: localize_patch
+benchmark_track: core
