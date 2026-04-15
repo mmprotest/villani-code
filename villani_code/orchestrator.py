@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -10,7 +11,16 @@ from typing import Any
 from villani_code.mission_state import get_current_mission_id, new_mission_id, set_current_mission_id
 from villani_code.orchestrator_models import Subtask, SupervisorResult, WorkerResult
 from villani_code.orchestrator_roles import build_supervisor_instruction, build_worker_instruction
-from villani_code.orchestrator_verify import restore_files, run_verification, snapshot_files, to_json
+from villani_code.orchestrator_verify import (
+    capture_repo_file_state,
+    cleanup_created_files,
+    count_changed_lines,
+    diff_repo_file_state,
+    restore_files,
+    run_verification,
+    snapshot_files,
+    to_json,
+)
 from villani_code.utils import ensure_dir
 
 
@@ -23,6 +33,10 @@ class OrchestratorConfig:
     max_worker_retries: int = 1
     supervisor_timeout_seconds: int | None = None
     worker_timeout_seconds: int | None = None
+    max_worker_model_turns: int = 40
+    max_worker_shell_commands: int = 20
+    max_worker_changed_files: int = 5
+    max_worker_changed_lines: int = 250
 
 
 @dataclass(slots=True)
@@ -138,46 +152,100 @@ def _run_worker_with_retries(
     snapshot_dir = snapshots_dir / subtask.id
     snapshot_files(config.repo, touched, snapshot_dir)
     max_attempts = config.max_worker_retries + 1
+    retryable_failures_used = 0
+    retryable_limit = 1
 
     for attempt in range(1, max_attempts + 1):
         prompt = build_worker_instruction(config.instruction, asdict(subtask), previous_failure=prev_summary)
         if result_path.exists():
             result_path.unlink()
-        proc = _run_child(
-            instruction=prompt,
-            inherited_run_args=config.inherited_run_args,
-            mission_id=mission_id,
-            role="worker",
-            result_json_path=result_path,
-            timeout_seconds=config.worker_timeout_seconds,
-            repo=config.repo,
+        before_state = capture_repo_file_state(config.repo)
+        try:
+            proc = _run_child(
+                instruction=prompt,
+                inherited_run_args=config.inherited_run_args,
+                mission_id=mission_id,
+                role="worker",
+                result_json_path=result_path,
+                timeout_seconds=config.worker_timeout_seconds,
+                repo=config.repo,
+            )
+            timeout_failure = False
+        except subprocess.TimeoutExpired as exc:
+            timeout_failure = True
+            proc = subprocess.CompletedProcess(exc.cmd, returncode=124, stdout=str(exc.stdout or ""), stderr=str(exc.stderr or ""))
+        after_state = capture_repo_file_state(config.repo)
+        modified_files, created_files, deleted_files = diff_repo_file_state(before_state, after_state)
+        actual_changed = sorted(set(modified_files + created_files + deleted_files))
+        changed_line_count = count_changed_lines(config.repo, set(modified_files + created_files))
+        out_of_scope_files = _out_of_scope_files(actual_changed, subtask.target_files)
+        variant_files = _variant_sprawl_files(created_files, subtask.target_files)
+        budget_reason = _budget_reason(
+            proc=proc,
+            changed_files_count=len(actual_changed),
+            changed_line_count=changed_line_count,
+            config=config,
         )
-        if proc.returncode != 0:
-            prev_summary = f"subprocess exited {proc.returncode}"
-            continue
-
         worker_result = _load_worker_result(result_path)
-        if worker_result is None:
-            prev_summary = "invalid worker result"
-            continue
 
-        changed = _count_changed_lines(config.repo, worker_result.files_touched)
-        verification = run_verification(
-            repo=config.repo,
-            worker_recommended=worker_result.recommended_verification,
-            success_criteria=subtask.success_criteria,
-            files_touched=worker_result.files_touched,
-            changed_line_count=changed,
-        )
-        (worker_dir / f"verification_attempt_{attempt}.json").write_text(
-            json.dumps(to_json(verification), indent=2), encoding="utf-8"
-        )
-        if verification.ok and worker_result.status == "success":
-            return {"success": True, "attempts": attempt}
+        should_restore = False
+        retryable = False
+        failure_reasons: list[str] = []
 
-        restore_files(config.repo, touched, snapshot_dir)
-        prev_summary = worker_result.summary if worker_result.summary else "; ".join(verification.reasons)
-        if attempt == max_attempts:
+        if timeout_failure:
+            last_cmd = _extract_last_command(proc.stdout, proc.stderr)
+            detail = f" (last command: {last_cmd})" if last_cmd else ""
+            failure_reasons.append(f"worker timeout/stall detected{detail}")
+            retryable = True
+            should_restore = True
+        elif proc.returncode != 0:
+            failure_reasons.append(f"subprocess exited {proc.returncode}")
+            should_restore = True
+        elif worker_result is None:
+            failure_reasons.append("invalid worker result")
+            should_restore = True
+        else:
+            if out_of_scope_files:
+                failure_reasons.append(f"out-of-scope edits: {', '.join(out_of_scope_files)}")
+                retryable = worker_result.status == "blocked_scope"
+                should_restore = True
+            if variant_files:
+                failure_reasons.append(f"variant/debug file sprawl: {', '.join(variant_files)}")
+                should_restore = True
+            if budget_reason:
+                failure_reasons.append(budget_reason)
+                retryable = True
+                should_restore = True
+
+            if not failure_reasons:
+                verification = run_verification(
+                    repo=config.repo,
+                    worker_recommended=worker_result.recommended_verification,
+                    success_criteria=subtask.success_criteria,
+                    files_touched=actual_changed,
+                    changed_line_count=changed_line_count,
+                    max_files=config.max_worker_changed_files,
+                    max_lines=config.max_worker_changed_lines,
+                )
+                (worker_dir / f"verification_attempt_{attempt}.json").write_text(
+                    json.dumps(to_json(verification), indent=2), encoding="utf-8"
+                )
+                if verification.ok and worker_result.status == "success":
+                    return {"success": True, "attempts": attempt}
+                failure_reasons.append(worker_result.summary if worker_result.summary else "; ".join(verification.reasons))
+                should_restore = True
+        if should_restore:
+            restore_files(config.repo, touched, snapshot_dir)
+            cleanup_created_files(config.repo, out_of_scope_files)
+        prev_summary = "; ".join(reason for reason in failure_reasons if reason)
+        if prev_summary:
+            (worker_dir / f"failure_attempt_{attempt}.json").write_text(
+                json.dumps({"summary": prev_summary, "retryable": retryable}, indent=2), encoding="utf-8"
+            )
+        if retryable:
+            retryable_failures_used += 1
+        can_retry = attempt < max_attempts and (not retryable or retryable_failures_used <= retryable_limit)
+        if not can_retry:
             return {"success": False, "attempts": attempt}
 
     return {"success": False, "attempts": max_attempts}
@@ -256,12 +324,62 @@ def _load_worker_result(path: Path) -> WorkerResult | None:
     )
 
 
-def _count_changed_lines(repo: Path, files: list[str]) -> int:
-    changed = 0
-    for rel in files:
-        path = repo / rel
-        if not path.exists() or not path.is_file():
+def _out_of_scope_files(changed_files: list[str], target_files: list[str]) -> list[str]:
+    allowed = {path.strip() for path in target_files if path.strip()}
+    return sorted(rel for rel in changed_files if rel not in allowed)
+
+
+def _variant_sprawl_files(created_files: list[str], target_files: list[str]) -> list[str]:
+    suffixes = ("_fixed", "_final", "_clean", "_new", "_v2", "_updated")
+    debug_prefixes = ("debug_", "verify_", "fix_", "copy_")
+    target_stems = {Path(rel).stem for rel in target_files}
+    flagged: list[str] = []
+    for rel in created_files:
+        base = Path(rel).name
+        stem = Path(rel).stem
+        if any(base.startswith(prefix) for prefix in debug_prefixes):
+            flagged.append(rel)
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        changed += len(text.splitlines())
-    return changed
+        for target_stem in target_stems:
+            if any(stem == f"{target_stem}{suffix}" for suffix in suffixes):
+                flagged.append(rel)
+                break
+    return sorted(set(flagged))
+
+
+def _extract_metric(text: str, key: str) -> int | None:
+    pattern = rf'"{re.escape(key)}"\s*:\s*(\d+)'
+    match = re.findall(pattern, text)
+    if not match:
+        return None
+    return int(match[-1])
+
+
+def _budget_reason(
+    proc: subprocess.CompletedProcess[str],
+    changed_files_count: int,
+    changed_line_count: int,
+    config: OrchestratorConfig,
+) -> str:
+    stdout = str(proc.stdout or "")
+    stderr = str(proc.stderr or "")
+    merged = f"{stdout}\n{stderr}"
+    turns = _extract_metric(merged, "turns_used")
+    commands = _extract_metric(merged, "tool_calls_used")
+    if turns is not None and turns > config.max_worker_model_turns:
+        return f"budget exceeded: model turns {turns}>{config.max_worker_model_turns}"
+    if commands is not None and commands > config.max_worker_shell_commands:
+        return f"budget exceeded: shell commands {commands}>{config.max_worker_shell_commands}"
+    if changed_files_count > config.max_worker_changed_files:
+        return f"budget exceeded: changed files {changed_files_count}>{config.max_worker_changed_files}"
+    if changed_line_count > config.max_worker_changed_lines:
+        return f"budget exceeded: changed lines {changed_line_count}>{config.max_worker_changed_lines}"
+    return ""
+
+
+def _extract_last_command(stdout: str, stderr: str) -> str:
+    merged = f"{stdout}\n{stderr}"
+    matches = re.findall(r'"command"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', merged)
+    if matches:
+        return bytes(matches[-1], "utf-8").decode("unicode_escape")
+    return ""
