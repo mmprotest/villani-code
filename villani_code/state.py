@@ -35,6 +35,7 @@ from villani_code.llm_client import LLMClient
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
+from villani_code.services import ServiceManager
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
@@ -538,6 +539,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._service_manager = ServiceManager(self.repo)
         if self.small_model:
             self._init_small_model_support()
 
@@ -964,6 +966,7 @@ class Runner:
                     ],
                 }
             )
+        mission_service_baseline = set(self._service_manager.list_service_ids())
         previous_attributed = set()
 
         def _attributed_changed_files() -> list[str]:
@@ -1026,6 +1029,7 @@ class Runner:
             self._save_session_snapshot(messages)
             mission_status = "completed" if completed else ("interrupted" if reason in {"max_seconds", "max_turns", "max_tool_calls"} else "failed")
             self._update_mission_state(status=mission_status, changed_files=all_changes, compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
+            self._service_manager.cleanup_services_started_after(mission_service_baseline, event_callback=self.event_callback)
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
             if self._debug_recorder is not None:
@@ -1210,6 +1214,7 @@ class Runner:
                     if post:
                         response.setdefault("content", []).append({"type": "text", "text": post})
                     self._save_session_snapshot(messages)
+                    self._service_manager.cleanup_services_started_after(mission_service_baseline, event_callback=self.event_callback)
                     if self._event_recorder is not None:
                         self._event_recorder.write_digest()
                     if self._debug_recorder is not None:
@@ -1338,6 +1343,7 @@ class Runner:
                     transcript_path = self._save_transcript_and_link(transcript)
                     self._save_session_snapshot(messages)
                 self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
+                self._service_manager.cleanup_services_started_after(mission_service_baseline, event_callback=self.event_callback)
                 if self._event_recorder is not None:
                     self._event_recorder.write_digest()
                 if self._debug_recorder is not None:
@@ -1666,14 +1672,18 @@ class Runner:
             if isinstance(decoded, dict):
                 payload["command"] = decoded.get("command")
                 payload["exit_code"] = decoded.get("exit_code")
+                payload["mode"] = decoded.get("mode")
                 payload["stdout"] = decoded.get("stdout")
                 payload["stderr"] = decoded.get("stderr")
+                payload["service"] = decoded.get("service")
                 payload["result_payload"] = {
                     **base_result_payload,
                     "command": decoded.get("command"),
+                    "mode": decoded.get("mode"),
                     "exit_code": decoded.get("exit_code"),
                     "stdout": decoded.get("stdout"),
                     "stderr": decoded.get("stderr"),
+                    "service": decoded.get("service"),
                 }
         elif tool_name == "Read":
             text_content = str(content)
