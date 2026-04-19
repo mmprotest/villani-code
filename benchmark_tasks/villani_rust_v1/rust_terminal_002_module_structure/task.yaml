@@ -16,10 +16,12 @@ success_policy:
   fail_on_timeout: true
   fail_on_repo_dirty_outside_allowlist: true
 allowlist_paths:
+- target/
 - src/
 - tests/
 - Cargo.toml
 allowed_paths:
+- target/
 - src/
 - tests/
 - Cargo.toml

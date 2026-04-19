@@ -16,9 +16,11 @@ success_policy:
   fail_on_timeout: true
   fail_on_repo_dirty_outside_allowlist: true
 allowlist_paths:
+- target/
 - src/
 - tests/
 allowed_paths:
+- target/
 - src/
 - tests/
 expected_touched_max: 4
