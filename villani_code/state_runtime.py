@@ -12,6 +12,11 @@ import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
+from villani_code.execution_memento import (
+    build_local_evidence_block,
+    load_execution_memento,
+    render_execution_memento_for_model,
+)
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
@@ -375,6 +380,11 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
             prepared = runner._context_budget.compact(prepared)
+    elif not runner.villani_mode:
+        _inject_execution_state_memory(runner, prepared)
+        prepared = _trim_regular_turn_messages(prepared, keep_units=4)
+        if runner._context_budget and _messages_chars(prepared) > runner._context_budget.max_chars:
+            prepared = runner._context_budget.compact_session_messages(prepared)
     inventory = runner._context_governance.load_inventory()
     inventory.task_id = str(getattr(getattr(runner, "_execution_plan", None), "task_goal", "task"))[:80] or "task"
     total_chars = sum(len(str(m.get("content", ""))) for m in prepared)
@@ -391,6 +401,81 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
     runner._context_governance.save_inventory(inventory)
     validate_anthropic_tool_sequence(prepared)
     return prepared
+
+
+def _inject_execution_state_memory(runner: Any, messages: list[dict[str, Any]]) -> None:
+    mission = getattr(runner, "_mission_state", None)
+    if mission is None:
+        return
+    if any(
+        isinstance(block, dict) and "EXECUTION STATE" in str(block.get("text", ""))
+        for message in messages
+        for block in (message.get("content", []) if isinstance(message.get("content", []), list) else [])
+    ):
+        return
+    memento = load_execution_memento(runner.repo, mission.mission_id)
+    if memento is None:
+        return
+    required = (
+        bool(memento.objective.strip()),
+        bool(memento.success_predicate.strip()),
+        bool(memento.pinned_constraints),
+        bool(memento.current_hypothesis.strip()),
+        bool(memento.next_best_action.strip()),
+    )
+    if not all(required):
+        return
+    memento_block = render_execution_memento_for_model(memento)
+    evidence_block = build_local_evidence_block(runner)
+    text = memento_block if not evidence_block else f"{memento_block}\n\n{evidence_block}"
+    prepend_text_to_latest_safe_user_message(messages, text)
+
+
+def _messages_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(len(str(message.get("content", ""))) for message in messages)
+
+
+def _is_tool_use_message(message: dict[str, Any]) -> bool:
+    if message.get("role") != "assistant":
+        return False
+    content = message.get("content", [])
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_use" for block in content
+    )
+
+
+def _is_tool_result_message(message: dict[str, Any]) -> bool:
+    if message.get("role") != "user":
+        return False
+    content = message.get("content", [])
+    return isinstance(content, list) and bool(content) and all(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
+
+
+def _group_atomic_units(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    units: list[list[dict[str, Any]]] = []
+    idx = 0
+    while idx < len(messages):
+        current = messages[idx]
+        if _is_tool_use_message(current) and idx + 1 < len(messages) and _is_tool_result_message(messages[idx + 1]):
+            units.append([current, messages[idx + 1]])
+            idx += 2
+            continue
+        units.append([current])
+        idx += 1
+    return units
+
+
+def _trim_regular_turn_messages(messages: list[dict[str, Any]], keep_units: int = 4) -> list[dict[str, Any]]:
+    system_messages = [message for message in messages if message.get("role") == "system"]
+    others = [message for message in messages if message.get("role") != "system"]
+    if not others:
+        return messages
+    units = _group_atomic_units(others)
+    tail_units = units[-max(2, keep_units):]
+    tail_messages = [message for unit in tail_units for message in unit]
+    return [*system_messages, *tail_messages]
 
 
 def validate_anthropic_tool_sequence(messages: list[dict[str, Any]]) -> None:
