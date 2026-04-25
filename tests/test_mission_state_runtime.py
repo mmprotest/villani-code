@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from villani_code.context_projection import build_model_context_packet
+from villani_code.execution_memento import build_execution_memento
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.mission_state import (
@@ -36,11 +37,15 @@ def test_mission_state_roundtrip(tmp_path: Path) -> None:
         status="active",
         verified_facts=[VerifiedFact(kind="k", value="v", source="s")],
         open_hypotheses=[OpenHypothesis(hypothesis_id="h1", statement="maybe", confidence=0.4, status="open")],
+        last_memento_path="x/y/execution_memento.json",
+        last_memento_turn_index=3,
     )
     save_mission_state(tmp_path, state)
     loaded = load_mission_state(tmp_path, "m1")
     assert loaded.verified_facts[0].value == "v"
     assert loaded.open_hypotheses[0].hypothesis_id == "h1"
+    assert loaded.last_memento_path.endswith("execution_memento.json")
+    assert loaded.last_memento_turn_index == 3
 
 
 def test_mission_directory_and_current_pointer(tmp_path: Path) -> None:
@@ -160,7 +165,7 @@ def test_projected_context_not_injected_in_benchmark_mode(tmp_path: Path) -> Non
     runner._inject_projected_context(messages)
     assert messages[-1]["content"][0]["text"] == "benchmark contract prompt"
     assert not any(
-        "Mission context packet:" in str(block.get("text", ""))
+        "EXECUTION STATE" in str(block.get("text", ""))
         for message in messages
         for block in message.get("content", [])
         if isinstance(block, dict)
@@ -170,6 +175,7 @@ def test_projected_context_not_injected_in_benchmark_mode(tmp_path: Path) -> Non
 def test_projected_context_injected_into_latest_safe_user_turn(tmp_path: Path) -> None:
     runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
     runner._ensure_mission("objective")
+    runner._task_contract = {"success_predicate": "pass", "no_go_paths": [".villani_code/"]}
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "older prompt"}]},
         {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1"}]},
@@ -179,19 +185,20 @@ def test_projected_context_injected_into_latest_safe_user_turn(tmp_path: Path) -
     runner._inject_projected_context(messages)
     assert messages[0]["content"][0]["text"] == "older prompt"
     assert messages[2]["content"] == [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
-    assert "Mission context packet:" in messages[3]["content"][0]["text"]
+    assert "EXECUTION STATE" in messages[3]["content"][0]["text"]
 
 
 def test_projected_context_injected_into_string_user_content(tmp_path: Path) -> None:
     runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
     runner._ensure_mission("objective")
+    runner._task_contract = {"success_predicate": "pass", "no_go_paths": [".villani_code/"]}
     messages = [
         {"role": "assistant", "content": [{"type": "text", "text": "ack"}]},
         {"role": "user", "content": "final prompt"},
     ]
     runner._inject_projected_context(messages)
     assert isinstance(messages[1]["content"], str)
-    assert "Mission context packet:" in messages[1]["content"]
+    assert "EXECUTION STATE" in messages[1]["content"]
     assert messages[1]["content"].endswith("final prompt")
 
 
@@ -205,6 +212,42 @@ def test_projected_context_skips_when_only_tool_result_user_turn_exists(tmp_path
     original = json.loads(json.dumps(messages))
     runner._inject_projected_context(messages)
     assert messages == original
+
+
+def test_execution_memento_saved_to_mission_dir(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    runner._task_contract = {"success_predicate": "pass tests", "preferred_targets": ["src/a.py"], "no_go_paths": [".villani_code/"]}
+    runner._current_turn_index = 2
+    runner._refresh_execution_memento()
+    state = load_mission_state(tmp_path, runner._mission_id)
+    assert state.last_memento_path.endswith("execution_memento.json")
+    assert state.last_memento_turn_index == 2
+    memento_path = Path(state.last_memento_path)
+    assert memento_path.exists()
+    assert (memento_path.parent / "execution_memento.md").exists()
+
+
+def test_execution_memento_excludes_runtime_artifact_paths(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    runner._mission_state.changed_files = ["src/app.py", ".villani_code/missions/m1/state.json"]
+    runner._mission_state.intended_targets = ["./.villani_code/sessions/last.json", "tests/test_app.py"]
+    memento = build_execution_memento(runner)
+    assert memento.changed_files == ["src/app.py"]
+    assert memento.in_scope_files == ["tests/test_app.py"]
+
+
+def test_projected_context_falls_back_when_memento_required_fields_missing(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    runner._task_contract = {}
+    messages = [
+        {"role": "assistant", "content": [{"type": "text", "text": "ack"}]},
+        {"role": "user", "content": "final prompt"},
+    ]
+    runner._inject_projected_context(messages)
+    assert "Mission context packet:" in messages[1]["content"]
 
 
 def test_new_mission_id_unique_for_rapid_calls() -> None:

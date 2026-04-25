@@ -39,6 +39,12 @@ from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.context_projection import build_model_context_packet, render_model_context_packet
+from villani_code.execution_memento import (
+    build_execution_memento,
+    build_local_evidence_block,
+    render_execution_memento_for_model,
+    save_execution_memento,
+)
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
@@ -1586,13 +1592,27 @@ class Runner:
     def _update_mission_state(self, **fields: Any) -> None:
         if self._mission_state is None:
             return
+        changed_field_names = set(fields.keys())
         for key, value in fields.items():
             if hasattr(self._mission_state, key):
                 setattr(self._mission_state, key, value)
         self._mission_state.intended_targets = sorted(self._intended_targets)
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()
+            changed_field_names.add("changed_files")
         save_mission_state(self.repo, self._mission_state)
+        memento_boundaries = {
+            "current_step_id",
+            "changed_files",
+            "validation_failures",
+            "last_failed_command",
+            "last_failed_summary",
+            "intended_targets",
+            "plan_summary",
+            "status",
+        }
+        if changed_field_names & memento_boundaries:
+            self._refresh_execution_memento()
         if self._debug_recorder is not None:
             self._debug_recorder.record_mission_state_snapshot(
                 self._mission_state.to_dict(),
@@ -1600,20 +1620,48 @@ class Runner:
                 turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else None,
             )
 
+    def _refresh_execution_memento(self) -> None:
+        if self._mission_state is None:
+            return
+        memento = build_execution_memento(self)
+        path = save_execution_memento(self.repo, self._mission_state.mission_id, memento)
+        self._mission_state.last_memento_path = str(path)
+        self._mission_state.last_memento_turn_index = int(self._current_turn_index or 0)
+        save_mission_state(self.repo, self._mission_state)
+
     def _inject_projected_context(self, messages: list[dict[str, Any]]) -> None:
         if not self._mission_state or self.benchmark_config.enabled:
             return
         if len(messages) <= 1:
             return
         if any(
-            "Mission context packet:" in str(block.get("text", ""))
+            "EXECUTION STATE" in str(block.get("text", ""))
             for msg in messages
             for block in msg.get("content", [])
             if isinstance(block, dict)
         ):
             return
-        packet = build_model_context_packet(self)
-        rendered = render_model_context_packet(packet)
+        memento = build_execution_memento(self)
+        required_present = all(
+            [
+                bool(memento.objective.strip()),
+                bool(memento.success_predicate.strip()),
+                bool(memento.pinned_constraints),
+                bool(memento.current_hypothesis.strip()),
+                bool(memento.next_best_action.strip()),
+            ]
+        )
+        if required_present:
+            rendered = render_execution_memento_for_model(memento)
+            evidence = build_local_evidence_block(self)
+            injected = rendered if not evidence else f"{rendered}\n\n{evidence}"
+            path = save_execution_memento(self.repo, self._mission_state.mission_id, memento)
+            self._mission_state.last_memento_path = str(path)
+            self._mission_state.last_memento_turn_index = int(self._current_turn_index or 0)
+            save_mission_state(self.repo, self._mission_state)
+        else:
+            packet = build_model_context_packet(self)
+            rendered = render_model_context_packet(packet)
         from villani_code import state_runtime
 
         state_runtime.prepend_text_to_latest_safe_user_message(messages, rendered)

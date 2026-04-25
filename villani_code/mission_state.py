@@ -54,6 +54,8 @@ class MissionState:
     last_failed_summary: str = ""
     last_checkpoint_id: str = ""
     last_transcript_path: str = ""
+    last_memento_path: str = ""
+    last_memento_turn_index: int = 0
     compact_summary: str = ""
     autonomous_wave: int = 0
     autonomous_backlog_summary: list[str] = field(default_factory=list)
@@ -85,6 +87,8 @@ class MissionState:
             last_failed_summary=str(payload.get("last_failed_summary", "")),
             last_checkpoint_id=str(payload.get("last_checkpoint_id", "")),
             last_transcript_path=str(payload.get("last_transcript_path", "")),
+            last_memento_path=str(payload.get("last_memento_path", "")),
+            last_memento_turn_index=int(payload.get("last_memento_turn_index", 0)),
             compact_summary=str(payload.get("compact_summary", "")),
             autonomous_wave=int(payload.get("autonomous_wave", 0)),
             autonomous_backlog_summary=[str(v) for v in payload.get("autonomous_backlog_summary", [])],
