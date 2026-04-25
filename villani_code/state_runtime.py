@@ -26,6 +26,7 @@ from villani_code.retrieval import Retriever
 from villani_code.mission_state import save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.utils import ensure_dir
+from villani_code.patch_apply import extract_unified_diff_targets, parse_unified_diff
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
@@ -371,6 +372,7 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = deepcopy(messages)
+    _inject_patch_recovery_instruction(runner, prepared)
     if runner.small_model:
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
@@ -456,6 +458,200 @@ def inject_retrieval_briefing(runner: Any, messages: list[dict[str, Any]]) -> No
         return
     briefing = "\n".join(f"- {h.path}: {h.reason}" for h in hits)
     content.insert(0, {"type": "text", "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>"})
+
+
+def _extract_patch_target_file(tool_input: dict[str, Any]) -> str:
+    explicit = _normalize_repo_path(str(tool_input.get("file_path", "")))
+    if explicit:
+        return explicit
+    diff = str(tool_input.get("unified_diff", ""))
+    try:
+        targets = extract_unified_diff_targets(diff, default_file_path=None)
+    except Exception:
+        targets = []
+    for candidate in targets:
+        normalized = _normalize_repo_path(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _extract_failed_hunk_snippet(tool_input: dict[str, Any], target_file: str) -> str:
+    diff = str(tool_input.get("unified_diff", ""))
+    if not diff.strip():
+        return ""
+    try:
+        parsed = parse_unified_diff(diff)
+    except Exception:
+        return diff[:1200]
+    normalized_target = _normalize_repo_path(target_file)
+    for file_patch in parsed:
+        candidate = file_patch.new_path if file_patch.new_path != "/dev/null" else file_patch.old_path
+        if _normalize_repo_path(candidate) != normalized_target:
+            continue
+        if not file_patch.hunks:
+            continue
+        lines = file_patch.hunks[0].lines[:40]
+        return "\n".join(lines)[:1200]
+    return diff[:1200]
+
+
+def _anchor_candidates_from_hunk(hunk_text: str) -> list[str]:
+    lines = []
+    for raw in str(hunk_text or "").splitlines():
+        if not raw:
+            continue
+        if raw.startswith(("-", " ")):
+            candidate = raw[1:].rstrip()
+            if candidate.strip():
+                lines.append(candidate)
+    unique: list[str] = []
+    for line in lines:
+        if line not in unique:
+            unique.append(line)
+    return unique[:12]
+
+
+def _render_context_slice(file_lines: list[str], start: int, end: int, total_lines: int) -> str:
+    rendered: list[str] = []
+    for idx in range(start, min(end, total_lines)):
+        rendered.append(f"{idx + 1:>5}: {file_lines[idx]}")
+    return "\n".join(rendered)
+
+
+def _extract_refreshed_patch_context(repo: Path, target_file: str, failed_hunk: str) -> str:
+    normalized = _normalize_repo_path(target_file)
+    if not normalized:
+        return "No target file was identified from the failed patch."
+    target_path = (repo / normalized).resolve()
+    try:
+        target_path.relative_to(repo.resolve())
+    except Exception:
+        return f"Target file is outside workspace: {normalized}"
+    if not target_path.exists() or not target_path.is_file():
+        return f"Target file missing or unreadable: {normalized}"
+    text = target_path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    total_lines = len(lines)
+    if total_lines == 0:
+        return f"{normalized} is empty (0 lines)."
+    anchors = _anchor_candidates_from_hunk(failed_hunk)
+    anchor_line_index = None
+    for anchor in anchors:
+        for idx, line in enumerate(lines):
+            if anchor in line:
+                anchor_line_index = idx
+                break
+        if anchor_line_index is not None:
+            break
+    context_radius = 20
+    hard_cap = 120
+    if anchor_line_index is None:
+        end = min(total_lines, hard_cap)
+        body = _render_context_slice(lines, 0, end, total_lines)
+        return f"{normalized} (total_lines={total_lines}, anchor=not_found)\n{body}"
+    start = max(0, anchor_line_index - context_radius)
+    end = min(total_lines, anchor_line_index + context_radius + 1)
+    if end - start > hard_cap:
+        end = start + hard_cap
+    body = _render_context_slice(lines, start, end, total_lines)
+    return (
+        f"{normalized} (total_lines={total_lines}, anchor_line={anchor_line_index + 1}, "
+        f"slice={start + 1}-{end})\n{body}"
+    )
+
+
+def record_patch_failure(
+    runner: Any,
+    *,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    error_text: str,
+    turn_index: int | None,
+) -> None:
+    target_file = _extract_patch_target_file(tool_input)
+    failed_hunk = _extract_failed_hunk_snippet(tool_input, target_file)
+    refreshed_context = _extract_refreshed_patch_context(runner.repo, target_file, failed_hunk)
+    attempts = 1
+    if target_file:
+        attempts = int(getattr(runner, "_patch_recovery_attempts_by_file", {}).get(target_file, 0)) + 1
+        runner._patch_recovery_attempts_by_file[target_file] = attempts
+    state = {
+        "tool": tool_name,
+        "target_file": target_file,
+        "error": str(error_text or "")[:800],
+        "failed_hunk": failed_hunk[:1200],
+        "refreshed_context": refreshed_context[:5000],
+        "attempts_for_file": attempts,
+        "turn_index": int(turn_index or 0),
+        "next_required_action": "retry_patch_against_refreshed_context",
+    }
+    runner._patch_recovery_state = state
+    runner._patch_recovery_pending_turn = True
+    runner.event_callback(
+        {
+            "type": "patch_failure_detected",
+            "target_file": target_file,
+            "error": state["error"],
+            "attempts_for_file": attempts,
+        }
+    )
+    runner.event_callback(
+        {
+            "type": "patch_recovery_context_refreshed",
+            "target_file": target_file,
+            "context_preview": refreshed_context[:400],
+        }
+    )
+    mission = getattr(runner, "_mission_state", None)
+    if mission is not None:
+        mission.last_patch_failure = dict(state)
+        summary = f"Patch failure: {target_file or 'unknown'}: {state['error']}"
+        recent = list(getattr(mission, "recent_tool_failures", []))
+        recent.append(summary[:280])
+        mission.recent_tool_failures = recent[-8:]
+        validation_failures = list(getattr(mission, "validation_failures", []))
+        validation_failures.append(summary[:280])
+        mission.validation_failures = validation_failures[-8:]
+        save_mission_state(runner.repo, mission)
+
+
+def clear_patch_recovery_if_target_succeeded(runner: Any, *, tool_input: dict[str, Any]) -> None:
+    active = getattr(runner, "_patch_recovery_state", None)
+    if not isinstance(active, dict):
+        return
+    active_target = _normalize_repo_path(str(active.get("target_file", "")))
+    if not active_target:
+        return
+    success_target = _extract_patch_target_file(tool_input)
+    if _normalize_repo_path(success_target) != active_target:
+        return
+    runner._patch_recovery_state = None
+    runner._patch_recovery_pending_turn = False
+
+
+def _inject_patch_recovery_instruction(runner: Any, messages: list[dict[str, Any]]) -> None:
+    if not bool(getattr(runner, "_patch_recovery_pending_turn", False)):
+        return
+    state = getattr(runner, "_patch_recovery_state", None)
+    if not isinstance(state, dict):
+        return
+    text = (
+        "Patch recovery: the previous patch failed. Do not use Bash/Python scripts to rewrite this target file yet. "
+        "Use the refreshed context to produce a smaller patch against current contents. "
+        "If patching is impossible, explain why in one sentence.\n"
+        f"target_file: {state.get('target_file', 'unknown')}\n"
+        f"patch_error: {state.get('error', '')}\n"
+        f"refreshed_context:\n{state.get('refreshed_context', '')}"
+    )
+    if prepend_text_to_latest_safe_user_message(messages, text):
+        runner._patch_recovery_pending_turn = False
+        runner.event_callback(
+            {
+                "type": "patch_recovery_instruction_injected",
+                "target_file": state.get("target_file", ""),
+            }
+        )
 
 
 def init_small_model_support(runner: Any) -> None:
