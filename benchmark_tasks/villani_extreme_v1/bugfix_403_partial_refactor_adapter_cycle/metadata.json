@@ -1,0 +1,36 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/public_api.py"
+  ],
+  "reference_patch_size_lines": 4,
+  "primary_skill": "compatibility-debugging",
+  "secondary_skills": [
+    "refactor-completion",
+    "adapters",
+    "pytest"
+  ],
+  "name": "bugfix_403_partial_refactor_adapter_cycle",
+  "difficulty": "hard",
+  "runtime_stressors": [
+    "backward_compatibility",
+    "false_fix_trap",
+    "api_contracts"
+  ],
+  "task_type": "multi_file_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_tests",
+    "inspect_interfaces",
+    "edit_file",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "correctness",
+    "backward-compatibility"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

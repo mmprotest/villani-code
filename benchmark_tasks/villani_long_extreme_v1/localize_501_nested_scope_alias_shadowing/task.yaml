@@ -1,0 +1,24 @@
+id: localize_501_nested_scope_alias_shadowing
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 20
+max_files_touched: 2
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_resolution.py::test_nested_lambda_uses_outer_alias_not_local_value
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/app/resolver.py
+benchmark_track: core
+forbidden_paths:
+- tests/
+- src/app/formatter.py
+- src/app/parser.py

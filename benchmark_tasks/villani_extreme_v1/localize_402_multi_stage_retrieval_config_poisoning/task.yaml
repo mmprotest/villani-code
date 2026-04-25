@@ -1,0 +1,24 @@
+id: localize_402_multi_stage_retrieval_config_poisoning
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 10
+max_files_touched: 2
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_retrieval.py::test_docs_only_profile_keeps_kind_based_guides
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/app/loader.py
+benchmark_track: core
+forbidden_paths:
+- tests/
+- src/app/retrieval.py
+- src/app/ranker.py

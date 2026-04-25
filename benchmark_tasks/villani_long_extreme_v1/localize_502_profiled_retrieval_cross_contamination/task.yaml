@@ -1,0 +1,24 @@
+id: localize_502_profiled_retrieval_cross_contamination
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 24
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_retrieval.py::test_guides_profile_does_not_drop_public_docs
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/app/loader.py
+- src/app/config.py
+benchmark_track: core
+forbidden_paths:
+- tests/
+- src/app/ranker.py

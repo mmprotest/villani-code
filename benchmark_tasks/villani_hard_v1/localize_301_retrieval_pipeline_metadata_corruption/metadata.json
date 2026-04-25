@@ -1,0 +1,35 @@
+{
+  "name": "localize_301_retrieval_pipeline_metadata_corruption",
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/ingest.py"
+  ],
+  "reference_patch_size_lines": 10,
+  "primary_skill": "pipeline-localization",
+  "secondary_skills": [
+    "retrieval",
+    "metadata",
+    "pytest"
+  ],
+  "runtime_stressors": [
+    "multi_stage_pipeline",
+    "misleading_symptom",
+    "false_fix_trap"
+  ],
+  "task_type": "repo_navigation_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_tests",
+    "inspect_pipeline",
+    "edit_files",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "root_cause_localization",
+    "correctness"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

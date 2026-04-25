@@ -1,0 +1,1 @@
+Repair the projection replay gap without breaking idempotency or checkpoint resume behavior.

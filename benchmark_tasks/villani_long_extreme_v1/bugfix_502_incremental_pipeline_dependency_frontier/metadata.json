@@ -1,0 +1,28 @@
+{
+  "name": "bugfix_502_incremental_pipeline_dependency_frontier",
+  "difficulty": "very_hard",
+  "primary_skill": "incremental_dependency_analysis",
+  "expected_files": [
+    "src/app/planner.py"
+  ],
+  "reference_patch_size_lines": 14,
+  "runtime_stressors": [
+    "false_fix_trap",
+    "hidden_multi_file_bug"
+  ],
+  "task_type": "false_fix_trap",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "pytest target",
+    "inspect graph planner",
+    "run full pytest"
+  ],
+  "evaluation_focus": [
+    "precise invalidation frontier",
+    "incrementality preserved"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

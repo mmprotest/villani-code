@@ -1,0 +1,25 @@
+id: bugfix_502_incremental_pipeline_dependency_frontier
+family: bugfix
+difficulty: hard
+language: python
+max_minutes: 22
+max_files_touched: 3
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_build.py::test_rebuild_refreshes_transitive_runtime_consumers_only
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+benchmark_track: core
+forbidden_paths:
+- docs/
+task_type: false_fix_trap
+expected_touched_max: 3

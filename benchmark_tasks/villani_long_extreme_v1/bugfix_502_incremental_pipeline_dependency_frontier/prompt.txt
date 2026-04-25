@@ -1,0 +1,1 @@
+Repair incremental rebuild invalidation so only the correct downstream frontier is recomputed.

@@ -1,0 +1,26 @@
+id: bugfix_402_incremental_cache_invalidation_false_fix
+family: bugfix
+difficulty: hard
+language: python
+max_minutes: 12
+max_files_touched: 4
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_buildsystem.py::test_transitive_dependents_refresh_after_change
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths: &id001
+- src/
+- tests/
+benchmark_track: core
+forbidden_paths:
+- docs/
+task_type: multi_file_bugfix
+allowed_paths: *id001
+expected_touched_max: 4

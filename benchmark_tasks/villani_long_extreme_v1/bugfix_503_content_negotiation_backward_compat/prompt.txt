@@ -1,0 +1,1 @@
+Repair response content negotiation so legacy clients still get stable payloads while v2 callers receive enriched metadata.

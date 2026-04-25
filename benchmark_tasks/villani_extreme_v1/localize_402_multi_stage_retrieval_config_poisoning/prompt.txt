@@ -1,0 +1,1 @@
+Retrieval regression after config refactor. Symptom looks like ranking quality. Root cause is profile/config plumbing.

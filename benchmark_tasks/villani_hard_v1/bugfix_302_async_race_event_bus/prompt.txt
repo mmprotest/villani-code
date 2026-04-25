@@ -1,0 +1,1 @@
+An event accounting component is failing under concurrent load. The visible repro is stress-based and the failure looks intermittent. Fix the race properly rather than papering over it.

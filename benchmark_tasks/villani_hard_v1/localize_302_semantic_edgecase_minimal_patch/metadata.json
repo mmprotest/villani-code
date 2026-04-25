@@ -1,0 +1,34 @@
+{
+  "name": "localize_302_semantic_edgecase_minimal_patch",
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/math_utils.py"
+  ],
+  "reference_patch_size_lines": 8,
+  "primary_skill": "semantic-bug-localization",
+  "secondary_skills": [
+    "business-logic",
+    "pytest"
+  ],
+  "runtime_stressors": [
+    "narrow_edge_case",
+    "anti_overediting",
+    "misleading_symptom"
+  ],
+  "task_type": "repo_navigation_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_tests",
+    "trace_logic",
+    "edit_file",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "root_cause_localization",
+    "minimal_patch"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

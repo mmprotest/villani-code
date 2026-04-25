@@ -1,0 +1,28 @@
+{
+  "name": "localize_501_nested_scope_alias_shadowing",
+  "difficulty": "very_hard",
+  "primary_skill": "symbol_resolution",
+  "expected_files": [
+    "src/app/resolver.py"
+  ],
+  "reference_patch_size_lines": 11,
+  "runtime_stressors": [
+    "hidden_multi_file_bug",
+    "false_fix_trap"
+  ],
+  "task_type": "hidden_multi_file_bug",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "pytest target",
+    "trace resolver",
+    "run full pytest"
+  ],
+  "evaluation_focus": [
+    "scope semantics",
+    "minimal patch"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

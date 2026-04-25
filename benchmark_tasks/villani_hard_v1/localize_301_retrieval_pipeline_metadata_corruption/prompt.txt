@@ -1,0 +1,1 @@
+Search quality regressed after a retrieval pipeline refactor. The visible failure looks like a ranking problem, but the actual corruption happens earlier in the pipeline. Localize and fix the real cause.

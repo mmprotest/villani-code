@@ -1,0 +1,1 @@
+A report rendering refactor was only half completed. New entry points mostly work, but legacy callers are now broken in subtle ways. Finish the compatibility layer without deleting the old surface area.

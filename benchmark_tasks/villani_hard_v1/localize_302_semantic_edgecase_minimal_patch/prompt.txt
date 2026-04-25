@@ -1,0 +1,1 @@
+An invoice total is wrong for a narrow credit edge case. The symptom shows up near the report layer, but the real bug is a small semantic mistake deeper in the helper chain. Fix the root cause with a minimal patch.

@@ -1,0 +1,1 @@
+Incremental cache invalidation bug. Visible fix can be faked by brute-force invalidation. Hidden tests reject that.

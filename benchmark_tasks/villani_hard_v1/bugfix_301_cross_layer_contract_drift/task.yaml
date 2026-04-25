@@ -1,0 +1,30 @@
+id: bugfix_301_cross_layer_contract_drift
+family: bugfix
+difficulty: hard
+language: python
+max_minutes: 15
+max_files_touched: 5
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_visible_contract.py::test_legacy_name_payload_still_creates_user
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+- scripts/
+allowed_paths:
+- src/
+- tests/
+- scripts/
+expected_touched_max: 2
+task_type: multi_file_bugfix
+benchmark_track: core
+forbidden_paths:
+- docs/

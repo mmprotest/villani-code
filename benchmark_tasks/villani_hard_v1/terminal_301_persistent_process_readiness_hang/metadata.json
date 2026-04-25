@@ -1,0 +1,37 @@
+{
+  "name": "terminal_301_persistent_process_readiness_hang",
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "scripts/smoke.py"
+  ],
+  "reference_patch_size_lines": 26,
+  "primary_skill": "terminal-workflow-debugging",
+  "secondary_skills": [
+    "subprocess",
+    "readiness",
+    "cleanup",
+    "pytest"
+  ],
+  "runtime_stressors": [
+    "persistent_process",
+    "workflow_trap",
+    "cleanup_requirements"
+  ],
+  "task_type": "terminal_workflow",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": true,
+  "likely_tool_sequence": [
+    "run_tests",
+    "read_script",
+    "edit_script",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "workflow_correctness",
+    "cleanup",
+    "cross_run_stability"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

@@ -1,0 +1,30 @@
+id: localize_302_semantic_edgecase_minimal_patch
+family: localize_patch
+difficulty: hard
+language: python
+max_minutes: 15
+max_files_touched: 4
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_visible_invoice.py::test_credit_cannot_increase_total
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- src/
+- tests/
+- scripts/
+allowed_paths:
+- src/
+- tests/
+- scripts/
+expected_touched_max: 1
+task_type: repo_navigation_bugfix
+benchmark_track: core
+forbidden_paths:
+- docs/
