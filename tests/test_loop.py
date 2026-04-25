@@ -214,6 +214,28 @@ class FakeClientThreeEmpty:
         }
 
 
+class FakeClientBashThenGenericFallbacks:
+    def __init__(self):
+        self.calls = 0
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "id": "1",
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "pwd"}},
+                ],
+            }
+        return {
+            "id": str(self.calls),
+            "role": "assistant",
+            "content": [{"type": "text", "text": "What would you like me to help you with?"}],
+            "stop_reason": "end_turn",
+        }
+
+
 def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
     client = FakeClientEmptyThenDone()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
@@ -346,6 +368,25 @@ def test_loop_stops_after_retry_limit_on_empty_turns(tmp_path: Path):
 
     assert client.calls == 3
     assert result["response"]["content"] == []
+
+
+def test_regular_runner_generic_reply_with_failing_verification_is_not_success(tmp_path: Path):
+    client = FakeClientBashThenGenericFallbacks()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
+
+    def failing_verification(trigger="edit"):
+        runner._last_validation_summary = "status=fail; confidence=0.2"
+        if runner._mission_state is not None:
+            runner._mission_state.validation_failures = ["tests failing"]
+        return "<verification>\nstatus: fail\n</verification>"
+
+    runner._run_verification = failing_verification
+    out = runner.run("fix failing test")
+
+    assert client.calls == 3
+    execution = out.get("execution", {})
+    assert execution.get("terminated_reason") == "stalled_context_loss"
+    assert execution.get("completed") is False
 
 
 class FakeClientDiffProposal:

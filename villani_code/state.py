@@ -887,6 +887,7 @@ class Runner:
         consecutive_recon_turns = 0
         benchmark_prose_only_after_forced_read = 0
         benchmark_forced_read_no_progress_guard_active = initial_read_enforced
+        generic_completion_guard_count = 0
         # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
         benchmark_mutation_denials = 0
         benchmark_denial_limit = 3
@@ -1208,6 +1209,32 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
+                    if self._should_block_regular_completion_on_generic_reply(response):
+                        generic_completion_guard_count += 1
+                        self.event_callback(
+                            {
+                                "type": "regular_completion_blocked_context_loss",
+                                "attempt": generic_completion_guard_count,
+                            }
+                        )
+                        if generic_completion_guard_count >= 2:
+                            return _finish_bounded(response, "stalled_context_loss", False)
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "Continue the active repair loop. Latest verification is still unresolved."
+                                            " Follow the execution state block, take the next concrete repair or verification action,"
+                                            " and do not ask generic follow-up questions."
+                                        ),
+                                    }
+                                ],
+                            }
+                        )
+                        continue
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
@@ -1336,6 +1363,33 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
+                if self._should_block_regular_completion_on_generic_reply(response):
+                    generic_completion_guard_count += 1
+                    self.event_callback(
+                        {
+                            "type": "regular_completion_blocked_context_loss",
+                            "attempt": generic_completion_guard_count,
+                        }
+                    )
+                    if generic_completion_guard_count >= 2:
+                        return _finish_bounded(response, "stalled_context_loss", False)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Continue the active repair loop. Latest verification is still unresolved."
+                                        " Follow the execution state block, take the next concrete repair or verification action,"
+                                        " and do not ask generic follow-up questions."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                generic_completion_guard_count = 0
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1818,6 +1872,11 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.is_no_progress_response(response)
+
+    def _should_block_regular_completion_on_generic_reply(self, response: dict[str, Any]) -> bool:
+        from villani_code import state_runtime
+
+        return state_runtime.should_block_regular_completion_on_generic_reply(self, response)
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime

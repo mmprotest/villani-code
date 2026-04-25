@@ -229,3 +229,52 @@ def build_local_evidence_block(runner: "Runner") -> str:
     if not items:
         return ""
     return "LOCAL EVIDENCE\n" + "\n".join(f"- {line}" for line in items[:4])
+
+
+def build_fallback_execution_state_block(runner: "Runner") -> str:
+    mission = getattr(runner, "_mission_state", None)
+    contract = getattr(runner, "_task_contract", {}) or {}
+
+    objective = str(getattr(mission, "objective", "") or "").strip() or "Continue the active repair mission"
+    success = str(contract.get("success_predicate", "") or "").strip()
+    if not success:
+        success = "Complete the requested task and make verification pass"
+
+    validation_failures = [str(v).strip() for v in getattr(mission, "validation_failures", []) if str(v).strip()]
+    last_validation_summary = str(getattr(runner, "_last_validation_summary", "") or "").strip()
+    last_failed_summary = str(getattr(mission, "last_failed_summary", "") or "").strip()
+    if last_validation_summary:
+        current_verification = last_validation_summary
+    elif validation_failures:
+        current_verification = validation_failures[0]
+    elif last_failed_summary:
+        current_verification = last_failed_summary
+    else:
+        current_verification = "verification still pending"
+
+    changed_files = list(getattr(mission, "changed_files", []) if mission is not None else [])
+    intended_targets = list(getattr(mission, "intended_targets", []) if mission is not None else [])
+    if validation_failures or any(token in current_verification.lower() for token in ("fail", "error", "uncertain")):
+        next_action = "Fix the remaining failing verification and rerun tests"
+    elif changed_files and "pass" not in current_verification.lower():
+        next_action = "Run verification to confirm the fix"
+    elif intended_targets:
+        next_action = "Inspect and repair the most likely target file"
+    else:
+        next_action = "Identify the failing component and continue repair"
+
+    pinned_constraints = [str(v).strip() for v in contract.get("no_go_paths", []) if str(v).strip()]
+    task_mode = str(contract.get("task_mode", "") or "").strip()
+    if task_mode:
+        pinned_constraints.insert(0, f"task mode: {task_mode}")
+    constraints_text = ", ".join(pinned_constraints[:4]) if pinned_constraints else "prefer surgical patch"
+
+    lines = [
+        "EXECUTION STATE",
+        f"Objective: {objective}",
+        f"Success: {success}",
+        f"Current verification: {current_verification[:220]}",
+        f"Next action: {next_action}",
+        f"Constraints: {constraints_text}",
+    ]
+    return "\n".join(lines)

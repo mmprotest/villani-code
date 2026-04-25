@@ -225,7 +225,72 @@ def test_prepare_messages_falls_back_when_memento_required_fields_missing(tmp_pa
         memento_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     messages = [{"role": "user", "content": [{"type": "text", "text": "do it"}]}]
     prepared = state_runtime.prepare_messages_for_model(runner, messages)
-    assert "EXECUTION STATE" not in str(prepared)
+    flattened = str(prepared)
+    assert "EXECUTION STATE" in flattened
+    assert "Objective:" in flattened
+    assert "Success:" in flattened
+    assert "Next action:" in flattened
+
+
+def test_prepare_messages_falls_back_when_memento_missing(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=False)
+    runner._context_governance = _GovernanceStub()
+    runner._ensure_mission("fix parser")
+    if runner._mission_state is not None:
+        memento_path = tmp_path / ".villani_code" / "missions" / runner._mission_state.mission_id / "execution_memento.json"
+        memento_path.unlink()
+    messages = [{"role": "user", "content": [{"type": "text", "text": "do it"}]}]
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+    flattened = str(prepared)
+    assert "Objective:" in flattened
+    assert "Success:" in flattened
+    assert "Next action:" in flattened
+
+
+def test_regular_trim_keeps_original_task_anchor_and_recent_tail() -> None:
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": "system-a"}]},
+        {"role": "system", "content": [{"type": "text", "text": "system-b"}]},
+        {"role": "user", "content": [{"type": "text", "text": "ORIGINAL TASK ANCHOR"}]},
+    ]
+    for idx in range(6):
+        messages.extend(
+            [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{idx}", "name": "Read", "input": {"file_path": "a.py"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{idx}", "content": "ok", "is_error": False}]},
+            ]
+        )
+    messages.append({"role": "user", "content": [{"type": "text", "text": "latest tail message"}]})
+    trimmed = state_runtime._trim_regular_turn_messages(messages, keep_units=3)
+    flattened = str(trimmed)
+    assert "system-a" in flattened and "system-b" in flattened
+    assert "ORIGINAL TASK ANCHOR" in flattened
+    assert "latest tail message" in flattened
+    state_runtime.validate_anthropic_tool_sequence(trimmed)
+
+
+def test_prepare_messages_uses_saved_memento_over_fallback(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=False)
+    runner._context_governance = _GovernanceStub()
+    runner._ensure_mission("fix parser")
+    if runner._mission_state is not None:
+        memento_path = tmp_path / ".villani_code" / "missions" / runner._mission_state.mission_id / "execution_memento.json"
+        payload = json.loads(memento_path.read_text(encoding="utf-8"))
+        payload["current_subgoal"] = "subgoal-from-memento"
+        payload["next_best_action"] = "memento-next-action"
+        payload["success_predicate"] = "memento-success"
+        payload["objective"] = "memento-objective"
+        payload["current_hypothesis"] = "memento-hypothesis"
+        payload["pinned_constraints"] = ["constraint-a"]
+        memento_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    prepared = state_runtime.prepare_messages_for_model(
+        runner, [{"role": "user", "content": [{"type": "text", "text": "do it"}]}]
+    )
+    flattened = str(prepared)
+    assert "Subgoal: subgoal-from-memento" in flattened
+    assert "Next action: memento-next-action" in flattened
 
 
 def test_run_verification_targets_touched_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
