@@ -886,6 +886,7 @@ class Runner:
         consecutive_no_edit_turns = 0
         consecutive_recon_turns = 0
         benchmark_prose_only_after_forced_read = 0
+        context_loss_guard_hits = 0
         benchmark_forced_read_no_progress_guard_active = initial_read_enforced
         # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
         benchmark_mutation_denials = 0
@@ -1075,6 +1076,38 @@ class Runner:
                 return "completed"
             return None
 
+        def _latest_verification_unresolved() -> bool:
+            if str(self._pending_verification or "").strip():
+                return True
+            mission = self._mission_state
+            if mission is not None and list(getattr(mission, "validation_failures", []) or []):
+                return True
+            summary = str(self._last_validation_summary or "").strip().lower()
+            if not summary:
+                return True
+            if any(token in summary for token in ("fail", "error", "pending", "unresolved")):
+                return True
+            return "pass" not in summary and "success" not in summary
+
+        def _is_generic_no_tool_fallback_response(response: dict[str, Any]) -> bool:
+            blocks = response.get("content", [])
+            text = " ".join(
+                str(block.get("text", "")).strip()
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if not text:
+                return False
+            lowered = text.lower()
+            generic_phrases = (
+                "what would you like me to help",
+                "how would you like to proceed",
+                "i've reviewed the repo",
+                "i have reviewed the repo",
+                "let me know how you'd like to proceed",
+            )
+            return any(phrase in lowered for phrase in generic_phrases)
+
         while True:
             self._current_turn_index = turns_used + 1
             self._live_stream_buffer = ""
@@ -1189,6 +1222,37 @@ class Runner:
                                 {
                                     "type": "text",
                                     "text": "Benchmark mode: no prose-only turns. Make exactly one concrete next tool call.",
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                if (
+                    not self.small_model
+                    and not self.villani_mode
+                    and _latest_verification_unresolved()
+                    and only_textual_response
+                    and _is_generic_no_tool_fallback_response(response)
+                ):
+                    context_loss_guard_hits += 1
+                    self.event_callback(
+                        {
+                            "type": "regular_context_loss_guard_triggered",
+                            "attempt": context_loss_guard_hits,
+                        }
+                    )
+                    if context_loss_guard_hits >= 2:
+                        return _finish_bounded(response, "stalled_context_loss", False)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Context restore: continue the active code-repair loop. "
+                                        "Use the execution state block, fix the remaining failing verification, and run verification."
+                                    ),
                                 }
                             ],
                         }

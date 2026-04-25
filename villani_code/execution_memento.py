@@ -229,3 +229,50 @@ def build_local_evidence_block(runner: "Runner") -> str:
     if not items:
         return ""
     return "LOCAL EVIDENCE\n" + "\n".join(f"- {line}" for line in items[:4])
+
+
+def build_fallback_execution_state_block(runner: "Runner") -> str:
+    mission = getattr(runner, "_mission_state", None)
+    contract = getattr(runner, "_task_contract", {}) or {}
+    objective = str(getattr(mission, "objective", "") or "").strip() or "Complete the requested task."
+    success = str(contract.get("success_predicate", "") or "").strip()
+    if not success:
+        success = "Complete the requested task and make verification pass"
+
+    verification = str(getattr(runner, "_last_validation_summary", "") or "").strip()
+    failures = [str(v).strip() for v in list(getattr(mission, "validation_failures", []) or []) if str(v).strip()]
+    if not verification and failures:
+        verification = failures[0]
+    if not verification:
+        verification = str(getattr(mission, "last_failed_summary", "") or "").strip()
+    if not verification:
+        verification = "verification still pending"
+
+    changed_files = [str(v).strip() for v in list(getattr(mission, "changed_files", []) or []) if str(v).strip()]
+    intended_targets = [str(v).strip() for v in list(getattr(mission, "intended_targets", []) or []) if str(v).strip()]
+    has_validation_signal = bool(getattr(runner, "_last_validation_summary", "").strip() or failures)
+    if failures:
+        next_action = "Fix the remaining failing verification and rerun tests"
+    elif changed_files and not has_validation_signal:
+        next_action = "Run verification to confirm the fix"
+    elif intended_targets:
+        next_action = "Inspect and repair the most likely target file"
+    else:
+        next_action = "Identify the failing component and continue repair"
+
+    constraints = [str(v).strip() for v in list(contract.get("no_go_paths", []) or []) if str(v).strip()]
+    pinned_constraints = [str(v).strip() for v in list(contract.get("pinned_constraints", []) or []) if str(v).strip()]
+    if pinned_constraints:
+        constraints = pinned_constraints + constraints
+
+    lines = [
+        "EXECUTION STATE",
+        f"Objective: {objective}",
+        f"Success: {success}",
+        f"Current verification: {verification}",
+        f"Next action: {next_action}",
+    ]
+    if constraints:
+        lines.append("Constraints:")
+        lines.extend(f"- {item}" for item in constraints[:6])
+    return "\n".join(lines)
