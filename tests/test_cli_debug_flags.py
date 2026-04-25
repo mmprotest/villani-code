@@ -75,3 +75,88 @@ def test_cli_trace_rebuild_tool_calls(tmp_path: Path) -> None:
     assert result.exit_code == 0
     rows = (run_dir / "tool_calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 1
+
+
+def test_cli_orchestrate_passes_run_flags(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_orchestrate(**kwargs):
+        captured.update(kwargs)
+        return {"stop_reason": "ok"}
+
+    monkeypatch.setattr("villani_code.cli.orchestrate", fake_orchestrate)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "orchestrate",
+            "fix task",
+            "--base-url",
+            "http://localhost:8000",
+            "--model",
+            "demo-model",
+            "--repo",
+            str(tmp_path),
+            "--max-tokens",
+            "2048",
+            "--stream",
+            "--thinking",
+            '{"budget_tokens":128}',
+            "--unsafe",
+            "--verbose",
+            "--extra-json",
+            '{"x":1}',
+            "--redact",
+            "--dangerously-skip-permissions",
+            "--auto-accept-edits",
+            "--no-auto-approve",
+            "--plan-mode",
+            "strict",
+            "--max-repair-attempts",
+            "5",
+            "--small-model",
+            "--provider",
+            "openai",
+            "--api-key",
+            "k",
+            "--debug",
+            "trace",
+            "--debug-dir",
+            str(tmp_path / "dbg"),
+            "--workers",
+            "4",
+            "--scout-workers",
+            "2",
+            "--patch-workers",
+            "2",
+            "--rounds",
+            "2",
+            "--worker-timeout",
+            "60",
+            "--verify-command",
+            "pytest -q",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--keep-worktrees",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["max_tokens"] == 2048
+    assert captured["stream"] is True
+    assert captured["thinking"] == '{"budget_tokens":128}'
+    assert captured["unsafe"] is True
+    assert captured["verbose"] is True
+    assert captured["extra_json"] == '{"x":1}'
+    assert captured["redact"] is True
+    assert captured["dangerously_skip_permissions"] is True
+    assert captured["auto_accept_edits"] is True
+    assert captured["auto_approve"] is False
+    assert captured["plan_mode"] == "strict"
+    assert captured["max_repair_attempts"] == 5
+    assert captured["small_model"] is True
+    assert captured["provider"] == "openai"
+    assert captured["api_key"] == "k"
+    assert captured["debug"] == "trace"
+    assert captured["workers"] == 4
+    assert captured["verify_command"] == "pytest -q"
+    assert captured["keep_worktrees"] is True

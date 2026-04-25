@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import Literal
 from pathlib import Path
 
 from villani_code.orchestrate.state import WorkerReport
@@ -14,9 +15,25 @@ from villani_code.orchestrate.state import WorkerReport
 class WorkerConfig:
     base_url: str
     model: str
-    provider: str
+    provider: Literal["anthropic", "openai"]
     api_key: str | None
     timeout_seconds: int
+    max_tokens: int = 4096
+    stream: bool = False
+    thinking: str | None = None
+    unsafe: bool = False
+    verbose: bool = False
+    extra_json: str | None = None
+    redact: bool = False
+    dangerously_skip_permissions: bool = False
+    auto_accept_edits: bool = False
+    auto_approve: bool = True
+    plan_mode: Literal["off", "auto", "strict"] = "auto"
+    max_repair_attempts: int = 2
+    small_model: bool = False
+    benchmark_runtime_json: str | None = None
+    debug: str | None = None
+    debug_dir: Path | None = None
 
 
 @dataclass
@@ -89,11 +106,40 @@ def run_worker(*, repo: Path, prompt: str, config: WorkerConfig) -> WorkerRunRes
         config.model,
         "--base-url",
         config.base_url,
-        "--no-stream",
-        "--auto-approve",
+        "--max-tokens",
+        str(config.max_tokens),
+        "--plan-mode",
+        config.plan_mode,
+        "--max-repair-attempts",
+        str(config.max_repair_attempts),
     ]
+    cmd.append("--stream" if config.stream else "--no-stream")
+    if config.thinking:
+        cmd.extend(["--thinking", config.thinking])
+    if config.unsafe:
+        cmd.append("--unsafe")
+    if config.verbose:
+        cmd.append("--verbose")
+    if config.extra_json:
+        cmd.extend(["--extra-json", config.extra_json])
+    if config.redact:
+        cmd.append("--redact")
+    if config.dangerously_skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
+    if config.auto_accept_edits:
+        cmd.append("--auto-accept-edits")
+    if config.auto_approve:
+        cmd.append("--auto-approve")
+    if config.small_model:
+        cmd.append("--small-model")
     if config.api_key:
         cmd.extend(["--api-key", config.api_key])
+    if config.benchmark_runtime_json:
+        cmd.extend(["--benchmark-runtime-json", config.benchmark_runtime_json])
+    if config.debug:
+        cmd.extend(["--debug", config.debug])
+    if config.debug_dir:
+        cmd.extend(["--debug-dir", str(config.debug_dir)])
 
     try:
         proc = subprocess.run(cmd, cwd=repo, text=True, capture_output=True, timeout=config.timeout_seconds, check=False)

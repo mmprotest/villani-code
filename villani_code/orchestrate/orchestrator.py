@@ -56,6 +56,22 @@ def orchestrate(
     model: str,
     provider: str,
     api_key: str | None,
+    max_tokens: int,
+    stream: bool,
+    thinking: str | None,
+    unsafe: bool,
+    verbose: bool,
+    extra_json: str | None,
+    redact: bool,
+    dangerously_skip_permissions: bool,
+    auto_accept_edits: bool,
+    auto_approve: bool,
+    plan_mode: str,
+    max_repair_attempts: int,
+    small_model: bool,
+    benchmark_runtime_json: str | None,
+    debug: str | None,
+    debug_dir: Path | None,
     workers: int,
     scout_workers: int,
     patch_workers: int,
@@ -78,7 +94,29 @@ def orchestrate(
     state_path = artifacts_root / "state.json"
     state.save(state_path)
 
-    config = WorkerConfig(base_url=base_url, model=model, provider=provider, api_key=api_key, timeout_seconds=worker_timeout)
+    config = WorkerConfig(
+        base_url=base_url,
+        model=model,
+        provider=provider,
+        api_key=api_key,
+        timeout_seconds=worker_timeout,
+        max_tokens=max_tokens,
+        stream=stream,
+        thinking=thinking,
+        unsafe=unsafe,
+        verbose=verbose,
+        extra_json=extra_json,
+        redact=redact,
+        dangerously_skip_permissions=dangerously_skip_permissions,
+        auto_accept_edits=auto_accept_edits,
+        auto_approve=auto_approve,
+        plan_mode=plan_mode,
+        max_repair_attempts=max_repair_attempts,
+        small_model=small_model,
+        benchmark_runtime_json=benchmark_runtime_json,
+        debug=debug,
+        debug_dir=debug_dir,
+    )
     workspace_manager = WorkspaceManager(repo=repo, keep_worktrees=keep_worktrees)
     verify_cmd = verify_command or detect_verify_commands(repo)[0]
 
