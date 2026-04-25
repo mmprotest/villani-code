@@ -160,3 +160,29 @@ def test_cli_orchestrate_passes_run_flags(monkeypatch, tmp_path: Path) -> None:
     assert captured["workers"] == 4
     assert captured["verify_command"] == "pytest -q"
     assert captured["keep_worktrees"] is True
+
+
+def test_cli_orchestrate_accepts_max_tokens_before_task(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_orchestrate(**kwargs):
+        seen.update(kwargs)
+        return {"stop_reason": "ok"}
+
+    monkeypatch.setattr("villani_code.cli.orchestrate", fake_orchestrate)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "orchestrate",
+            "--base-url",
+            "http://localhost:8000",
+            "--model",
+            "demo-model",
+            "--max-tokens",
+            "333",
+            "task",
+        ],
+    )
+    assert result.exit_code == 0
+    assert seen["max_tokens"] == 333
