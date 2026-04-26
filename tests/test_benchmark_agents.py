@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import shutil
 from pathlib import Path
 
@@ -62,11 +63,14 @@ def test_opencode_command_with_base_url_uses_local_provider_prefix() -> None:
         provider="openai",
     )
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd[:8] == [
+    assert cmd[0:3] == [
         "opencode",
         "run",
+        "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done.",
+    ]
+    assert cmd[3:9] == [
         "--model",
-        "villani-openai-compatible/qwen-9b",
+        "villani-openai-compatible/benchmark-model",
         "--format",
         "json",
         "--dangerously-skip-permissions",
@@ -76,8 +80,9 @@ def test_opencode_command_with_base_url_uses_local_provider_prefix() -> None:
     prompt_path = Path(cmd[file_arg_idx])
     assert prompt_path.exists()
     assert prompt_path.read_text(encoding="utf-8") == prompt
-    assert cmd[-1] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
-    assert "\n" not in cmd[-1]
+    assert cmd[2] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
+    assert "\n" not in cmd[2]
+    assert cmd[-1] == str(prompt_path)
     shutil.rmtree(prompt_path.parent, ignore_errors=True)
     assert env["OPENAI_API_KEY"] == "sk-test"
 
@@ -92,9 +97,12 @@ def test_opencode_command_without_base_url_preserves_model() -> None:
         api_key=None,
         provider="openai",
     )
-    assert cmd[:8] == [
+    assert cmd[0:3] == [
         "opencode",
         "run",
+        "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done.",
+    ]
+    assert cmd[3:9] == [
         "--model",
         "qwen-9b",
         "--format",
@@ -102,8 +110,8 @@ def test_opencode_command_without_base_url_preserves_model() -> None:
         "--dangerously-skip-permissions",
         "--file",
     ]
-    assert cmd[-1] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
     prompt_path = Path(cmd[cmd.index("--file") + 1])
+    assert cmd[-1] == str(prompt_path)
     shutil.rmtree(prompt_path.parent, ignore_errors=True)
 
 
@@ -150,7 +158,7 @@ def test_resolve_subprocess_command_wraps_windows_cmd_shim(monkeypatch) -> None:
 
 def test_opencode_run_agent_writes_project_config_for_base_url(tmp_path: Path, monkeypatch) -> None:
     runner = OpenCodeAgentRunner()
-    captured: dict[str, list[str] | dict[str, str]] = {}
+    captured: dict[str, object] = {}
 
     class DummyProc:
         returncode = 0
@@ -163,6 +171,10 @@ def test_opencode_run_agent_writes_project_config_for_base_url(tmp_path: Path, m
         captured["env"] = env
         config_path = Path(cwd) / "opencode.json"
         assert config_path.exists()
+        captured["config"] = json.loads(config_path.read_text(encoding="utf-8"))
+        prompt_path = Path(command[-1])
+        captured["prompt_exists_during_run"] = prompt_path.exists()
+        captured["prompt_contents"] = prompt_path.read_text(encoding="utf-8")
         return DummyProc()
 
     monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
@@ -176,20 +188,57 @@ def test_opencode_run_agent_writes_project_config_for_base_url(tmp_path: Path, m
         timeout=10,
     )
     assert (tmp_path / "opencode.json").exists() is False
-    assert captured["command"][:8] == [
+    assert captured["command"][0:3] == [
         "opencode",
         "run",
+        "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done.",
+    ]
+    assert captured["command"][3:9] == [
         "--model",
-        "villani-openai-compatible/qwen-9b",
+        "villani-openai-compatible/benchmark-model",
         "--format",
         "json",
         "--dangerously-skip-permissions",
         "--file",
     ]
-    assert captured["command"][-1] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
+    prompt_path = Path(captured["command"][-1])
+    assert captured["prompt_exists_during_run"] is True
+    assert captured["prompt_contents"] == "fix bug"
+    assert captured["command"][-1] == str(prompt_path)
+    config_data = captured["config"]
+    assert isinstance(config_data, dict)
+    assert config_data["provider"]["villani-openai-compatible"]["models"]["benchmark-model"]["name"] == "qwen-9b"
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["OPENAI_API_KEY"] == "dummy"
+
+
+def test_opencode_base_url_with_slashes_in_model_uses_model_alias(tmp_path: Path, monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    seen: dict[str, list[str]] = {}
+
+    class DummyProc:
+        returncode = 0
+
+        def communicate(self, timeout):
+            return ("", "")
+
+    def fake_popen(command, cwd, stdout, stderr, text, env):
+        seen["command"] = command
+        return DummyProc()
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
+    runner.run_agent(
+        repo_path=tmp_path,
+        prompt="fix bug",
+        model="villanis/models/qwen3.6-27b-iq4_xs.gguf",
+        base_url="http://127.0.0.1:1234",
+        api_key="sk-test",
+        provider="openai",
+        timeout=10,
+    )
+    command = seen["command"]
+    assert command[command.index("--model") + 1] == "villani-openai-compatible/benchmark-model"
 
 
 def test_opencode_run_agent_fails_if_opencode_json_exists(tmp_path: Path) -> None:

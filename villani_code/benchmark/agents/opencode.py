@@ -11,6 +11,7 @@ from villani_code.benchmark.agents.base import AgentRunner
 class OpenCodeAgentRunner(AgentRunner):
     name = "opencode"
     _LOCAL_PROVIDER_ID = "villani-openai-compatible"
+    _LOCAL_MODEL_ALIAS = "benchmark-model"
     _TASK_INSTRUCTION = (
         "Complete the benchmark task described in the attached file. "
         "Modify the current repository. Do not ask for clarification. Stop when done."
@@ -39,10 +40,11 @@ class OpenCodeAgentRunner(AgentRunner):
         self._prompt_temp_dir = prompt_temp_dir
         prompt_file = prompt_temp_dir / "villani_opencode_benchmark_prompt.md"
         prompt_file.write_text(prompt, encoding="utf-8")
-        model_arg = f"{self._LOCAL_PROVIDER_ID}/{model}" if base_url else model
+        model_arg = f"{self._LOCAL_PROVIDER_ID}/{self._LOCAL_MODEL_ALIAS}" if base_url else model
         return [
             "opencode",
             "run",
+            self._TASK_INSTRUCTION,
             "--model",
             model_arg,
             "--format",
@@ -50,7 +52,6 @@ class OpenCodeAgentRunner(AgentRunner):
             "--dangerously-skip-permissions",
             "--file",
             str(prompt_file.resolve()),
-            self._TASK_INSTRUCTION,
         ]
 
     def build_env(self, *, base_url: str | None, api_key: str | None) -> dict[str, str]:
@@ -95,7 +96,7 @@ class OpenCodeAgentRunner(AgentRunner):
                                     "baseURL": self._normalize_base_url(base_url),
                                     "apiKey": "{env:OPENAI_API_KEY}",
                                 },
-                                "models": {model: {"name": model}},
+                                "models": {self._LOCAL_MODEL_ALIAS: {"name": model}},
                             }
                         },
                     },
