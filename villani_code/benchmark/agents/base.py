@@ -96,6 +96,8 @@ class AgentRunner(ABC):
         stdout_path = debug_dir / "agent_stdout.txt"
         stderr_path = debug_dir / "agent_stderr.txt"
         meta_path = debug_dir / "agent_run_meta.json"
+        stdout = stdout or ""
+        stderr = stderr or ""
 
         command_path.write_text(" ".join(command) + "\n", encoding="utf-8")
         stdout_path.write_text(stdout, encoding="utf-8")

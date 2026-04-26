@@ -1,4 +1,5 @@
 from __future__ import annotations
+import shutil
 from pathlib import Path
 
 from villani_code.benchmark.agents import AGENTS, build_agent_runner
@@ -51,16 +52,17 @@ def test_aider_command_forwards_model_and_endpoint() -> None:
 
 def test_opencode_command_with_base_url_uses_local_provider_prefix() -> None:
     runner = OpenCodeAgentRunner()
+    prompt = "line one\nline two\nline three"
     cmd = runner.build_command(
         Path("."),
-        "fix bug",
+        prompt,
         model="qwen-9b",
         base_url="http://127.0.0.1:1234",
         api_key="sk-test",
         provider="openai",
     )
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd == [
+    assert cmd[:8] == [
         "opencode",
         "run",
         "--model",
@@ -68,8 +70,15 @@ def test_opencode_command_with_base_url_uses_local_provider_prefix() -> None:
         "--format",
         "json",
         "--dangerously-skip-permissions",
-        "fix bug",
+        "--file",
     ]
+    file_arg_idx = cmd.index("--file") + 1
+    prompt_path = Path(cmd[file_arg_idx])
+    assert prompt_path.exists()
+    assert prompt_path.read_text(encoding="utf-8") == prompt
+    assert cmd[-1] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
+    assert "\n" not in cmd[-1]
+    shutil.rmtree(prompt_path.parent, ignore_errors=True)
     assert env["OPENAI_API_KEY"] == "sk-test"
 
 
@@ -83,7 +92,7 @@ def test_opencode_command_without_base_url_preserves_model() -> None:
         api_key=None,
         provider="openai",
     )
-    assert cmd == [
+    assert cmd[:8] == [
         "opencode",
         "run",
         "--model",
@@ -91,8 +100,11 @@ def test_opencode_command_without_base_url_preserves_model() -> None:
         "--format",
         "json",
         "--dangerously-skip-permissions",
-        "fix bug",
+        "--file",
     ]
+    assert cmd[-1] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
+    prompt_path = Path(cmd[cmd.index("--file") + 1])
+    shutil.rmtree(prompt_path.parent, ignore_errors=True)
 
 
 def test_opencode_env_sets_openai_api_key_from_api_key() -> None:
@@ -164,7 +176,7 @@ def test_opencode_run_agent_writes_project_config_for_base_url(tmp_path: Path, m
         timeout=10,
     )
     assert (tmp_path / "opencode.json").exists() is False
-    assert captured["command"] == [
+    assert captured["command"][:8] == [
         "opencode",
         "run",
         "--model",
@@ -172,8 +184,9 @@ def test_opencode_run_agent_writes_project_config_for_base_url(tmp_path: Path, m
         "--format",
         "json",
         "--dangerously-skip-permissions",
-        "fix bug",
+        "--file",
     ]
+    assert captured["command"][-1] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["OPENAI_API_KEY"] == "dummy"
@@ -196,6 +209,36 @@ def test_opencode_run_agent_fails_if_opencode_json_exists(tmp_path: Path) -> Non
         assert "cannot safely overwrite existing config" in str(exc)
     else:
         raise AssertionError("expected RuntimeError when opencode.json already exists")
+
+
+def test_debug_artifacts_handles_none_stdout_stderr(tmp_path: Path) -> None:
+    class DummyRunner(AgentRunner):
+        def build_command(
+            self,
+            repo_path: Path,
+            prompt: str,
+            model: str | None,
+            base_url: str | None,
+            api_key: str | None,
+            provider: str | None,
+            benchmark_config_json: str | None = None,
+        ) -> list[str]:
+            return ["echo", "ok"]
+
+    runner = DummyRunner()
+    artifacts = runner._write_debug_artifacts(
+        tmp_path,
+        command=["echo", "ok"],
+        cwd=tmp_path,
+        env={},
+        stdout=None,  # type: ignore[arg-type]
+        stderr=None,  # type: ignore[arg-type]
+        exit_code=0,
+        timeout_hit=False,
+        runtime_seconds=0.1,
+    )
+    assert Path(artifacts["agent_stdout"]).read_text(encoding="utf-8") == ""
+    assert Path(artifacts["agent_stderr"]).read_text(encoding="utf-8") == ""
 
 def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
     runner = ClaudeCodeAgentRunner()
