@@ -39,6 +39,13 @@ from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.context_projection import build_model_context_packet, render_model_context_packet
+from villani_code.execution_memento import (
+    build_execution_memento,
+    build_local_evidence_block,
+    load_execution_memento,
+    render_execution_memento_for_model,
+    save_execution_memento,
+)
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
@@ -880,6 +887,7 @@ class Runner:
         consecutive_recon_turns = 0
         benchmark_prose_only_after_forced_read = 0
         benchmark_forced_read_no_progress_guard_active = initial_read_enforced
+        generic_completion_guard_count = 0
         # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
         benchmark_mutation_denials = 0
         benchmark_denial_limit = 3
@@ -1201,6 +1209,32 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
+                    if self._should_block_regular_completion_on_generic_reply(response):
+                        generic_completion_guard_count += 1
+                        self.event_callback(
+                            {
+                                "type": "regular_completion_blocked_context_loss",
+                                "attempt": generic_completion_guard_count,
+                            }
+                        )
+                        if generic_completion_guard_count >= 2:
+                            return _finish_bounded(response, "stalled_context_loss", False)
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "Continue the active repair loop. Latest verification is still unresolved."
+                                            " Follow the execution state block, take the next concrete repair or verification action,"
+                                            " and do not ask generic follow-up questions."
+                                        ),
+                                    }
+                                ],
+                            }
+                        )
+                        continue
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
@@ -1329,6 +1363,33 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
+                if self._should_block_regular_completion_on_generic_reply(response):
+                    generic_completion_guard_count += 1
+                    self.event_callback(
+                        {
+                            "type": "regular_completion_blocked_context_loss",
+                            "attempt": generic_completion_guard_count,
+                        }
+                    )
+                    if generic_completion_guard_count >= 2:
+                        return _finish_bounded(response, "stalled_context_loss", False)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Continue the active repair loop. Latest verification is still unresolved."
+                                        " Follow the execution state block, take the next concrete repair or verification action,"
+                                        " and do not ask generic follow-up questions."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                generic_completion_guard_count = 0
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1586,12 +1647,31 @@ class Runner:
     def _update_mission_state(self, **fields: Any) -> None:
         if self._mission_state is None:
             return
+        changed_keys = set(fields.keys())
         for key, value in fields.items():
             if hasattr(self._mission_state, key):
                 setattr(self._mission_state, key, value)
         self._mission_state.intended_targets = sorted(self._intended_targets)
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()
+        meaningful_update_keys = {
+            "current_step_id",
+            "plan_summary",
+            "changed_files",
+            "intended_targets",
+            "validation_failures",
+            "last_failed_command",
+            "last_failed_summary",
+            "last_checkpoint_id",
+            "objective",
+            "status",
+        }
+        should_refresh_memento = bool(changed_keys & meaningful_update_keys) or not self._mission_state.last_memento_path
+        if should_refresh_memento:
+            memento = build_execution_memento(self)
+            path = save_execution_memento(self.repo, self._mission_state.mission_id, memento)
+            self._mission_state.last_memento_path = str(path)
+            self._mission_state.last_memento_turn_index = int(self._current_turn_index or 0)
         save_mission_state(self.repo, self._mission_state)
         if self._debug_recorder is not None:
             self._debug_recorder.record_mission_state_snapshot(
@@ -1605,6 +1685,29 @@ class Runner:
             return
         if len(messages) <= 1:
             return
+        memento = load_execution_memento(self.repo, self._mission_state.mission_id)
+        if memento is not None:
+            required = (
+                bool(memento.objective.strip()),
+                bool(memento.success_predicate.strip()),
+                bool(memento.pinned_constraints),
+                bool(memento.current_hypothesis.strip()),
+                bool(memento.next_best_action.strip()),
+            )
+            if all(required):
+                rendered = render_execution_memento_for_model(memento)
+                local = build_local_evidence_block(self)
+                block = rendered if not local else f"{rendered}\n\n{local}"
+                if not any(
+                    "EXECUTION STATE" in str(content_block.get("text", ""))
+                    for message in messages
+                    for content_block in (message.get("content", []) if isinstance(message.get("content", []), list) else [])
+                    if isinstance(content_block, dict)
+                ):
+                    from villani_code import state_runtime
+
+                    state_runtime.prepend_text_to_latest_safe_user_message(messages, block)
+                return
         if any(
             "Mission context packet:" in str(block.get("text", ""))
             for msg in messages
@@ -1769,6 +1872,11 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.is_no_progress_response(response)
+
+    def _should_block_regular_completion_on_generic_reply(self, response: dict[str, Any]) -> bool:
+        from villani_code import state_runtime
+
+        return state_runtime.should_block_regular_completion_on_generic_reply(self, response)
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime

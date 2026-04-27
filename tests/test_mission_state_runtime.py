@@ -5,6 +5,7 @@ from pathlib import Path
 
 from villani_code.context_projection import build_model_context_packet
 from villani_code.debug_bundle import create_debug_bundle
+from villani_code.execution_memento import build_execution_memento, load_execution_memento
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.mission_state import (
     MissionState,
@@ -34,6 +35,8 @@ def test_mission_state_roundtrip(tmp_path: Path) -> None:
         mode="execution",
         repo_root=str(tmp_path),
         status="active",
+        last_memento_path="memo.json",
+        last_memento_turn_index=3,
         verified_facts=[VerifiedFact(kind="k", value="v", source="s")],
         open_hypotheses=[OpenHypothesis(hypothesis_id="h1", statement="maybe", confidence=0.4, status="open")],
     )
@@ -41,6 +44,8 @@ def test_mission_state_roundtrip(tmp_path: Path) -> None:
     loaded = load_mission_state(tmp_path, "m1")
     assert loaded.verified_facts[0].value == "v"
     assert loaded.open_hypotheses[0].hypothesis_id == "h1"
+    assert loaded.last_memento_path == "memo.json"
+    assert loaded.last_memento_turn_index == 3
 
 
 def test_mission_directory_and_current_pointer(tmp_path: Path) -> None:
@@ -75,6 +80,17 @@ def test_transcript_save_updates_mission_state(tmp_path: Path) -> None:
     path = runner._save_transcript_and_link({"requests": [], "responses": []})
     loaded = load_mission_state(tmp_path, runner._mission_id)
     assert loaded.last_transcript_path == str(path)
+    assert loaded.last_memento_path.endswith("execution_memento.json")
+
+
+def test_execution_memento_is_saved_and_loadable(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("objective")
+    state = load_mission_state(tmp_path, runner._mission_id)
+    memento = load_execution_memento(tmp_path, runner._mission_id)
+    assert state.last_memento_path.endswith("execution_memento.json")
+    assert memento is not None
+    assert memento.objective == "objective"
 
 
 def test_plan_artifact_serialization_roundtrip() -> None:
@@ -131,6 +147,16 @@ def test_context_projection_excludes_runtime_artifacts(tmp_path: Path) -> None:
     assert packet["intended_targets"] == ["tests/test_app.py"]
 
 
+def test_execution_memento_excludes_runtime_artifacts(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
+    runner._ensure_mission("do x")
+    runner._mission_state.changed_files = ["src/app.py", ".villani_code/missions/m1/state.json"]
+    runner._mission_state.intended_targets = ["./.villani_code/sessions/last.json", "tests/test_app.py"]
+    memento = build_execution_memento(runner)
+    assert memento.changed_files == ["src/app.py"]
+    assert memento.in_scope_files == ["tests/test_app.py"]
+
+
 def test_projected_context_not_injected_on_initial_turn_even_when_requested(tmp_path: Path) -> None:
     runner = Runner(client=DummyClient(), repo=tmp_path, model="x", stream=False, print_stream=False)
     runner._ensure_mission("objective")
@@ -179,7 +205,7 @@ def test_projected_context_injected_into_latest_safe_user_turn(tmp_path: Path) -
     runner._inject_projected_context(messages)
     assert messages[0]["content"][0]["text"] == "older prompt"
     assert messages[2]["content"] == [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
-    assert "Mission context packet:" in messages[3]["content"][0]["text"]
+    assert "EXECUTION STATE" in messages[3]["content"][0]["text"]
 
 
 def test_projected_context_injected_into_string_user_content(tmp_path: Path) -> None:
@@ -191,7 +217,7 @@ def test_projected_context_injected_into_string_user_content(tmp_path: Path) -> 
     ]
     runner._inject_projected_context(messages)
     assert isinstance(messages[1]["content"], str)
-    assert "Mission context packet:" in messages[1]["content"]
+    assert "EXECUTION STATE" in messages[1]["content"]
     assert messages[1]["content"].endswith("final prompt")
 
 

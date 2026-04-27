@@ -12,6 +12,12 @@ import tempfile
 from typing import Any
 
 from villani_code.autonomy import VerificationStatus
+from villani_code.execution_memento import (
+    build_fallback_execution_state_block,
+    build_local_evidence_block,
+    load_execution_memento,
+    render_execution_memento_for_model,
+)
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
@@ -375,6 +381,12 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
             prepared = runner._context_budget.compact(prepared)
+    elif not runner.villani_mode:
+        _inject_execution_state_memory(runner, prepared)
+        prepared = _trim_regular_turn_messages(prepared, keep_units=4)
+        if runner._context_budget and _messages_chars(prepared) > runner._context_budget.max_chars:
+            prepared = runner._context_budget.compact_session_messages(prepared)
+        _ensure_regular_execution_state_invariant(runner, prepared)
     inventory = runner._context_governance.load_inventory()
     inventory.task_id = str(getattr(getattr(runner, "_execution_plan", None), "task_goal", "task"))[:80] or "task"
     total_chars = sum(len(str(m.get("content", ""))) for m in prepared)
@@ -391,6 +403,158 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
     runner._context_governance.save_inventory(inventory)
     validate_anthropic_tool_sequence(prepared)
     return prepared
+
+
+def _inject_execution_state_memory(runner: Any, messages: list[dict[str, Any]]) -> None:
+    mission = getattr(runner, "_mission_state", None)
+    if mission is None:
+        return
+    if any(
+        isinstance(block, dict) and "EXECUTION STATE" in str(block.get("text", ""))
+        for message in messages
+        for block in (message.get("content", []) if isinstance(message.get("content", []), list) else [])
+    ):
+        return
+    memento = load_execution_memento(runner.repo, mission.mission_id)
+    memento_block = ""
+    if memento is not None:
+        required = (
+            bool(memento.objective.strip()),
+            bool(memento.success_predicate.strip()),
+            bool(memento.pinned_constraints),
+            bool(memento.current_hypothesis.strip()),
+            bool(memento.next_best_action.strip()),
+        )
+        if all(required):
+            memento_block = render_execution_memento_for_model(memento)
+    if not memento_block:
+        memento_block = build_fallback_execution_state_block(runner)
+    evidence_block = build_local_evidence_block(runner)
+    text = memento_block if not evidence_block else f"{memento_block}\n\n{evidence_block}"
+    prepend_text_to_latest_safe_user_message(messages, text)
+
+
+def _messages_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(len(str(message.get("content", ""))) for message in messages)
+
+
+def _is_tool_use_message(message: dict[str, Any]) -> bool:
+    if message.get("role") != "assistant":
+        return False
+    content = message.get("content", [])
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_use" for block in content
+    )
+
+
+def _is_tool_result_message(message: dict[str, Any]) -> bool:
+    if message.get("role") != "user":
+        return False
+    content = message.get("content", [])
+    return isinstance(content, list) and bool(content) and all(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
+
+
+def _group_atomic_units(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    units: list[list[dict[str, Any]]] = []
+    idx = 0
+    while idx < len(messages):
+        current = messages[idx]
+        if _is_tool_use_message(current) and idx + 1 < len(messages) and _is_tool_result_message(messages[idx + 1]):
+            units.append([current, messages[idx + 1]])
+            idx += 2
+            continue
+        units.append([current])
+        idx += 1
+    return units
+
+
+def _trim_regular_turn_messages(messages: list[dict[str, Any]], keep_units: int = 4) -> list[dict[str, Any]]:
+    system_messages = [message for message in messages if message.get("role") == "system"]
+    others = [message for message in messages if message.get("role") != "system"]
+    if not others:
+        return messages
+    units = _group_atomic_units(others)
+    anchor_message = next((message for message in others if not _is_tool_result_message(message)), None)
+    anchor_unit: list[dict[str, Any]] = []
+    if anchor_message is not None:
+        anchor_unit = next((unit for unit in units if any(member is anchor_message for member in unit)), [])
+    tail_units = units[-max(2, keep_units):]
+    selected: list[dict[str, Any]] = []
+    selected.extend(system_messages)
+    seen_ids: set[int] = set()
+    for message in anchor_unit:
+        selected.append(message)
+        seen_ids.add(id(message))
+    for unit in tail_units:
+        for message in unit:
+            if id(message) in seen_ids:
+                continue
+            selected.append(message)
+            seen_ids.add(id(message))
+    return selected
+
+
+def _has_execution_state_markers(messages: list[dict[str, Any]]) -> bool:
+    text_fragments: list[str] = []
+    for message in messages:
+        content = message.get("content", [])
+        if isinstance(content, str):
+            text_fragments.append(content)
+            continue
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_fragments.append(str(block.get("text", "")))
+    flattened = "\n".join(text_fragments)
+    return "Objective:" in flattened and "Success:" in flattened and "Next action:" in flattened
+
+
+def _ensure_regular_execution_state_invariant(runner: Any, messages: list[dict[str, Any]]) -> None:
+    if runner.small_model or runner.villani_mode:
+        return
+    if not _has_execution_state_markers(messages):
+        prepend_text_to_latest_safe_user_message(messages, build_fallback_execution_state_block(runner))
+
+
+def should_block_regular_completion_on_generic_reply(runner: Any, response: dict[str, Any]) -> bool:
+    if runner.small_model or runner.villani_mode or str(getattr(runner, "_runtime_mode", "")) != "execution":
+        return False
+    content_blocks = response.get("content", [])
+    if not content_blocks or any(block.get("type") == "tool_use" for block in content_blocks if isinstance(block, dict)):
+        return False
+    text = " ".join(
+        str(block.get("text", "")).strip()
+        for block in content_blocks
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    generic_markers = (
+        "what would you like me to help",
+        "how would you like to proceed",
+        "how would you like to continue",
+        "i've reviewed the repo",
+        "i have reviewed the repo",
+    )
+    looks_generic = any(marker in lowered for marker in generic_markers) or (
+        "would you like" in lowered and "?" in lowered and len(lowered) < 240
+    )
+    if not looks_generic:
+        return False
+
+    mission = getattr(runner, "_mission_state", None)
+    last_validation_summary = str(getattr(runner, "_last_validation_summary", "") or "").lower()
+    pending_verification = str(getattr(runner, "_pending_verification", "") or "").lower()
+    mission_failed_summary = str(getattr(mission, "last_failed_summary", "") if mission else "").lower()
+    has_failures = bool(getattr(mission, "validation_failures", []) if mission else [])
+    verification_unresolved = has_failures or any(
+        token in f"{last_validation_summary}\n{pending_verification}\n{mission_failed_summary}"
+        for token in ("fail", "error", "uncertain", "pending", "not yet run")
+    )
+    return verification_unresolved
 
 
 def validate_anthropic_tool_sequence(messages: list[dict[str, Any]]) -> None:
