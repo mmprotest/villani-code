@@ -110,3 +110,18 @@ def test_villani_task_reports_completed_when_done(tmp_path: Path) -> None:
 
     assert result["execution"]["completed"] is True
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_regular_runner_generic_no_tool_reply_with_unresolved_verification_does_not_complete(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "text", "text": "What would you like me to help you with?"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "How would you like to proceed?"}]},
+        ],
+    )
+
+    result = runner.run("repair failing tests")
+
+    assert result["execution"]["completed"] is False
+    assert result["execution"]["terminated_reason"] == "stalled_context_loss"
