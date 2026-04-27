@@ -528,6 +528,9 @@ class Runner:
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
+        self._patch_recovery_state: dict[str, Any] | None = None
+        self._patch_recovery_pending_turn = False
+        self._patch_recovery_attempts_by_file: dict[str, int] = {}
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -1409,6 +1412,18 @@ class Runner:
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
                     self._update_mission_state(last_failed_command=f"{tool_name} {tool_input}", last_failed_summary=result_text[:500])
+                    if tool_name in {"Patch", "Edit"}:
+                        from villani_code import state_runtime
+
+                        state_runtime.record_patch_failure(
+                            self,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            error_text=result_text,
+                            turn_index=self._current_turn_index
+                            if isinstance(self._current_turn_index, int)
+                            else turns_used,
+                        )
                     if (
                         self.benchmark_config.enabled
                         and tool_name in {"Write", "Patch"}
@@ -1444,6 +1459,13 @@ class Runner:
                             "next_strategy": failure.suggested_strategy,
                             "occurrence": failure.occurrence_count,
                         }
+                    )
+
+                if tool_name in {"Patch", "Edit"} and not result.get("is_error"):
+                    from villani_code import state_runtime
+
+                    state_runtime.clear_patch_recovery_if_target_succeeded(
+                        self, tool_input=tool_input
                     )
 
                 self.hooks.run_event(
