@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from villani_code.context_budget import ContextBudget
-from villani_code.state_runtime import validate_anthropic_tool_sequence
+from villani_code.state_runtime import _trim_regular_runner_transcript_tail, validate_anthropic_tool_sequence
 from villani_code.tui.controller import RunnerController
 
 
@@ -103,3 +103,21 @@ def test_follow_up_prompt_can_include_prior_tool_and_assistant_context() -> None
     )
     assert sent[-1]["role"] == "user"
     assert "follow-up" in sent[-1]["content"][0]["text"]
+
+
+def test_regular_runner_tail_trimming_preserves_tool_use_result_integrity() -> None:
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": "sys"}]},
+        {"role": "user", "content": [{"type": "text", "text": "start"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "b"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "b.py"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "tail"}]},
+        {"role": "user", "content": [{"type": "text", "text": "latest"}]},
+    ]
+    trimmed = _trim_regular_runner_transcript_tail(messages, keep_units=2)
+    validate_anthropic_tool_sequence(trimmed)
+    assert len(trimmed) < len(messages)

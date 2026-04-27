@@ -469,6 +469,82 @@ def test_prepare_messages_for_model_repeated_calls_do_not_duplicate_injection() 
         ) == 1
 
 
+def test_prepare_messages_for_model_regular_injects_memento_without_duplication() -> None:
+    class _CtxGov:
+        def load_inventory(self):
+            return SimpleNamespace(task_id="")
+
+        def register_item(self, *args, **kwargs):
+            return None
+
+        def prune_for_budget(self, _inventory):
+            return None
+
+        def save_inventory(self, _inventory):
+            return None
+
+    class _Runner:
+        small_model = False
+        villani_mode = False
+        _context_budget = None
+        _execution_plan = SimpleNamespace(task_goal="t")
+        _context_governance = _CtxGov()
+
+        @staticmethod
+        def _inject_projected_context(messages):
+            state_runtime.prepend_text_to_latest_safe_user_message(messages, "EXECUTION STATE\nObjective: x")
+
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Need context on runtime."}]}]
+    prepared_one = state_runtime.prepare_messages_for_model(_Runner(), messages)
+    prepared_two = state_runtime.prepare_messages_for_model(_Runner(), messages)
+    for prepared in (prepared_one, prepared_two):
+        assert sum(
+            1
+            for block in prepared[0]["content"]
+            if isinstance(block, dict) and "EXECUTION STATE" in str(block.get("text", ""))
+        ) == 1
+
+
+def test_prepare_messages_for_model_regular_trims_history_and_preserves_tool_sequence() -> None:
+    class _CtxGov:
+        def load_inventory(self):
+            return SimpleNamespace(task_id="")
+
+        def register_item(self, *args, **kwargs):
+            return None
+
+        def prune_for_budget(self, _inventory):
+            return None
+
+        def save_inventory(self, _inventory):
+            return None
+
+    runner = SimpleNamespace(
+        small_model=False,
+        villani_mode=False,
+        _context_budget=None,
+        _context_governance=_CtxGov(),
+        _execution_plan=SimpleNamespace(task_goal="t"),
+        _inject_projected_context=lambda _messages: None,
+    )
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": "sys"}]},
+        {"role": "user", "content": [{"type": "text", "text": "objective"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "old ack"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.py"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "middle"}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "b.py"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "latest"}]},
+        {"role": "user", "content": [{"type": "text", "text": "next"}]},
+    ]
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+    state_runtime.validate_anthropic_tool_sequence(prepared)
+    assert len(prepared) < len(messages)
+    assert prepared[0]["role"] == "system"
+
+
 def test_fail_first_localization_runs_without_strong_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     events: list[dict] = []

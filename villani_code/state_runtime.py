@@ -375,6 +375,11 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:
             prepared = runner._context_budget.compact(prepared)
+    elif not getattr(runner, "villani_mode", False):
+        prepared = _trim_regular_runner_transcript_tail(prepared, keep_units=4)
+        inject = getattr(runner, "_inject_projected_context", None)
+        if callable(inject):
+            inject(prepared)
     inventory = runner._context_governance.load_inventory()
     inventory.task_id = str(getattr(getattr(runner, "_execution_plan", None), "task_goal", "task"))[:80] or "task"
     total_chars = sum(len(str(m.get("content", ""))) for m in prepared)
@@ -391,6 +396,54 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
     runner._context_governance.save_inventory(inventory)
     validate_anthropic_tool_sequence(prepared)
     return prepared
+
+
+def _trim_regular_runner_transcript_tail(
+    messages: list[dict[str, Any]],
+    *,
+    keep_units: int = 4,
+) -> list[dict[str, Any]]:
+    if len(messages) <= 8:
+        return messages
+    system_messages = [message for message in messages if message.get("role") == "system"]
+    conversation = [message for message in messages if message.get("role") != "system"]
+    if not conversation:
+        return messages
+    prefix: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(conversation) and conversation[idx].get("role") == "user":
+        prefix.append(conversation[idx])
+        idx += 1
+    units: list[list[dict[str, Any]]] = []
+    i = idx
+    while i < len(conversation):
+        current = conversation[i]
+        content = current.get("content", [])
+        if (
+            current.get("role") == "assistant"
+            and isinstance(content, list)
+            and any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content)
+            and i + 1 < len(conversation)
+            and conversation[i + 1].get("role") == "user"
+            and isinstance(conversation[i + 1].get("content", []), list)
+            and conversation[i + 1].get("content", [])
+            and all(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in conversation[i + 1].get("content", [])
+            )
+        ):
+            units.append([current, conversation[i + 1]])
+            i += 2
+            continue
+        units.append([current])
+        i += 1
+    tail: list[dict[str, Any]] = []
+    for unit in units[-keep_units:]:
+        tail.extend(unit)
+    kept = system_messages + prefix + tail
+    if len(kept) >= len(messages):
+        return messages
+    return kept
 
 
 def validate_anthropic_tool_sequence(messages: list[dict[str, Any]]) -> None:
@@ -830,6 +883,9 @@ def _build_compact_validation_summary(
     if emitted_fingerprint == getattr(runner, "_last_emitted_validation_fingerprint", ""):
         return ""
     runner._last_emitted_validation_fingerprint = emitted_fingerprint
+    refresh = getattr(runner, "_refresh_execution_memento", None)
+    if callable(refresh):
+        refresh()
     return (
         "<validation_summary>\n"
         f"last_validation_target: {target or 'none'}\n"
@@ -1330,6 +1386,9 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             runner._mission_state.validation_failures = []
             runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
             save_mission_state(runner.repo, runner._mission_state)
+            refresh = getattr(runner, "_refresh_execution_memento", None)
+            if callable(refresh):
+                refresh()
         return "Validation: passed."
 
     outcome = execute_repair_loop(
@@ -1358,6 +1417,9 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
             runner._mission_state.validation_failures = []
             runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
             save_mission_state(runner.repo, runner._mission_state)
+            refresh = getattr(runner, "_refresh_execution_memento", None)
+            if callable(refresh):
+                refresh()
         return outcome.message
 
     checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"])
@@ -1377,4 +1439,7 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         runner._mission_state.last_failed_summary = outcome.message
         runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
         save_mission_state(runner.repo, runner._mission_state)
+        refresh = getattr(runner, "_refresh_execution_memento", None)
+        if callable(refresh):
+            refresh()
     return outcome.message
