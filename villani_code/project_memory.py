@@ -160,6 +160,7 @@ class SessionState:
     outcome_status: str = "pending"
     next_step_hints: list[str] = field(default_factory=list)
     handoff_checkpoint: str = ""
+    shell_environment: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -397,9 +398,77 @@ def load_repo_map(repo: Path) -> dict[str, Any]:
 
 def load_validation_config(repo: Path) -> ValidationConfig:
     path = repo / VILLANI_DIR / "validation.json"
-    if not path.exists():
+    if path.exists():
+        cfg = ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        if cfg.steps:
+            return cfg
+    repo_map, generated, _rules = scan_repo(repo)
+    if not repo_map.languages and not generated.steps:
         return ValidationConfig(steps=[])
-    return ValidationConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(generated.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return generated
+
+
+def augment_validation_config_with_live_commands(repo: Path, commands: list[str], *, primary_target: str = "") -> ValidationConfig:
+    """Persist a small set of live-observed validation commands into validation.json.
+
+    This keeps startup fallback configs (for example, only git diff) from remaining stale
+    after the runtime observes stronger, direct validation evidence.
+    """
+    normalized_commands = [str(cmd).strip() for cmd in commands if str(cmd).strip()]
+    if not normalized_commands:
+        return load_validation_config(repo)
+    cfg = load_validation_config(repo)
+    existing_commands = {str(step.command).strip() for step in cfg.steps if str(step.command).strip()}
+    added = False
+    for command in normalized_commands:
+        if command in existing_commands:
+            continue
+        lowered = command.lower()
+        if "pytest" in lowered and primary_target and primary_target in lowered:
+            kind = "test"
+            strategy = "primary_target"
+        elif "pytest" in lowered:
+            kind = "test"
+            strategy = "related_tests"
+        elif any(token in lowered for token in ("helper", "wrapper", "probe", "verify_", "smoke", "sanity")):
+            kind = "inspection"
+            strategy = "helper_wrapper"
+        elif any(token in lowered for token in ("ruff", "mypy", "lint", "typecheck")):
+            kind = "lint"
+            strategy = "changed_files"
+        elif (lowered.startswith("python ") or lowered.startswith("python3 ")) and primary_target and primary_target in lowered:
+            kind = "test"
+            strategy = "primary_target"
+        elif lowered.startswith("python ") or lowered.startswith("python3 "):
+            kind = "inspection"
+            strategy = "targeted"
+        else:
+            kind = "inspection"
+            strategy = "none"
+        name = f"live-{kind}-{len(cfg.steps) + 1}"
+        cfg.steps.append(
+            ValidationStep(
+                name=name,
+                command=command,
+                kind=kind,
+                cost_level=2,
+                is_mutating=False,
+                scope_hint="targeted",
+                language_family="generic",
+                target_strategy=strategy,
+                escalation_role="early_signal",
+                typical_trigger_conditions=["live_observed"],
+            )
+        )
+        existing_commands.add(command)
+        added = True
+    if added:
+        path = repo / VILLANI_DIR / "validation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return cfg
 
 
 def update_session_state(repo: Path, state: SessionState) -> None:

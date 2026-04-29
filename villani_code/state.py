@@ -35,6 +35,7 @@ from villani_code.llm_client import LLMClient
 from villani_code.runtime_safety import ensure_runtime_dependencies_not_shadowed
 from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
+from villani_code.shells import detect_shell_environment
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
@@ -528,6 +529,22 @@ class Runner:
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
+        self._recovery_mode = False
+        self._failing_file = ""
+        self._active_solution_file = ""
+        self._primary_execution_target = ""
+        self._primary_execution_target_cwd = ""
+        self._primary_execution_target_evidence = "none"
+        self._primary_target_minimally_valid = False
+        self._active_solution_last_validation_ok: bool | None = None
+        self._active_solution_last_validation_summary = ""
+        self._failing_error_summary = ""
+        self._failing_command = ""
+        self._file_was_read_since_failure = False
+        self._recovery_files_at_failure: set[str] = set()
+        self._recovery_created_artifacts: set[str] = set()
+        self._recovery_target_switch_blocked = False
+        self._failing_target_contract_summary = ""
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -538,6 +555,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._shell_environment = detect_shell_environment(str(self.repo)).to_dict()
         if self.small_model:
             self._init_small_model_support()
 
@@ -901,6 +919,22 @@ class Runner:
         self._scope_expansion_used = False
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
+        self._recovery_mode = False
+        self._failing_file = ""
+        self._active_solution_file = ""
+        self._primary_execution_target = ""
+        self._primary_execution_target_cwd = ""
+        self._primary_execution_target_evidence = "none"
+        self._primary_target_minimally_valid = False
+        self._active_solution_last_validation_ok = None
+        self._active_solution_last_validation_summary = ""
+        self._failing_error_summary = ""
+        self._failing_command = ""
+        self._file_was_read_since_failure = False
+        self._recovery_files_at_failure = set()
+        self._recovery_created_artifacts = set()
+        self._recovery_target_switch_blocked = False
+        self._failing_target_contract_summary = ""
         if self._first_attempt_write_lock_active:
             self.event_callback(
                 {
@@ -991,6 +1025,16 @@ class Runner:
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
         ) -> dict[str, Any]:
+            def _evidence_guard_prefix() -> str:
+                primary_target = str(getattr(self, "_primary_execution_target", "")).strip()
+                primary_ok = bool(getattr(self, "_primary_target_minimally_valid", False))
+                if not primary_target or primary_ok:
+                    return ""
+                return (
+                    "[Execution status] Incomplete: primary execution target does not yet have clean direct validation. "
+                    "Treat results as partial until direct validation succeeds."
+                )
+
             elapsed = time.monotonic() - start
             intentional_changes, incidental_changes, all_changes = _change_summary()
             final_text = "\n".join(
@@ -998,6 +1042,11 @@ class Runner:
                 for block in response.get("content", [])
                 if block.get("type") == "text"
             )
+            guard_prefix = _evidence_guard_prefix()
+            if guard_prefix:
+                final_text = f"{guard_prefix}\n\n{final_text}".strip()
+                response.setdefault("content", [])
+                response["content"].insert(0, {"type": "text", "text": guard_prefix})
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,
@@ -1046,6 +1095,13 @@ class Runner:
         def _budget_reason(
             completed: bool = False, model_idle: bool = False
         ) -> str | None:
+            if completed:
+                active_solution_file = str(
+                    getattr(self, "_primary_execution_target", "") or getattr(self, "_active_solution_file", "")
+                ).strip()
+                active_validation_ok = getattr(self, "_active_solution_last_validation_ok", None)
+                if active_solution_file and active_validation_ok is not True:
+                    return "active_solution_validation_missing" if active_validation_ok is None else "active_solution_validation_failed"
             if execution_budget is None:
                 return None
             elapsed = time.monotonic() - start
@@ -1204,27 +1260,7 @@ class Runner:
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
-                    transcript["final_assistant_content"] = response.get("content", [])
-                    transcript_path = self._save_transcript_and_link(transcript)
-                    post = self._run_post_execution_validation(_change_summary()[2])
-                    if post:
-                        response.setdefault("content", []).append({"type": "text", "text": post})
-                    self._save_session_snapshot(messages)
-                    if self._event_recorder is not None:
-                        self._event_recorder.write_digest()
-                    if self._debug_recorder is not None:
-                        self._debug_recorder.write_final_summary(
-                            status="completed",
-                            termination_reason="completed",
-                            total_turns=turns_used,
-                            mission_id=self._mission_id,
-                        )
-                    return {
-                        "response": response,
-                        "messages": messages,
-                        "transcript_path": str(transcript_path),
-                        "transcript": transcript,
-                    }
+                    return _finish_bounded(response, "completed", True)
                 proposal = self._capture_edit_proposal(response)
                 if proposal:
                     self.event_callback(
@@ -1332,27 +1368,7 @@ class Runner:
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                transcript["final_assistant_content"] = response.get("content", [])
-                transcript_path = None
-                if not self._planning_read_only:
-                    transcript_path = self._save_transcript_and_link(transcript)
-                    self._save_session_snapshot(messages)
-                self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
-                if self._event_recorder is not None:
-                    self._event_recorder.write_digest()
-                if self._debug_recorder is not None:
-                    self._debug_recorder.write_final_summary(
-                        status="completed",
-                        termination_reason="completed",
-                        total_turns=turns_used,
-                        mission_id=self._mission_id,
-                    )
-                return {
-                    "response": response,
-                    "messages": messages,
-                    "transcript_path": str(transcript_path) if transcript_path is not None else "",
-                    "transcript": transcript,
-                }
+                return _finish_bounded(response, "completed", True)
 
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
@@ -1394,14 +1410,42 @@ class Runner:
                 tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
-                    if tool_name == "Read" and not result.get("is_error"):
-                        self._files_read.add(str(tool_input.get("file_path", "")))
+                if tool_name == "Read" and not result.get("is_error"):
+                    read_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                    self._files_read.add(read_path)
+                    if (
+                        getattr(self, "_recovery_mode", False)
+                        and read_path
+                        and read_path == str(getattr(self, "_failing_file", ""))
+                    ):
+                        self._file_was_read_since_failure = True
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    if getattr(self, "_recovery_mode", False):
+                        target_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+                        if target_path and target_path == str(getattr(self, "_failing_file", "")):
+                            self._file_was_read_since_failure = False
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
                 elif tool_name == "Bash":
+                    try:
+                        decoded = json.loads(str(result.get("content", "")))
+                    except Exception:
+                        decoded = {}
+                    if isinstance(decoded, dict):
+                        from villani_code import state_runtime
+
+                        state_runtime.activate_live_recovery_on_primary_failure(
+                            self,
+                            command=str(decoded.get("command", "") or str(tool_input.get("command", ""))),
+                            exit_code=int(decoded.get("exit_code", 0)),
+                            stdout=str(decoded.get("stdout", "") or ""),
+                            stderr=str(decoded.get("stderr", "") or ""),
+                            attempted_target=state_runtime._extract_command_python_target(
+                                str(decoded.get("command", "") or str(tool_input.get("command", "")))
+                            ),
+                        )
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
@@ -1590,6 +1634,11 @@ class Runner:
             if hasattr(self._mission_state, key):
                 setattr(self._mission_state, key, value)
         self._mission_state.intended_targets = sorted(self._intended_targets)
+        self._mission_state.recovery_mode = bool(getattr(self, "_recovery_mode", False))
+        self._mission_state.primary_execution_target = str(getattr(self, "_primary_execution_target", ""))
+        self._mission_state.primary_execution_cwd = str(getattr(self, "_primary_execution_target_cwd", ""))
+        self._mission_state.primary_execution_evidence = str(getattr(self, "_primary_execution_target_evidence", "none"))
+        self._mission_state.primary_target_minimally_valid = bool(getattr(self, "_primary_target_minimally_valid", False))
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()
         save_mission_state(self.repo, self._mission_state)

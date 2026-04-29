@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import py_compile
 import re
 from dataclasses import dataclass
@@ -217,6 +218,28 @@ def _benchmark_mutation_targets(tool_name: str, tool_input: dict[str, Any]) -> l
         except PatchApplyError:
             return [default_path] if default_path else []
     return []
+
+
+def _is_validation_candidate_target(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    if not normalized:
+        return False
+    suffix = Path(normalized).suffix.lower()
+    return suffix in {
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".rs",
+        ".go",
+        ".toml",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".ini",
+        ".cfg",
+    }
 
 
 def _normalize_mutation_payload(tool_name: str, tool_input: dict[str, Any]) -> None:
@@ -485,10 +508,10 @@ def execute_tool_with_policy(
             if not any(command.startswith(prefix) for prefix in readonly_prefixes):
                 return {"content": "Planning mode is read-only: shell command is not on read-only allowlist", "is_error": True}
 
+    policy_error = runner._small_model_tool_guard(tool_name, tool_input)
+    if policy_error:
+        return {"content": policy_error, "is_error": True}
     if runner.small_model or runner.villani_mode or runner.benchmark_config.enabled:
-        policy_error = runner._small_model_tool_guard(tool_name, tool_input)
-        if policy_error:
-            return {"content": policy_error, "is_error": True}
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
     if tool_name in {"Write", "Patch"}:
@@ -603,7 +626,8 @@ def execute_tool_with_policy(
         )
         if normalized_targets:
             runner._intended_targets.update(normalized_targets)
-            runner._current_verification_targets = set(normalized_targets)
+            verification_candidates = [target for target in normalized_targets if _is_validation_candidate_target(target)]
+            runner._current_verification_targets.update(verification_candidates)
             runner._current_verification_before_contents = {}
             checkpoint_paths: list[Path] = []
             for normalized_target in normalized_targets:
@@ -614,6 +638,9 @@ def execute_tool_with_policy(
                     runner._before_contents[normalized_target] = before_text
                     runner._current_verification_before_contents[normalized_target] = before_text
             runner.checkpoints.create(checkpoint_paths, message_index=message_count)
+            from villani_code import state_runtime
+
+            state_runtime.refresh_live_validation_candidates(runner, verification_candidates or normalized_targets)
     result = execute_tool_with_lifecycle(
         runner=runner,
         tool_name=tool_name,
@@ -658,6 +685,12 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    write_target = ""
+    write_target_existed = False
+    if tool_name == "Write":
+        write_target = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if write_target:
+            write_target_existed = (runner.repo / write_target).exists()
     result = execute_tool(
         tool_name,
         tool_input,
@@ -665,6 +698,7 @@ def execute_tool_with_lifecycle(
         unsafe=runner.unsafe,
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
+        runtime_state={"shell_environment": dict(getattr(runner, "_shell_environment", {}))},
     )
     runner.event_callback(
         {
@@ -678,4 +712,40 @@ def execute_tool_with_lifecycle(
             **({"forced": True} if forced else {}),
         }
     )
+    if tool_name == "Bash" and not result.get("is_error"):
+        try:
+            decoded = json.loads(str(result.get("content", "")))
+        except Exception:
+            decoded = {}
+        if isinstance(decoded, dict):
+            from villani_code import state_runtime
+
+            command = str(decoded.get("command", "") or str(tool_input.get("command", "")))
+            state_runtime.activate_live_recovery_on_primary_failure(
+                runner,
+                command=command,
+                exit_code=int(decoded.get("exit_code", 0)),
+                stdout=str(decoded.get("stdout", "") or ""),
+                stderr=str(decoded.get("stderr", "") or ""),
+                attempted_target=state_runtime._extract_command_python_target(command),
+                attempted_cwd=str(tool_input.get("cwd", "") or runner.repo),
+            )
+    if (
+        tool_name == "Read"
+        and not result.get("is_error")
+        and bool(getattr(runner, "_recovery_mode", False))
+    ):
+        read_path = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+        if read_path and read_path == str(getattr(runner, "_failing_file", "")):
+            runner._file_was_read_since_failure = True
+    if (
+        tool_name == "Write"
+        and not result.get("is_error")
+        and bool(getattr(runner, "_recovery_mode", False))
+        and write_target
+        and not write_target_existed
+    ):
+        created_artifacts = set(getattr(runner, "_recovery_created_artifacts", set()))
+        created_artifacts.add(write_target)
+        runner._recovery_created_artifacts = created_artifacts
     return result

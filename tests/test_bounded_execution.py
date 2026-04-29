@@ -110,3 +110,89 @@ def test_villani_task_reports_completed_when_done(tmp_path: Path) -> None:
 
     assert result["execution"]["completed"] is True
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_active_solution_failed_validation_blocks_completed_status(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python web_server.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "all done"}]},
+        ],
+    )
+    def fake_verify(*_args, **_kwargs) -> str:
+        runner._active_solution_file = "web_server.py"
+        runner._active_solution_last_validation_ok = False
+        return ""
+    monkeypatch.setattr(runner, "_run_verification", fake_verify)
+
+    result = runner.run("work")
+
+    assert result["execution"]["completed"] is False
+    assert result["execution"]["terminated_reason"] == "active_solution_validation_failed"
+
+
+def test_active_solution_successful_validation_allows_completed_status(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python web_server.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "all done"}]},
+        ],
+    )
+    def fake_verify(*_args, **_kwargs) -> str:
+        runner._active_solution_file = "web_server.py"
+        runner._active_solution_last_validation_ok = True
+        return ""
+    monkeypatch.setattr(runner, "_run_verification", fake_verify)
+
+    result = runner.run("work")
+
+    assert result["execution"]["completed"] is True
+    assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_final_summary_is_honest_when_primary_validation_missing(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python web_server.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Fully functional and thoroughly tested."}]},
+        ],
+    )
+    def fake_verify(*_args, **_kwargs) -> str:
+        runner._primary_execution_target = "web_server.py"
+        runner._primary_target_minimally_valid = False
+        runner._active_solution_file = "web_server.py"
+        runner._active_solution_last_validation_ok = False
+        return ""
+    monkeypatch.setattr(runner, "_run_verification", fake_verify)
+    monkeypatch.setattr(runner, "_run_post_execution_validation", lambda _changed: "")
+
+    result = runner.run("work")
+    final_text = result["execution"]["final_text"]
+    assert "Incomplete: primary execution target does not yet have clean direct validation" in final_text
+    assert "Fully functional and thoroughly tested." in final_text
+
+
+def test_final_summary_can_remain_positive_when_primary_validation_is_strong(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python web_server.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Fully functional and thoroughly tested."}]},
+        ],
+    )
+    def fake_verify(*_args, **_kwargs) -> str:
+        runner._primary_execution_target = "web_server.py"
+        runner._primary_target_minimally_valid = True
+        runner._active_solution_file = "web_server.py"
+        runner._active_solution_last_validation_ok = True
+        return ""
+    monkeypatch.setattr(runner, "_run_verification", fake_verify)
+    monkeypatch.setattr(runner, "_run_post_execution_validation", lambda _changed: "")
+
+    result = runner.run("work")
+    final_text = result["execution"]["final_text"]
+    assert "Incomplete: primary execution target does not yet have clean direct validation" not in final_text
+    assert "Fully functional and thoroughly tested." in final_text

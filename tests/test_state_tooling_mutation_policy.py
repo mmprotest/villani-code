@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from villani_code.context_projection import build_model_context_packet, render_model_context_packet
+from villani_code.project_memory import load_validation_config
 from villani_code.state import Runner
-from villani_code.state_tooling import execute_tool_with_policy
+from villani_code.state_tooling import execute_tool_with_lifecycle, execute_tool_with_policy
 
 
 class _Client:
@@ -126,3 +128,298 @@ def test_patch_existing_file_rewrite_heavy_is_rejected(tmp_path: Path) -> None:
     result = execute_tool_with_policy(runner, "Patch", {"unified_diff": "\n".join(diff_lines)}, "1", 0)
     assert result["is_error"] is True
     assert "Rewrite-heavy mutation rejected" in str(result["content"])
+
+
+def test_recovery_mode_blocks_delete_of_active_failing_file(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "legal_review_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._failing_file = "legal_review_app.py"
+    runner._failing_error_summary = "SyntaxError"
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/legal_review_app.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-print('x')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert '"recovery_blocked": true' in str(result["content"])
+    assert "delete_blocked_for_failing_file" in str(result["content"])
+
+
+def test_recovery_mode_blocks_delete_of_active_solution_file(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "web_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_app.py"
+    runner._failing_file = "helper.py"
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/web_app.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-print('x')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "delete_blocked_for_failing_file" in str(result["content"])
+    assert '"recovery_blocked": true' in str(result["content"])
+
+
+def test_recovery_mode_blocks_edit_without_read_first(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "legal_review_app.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._failing_file = "legal_review_app.py"
+    runner._failing_error_summary = "NameError"
+    runner._file_was_read_since_failure = False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "legal_review_app.py", "content": "print('fixed')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "read_required_before_edit" in str(result["content"])
+
+
+def test_recovery_mode_blocks_new_validation_artifact_entrypoint_launch(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_app.py"
+    runner._primary_execution_target = "web_app.py"
+    runner._recovery_files_at_failure = {"web_app.py"}
+
+    create = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "web_server.py", "content": "print('x')\n"},
+        "1a",
+        0,
+    )
+    assert create["is_error"] is False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python web_server.py", "timeout_sec": 30},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert '"classification": "blocked"' in str(result["content"])
+    assert (
+        '"short_reason": "recovery_target_switch_blocked"' in str(result["content"])
+        or '"short_reason": "recovery_new_wrapper_target_blocked"' in str(result["content"])
+    )
+    assert '"primary_execution_target": "web_app.py"' in str(result["content"])
+    assert '"attempted_target": "web_server.py"' in str(result["content"])
+
+
+def test_recovery_mode_allows_rerun_of_same_primary_target(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._primary_execution_target = "web_app.py"
+    runner._active_solution_file = "web_app.py"
+
+    result = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python web_app.py", "timeout_sec": 30},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
+
+
+def test_recovery_e2e_blocks_drift_after_scaffold_then_real_target_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    scaffold = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "app/__init__.py", "content": ""},
+        "s1",
+        0,
+    )
+    assert scaffold["is_error"] is False
+    assert runner._primary_execution_target == ""
+
+    (tmp_path / "service.py").write_text("def broken(:\n  pass\n", encoding="utf-8")
+    runner._primary_execution_target = "service.py"
+    runner._primary_execution_target_cwd = "."
+    runner._primary_execution_target_evidence = "direct_run"
+    failed = execute_tool_with_lifecycle(
+        runner=runner,
+        tool_name="Bash",
+        tool_input={"command": "python service.py", "timeout_sec": 30},
+        tool_use_id="b1",
+        turn_index=0,
+    )
+    assert failed["is_error"] is False
+    assert runner._recovery_mode is True
+
+    blocked = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python helper.py", "timeout_sec": 30},
+        "b2",
+        1,
+    )
+    assert blocked["is_error"] is True
+    assert (
+        "recovery_target_switch_blocked" in str(blocked["content"])
+        or "recovery_new_wrapper_target_blocked" in str(blocked["content"])
+    )
+
+
+def test_bash_hard_failure_on_primary_sets_live_recovery_state(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+    runner._primary_execution_target = "web_app.py"
+    runner._active_solution_file = "web_app.py"
+    runner._recovery_mode = False
+
+    result = execute_tool_with_lifecycle(
+        runner=runner,
+        tool_name="Bash",
+        tool_input={"command": "python web_app.py", "timeout_sec": 30},
+        tool_use_id="fail-1",
+        turn_index=0,
+    )
+    assert result["is_error"] is False
+    assert runner._recovery_mode is True
+    assert runner._failing_file == "web_app.py"
+    assert runner._primary_execution_target == "web_app.py"
+    assert runner._primary_target_minimally_valid is False
+
+
+def test_recovery_mode_allows_helper_file_edit_with_active_solution(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "web_app.py").write_text("print('x')\n", encoding="utf-8")
+    helper = tmp_path / "utils.py"
+    helper.write_text("x=1\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_app.py"
+    runner._failing_file = "web_app.py"
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/utils.py\n+++ b/utils.py\n@@ -1 +1 @@\n-x=1\n+x=2\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
+
+
+def test_recovery_mode_blocks_full_write_of_active_solution_after_hard_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "web_server.py"
+    target.write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_server.py"
+    runner._failing_file = "web_server.py"
+    runner._active_solution_last_validation_ok = False
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "web_server.py", "content": "print('rewritten')\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is True
+    assert "full_write_blocked_for_active_solution" in str(result["content"])
+    assert '"recovery_blocked": true' in str(result["content"])
+
+
+def test_recovery_mode_allows_bounded_patch_of_active_solution_after_hard_failure(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    target = tmp_path / "web_server.py"
+    target.write_text("x=1\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._active_solution_file = "web_server.py"
+    runner._failing_file = "web_server.py"
+    runner._active_solution_last_validation_ok = False
+    runner._file_was_read_since_failure = True
+
+    result = execute_tool_with_policy(
+        runner,
+        "Patch",
+        {"unified_diff": "--- a/web_server.py\n+++ b/web_server.py\n@@ -1 +1 @@\n-x=1\n+x=2\n"},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
+
+
+def test_integration_scaffold_then_direct_run_reseeds_primary_and_live_validation(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / ".villani").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".villani" / "validation.json").write_text(
+        '{"steps":[{"name":"git-diff","command":"git diff --stat","kind":"inspection","cost_level":1,"is_mutating":false}]}',
+        encoding="utf-8",
+    )
+    scaffold = execute_tool_with_policy(
+        runner,
+        "Write",
+        {"file_path": "app/__init__.py", "content": ""},
+        "s1",
+        0,
+    )
+    assert scaffold["is_error"] is False
+    assert runner._primary_execution_target == ""
+
+    (tmp_path / "service.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+    run = execute_tool_with_policy(
+        runner,
+        "Bash",
+        {"command": "python service.py", "timeout_sec": 30, "cwd": str(tmp_path)},
+        "b1",
+        1,
+    )
+    assert run["is_error"] is False
+    assert runner._primary_execution_target == "service.py"
+    assert runner._primary_execution_target_evidence == "direct_run"
+    assert runner._primary_execution_target_cwd == "."
+    assert runner._recovery_mode is True
+
+    packet = build_model_context_packet(runner)
+    rendered = render_model_context_packet(packet)
+    assert "Recovery contract:" in rendered
+    assert "target=service.py" in rendered
+    assert "cwd=." in rendered
+
+    cfg = load_validation_config(tmp_path)
+    assert any(step.command == "python service.py" for step in cfg.steps)
+
+
+def test_read_failing_file_flips_recovery_read_flag(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    (tmp_path / "legal_review_app.py").write_text("print('x')\n", encoding="utf-8")
+    runner._recovery_mode = True
+    runner._failing_file = "legal_review_app.py"
+    runner._failing_error_summary = "ImportError"
+    runner._file_was_read_since_failure = False
+
+    result = execute_tool_with_policy(
+        runner,
+        "Read",
+        {"file_path": "legal_review_app.py", "max_bytes": 1000},
+        "1",
+        0,
+    )
+    assert result["is_error"] is False
+    assert runner._file_was_read_since_failure is True

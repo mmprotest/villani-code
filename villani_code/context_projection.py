@@ -28,6 +28,24 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
         constraints.append(f"Success predicate: {contract.get('success_predicate', '')}")
         constraints.extend([f"No-go: {p}" for p in contract.get("no_go_paths", [])[:4]])
     skill_guidance = [getattr(skill, "guidance", "") for skill in getattr(runner, "skills", []) if getattr(skill, "guidance", "")]
+    recovery_mode = bool(getattr(runner, "_recovery_mode", False))
+    primary_target = str(getattr(runner, "_primary_execution_target", "")).replace("\\", "/").lstrip("./")
+    recovery_block: dict[str, Any] | None = None
+    if recovery_mode and primary_target:
+        failing_summary = str(getattr(runner, "_failing_error_summary", "") or "")
+        failing_target_summary = str(getattr(runner, "_failing_target_contract_summary", "") or "")
+        recovery_block = {
+            "primary_execution_target": primary_target,
+            "primary_execution_cwd": str(getattr(runner, "_primary_execution_target_cwd", "") or "."),
+            "primary_execution_evidence": str(getattr(runner, "_primary_execution_target_evidence", "none")),
+            "recovery_mode": True,
+            "failing_target_summary": failing_target_summary,
+            "failing_error_summary": failing_summary,
+            "primary_target_minimally_valid": bool(getattr(runner, "_primary_target_minimally_valid", False)),
+            "switch_blocked": bool(getattr(runner, "_recovery_target_switch_blocked", False)),
+            "active_solution_last_validation_ok": getattr(runner, "_active_solution_last_validation_ok", None),
+            "needs_direct_validation": not bool(getattr(runner, "_primary_target_minimally_valid", False)),
+        }
     return {
         "objective": getattr(mission, "objective", ""),
         "runtime_mode": getattr(mission, "mode", getattr(runner, "_runtime_mode", "execution")),
@@ -43,6 +61,7 @@ def build_model_context_packet(runner: "Runner") -> dict[str, Any]:
         "constraints": constraints,
         "repo_root": str(getattr(runner, "repo", "")),
         "skill_guidance": [s for s in skill_guidance if s][:8],
+        "recovery": recovery_block,
     }
 
 
@@ -67,4 +86,19 @@ def render_model_context_packet(packet: dict[str, Any]) -> str:
     if guidance:
         lines.append("Skill guidance:")
         lines.extend(f"- {g}" for g in guidance[:6])
+    recovery = packet.get("recovery", {})
+    if isinstance(recovery, dict) and recovery:
+        failure_summary = str(recovery.get("failing_error_summary", "") or recovery.get("failing_target_summary", ""))
+        lines.append(
+            "Recovery contract: "
+            f"target={recovery.get('primary_execution_target', '')}; "
+            f"cwd={recovery.get('primary_execution_cwd', '.')}; "
+            f"evidence={recovery.get('primary_execution_evidence', 'none')}; "
+            f"mode={bool(recovery.get('recovery_mode', False))}; "
+            f"min_valid={bool(recovery.get('primary_target_minimally_valid', False))}; "
+            f"switch_blocked={bool(recovery.get('switch_blocked', False))}; "
+            f"active_validation_ok={recovery.get('active_solution_last_validation_ok', None)}; "
+            f"needs_direct_validation={bool(recovery.get('needs_direct_validation', True))}; "
+            f"failure={failure_summary}"
+        )
     return "\n".join(lines)
