@@ -15,8 +15,17 @@ from villani_code.autonomy import VerificationStatus
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
 from villani_code.planning import TaskMode, generate_execution_plan
-from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
-from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
+from villani_code.project_memory import (
+    SessionState,
+    ensure_project_memory,
+    load_repo_map,
+    update_session_state,
+)
+from villani_code.context_governance import (
+    ContextCompactor,
+    ContextInclusionReason,
+    ContextExclusionReason,
+)
 from villani_code.validation_loop import run_validation
 from villani_code.shells import baseline_import_validation_command, shell_family_for_platform
 from villani_code.repair import execute_repair_loop
@@ -132,7 +141,9 @@ def parse_failure_signal(stdout: str, stderr: str) -> dict[str, Any]:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("E   ", "AssertionError", "ValueError", "TypeError", "KeyError", "RuntimeError")):
+        if stripped.startswith(
+            ("E   ", "AssertionError", "ValueError", "TypeError", "KeyError", "RuntimeError")
+        ):
             evidence["error_summary"] = stripped.removeprefix("E   ").strip()
             break
     if not evidence["error_summary"]:
@@ -248,7 +259,9 @@ def classify_diagnosis_target_confidence(
         traceback_file = _normalize_repo_path(str(failure_evidence.get("traceback_file", "")))
         if traceback_file and traceback_file == target_file:
             return "strong"
-        excerpt_path = _extract_first_path_from_text(str(failure_evidence.get("raw_failure_excerpt", "")))
+        excerpt_path = _extract_first_path_from_text(
+            str(failure_evidence.get("raw_failure_excerpt", ""))
+        )
         if excerpt_path and excerpt_path == target_file:
             return "strong"
 
@@ -304,12 +317,16 @@ def run_pre_edit_diagnosis(
     cfg = getattr(runner, "benchmark_config", None)
     if cfg and cfg.enabled:
         if cfg.visible_verification:
-            evidence_lines.append("Visible verification: " + "; ".join(cfg.visible_verification[:3]))
+            evidence_lines.append(
+                "Visible verification: " + "; ".join(cfg.visible_verification[:3])
+            )
         if cfg.expected_files:
             evidence_lines.append("Expected files: " + ", ".join(cfg.expected_files[:5]))
     if failure_evidence:
         if failure_evidence.get("first_failing_test"):
-            evidence_lines.append("First failing test: " + str(failure_evidence["first_failing_test"]))
+            evidence_lines.append(
+                "First failing test: " + str(failure_evidence["first_failing_test"])
+            )
         if failure_evidence.get("traceback_file"):
             file_line = str(failure_evidence["traceback_file"])
             if failure_evidence.get("traceback_line"):
@@ -324,7 +341,7 @@ def run_pre_edit_diagnosis(
 
     system_prompt = (
         "Return strict JSON only with exactly these string keys: "
-        'target_file, bug_class, fix_intent. No prose, no markdown, no extra keys.'
+        "target_file, bug_class, fix_intent. No prose, no markdown, no extra keys."
     )
     user_prompt = (
         "Produce one cheap pre-edit diagnosis from available evidence only. "
@@ -341,7 +358,9 @@ def run_pre_edit_diagnosis(
     try:
         response = runner.client.create_message(payload, stream=False)
     except Exception as exc:  # pragma: no cover - defensive path
-        runner.event_callback({"type": "diagnosis_failed", "reason": f"call_error:{exc.__class__.__name__}"})
+        runner.event_callback(
+            {"type": "diagnosis_failed", "reason": f"call_error:{exc.__class__.__name__}"}
+        )
         return None
 
     blocks = response.get("content", []) if isinstance(response, dict) else []
@@ -376,7 +395,9 @@ def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> l
         if runner._context_budget:
             prepared = runner._context_budget.compact(prepared)
     inventory = runner._context_governance.load_inventory()
-    inventory.task_id = str(getattr(getattr(runner, "_execution_plan", None), "task_goal", "task"))[:80] or "task"
+    inventory.task_id = (
+        str(getattr(getattr(runner, "_execution_plan", None), "task_goal", "task"))[:80] or "task"
+    )
     total_chars = sum(len(str(m.get("content", ""))) for m in prepared)
     runner._context_governance.register_item(
         inventory,
@@ -400,7 +421,9 @@ def validate_anthropic_tool_sequence(messages: list[dict[str, Any]]) -> None:
         content = message.get("content", [])
         if not isinstance(content, list):
             continue
-        if not any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content):
+        if not any(
+            isinstance(block, dict) and block.get("type") == "tool_use" for block in content
+        ):
             continue
 
         followup_index = index + 1
@@ -455,7 +478,9 @@ def inject_retrieval_briefing(runner: Any, messages: list[dict[str, Any]]) -> No
     if not hits:
         return
     briefing = "\n".join(f"- {h.path}: {h.reason}" for h in hits)
-    content.insert(0, {"type": "text", "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>"})
+    content.insert(
+        0, {"type": "text", "text": f"<retrieval-briefing>\n{briefing}\n</retrieval-briefing>"}
+    )
 
 
 def init_small_model_support(runner: Any) -> None:
@@ -523,7 +548,9 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 from villani_code import state_tooling
 
                 guard_turn_index = (
-                    runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0
+                    runner._current_turn_index
+                    if isinstance(getattr(runner, "_current_turn_index", None), int)
+                    else 0
                 )
                 guard_tool_use_id = f"guard-read-{guard_turn_index}-{fp.replace('/', '_')}"
                 read_result = state_tooling.execute_tool_with_lifecycle(
@@ -540,9 +567,13 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
 
             intended = set(getattr(runner, "_intended_targets", set()))
             if intended and fp not in intended:
-                explicit_allowlisted = runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp)
+                explicit_allowlisted = (
+                    runner.benchmark_config.enabled and runner.benchmark_config.in_allowlist(fp)
+                )
                 benchmark_scope_ok = (not runner.benchmark_config.enabled) or explicit_allowlisted
-                has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(fp, intended)
+                has_evidence = (fp in runner._files_read) or _is_strongly_adjacent_path(
+                    fp, intended
+                )
                 can_expand_once = (
                     (not runner._scope_expansion_used)
                     and benchmark_scope_ok
@@ -588,6 +619,7 @@ def small_model_tool_guard(runner: Any, tool_name: str, tool_input: dict[str, An
                 return "Small-model mode policy: avoid whole-file writes for large files; use Patch instead."
     return None
 
+
 def tighten_tool_input(tool_name: str, tool_input: dict[str, Any]) -> None:
     if tool_name == "Read":
         tool_input["max_bytes"] = min(int(tool_input.get("max_bytes", 200000)), 50_000)
@@ -609,8 +641,6 @@ def truncate_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, An
 def git_changed_files(repo: Any) -> list[str]:
     proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True)
     return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
-
-
 
 
 def _collect_changed_python_files(runner: Any) -> list[str]:
@@ -636,7 +666,9 @@ def _is_pytest_based_verification(runner: Any) -> bool:
 def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
     checked_files = _collect_changed_python_files(runner)
     telemetry = {
-        "first_attempt_write_lock_active": bool(getattr(runner, "_first_attempt_write_lock_active", False)),
+        "first_attempt_write_lock_active": bool(
+            getattr(runner, "_first_attempt_write_lock_active", False)
+        ),
         "locked_target_file": str(getattr(runner, "_first_attempt_locked_target", "") or ""),
         "syntax_sanity_ran": bool(checked_files),
         "collection_sanity_ran": False,
@@ -731,7 +763,11 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
         reason = (
             collect_stderr.splitlines()[0]
             if collect_stderr
-            else (collect_stdout.splitlines()[0] if collect_stdout else "pytest collection sanity failed")
+            else (
+                collect_stdout.splitlines()[0]
+                if collect_stdout
+                else "pytest collection sanity failed"
+            )
         )
         runner.event_callback(
             {
@@ -907,6 +943,7 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
     runner._first_attempt_write_lock_active = False
     return verification
 
+
 def run_verification(runner: Any, trigger: str = "edit") -> str:
     current_changed = set(git_changed_files(runner.repo))
     attributed_changed = sorted(current_changed - runner._verification_baseline_changed)
@@ -923,8 +960,12 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         commands.append(["git", "diff", "--stat", "--", *attributed_intentional])
         commands.append(["git", "diff", "--", *attributed_intentional])
 
-    touched_tests = [p for p in attributed_intentional if p.startswith("tests/") and p.endswith(".py")]
-    touched_sources = [p for p in attributed_intentional if p.endswith(".py") and not p.startswith("tests/")]
+    touched_tests = [
+        p for p in attributed_intentional if p.startswith("tests/") and p.endswith(".py")
+    ]
+    touched_sources = [
+        p for p in attributed_intentional if p.endswith(".py") and not p.startswith("tests/")
+    ]
     task_mode = getattr(runner, "_task_mode", TaskMode.GENERAL)
     if touched_tests:
         commands.append(["pytest", "-q", *touched_tests])
@@ -962,13 +1003,14 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     verification_artifacts = [
         r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
     ]
-    validation_target_paths = sorted(set(runner._current_verification_targets) or set(attributed_intentional))
+    validation_target_paths = sorted(
+        set(runner._current_verification_targets) or set(attributed_intentional)
+    )
     validation_target = json.dumps(validation_target_paths)
     artifact_signature = json.dumps(sorted(verification_artifacts))
-    repeated_without_new_evidence = (
-        validation_target == getattr(runner, "_last_validation_target", "")
-        and artifact_signature == getattr(runner, "_last_validation_artifact_signature", "")
-    )
+    repeated_without_new_evidence = validation_target == getattr(
+        runner, "_last_validation_target", ""
+    ) and artifact_signature == getattr(runner, "_last_validation_artifact_signature", "")
     verification = runner._verification_engine.verify(
         trigger,
         attributed_intentional,
@@ -1075,9 +1117,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
             {
                 "type": "confidence_risk",
                 "confidence": verification.confidence_score,
-                "risk": "medium"
-                if verification.status == VerificationStatus.UNCERTAIN
-                else "high",
+                "risk": "medium" if verification.status == VerificationStatus.UNCERTAIN else "high",
                 "summary": verification.summary,
             }
         )
@@ -1120,7 +1160,10 @@ def capture_edit_proposal(runner: Any, response: dict[str, Any]):
     if not diff_text:
         return None
     files = extract_unified_diff_targets(diff_text)
-    return runner.proposals.create(diff_text=diff_text, files_touched=files, summary="Assistant proposed unified diff")
+    return runner.proposals.create(
+        diff_text=diff_text, files_touched=files, summary="Assistant proposed unified diff"
+    )
+
 
 def is_no_progress_response(response: dict[str, Any]) -> bool:
     blocks = response.get("content", [])
@@ -1131,7 +1174,10 @@ def is_no_progress_response(response: dict[str, Any]) -> bool:
 
 
 def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
-    if getattr(runner, "_mission_state", None) is not None and getattr(runner, "_mission_dir", None) is not None:
+    if (
+        getattr(runner, "_mission_state", None) is not None
+        and getattr(runner, "_mission_dir", None) is not None
+    ):
         mission_dir = runner._mission_dir
         ensure_dir(mission_dir)
         (mission_dir / "messages.json").write_text(json.dumps(messages, indent=2), encoding="utf-8")
@@ -1144,7 +1190,15 @@ def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
     root = runner.repo / ".villani_code" / "sessions"
     ensure_dir(root)
     (root / "last.json").write_text(
-        json.dumps({"id": "last", "messages": messages, "cwd": str(runner.repo), "settings": {"model": runner.model}}, indent=2),
+        json.dumps(
+            {
+                "id": "last",
+                "messages": messages,
+                "cwd": str(runner.repo),
+                "settings": {"model": runner.model},
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -1161,14 +1215,24 @@ def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
     if event.get("type") != "content_block_delta":
         return
     delta = event.get("delta", {})
+    if delta.get("type") == "thinking_delta":
+        thinking_text = str(delta.get("thinking", ""))
+        if thinking_text:
+            if runner.print_stream:
+                print(thinking_text, end="", flush=True)
+            else:
+                runner.event_callback({"type": "stream_text", "text": thinking_text})
+        return
     if delta.get("type") == "text_delta":
         raw_text = delta.get("text", "")
         before = runner._live_stream_buffer
-        runner._live_stream_buffer, updated_started = apply_live_display_delta(before, raw_text, runner._live_stream_started)
+        runner._live_stream_buffer, updated_started = apply_live_display_delta(
+            before, raw_text, runner._live_stream_started
+        )
         if updated_started and not runner._live_stream_started:
             runner.event_callback({"type": "first_text_delta"})
         runner._live_stream_started = updated_started
-        appended = runner._live_stream_buffer[len(before):]
+        appended = runner._live_stream_buffer[len(before) :]
         if appended:
             emit = runner._coalescer.consume(appended)
             if emit:
@@ -1184,22 +1248,28 @@ def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
             runner.event_callback({"type": "stream_text", "text": partial})
 
 
-
-
 def _build_session_state_from_plan(instruction: str, plan: Any) -> SessionState:
     return SessionState(
         task_summary=instruction[:220],
         plan_summary=plan.task_goal[:220],
         plan_risk=plan.risk_level.value,
-        grounding_evidence_summary=list(plan.grounding_evidence.get("explicit_signals", []))[:6] if isinstance(plan.grounding_evidence, dict) else [],
+        grounding_evidence_summary=list(plan.grounding_evidence.get("explicit_signals", []))[:6]
+        if isinstance(plan.grounding_evidence, dict)
+        else [],
         action_classes=list(plan.action_classes),
         estimated_scope=plan.estimated_scope,
         change_impact=str(getattr(plan, "change_impact", "source_only")),
         task_mode=str(getattr(plan, "task_mode", TaskMode.GENERAL.value)),
-        candidate_targets_summary=[str(v.get("target", "")) for v in getattr(plan, "candidate_targets", [])[:8]],
+        candidate_targets_summary=[
+            str(v.get("target", "")) for v in getattr(plan, "candidate_targets", [])[:8]
+        ],
         validation_plan_summary=list(plan.validation_steps[:6]),
         outcome_status="planned",
-        next_step_hints=["Execute scoped edits", "Run targeted validation", "Escalate validation when required"],
+        next_step_hints=[
+            "Execute scoped edits",
+            "Run targeted validation",
+            "Escalate validation when required",
+        ],
         handoff_checkpoint=f"risk={plan.risk_level.value};scope={plan.estimated_scope};impact={getattr(plan, 'change_impact', 'source_only')}",
     )
 
@@ -1218,7 +1288,9 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     if val_file.exists():
         try:
             payload = json.loads(val_file.read_text(encoding="utf-8"))
-            validation_steps = [str(s.get("name", "")) for s in payload.get("steps", []) if isinstance(s, dict)]
+            validation_steps = [
+                str(s.get("name", "")) for s in payload.get("steps", []) if isinstance(s, dict)
+            ]
         except json.JSONDecodeError:
             validation_steps = []
 
@@ -1246,11 +1318,27 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
     )
     stale = runner._context_governance.detect_stale_context(inventory, plan.task_mode, 0)
     for sig in stale:
-        runner._context_governance.exclude_candidate(inventory, f"stale:{sig}", "stale", sig, 120, ContextExclusionReason.STALE, "stale context detected")
+        runner._context_governance.exclude_candidate(
+            inventory,
+            f"stale:{sig}",
+            "stale",
+            sig,
+            120,
+            ContextExclusionReason.STALE,
+            "stale context detected",
+        )
     runner._context_governance.prune_for_budget(inventory)
     runner._context_governance.save_inventory(inventory)
-    runner.event_callback({"type": "plan_generated", "plan": plan.to_dict(), "human": plan.to_human_text()})
-    runner.event_callback({"type": "plan_risk_rationale", "risk": plan.risk_level.value, "drivers": plan.risk_assessment.get("drivers", [])})
+    runner.event_callback(
+        {"type": "plan_generated", "plan": plan.to_dict(), "human": plan.to_human_text()}
+    )
+    runner.event_callback(
+        {
+            "type": "plan_risk_rationale",
+            "risk": plan.risk_level.value,
+            "drivers": plan.risk_assessment.get("drivers", []),
+        }
+    )
 
     session = _build_session_state_from_plan(instruction, plan)
 
@@ -1265,7 +1353,9 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         return
 
     runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
-    approved = runner.approval_callback("ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value})
+    approved = runner.approval_callback(
+        "ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value}
+    )
     if not approved:
         runner.event_callback({"type": "plan_rejected"})
         session.outcome_status = "rejected"
@@ -1274,8 +1364,6 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         raise RuntimeError("Execution plan rejected by user.")
     runner.event_callback({"type": "plan_approved", "risk": plan.risk_level.value})
     update_session_state(runner.repo, session)
-
-
 
 
 def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
@@ -1290,15 +1378,27 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
 
     runner.event_callback({"type": "validation_started", "changed_files": changed_files})
     task_mode = str(getattr(plan, "task_mode", TaskMode.GENERAL.value))
-    result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback, repo_map=repo_map, change_impact=plan_impact, action_classes=plan_actions, task_mode=task_mode)
-    runner.event_callback({
-        "type": "validation_plan_selected",
-        "steps": [s.step.name for s in result.plan.selected_steps],
-        "reasons": [r.reason for r in result.plan.reasons[:6]],
-        "escalation": result.plan.escalation.reason,
-    })
+    result = run_validation(
+        runner.repo,
+        changed_files,
+        event_callback=runner.event_callback,
+        repo_map=repo_map,
+        change_impact=plan_impact,
+        action_classes=plan_actions,
+        task_mode=task_mode,
+    )
+    runner.event_callback(
+        {
+            "type": "validation_plan_selected",
+            "steps": [s.step.name for s in result.plan.selected_steps],
+            "reasons": [r.reason for r in result.plan.reasons[:6]],
+            "escalation": result.plan.escalation.reason,
+        }
+    )
     inventory = runner._context_governance.load_inventory()
-    compact_validation = ContextCompactor.compact_validation_logs(result.failure_summary if not result.passed else "Validation passed")
+    compact_validation = ContextCompactor.compact_validation_logs(
+        result.failure_summary if not result.passed else "Validation passed"
+    )
     inventory.compactions.append(compact_validation)
     runner._context_governance.register_item(
         inventory,
@@ -1309,23 +1409,36 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         ContextInclusionReason.VALIDATION_SIGNAL,
         "validation outcomes affect next step",
     )
-    stale = runner._context_governance.detect_stale_context(inventory, task_mode, len(getattr(result, "steps", [])))
+    stale = runner._context_governance.detect_stale_context(
+        inventory, task_mode, len(getattr(result, "steps", []))
+    )
     if stale:
         runner.event_callback({"type": "context_stale_detected", "signals": stale})
     runner._context_governance.prune_for_budget(inventory)
     runner._context_governance.save_inventory(inventory)
 
     if result.passed:
-        checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed"])
-        runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "validation_passed"})
-        update_session_state(runner.repo, SessionState(
-            affected_files=changed_files,
-            validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
-            validation_summary="passed",
-            outcome_status="success",
-            next_step_hints=["Finalize and report output"],
-            handoff_checkpoint="validation_passed",
-        ))
+        checkpoint = runner._context_governance.create_checkpoint(
+            inventory, str(getattr(plan, "task_goal", "")), ["validation passed"]
+        )
+        runner.event_callback(
+            {
+                "type": "context_checkpoint_created",
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "reason": "validation_passed",
+            }
+        )
+        update_session_state(
+            runner.repo,
+            SessionState(
+                affected_files=changed_files,
+                validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
+                validation_summary="passed",
+                outcome_status="success",
+                next_step_hints=["Finalize and report output"],
+                handoff_checkpoint="validation_passed",
+            ),
+        )
         if getattr(runner, "_mission_state", None) is not None:
             runner._mission_state.validation_failures = []
             runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
@@ -1343,35 +1456,57 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         max_attempts=int(getattr(runner, "max_repair_attempts", 2)),
     )
     if outcome.recovered:
-        checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["validation passed after repair"])
-        runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_recovered"})
-        update_session_state(runner.repo, SessionState(
-            affected_files=changed_files,
-            validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
-            validation_summary="passed after repair",
-            repair_attempt_summaries=[asdict(a) for a in outcome.attempts],
-            outcome_status="recovered",
-            next_step_hints=["Report repaired validation and summarize edits"],
-            handoff_checkpoint="repair_recovered",
-        ))
+        checkpoint = runner._context_governance.create_checkpoint(
+            inventory, str(getattr(plan, "task_goal", "")), ["validation passed after repair"]
+        )
+        runner.event_callback(
+            {
+                "type": "context_checkpoint_created",
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "reason": "repair_recovered",
+            }
+        )
+        update_session_state(
+            runner.repo,
+            SessionState(
+                affected_files=changed_files,
+                validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
+                validation_summary="passed after repair",
+                repair_attempt_summaries=[asdict(a) for a in outcome.attempts],
+                outcome_status="recovered",
+                next_step_hints=["Report repaired validation and summarize edits"],
+                handoff_checkpoint="repair_recovered",
+            ),
+        )
         if getattr(runner, "_mission_state", None) is not None:
             runner._mission_state.validation_failures = []
             runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
             save_mission_state(runner.repo, runner._mission_state)
         return outcome.message
 
-    checkpoint = runner._context_governance.create_checkpoint(inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"])
-    runner.event_callback({"type": "context_checkpoint_created", "checkpoint_id": checkpoint.checkpoint_id, "reason": "repair_exhausted"})
-    update_session_state(runner.repo, SessionState(
-        affected_files=changed_files,
-        validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
-        validation_summary="failed",
-        last_failed_step=outcome.last_failed_step,
-        repair_attempt_summaries=[asdict(a) for a in outcome.attempts],
-        outcome_status="failed",
-        next_step_hints=["Inspect failing step and rerun with interactive guidance"],
-        handoff_checkpoint="repair_exhausted",
-    ))
+    checkpoint = runner._context_governance.create_checkpoint(
+        inventory, str(getattr(plan, "task_goal", "")), ["repair attempts exhausted"]
+    )
+    runner.event_callback(
+        {
+            "type": "context_checkpoint_created",
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "reason": "repair_exhausted",
+        }
+    )
+    update_session_state(
+        runner.repo,
+        SessionState(
+            affected_files=changed_files,
+            validation_plan_summary=[s.step.name for s in result.plan.selected_steps],
+            validation_summary="failed",
+            last_failed_step=outcome.last_failed_step,
+            repair_attempt_summaries=[asdict(a) for a in outcome.attempts],
+            outcome_status="failed",
+            next_step_hints=["Inspect failing step and rerun with interactive guidance"],
+            handoff_checkpoint="repair_exhausted",
+        ),
+    )
     if getattr(runner, "_mission_state", None) is not None:
         runner._mission_state.validation_failures = [result.failure_summary]
         runner._mission_state.last_failed_summary = outcome.message
