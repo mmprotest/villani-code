@@ -29,6 +29,7 @@ from villani_code.utils import ensure_dir
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
+_NON_GIT_SNAPSHOT_BY_REPO: dict[str, dict[str, tuple[int, int]]] = {}
 
 
 def _user_message_is_safe_for_text_injection(message: dict[str, Any]) -> bool:
@@ -606,9 +607,48 @@ def truncate_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, An
     return result
 
 
+def _snapshot_workspace_files(repo: Path) -> dict[str, tuple[int, int]]:
+    snapshot: dict[str, tuple[int, int]] = {}
+    for current_root, dirs, files in repo.walk():
+        rel_root = current_root.relative_to(repo).as_posix()
+        if rel_root != "." and is_ignored_repo_path(rel_root):
+            dirs[:] = []
+            continue
+        dirs[:] = [
+            name
+            for name in dirs
+            if not is_ignored_repo_path(f"{rel_root}/{name}" if rel_root != "." else name)
+        ]
+        for name in files:
+            rel = f"{rel_root}/{name}" if rel_root != "." else name
+            rel = rel.replace("\\", "/")
+            if is_ignored_repo_path(rel):
+                continue
+            file_path = current_root / name
+            try:
+                stat = file_path.stat()
+            except FileNotFoundError:
+                continue
+            snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
 def git_changed_files(repo: Any) -> list[str]:
     proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True)
-    return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
+    if proc.returncode == 0:
+        return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
+
+    repo_path = Path(repo).resolve()
+    repo_key = str(repo_path)
+    current = _snapshot_workspace_files(repo_path)
+    previous = _NON_GIT_SNAPSHOT_BY_REPO.get(repo_key)
+    _NON_GIT_SNAPSHOT_BY_REPO[repo_key] = current
+    if previous is None:
+        return []
+    added = set(current) - set(previous)
+    deleted = set(previous) - set(current)
+    modified = {path for path in set(current) & set(previous) if current[path] != previous[path]}
+    return sorted(added | deleted | modified)
 
 
 
