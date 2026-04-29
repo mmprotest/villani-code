@@ -1,0 +1,1 @@
+Serialized user records cannot be deserialized back. The JSON field names don't match on the way back in, causing deserialization to fail. Fix the serialization roundtrip so records survive a serialize-then-deserialize cycle.

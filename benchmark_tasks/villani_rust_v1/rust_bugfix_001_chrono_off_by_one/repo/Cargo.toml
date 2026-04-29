@@ -1,0 +1,11 @@
+[package]
+name = "date-resolver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4"
+
+[[test]]
+name = "test_fix"
+path = "tests/test_fix.rs"

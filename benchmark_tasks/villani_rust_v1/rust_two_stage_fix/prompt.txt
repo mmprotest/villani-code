@@ -1,0 +1,1 @@
+Cached user lookups always miss even for users that were just inserted, and deserialized user records appear to be missing the email field. There may be more than one bug. Fix the issues so that serialization round-trips correctly and cache lookups hit as expected.

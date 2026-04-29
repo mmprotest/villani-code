@@ -1,0 +1,16 @@
+[package]
+name = "module-structure"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "module_structure"
+path = "src/lib.rs"
+
+[[bin]]
+name = "module-structure"
+path = "src/main.rs"
+
+[[test]]
+name = "test_build"
+path = "tests/test_build.rs"
