@@ -1130,6 +1130,28 @@ def is_no_progress_response(response: dict[str, Any]) -> bool:
     return len(text) <= 2
 
 
+def response_commits_to_code_edit(text: str) -> bool:
+    normalized = " ".join(str(text or "").lower().split())
+    if not normalized:
+        return False
+    if any(
+        phrase in normalized
+        for phrase in (
+            "one possible fix would be",
+            "you could update",
+            "i recommend changing",
+            "no code changes are needed",
+        )
+    ):
+        return False
+    edit_verbs = r"(update|modify|change|patch|edit|fix|add)"
+    if re.search(rf"\bi(?:'ll| will| need to)\s+{edit_verbs}\b", normalized):
+        return True
+    if re.search(rf"\bthe fix is to\s+{edit_verbs}\b", normalized):
+        return True
+    return False
+
+
 def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
     if getattr(runner, "_mission_state", None) is not None and getattr(runner, "_mission_dir", None) is not None:
         mission_dir = runner._mission_dir

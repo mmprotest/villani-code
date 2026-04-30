@@ -528,6 +528,7 @@ class Runner:
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
+        self._edit_intent_nudge_used = False
         self._context_governance = ContextGovernanceManager(self.repo)
         self._planning_read_only = False
         self._runtime_mode: Literal["execution", "planning"] = "execution"
@@ -1329,6 +1330,31 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
+                if (
+                    not self._planning_read_only
+                    and not self._edit_intent_nudge_used
+                    and self._response_commits_to_code_edit(
+                        " ".join(
+                            block.get("text", "")
+                            for block in response.get("content", [])
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        )
+                    )
+                ):
+                    self._edit_intent_nudge_used = True
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "You described a concrete code change, but no file was modified. Apply the minimal edit now, then verify if possible.",
+                                }
+                            ],
+                        }
+                    )
+                    self.event_callback({"type": "edit_intent_without_edit_nudged"})
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1769,6 +1795,11 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.is_no_progress_response(response)
+
+    def _response_commits_to_code_edit(self, text: str) -> bool:
+        from villani_code import state_runtime
+
+        return state_runtime.response_commits_to_code_edit(text)
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime
