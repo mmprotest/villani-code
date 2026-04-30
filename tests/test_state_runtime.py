@@ -664,3 +664,13 @@ def test_diagnosis_confidence_weak_without_file_evidence(tmp_path: Path) -> None
     }
     confidence = state_runtime.classify_diagnosis_target_confidence(runner, diagnosis, failure_evidence=None)
     assert confidence == "weak"
+
+def test_response_commits_to_code_edit_detects_concrete_intent() -> None:
+    assert state_runtime.response_commits_to_code_edit("I'll update x.py to handle empty values.")
+    assert state_runtime.response_commits_to_code_edit("The fix is to add this handler to the registry.")
+
+
+def test_response_commits_to_code_edit_ignores_suggestions_or_non_edits() -> None:
+    assert not state_runtime.response_commits_to_code_edit("One possible fix would be to adjust the parser.")
+    assert not state_runtime.response_commits_to_code_edit("You could update the default value.")
+    assert not state_runtime.response_commits_to_code_edit("No code changes are needed.")
