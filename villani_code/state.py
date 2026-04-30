@@ -1333,7 +1333,7 @@ class Runner:
                 if (
                     not self._planning_read_only
                     and not self._edit_intent_nudge_used
-                    and state_runtime.response_commits_to_code_edit(
+                    and self._response_commits_to_code_edit(
                         " ".join(
                             block.get("text", "")
                             for block in response.get("content", [])
@@ -1795,6 +1795,11 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.is_no_progress_response(response)
+
+    def _response_commits_to_code_edit(self, text: str) -> bool:
+        from villani_code import state_runtime
+
+        return state_runtime.response_commits_to_code_edit(text)
 
     def _save_session_snapshot(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime
