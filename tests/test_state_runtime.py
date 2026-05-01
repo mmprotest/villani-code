@@ -701,3 +701,42 @@ def test_run_task_verification_command_uses_portable_shell(monkeypatch, tmp_path
     out = state_runtime.run_task_verification_command(runner, 'pytest -q')
     assert calls['shell'] is True
     assert out['passed'] is True
+
+
+def test_pre_edit_localization_uses_shared_verification_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    calls = {}
+    events: list[dict] = []
+    runner = SimpleNamespace(
+        repo=tmp_path,
+        benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], expected_files=[]),
+        _execution_plan=SimpleNamespace(relevant_files=[]),
+        _task_execution_contract=state_runtime.TaskExecutionContract(["pytest -q"], [], [], [], True, False),
+        _pending_verification="",
+        event_callback=events.append,
+    )
+
+    def fake_verify(_runner, command, timeout_seconds=120, cwd=None):
+        calls['command'] = command
+        calls['cwd'] = cwd
+        calls['timeout'] = timeout_seconds
+        return {"command": command, "exit_code": 1, "timed_out": False, "first_failing_test": "t::x", "error_summary": "AssertionError", "raw_failure_excerpt": "FAILED t::x"}
+
+    monkeypatch.setattr(state_runtime, 'run_task_verification_command', fake_verify)
+    evidence = state_runtime.run_pre_edit_failure_localization(runner)
+    assert evidence is not None
+    assert calls['command'] == 'pytest -q'
+    assert calls['cwd'] is not None
+
+
+def test_inject_task_evidence_message_uses_safe_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = []
+    runner = SimpleNamespace(event_callback=events.append)
+    calls = {}
+    def fake_prepend(messages, text):
+        calls['text'] = text
+        return False
+    monkeypatch.setattr(state_runtime, 'prepend_text_to_latest_safe_user_message', fake_prepend)
+    ok = state_runtime.inject_task_evidence_message(runner, [{"role":"user","content":"x"}], "pkt")
+    assert ok is False
+    assert any(e.get('type') == 'task_evidence_injection_failed' for e in events)

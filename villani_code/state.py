@@ -748,7 +748,7 @@ class Runner:
         initial_read_enforced = False
         pre_edit_failure_evidence = None
         diagnosis_confidence = "weak"
-        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
+        if self.small_model or self.villani_mode or bool(self._task_execution_contract.verification_commands):
             try:
                 from villani_code import state_runtime
 
@@ -926,11 +926,21 @@ class Runner:
             changed = set(self._git_changed_files()) - set(baseline_changed)
             if not changed:
                 return False
-            cfg = self.benchmark_config
-            if not cfg.enabled:
+            contract = getattr(self, "_task_execution_contract", None)
+            if contract is None:
                 return True
-            scoped = set(str(p).replace("\\","/").lstrip("./") for p in (cfg.allowlist_paths + cfg.expected_files))
-            return any((c in scoped) or any(c.startswith(prefix.rstrip("/")+"/") for prefix in scoped) for c in changed)
+            scoped = {
+                str(p).replace("\\", "/").lstrip("./")
+                for p in (list(contract.allowed_edit_paths) + list(contract.expected_files))
+                if str(p).strip()
+            }
+            if not scoped:
+                return True
+            normalized_changed = {str(c).replace("\\", "/").lstrip("./") for c in changed}
+            return any(
+                (c in scoped) or any(c.startswith(prefix.rstrip("/") + "/") for prefix in scoped)
+                for c in normalized_changed
+            )
 
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read

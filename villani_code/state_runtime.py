@@ -169,10 +169,19 @@ def build_task_execution_contract(runner: Any, instruction: str = "") -> TaskExe
     requires_patch = bool(asks_fix or verification_commands or allowed or expected)
     return TaskExecutionContract(verification_commands, allowed, expected, relevant, requires_patch, False)
 
-def run_task_verification_command(runner: Any, command: str, timeout_seconds: int = 120) -> dict[str, Any]:
+def run_task_verification_command(
+    runner: Any, command: str, timeout_seconds: int = 120, cwd: Path | None = None
+) -> dict[str, Any]:
     result = {"command": command, "exit_code": None, "timed_out": False, "stdout_excerpt": "", "stderr_excerpt": "", "first_failing_test": "", "error_summary": "", "raw_failure_excerpt": "", "passed": False}
     try:
-        proc = subprocess.run(command, cwd=runner.repo, shell=True, capture_output=True, text=True, timeout=timeout_seconds)
+        proc = subprocess.run(
+            command,
+            cwd=cwd or runner.repo,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
         result["exit_code"] = int(proc.returncode)
         result["stdout_excerpt"] = "\n".join(str(proc.stdout or "").splitlines()[:20])
         result["stderr_excerpt"] = "\n".join(str(proc.stderr or "").splitlines()[:20])
@@ -199,8 +208,10 @@ def _has_useful_failure_signal(evidence: dict[str, Any] | None) -> bool:
 
 
 def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
-    cfg = getattr(runner, "benchmark_config", None)
-    visible_commands = list(getattr(cfg, "visible_verification", []) if cfg else [])
+    contract = getattr(runner, "_task_execution_contract", None)
+    if contract is None:
+        contract = build_task_execution_contract(runner)
+    visible_commands = list(getattr(contract, "verification_commands", []) or [])
     visible_command = str(visible_commands[0]).strip() if visible_commands else ""
     if not visible_command:
         runner.event_callback(
@@ -223,17 +234,9 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
             isolated_repo = Path(temp_root) / "repo"
             shutil.copytree(runner.repo, isolated_repo, ignore=shutil.ignore_patterns(".git",".villani_code","villani_debug","__pycache__",".pytest_cache",".mypy_cache",".ruff_cache","node_modules","dist","build"))
             runner.event_callback({"type": "pre_edit_failure_signal_isolated", "isolated": True})
-            proc = subprocess.run(
-                ["bash", "-lc", visible_command],
-                cwd=isolated_repo,
-                capture_output=True,
-                text=True,
-                timeout=120,
+            evidence = run_task_verification_command(
+                runner, visible_command, timeout_seconds=120, cwd=isolated_repo
             )
-            timed_out = False
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        proc = type("TimeoutProc", (), {"returncode": 124, "stdout": str(exc.stdout or ""), "stderr": str(exc.stderr or "")})()
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback(
             {
@@ -244,26 +247,13 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
         )
         return None
 
-    evidence: dict[str, Any] = {
-        "first_failing_test": "",
-        "traceback_file": "",
-        "traceback_line": None,
-        "error_summary": "",
-        "raw_failure_excerpt": "",
-        "command": visible_command,
-        "exit_code": int(proc.returncode),
-        "timed_out": bool(timed_out),
-        "stdout_excerpt": "\n".join(str(proc.stdout or "").splitlines()[:20]),
-        "stderr_excerpt": "\n".join(str(proc.stderr or "").splitlines()[:20]),
-    }
-    if proc.returncode != 0:
-        evidence.update(parse_failure_signal(proc.stdout, proc.stderr))
+    evidence.setdefault("command", visible_command)
 
     runner.event_callback(
         {
             "type": "pre_edit_failure_signal_captured",
             "visible_verification_command": visible_command,
-            "exit_code": int(proc.returncode),
+            "exit_code": int(evidence.get("exit_code", -1) or -1),
             "failure_evidence_extracted": _has_useful_failure_signal(evidence),
             "first_failing_test": evidence.get("first_failing_test", ""),
             "traceback_file": evidence.get("traceback_file", ""),
@@ -274,18 +264,10 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
 
 
 def inject_task_evidence_message(runner: Any, messages: list[dict[str, Any]], packet: str) -> bool:
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            message["content"] = content + "\n\n" + packet
-            return True
-        if isinstance(content, list):
-            content.append({"type":"text","text":packet})
-            return True
-    runner.event_callback({"type":"task_evidence_injection_failed"})
-    return False
+    ok = prepend_text_to_latest_safe_user_message(messages, packet)
+    if not ok:
+        runner.event_callback({"type": "task_evidence_injection_failed"})
+    return ok
 
 def build_task_evidence_packet(runner: Any, failure_evidence: dict[str, Any] | None = None) -> str:
     contract = getattr(runner, "_task_execution_contract", None)
@@ -940,6 +922,8 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
             runner._last_task_verification_result = task_result
             runner._last_task_verification_passed = bool(task_result.get("passed") and not task_result.get("timed_out"))
             runner._last_task_verification_failed = not runner._last_task_verification_passed
+            if runner._last_task_verification_passed:
+                runner._task_verification_repair_attempts = 0
             runner.event_callback({"type":"task_verification_result","result":task_result,"passed":runner._last_task_verification_passed})
         runner._first_attempt_write_lock_active = False
         return verification
@@ -995,6 +979,8 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
         runner._last_task_verification_result = task_result
         runner._last_task_verification_passed = bool(task_result.get("passed") and not task_result.get("timed_out"))
         runner._last_task_verification_failed = not runner._last_task_verification_passed
+        if runner._last_task_verification_passed:
+            runner._task_verification_repair_attempts = 0
         runner.event_callback({"type":"task_verification_result","result":task_result,"passed":runner._last_task_verification_passed})
     runner._first_attempt_write_lock_active = False
     return verification
