@@ -81,6 +81,10 @@ _CONCRETE_EDIT_PATTERNS = (
     r"\bregister\b.{0,40}\bin\b",
     r"\bmissing\b.{0,40}\bregistry\b",
     r"\badd\b.{0,40}\bto registry\b",
+    r"\bthe fix is (?:straightforward|simple)\s*:\s*(?:add|register|wire|hook|include)\b",
+    r"\b(?:register|add|wire|include)\s+it\b",
+    r"\bhook it up\b",
+    r"\bfix it by (?:adding|registering|wiring|including)\b",
 )
 _HEDGING_PATTERNS = (
     r"\bone possible fix would be\b",
@@ -89,6 +93,8 @@ _HEDGING_PATTERNS = (
     r"\bcould add\b",
     r"\bmight add\b",
     r"\bone option would be\b",
+    r"\bit might need to be\b",
+    r"\bmaybe\b",
     r"\bno code changes are needed\b",
 )
 
@@ -1032,7 +1038,7 @@ class Runner:
             )
         previous_attributed = set()
         finalization_nudge_state: dict[str, bool] = {}
-        known_verification_command = self._task_mode in {
+        known_verification_command = bool(self.benchmark_config.visible_verification) or self._task_mode in {
             TaskMode.FIX_FAILING_TEST,
             TaskMode.FIX_LINT_OR_TYPE,
         }

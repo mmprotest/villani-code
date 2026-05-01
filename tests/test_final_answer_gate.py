@@ -46,9 +46,16 @@ def test_vague_suggestion_does_not_block() -> None:
 
 def test_new_concrete_edit_phrases_detected() -> None:
     phrases = [
-        "The fix is simply adding slug_handler to the registry.",
-        "Need to register the handler.",
-        "Add slug to REGISTRY.",
+        "The fix is straightforward: register it.",
+        "Found it. The markdown_handler is imported but never added to the REGISTRY dictionary. The fix is straightforward: register it.",
+        "The fix is simple: add it to the registry.",
+        "Need to register it.",
+        "Register it in the registry.",
+        "Add it to the registry.",
+        "Wire it into the registry.",
+        "Hook it up in the dispatch table.",
+        "Include it in the mapping.",
+        "Fix it by registering the handler.",
     ]
     for phrase in phrases:
         reason = final_answer_block_reason(
@@ -66,7 +73,15 @@ def test_new_concrete_edit_phrases_detected() -> None:
 
 
 def test_vague_add_suggestions_still_do_not_trigger() -> None:
-    for phrase in ["could add a handler", "might add a handler", "one option would be adding a handler"]:
+    for phrase in [
+        "One possible fix would be to register it.",
+        "You could add it to the registry.",
+        "I recommend registering it.",
+        "It might need to be added.",
+        "Maybe wire it into the registry.",
+        "This looks like a registry issue.",
+        "No code changes are needed.",
+    ]:
         reason = final_answer_block_reason(
             instruction="implement fix",
             final_text=phrase,
