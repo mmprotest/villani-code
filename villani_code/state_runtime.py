@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from dataclasses import dataclass
 
 from villani_code.autonomy import VerificationStatus
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
@@ -147,6 +148,56 @@ def parse_failure_signal(stdout: str, stderr: str) -> dict[str, Any]:
     return evidence
 
 
+@dataclass
+class TaskExecutionContract:
+    verification_commands: list[str]
+    allowed_edit_paths: list[str]
+    expected_files: list[str]
+    relevant_spec_or_test_files: list[str]
+    requires_patch: bool
+    allows_new_files: bool = False
+
+def build_task_execution_contract(runner: Any, instruction: str = "") -> TaskExecutionContract:
+    cfg = getattr(runner, "benchmark_config", None)
+    plan = getattr(runner, "_execution_plan", None)
+    verification_commands = list(getattr(cfg, "visible_verification", []) if cfg else [])
+    allowed = list(getattr(cfg, "allowlist_paths", []) if cfg else [])
+    expected = list(getattr(cfg, "expected_files", []) if cfg else [])
+    relevant = list(getattr(plan, "relevant_files", []) if plan else [])
+    txt = instruction.lower()
+    asks_fix = any(k in txt for k in ["fix", "implement", "update", "patch"])
+    requires_patch = bool(asks_fix or verification_commands or allowed or expected)
+    return TaskExecutionContract(verification_commands, allowed, expected, relevant, requires_patch, False)
+
+def run_task_verification_command(
+    runner: Any, command: str, timeout_seconds: int = 120, cwd: Path | None = None
+) -> dict[str, Any]:
+    result = {"command": command, "exit_code": None, "timed_out": False, "stdout_excerpt": "", "stderr_excerpt": "", "first_failing_test": "", "error_summary": "", "raw_failure_excerpt": "", "passed": False}
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=cwd or runner.repo,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        result["exit_code"] = int(proc.returncode)
+        result["stdout_excerpt"] = "\n".join(str(proc.stdout or "").splitlines()[:20])
+        result["stderr_excerpt"] = "\n".join(str(proc.stderr or "").splitlines()[:20])
+        if proc.returncode != 0:
+            result.update(parse_failure_signal(proc.stdout, proc.stderr))
+        result["passed"] = proc.returncode == 0
+    except subprocess.TimeoutExpired as exc:
+        result["timed_out"] = True
+        result["exit_code"] = 124
+        result["stdout_excerpt"] = "\n".join(str(exc.stdout or "").splitlines()[:20])
+        result["stderr_excerpt"] = "\n".join(str(exc.stderr or "").splitlines()[:20])
+    except Exception as exc:
+        result["exit_code"] = -1
+        result["error_summary"] = f"command_error:{exc.__class__.__name__}"
+    return result
+
 def _has_useful_failure_signal(evidence: dict[str, Any] | None) -> bool:
     if not evidence:
         return False
@@ -157,21 +208,16 @@ def _has_useful_failure_signal(evidence: dict[str, Any] | None) -> bool:
 
 
 def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
-    cfg = getattr(runner, "benchmark_config", None)
-    visible_commands = list(getattr(cfg, "visible_verification", []) if cfg else [])
+    contract = getattr(runner, "_task_execution_contract", None)
+    if contract is None:
+        contract = build_task_execution_contract(runner)
+    visible_commands = list(getattr(contract, "verification_commands", []) or [])
     visible_command = str(visible_commands[0]).strip() if visible_commands else ""
-    expected_file = _single_clear_file(list(getattr(cfg, "expected_files", []) if cfg else []))
-    plan = getattr(runner, "_execution_plan", None)
-    relevant_file = _single_clear_file(list(getattr(plan, "relevant_files", []) if plan else []))
-    has_traceback = bool(getattr(runner, "_pending_verification", "").strip())
-    broad_visible = _is_broad_visible_verification(visible_command)
-    strong_signal = bool(expected_file or relevant_file or has_traceback or not broad_visible)
-
-    if strong_signal or not visible_command:
+    if not visible_command:
         runner.event_callback(
             {
                 "type": "pre_edit_failure_signal_skipped",
-                "reason": "strong_signal" if strong_signal else "missing_visible_verification",
+                "reason": "missing_visible_verification",
                 "visible_verification_command": visible_command,
             }
         )
@@ -186,13 +232,10 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
     try:
         with tempfile.TemporaryDirectory(prefix="villani-pre-edit-") as temp_root:
             isolated_repo = Path(temp_root) / "repo"
-            shutil.copytree(runner.repo, isolated_repo)
+            shutil.copytree(runner.repo, isolated_repo, ignore=shutil.ignore_patterns(".git",".villani_code","villani_debug","__pycache__",".pytest_cache",".mypy_cache",".ruff_cache","node_modules","dist","build"))
             runner.event_callback({"type": "pre_edit_failure_signal_isolated", "isolated": True})
-            proc = subprocess.run(
-                ["bash", "-lc", visible_command],
-                cwd=isolated_repo,
-                capture_output=True,
-                text=True,
+            evidence = run_task_verification_command(
+                runner, visible_command, timeout_seconds=120, cwd=isolated_repo
             )
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback(
@@ -204,23 +247,13 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
         )
         return None
 
-    evidence: dict[str, Any] = {
-        "first_failing_test": "",
-        "traceback_file": "",
-        "traceback_line": None,
-        "error_summary": "",
-        "raw_failure_excerpt": "",
-        "command": visible_command,
-        "exit_code": int(proc.returncode),
-    }
-    if proc.returncode != 0:
-        evidence.update(parse_failure_signal(proc.stdout, proc.stderr))
+    evidence.setdefault("command", visible_command)
 
     runner.event_callback(
         {
             "type": "pre_edit_failure_signal_captured",
             "visible_verification_command": visible_command,
-            "exit_code": int(proc.returncode),
+            "exit_code": int(evidence.get("exit_code", -1) or -1),
             "failure_evidence_extracted": _has_useful_failure_signal(evidence),
             "first_failing_test": evidence.get("first_failing_test", ""),
             "traceback_file": evidence.get("traceback_file", ""),
@@ -229,6 +262,33 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
     )
     return evidence
 
+
+def inject_task_evidence_message(runner: Any, messages: list[dict[str, Any]], packet: str) -> bool:
+    ok = prepend_text_to_latest_safe_user_message(messages, packet)
+    if not ok:
+        runner.event_callback({"type": "task_evidence_injection_failed"})
+    return ok
+
+def build_task_evidence_packet(runner: Any, failure_evidence: dict[str, Any] | None = None) -> str:
+    contract = getattr(runner, "_task_execution_contract", None)
+    if contract is None:
+        contract = build_task_execution_contract(runner)
+    if not (contract.verification_commands or contract.allowed_edit_paths or contract.expected_files):
+        return ""
+    lines = ["Task evidence:"]
+    cmd = ", ".join(contract.verification_commands[:1])
+    lines.append(f"- Verification command: {cmd or 'n/a'}")
+    if failure_evidence is not None:
+        lines.append(f"- Exit code: {failure_evidence.get('exit_code')}")
+        lines.append(f"- Timed out: {bool(failure_evidence.get('timed_out', False))}")
+        lines.append(f"- First failing test: {failure_evidence.get('first_failing_test') or 'n/a'}")
+        lines.append(f"- Failure excerpt: {failure_evidence.get('error_summary') or failure_evidence.get('raw_failure_excerpt', '')[:220] or 'n/a'}")
+    lines.append(f"- Allowed edit paths: {', '.join(contract.allowed_edit_paths[:6]) or 'n/a'}")
+    lines.append(f"- Candidate files: {', '.join(contract.expected_files[:6]) or 'n/a'}")
+    lines.append(f"- Relevant test/spec files if known: {', '.join(contract.relevant_spec_or_test_files[:6]) or 'n/a'}")
+    lines.append("- Use verification and source evidence before patching. Apply an actual in-scope patch before summarising.")
+    lines.append("- Do not create scratch/helper files unless explicitly requested or in scope.")
+    return "\n".join(lines)
 
 def classify_diagnosis_target_confidence(
     runner: Any,
@@ -856,6 +916,15 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
             )
         runner._patch_sanity_retry_pending = False
         verification = run_verification(runner, trigger)
+        contract = getattr(runner, "_task_execution_contract", None)
+        if contract and contract.verification_commands:
+            task_result = run_task_verification_command(runner, contract.verification_commands[0])
+            runner._last_task_verification_result = task_result
+            runner._last_task_verification_passed = bool(task_result.get("passed") and not task_result.get("timed_out"))
+            runner._last_task_verification_failed = not runner._last_task_verification_passed
+            if runner._last_task_verification_passed:
+                runner._task_verification_repair_attempts = 0
+            runner.event_callback({"type":"task_verification_result","result":task_result,"passed":runner._last_task_verification_passed})
         runner._first_attempt_write_lock_active = False
         return verification
 
@@ -904,6 +973,15 @@ def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
         }
     )
     verification = run_verification(runner, f"{trigger} (after_sanity_retry_failed)")
+    contract = getattr(runner, "_task_execution_contract", None)
+    if contract and contract.verification_commands:
+        task_result = run_task_verification_command(runner, contract.verification_commands[0])
+        runner._last_task_verification_result = task_result
+        runner._last_task_verification_passed = bool(task_result.get("passed") and not task_result.get("timed_out"))
+        runner._last_task_verification_failed = not runner._last_task_verification_passed
+        if runner._last_task_verification_passed:
+            runner._task_verification_repair_attempts = 0
+        runner.event_callback({"type":"task_verification_result","result":task_result,"passed":runner._last_task_verification_passed})
     runner._first_attempt_write_lock_active = False
     return verification
 

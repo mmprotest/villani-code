@@ -4,6 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Iterable
 
 from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
 from villani_code.benchmark.agents.base import AgentRunner
@@ -77,19 +78,31 @@ class VillaniAgentRunner(AgentRunner):
             benchmark_config_json=benchmark_config_json,
             debug_dir=debug_dir,
         )
-        events_file = repo_path / ".villani_code" / "runtime_events.jsonl"
         events: list[AdapterEvent] = []
-        if events_file.exists():
-            for raw in events_file.read_text(encoding="utf-8").splitlines():
-                if not raw.strip():
-                    continue
-                payload = json.loads(raw)
-                runtime_type = str(payload.get("type") or "").strip()
-                if not runtime_type:
-                    runtime_type = str(payload.get("event") or "").strip()
-                if not runtime_type:
-                    runtime_type = "runtime_event"
-                events.append(AdapterEvent(type=runtime_type, timestamp=float(payload.get("ts", time.time())), payload=payload))
+        candidates: list[Path] = []
+        candidates.extend(sorted((repo_path / ".villani_code" / "missions").glob("*/runtime_events.jsonl")))
+        candidates.extend(sorted((repo_path / ".villani_code" / "missions").glob("*/tool_calls.jsonl")))
+        candidates.extend(sorted((repo_path / "villani_debug").glob("*/events.jsonl")))
+        candidates.extend(sorted((repo_path / "villani_debug").glob("*/tool_calls.jsonl")))
+        legacy = repo_path / ".villani_code" / "runtime_events.jsonl"
+        if legacy.exists():
+            candidates.append(legacy)
+        if candidates:
+            groups: dict[Path, list[Path]] = {}
+            for cp in candidates:
+                groups.setdefault(cp.parent, []).append(cp)
+            best_parent = max(groups.keys(), key=lambda pp: max(x.stat().st_mtime for x in groups[pp] if x.exists()))
+            for path in sorted(groups[best_parent], key=lambda x: x.name):
+                for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if not raw.strip():
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        continue
+                    runtime_type = str(payload.get("type") or payload.get("event") or "runtime_event").strip() or "runtime_event"
+                    ts = float(payload.get("ts") or payload.get("timestamp") or time.time())
+                    events.append(AdapterEvent(type=runtime_type, timestamp=ts, payload=payload))
         return AdapterRunResult(
             **base.model_dump(exclude={"events", "telemetry_quality", "telemetry_field_quality_map"}),
             events=base.events + events,

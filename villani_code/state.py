@@ -513,6 +513,12 @@ class Runner:
         self._current_verification_before_contents: dict[str, str] = {}
         self._verification_baseline_changed: set[str] = set()
         self._scope_expansion_used = False
+        self._last_task_verification_result = None
+        self._last_task_verification_passed = False
+        self._last_task_verification_failed = False
+        self._task_verification_repair_attempts = 0
+        self._out_of_scope_mutation_paths: set[str] = set()
+        self._out_of_scope_mutation_detected = False
         self._task_mode: TaskMode = TaskMode.GENERAL
         self._task_contract: dict[str, Any] = {}
         self._last_verification_fingerprint = ""
@@ -736,16 +742,44 @@ class Runner:
             self._ensure_project_memory_and_plan(instruction)
             self._task_mode = classify_task_mode(instruction)
         diagnosis = None
+        from villani_code import state_runtime
+        self._task_execution_contract = state_runtime.build_task_execution_contract(self, instruction)
         diagnosed_target_file = ""
         required_initial_read = ""
         initial_read_enforced = False
         pre_edit_failure_evidence = None
         diagnosis_confidence = "weak"
-        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
+        if self.small_model or self.villani_mode or bool(self._task_execution_contract.verification_commands):
             try:
                 from villani_code import state_runtime
 
                 pre_edit_failure_evidence = state_runtime.run_pre_edit_failure_localization(self)
+                evidence_packet = state_runtime.build_task_evidence_packet(self, pre_edit_failure_evidence)
+                if evidence_packet:
+                    self.event_callback({
+                        "type": "task_evidence_packet_built",
+                        "byte_length": len(evidence_packet.encode("utf-8", errors="replace")),
+                        "has_verification_command": "Verification command:" in evidence_packet,
+                        "has_failure_excerpt": "Failure excerpt:" in evidence_packet,
+                        "has_allowed_edit_paths": "Allowed edit paths:" in evidence_packet,
+                        "has_expected_files": "Candidate files:" in evidence_packet,
+                    })
+                    injected = state_runtime.inject_task_evidence_message(self, messages, evidence_packet)
+                    self.event_callback({
+                        "type": "task_evidence_packet_injected" if injected else "task_evidence_packet_injection_failed",
+                        "byte_length": len(evidence_packet.encode("utf-8", errors="replace")),
+                        "has_verification_command": "Verification command:" in evidence_packet,
+                        "has_failure_excerpt": "Failure excerpt:" in evidence_packet,
+                        "has_allowed_edit_paths": "Allowed edit paths:" in evidence_packet,
+                        "has_expected_files": "Candidate files:" in evidence_packet,
+                    })
+                    if not injected:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": evidence_packet}]})
+                        fallback_ok = state_runtime.prepend_text_to_latest_safe_user_message(messages, "Task evidence fallback attached.")
+                        if fallback_ok:
+                            self.event_callback({"type": "task_evidence_packet_fallback_injected"})
+                        else:
+                            raise RuntimeError("task evidence injection failed before first model call")
                 diagnosis = state_runtime.run_pre_edit_diagnosis(
                     self,
                     instruction,
@@ -899,6 +933,38 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
+        self._last_task_verification_result = None
+        self._last_task_verification_passed = False
+        self._last_task_verification_failed = False
+        self._task_verification_repair_attempts = 0
+        def _task_requires_patch() -> bool:
+            text = instruction.lower()
+            asks_fix = any(k in text for k in ["fix", "implement", "update", "patch"])
+            contract = getattr(self, "_task_execution_contract", None)
+            if contract is None:
+                return asks_fix
+            return bool(contract.requires_patch or asks_fix)
+
+        def _has_in_scope_patch() -> bool:
+            changed = set(self._git_changed_files()) - set(baseline_changed)
+            if not changed:
+                return False
+            contract = getattr(self, "_task_execution_contract", None)
+            if contract is None:
+                return True
+            scoped = {
+                str(p).replace("\\", "/").lstrip("./")
+                for p in (list(contract.allowed_edit_paths) + list(contract.expected_files))
+                if str(p).strip()
+            }
+            if not scoped:
+                return True
+            normalized_changed = {str(c).replace("\\", "/").lstrip("./") for c in changed}
+            return any(
+                (c in scoped) or any(c.startswith(prefix.rstrip("/") + "/") for prefix in scoped)
+                for c in normalized_changed
+            )
+
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
         if self._first_attempt_write_lock_active:
@@ -1328,6 +1394,46 @@ class Runner:
                     reminder = "Benchmark mode requires a real patch in task scope before completion."
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                    continue
+                if _task_requires_patch() and not _has_in_scope_patch():
+                    self._benchmark_noop_completion_attempts += 1
+                    if self._benchmark_noop_completion_attempts > 2:
+                        return _finish_bounded(response, "incomplete_no_patch", False)
+                    messages.append({"role": "user", "content": [{"type": "text", "text": "You described or implied a fix, but no in-scope repository file was modified. Make exactly one targeted Patch or Write tool call now. Do not summarise."}]})
+                    continue
+                if self._out_of_scope_mutation_detected:
+                    current_changed = {str(p).replace("\\", "/").lstrip("./") for p in self._git_changed_files()}
+                    still_offending = sorted(current_changed.intersection(self._out_of_scope_mutation_paths))
+                    if still_offending:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": "Out-of-scope file changes are still present. Revert those files or remove the invalid changes before completing."}]})
+                        continue
+                    self._out_of_scope_mutation_detected = False
+                    self._out_of_scope_mutation_paths = set()
+                contract = getattr(self, "_task_execution_contract", None)
+                if contract and contract.verification_commands and _has_in_scope_patch() and self._last_task_verification_failed:
+                    self._task_verification_repair_attempts += 1
+                    if self._task_verification_repair_attempts > 2:
+                        return _finish_bounded(response, "verification_failed_after_patch", False)
+                    vr = self._last_task_verification_result or {}
+                    changed_files = sorted(set(self._git_changed_files()) - set(baseline_changed))
+                    repair = [
+                        "Verification failed after your patch.",
+                        "",
+                        f"Command:\n{vr.get('command','')}",
+                        "",
+                        f"Exit code:\n{vr.get('exit_code')}",
+                        "",
+                        f"Timed out:\n{bool(vr.get('timed_out'))}",
+                        "",
+                        f"Failure excerpt:\n{vr.get('error_summary') or vr.get('stderr_excerpt') or vr.get('stdout_excerpt') or 'n/a'}",
+                        "",
+                        f"Files changed:\n{', '.join(changed_files) or 'none'}",
+                        "",
+                        "Do not claim completion. Make one targeted repair patch, or revert the bad patch if the failure shows the change is wrong.",
+                    ]
+                    if vr.get("timed_out"):
+                        repair.append("The verification command timed out. Treat this as a failure signal. Inspect loops, pagination, waits, subprocesses, or unbounded retries related to your change.")
+                    messages.append({"role":"user","content":[{"type":"text","text":"\n".join(repair)}]})
                     continue
                 reason = _budget_reason(completed=True)
                 if reason:

@@ -471,35 +471,47 @@ def test_prepare_messages_for_model_repeated_calls_do_not_duplicate_injection() 
 
 def test_fail_first_localization_runs_without_strong_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
+    calls: dict[str, object] = {}
     events: list[dict] = []
     runner = SimpleNamespace(
         repo=tmp_path,
         benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], expected_files=[]),
+        _task_execution_contract=state_runtime.TaskExecutionContract(["pytest -q"], [], [], [], True, False),
         _execution_plan=SimpleNamespace(relevant_files=[]),
         _pending_verification="",
         event_callback=events.append,
     )
 
-    def fake_run(cmd, **_kwargs):
-        assert cmd == ["bash", "-lc", "pytest -q"]
+    def fake_verify(_runner, command, timeout_seconds=120, cwd=None):
+        calls["command"] = command
+        calls["timeout_seconds"] = timeout_seconds
+        calls["cwd"] = cwd
+        return {
+            "command": command,
+            "exit_code": 1,
+            "timed_out": False,
+            "stdout_excerpt": "FAILED tests/test_api.py::test_runtime - AssertionError: boom",
+            "stderr_excerpt": "",
+            "first_failing_test": "tests/test_api.py::test_runtime",
+            "error_summary": "AssertionError: boom",
+            "raw_failure_excerpt": "FAILED tests/test_api.py::test_runtime - AssertionError: boom",
+            "passed": False,
+        }
 
-        class P:
-            returncode = 1
-            stdout = "FAILED tests/test_api.py::test_runtime - AssertionError: boom"
-            stderr = ""
-
-        return P()
-
-    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(state_runtime, "run_task_verification_command", fake_verify)
     evidence = state_runtime.run_pre_edit_failure_localization(runner)
 
     assert evidence is not None
     assert evidence["first_failing_test"] == "tests/test_api.py::test_runtime"
+    assert calls["command"] == "pytest -q"
+    assert calls["timeout_seconds"] == 120
+    assert calls["cwd"] is not None
+    assert Path(str(calls["cwd"])) != tmp_path
     assert any(e.get("type") == "pre_edit_failure_signal_attempted" for e in events)
     assert any(e.get("type") == "pre_edit_failure_signal_captured" for e in events)
 
 
-def test_fail_first_localization_skips_with_clear_expected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fail_first_localization_runs_with_clear_expected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     events: list[dict] = []
     runner = SimpleNamespace(
@@ -514,13 +526,17 @@ def test_fail_first_localization_skips_with_clear_expected_file(tmp_path: Path, 
     )
 
     def fake_run(_cmd, **_kwargs):
-        raise AssertionError("verification should be skipped when expected file is clear")
+        class P:
+            returncode = 1
+            stdout = "FAILED tests/test_api.py::test_runtime - AssertionError: boom"
+            stderr = ""
+        return P()
 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     evidence = state_runtime.run_pre_edit_failure_localization(runner)
 
-    assert evidence is None
-    assert any(e.get("type") == "pre_edit_failure_signal_skipped" for e in events)
+    assert evidence is not None
+    assert any(e.get("type") == "pre_edit_failure_signal_captured" for e in events)
 
 
 def test_parse_failure_signal_extracts_test_and_traceback() -> None:
@@ -664,3 +680,135 @@ def test_diagnosis_confidence_weak_without_file_evidence(tmp_path: Path) -> None
     }
     confidence = state_runtime.classify_diagnosis_target_confidence(runner, diagnosis, failure_evidence=None)
     assert confidence == "weak"
+
+
+def test_task_evidence_packet_contains_excerpt_and_scope() -> None:
+    runner = SimpleNamespace(
+        benchmark_config=SimpleNamespace(enabled=True, visible_verification=["pytest -q"], allowlist_paths=["src/app"], expected_files=["src/app/core.py"]),
+        _execution_plan=SimpleNamespace(relevant_files=["tests/test_core.py"]),
+    )
+    packet = state_runtime.build_task_evidence_packet(runner, {"exit_code":1, "timed_out":False, "error_summary":"AssertionError: x"})
+    assert "Failure excerpt:" in packet
+    assert "Allowed edit paths: src/app" in packet
+
+
+def test_build_task_execution_contract_from_benchmark_metadata() -> None:
+    runner = SimpleNamespace(
+        benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], allowlist_paths=["src"], expected_files=["src/app.py"]),
+        _execution_plan=SimpleNamespace(relevant_files=["tests/test_app.py"]),
+    )
+    contract = state_runtime.build_task_execution_contract(runner, "fix bug")
+    assert contract.verification_commands == ["pytest -q"]
+    assert "src" in contract.allowed_edit_paths
+    assert contract.requires_patch is True
+
+def test_run_task_verification_command_uses_portable_shell(monkeypatch, tmp_path: Path) -> None:
+    calls = {}
+    runner = SimpleNamespace(repo=tmp_path)
+    def fake_run(cmd, **kwargs):
+        calls['shell'] = kwargs.get('shell')
+        class P: returncode=0; stdout='ok'; stderr=''
+        return P()
+    monkeypatch.setattr(state_runtime.subprocess, 'run', fake_run)
+    out = state_runtime.run_task_verification_command(runner, 'pytest -q')
+    assert calls['shell'] is True
+    assert out['passed'] is True
+
+
+def test_pre_edit_localization_uses_shared_verification_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    calls = {}
+    events: list[dict] = []
+    runner = SimpleNamespace(
+        repo=tmp_path,
+        benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], expected_files=[]),
+        _execution_plan=SimpleNamespace(relevant_files=[]),
+        _task_execution_contract=state_runtime.TaskExecutionContract(["pytest -q"], [], [], [], True, False),
+        _pending_verification="",
+        event_callback=events.append,
+    )
+
+    def fake_verify(_runner, command, timeout_seconds=120, cwd=None):
+        calls['command'] = command
+        calls['cwd'] = cwd
+        calls['timeout'] = timeout_seconds
+        return {"command": command, "exit_code": 1, "timed_out": False, "first_failing_test": "t::x", "error_summary": "AssertionError", "raw_failure_excerpt": "FAILED t::x"}
+
+    monkeypatch.setattr(state_runtime, 'run_task_verification_command', fake_verify)
+    evidence = state_runtime.run_pre_edit_failure_localization(runner)
+    assert evidence is not None
+    assert calls['command'] == 'pytest -q'
+    assert calls['cwd'] is not None
+
+
+def test_inject_task_evidence_message_uses_safe_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = []
+    runner = SimpleNamespace(event_callback=events.append)
+    calls = {}
+    def fake_prepend(messages, text):
+        calls['text'] = text
+        return False
+    monkeypatch.setattr(state_runtime, 'prepend_text_to_latest_safe_user_message', fake_prepend)
+    ok = state_runtime.inject_task_evidence_message(runner, [{"role":"user","content":"x"}], "pkt")
+    assert ok is False
+    assert any(e.get('type') == 'task_evidence_injection_failed' for e in events)
+
+
+def test_runner_preserves_task_execution_contract_during_run(tmp_path: Path) -> None:
+    class Client:
+        def create_message(self, _payload, stream):
+            assert stream is False
+            return {"role": "assistant", "content": []}
+
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, benchmark_config=SimpleNamespace(enabled=False, visible_verification=["pytest -q"], expected_files=["src/app.py"], allowlist_paths=["src"], task_id="t", allowed_support_files=[]))
+    out = runner.run("fix bug")
+    assert out
+    assert runner._task_execution_contract is not None
+    assert runner._task_execution_contract.verification_commands == ["pytest -q"]
+
+
+def test_post_edit_verification_uses_contract_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = {}
+    runner = SimpleNamespace(
+        repo=tmp_path,
+        _task_execution_contract=state_runtime.TaskExecutionContract(["pytest -q"], [], [], [], True, False),
+        _patch_sanity_retry_pending=False,
+        _first_attempt_write_lock_active=True,
+        _task_verification_repair_attempts=1,
+        event_callback=lambda _e: None,
+    )
+
+    monkeypatch.setattr(state_runtime, '_run_patch_sanity_check', lambda _r: {"ran": False, "passed": True, "checked_files": []})
+    monkeypatch.setattr(state_runtime, 'run_verification', lambda _r, _t: 'verification-ran')
+
+    def fake_task_verify(_runner, command, timeout_seconds=120, cwd=None):
+        calls['command'] = command
+        return {"command": command, "passed": True, "timed_out": False, "exit_code": 0}
+
+    monkeypatch.setattr(state_runtime, 'run_task_verification_command', fake_task_verify)
+    out = state_runtime.run_post_edit_verification(runner, 'Patch execution')
+    assert out == 'verification-ran'
+    assert calls['command'] == 'pytest -q'
+    assert runner._task_verification_repair_attempts == 0
+
+
+def test_first_model_request_contains_task_evidence_packet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+    class StopAfterFirstModelRequest(Exception):
+        pass
+    class Client:
+        def create_message(self, payload, stream):
+            captured['payload'] = payload
+            raise StopAfterFirstModelRequest
+
+    runner = Runner(client=Client(), repo=tmp_path, model='m', stream=False, benchmark_config=SimpleNamespace(enabled=False, visible_verification=['pytest -q'], expected_files=['src/app.py'], allowlist_paths=['src'], task_id='t', allowed_support_files=[]))
+    monkeypatch.setattr(state_runtime, 'run_pre_edit_failure_localization', lambda _r: {"command":"pytest -q", "exit_code":1, "timed_out":False, "error_summary":"AssertionError: boom", "raw_failure_excerpt":"FAILED tests/test_api.py::test_runtime - AssertionError: boom"})
+    monkeypatch.setattr(state_runtime, 'run_pre_edit_diagnosis', lambda *_a, **_k: None)
+    with pytest.raises(StopAfterFirstModelRequest):
+        runner.run('fix bug')
+    text = str(captured['payload']['messages'][0]['content'])
+    assert 'Task evidence:' in text
+    assert 'Verification command:' in text
+    assert 'Failure excerpt:' in text
+    assert 'Allowed edit paths:' in text
+    assert 'AssertionError: boom' in text
