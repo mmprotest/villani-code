@@ -754,7 +754,23 @@ class Runner:
                 pre_edit_failure_evidence = state_runtime.run_pre_edit_failure_localization(self)
                 evidence_packet = state_runtime.build_task_evidence_packet(self, pre_edit_failure_evidence)
                 if evidence_packet:
-                    state_runtime.inject_task_evidence_message(self, messages, evidence_packet)
+                    self.event_callback({
+                        "type": "task_evidence_packet_built",
+                        "byte_length": len(evidence_packet.encode("utf-8", errors="replace")),
+                        "has_verification_command": "Verification command:" in evidence_packet,
+                        "has_failure_excerpt": "Failure excerpt:" in evidence_packet,
+                        "has_allowed_edit_paths": "Allowed edit paths:" in evidence_packet,
+                        "has_expected_files": "Candidate files:" in evidence_packet,
+                    })
+                    injected = state_runtime.inject_task_evidence_message(self, messages, evidence_packet)
+                    self.event_callback({
+                        "type": "task_evidence_packet_injected" if injected else "task_evidence_packet_injection_failed",
+                        "byte_length": len(evidence_packet.encode("utf-8", errors="replace")),
+                        "has_verification_command": "Verification command:" in evidence_packet,
+                        "has_failure_excerpt": "Failure excerpt:" in evidence_packet,
+                        "has_allowed_edit_paths": "Allowed edit paths:" in evidence_packet,
+                        "has_expected_files": "Candidate files:" in evidence_packet,
+                    })
                 diagnosis = state_runtime.run_pre_edit_diagnosis(
                     self,
                     instruction,

@@ -622,6 +622,43 @@ def execute_tool_with_policy(
         forced=False,
         turn_index=runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0,
     )
+    if tool_name == "Bash" and not result.get("is_error"):
+        contract = getattr(runner, "_task_execution_contract", None)
+        if contract and (contract.allowed_edit_paths or contract.expected_files):
+            baseline = set(getattr(runner, "_verification_baseline_changed", set()))
+            changed = {
+                str(p).replace("\\", "/").lstrip("./")
+                for p in runner._git_changed_files()
+                if str(p).strip()
+            } - {
+                str(p).replace("\\", "/").lstrip("./")
+                for p in baseline
+            }
+            scoped = {
+                str(p).replace("\\", "/").lstrip("./")
+                for p in (list(contract.allowed_edit_paths) + list(contract.expected_files))
+                if str(p).strip()
+            }
+            offending = sorted(
+                path for path in changed
+                if not ((path in scoped) or any(path.startswith(prefix.rstrip("/") + "/") for prefix in scoped))
+            )
+            if offending:
+                runner.event_callback(
+                    {
+                        "type": "out_of_scope_shell_mutation_detected",
+                        "offending_paths": offending[:12],
+                    }
+                )
+                return {
+                    "is_error": True,
+                    "content": (
+                        "Your shell command modified files outside the task's allowed edit scope. "
+                        "Those changes are not valid progress. Modify only the expected/allowed files "
+                        "unless the task explicitly asks for new files. "
+                        f"Offending paths: {', '.join(offending[:12])}"
+                    ),
+                }
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
 
 
