@@ -794,19 +794,21 @@ def test_post_edit_verification_uses_contract_command(monkeypatch: pytest.Monkey
 
 def test_first_model_request_contains_task_evidence_packet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
+    class StopAfterFirstModelRequest(Exception):
+        pass
     class Client:
         def create_message(self, payload, stream):
             captured['payload'] = payload
-            return {"role":"assistant","content":[]}
+            raise StopAfterFirstModelRequest
 
     runner = Runner(client=Client(), repo=tmp_path, model='m', stream=False, benchmark_config=SimpleNamespace(enabled=False, visible_verification=['pytest -q'], expected_files=['src/app.py'], allowlist_paths=['src'], task_id='t', allowed_support_files=[]))
     monkeypatch.setattr(state_runtime, 'run_pre_edit_failure_localization', lambda _r: {"command":"pytest -q", "exit_code":1, "timed_out":False, "error_summary":"AssertionError: boom", "raw_failure_excerpt":"FAILED tests/test_api.py::test_runtime - AssertionError: boom"})
     monkeypatch.setattr(state_runtime, 'run_pre_edit_diagnosis', lambda *_a, **_k: None)
-    runner.run('fix bug')
+    with pytest.raises(StopAfterFirstModelRequest):
+        runner.run('fix bug')
     text = str(captured['payload']['messages'][0]['content'])
     assert 'Task evidence:' in text
     assert 'Verification command:' in text
     assert 'Failure excerpt:' in text
     assert 'Allowed edit paths:' in text
     assert 'AssertionError: boom' in text
-

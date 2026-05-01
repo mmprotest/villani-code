@@ -517,6 +517,8 @@ class Runner:
         self._last_task_verification_passed = False
         self._last_task_verification_failed = False
         self._task_verification_repair_attempts = 0
+        self._out_of_scope_mutation_paths: set[str] = set()
+        self._out_of_scope_mutation_detected = False
         self._task_mode: TaskMode = TaskMode.GENERAL
         self._task_contract: dict[str, Any] = {}
         self._last_verification_fingerprint = ""
@@ -771,6 +773,13 @@ class Runner:
                         "has_allowed_edit_paths": "Allowed edit paths:" in evidence_packet,
                         "has_expected_files": "Candidate files:" in evidence_packet,
                     })
+                    if not injected:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": evidence_packet}]})
+                        fallback_ok = state_runtime.prepend_text_to_latest_safe_user_message(messages, "Task evidence fallback attached.")
+                        if fallback_ok:
+                            self.event_callback({"type": "task_evidence_packet_fallback_injected"})
+                        else:
+                            raise RuntimeError("task evidence injection failed before first model call")
                 diagnosis = state_runtime.run_pre_edit_diagnosis(
                     self,
                     instruction,
@@ -1392,6 +1401,14 @@ class Runner:
                         return _finish_bounded(response, "incomplete_no_patch", False)
                     messages.append({"role": "user", "content": [{"type": "text", "text": "You described or implied a fix, but no in-scope repository file was modified. Make exactly one targeted Patch or Write tool call now. Do not summarise."}]})
                     continue
+                if self._out_of_scope_mutation_detected:
+                    current_changed = {str(p).replace("\\", "/").lstrip("./") for p in self._git_changed_files()}
+                    still_offending = sorted(current_changed.intersection(self._out_of_scope_mutation_paths))
+                    if still_offending:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": "Out-of-scope file changes are still present. Revert those files or remove the invalid changes before completing."}]})
+                        continue
+                    self._out_of_scope_mutation_detected = False
+                    self._out_of_scope_mutation_paths = set()
                 contract = getattr(self, "_task_execution_contract", None)
                 if contract and contract.verification_commands and _has_in_scope_patch() and self._last_task_verification_failed:
                     self._task_verification_repair_attempts += 1

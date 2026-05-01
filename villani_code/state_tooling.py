@@ -644,6 +644,8 @@ def execute_tool_with_policy(
                 if not ((path in scoped) or any(path.startswith(prefix.rstrip("/") + "/") for prefix in scoped))
             )
             if offending:
+                runner._out_of_scope_mutation_detected = True
+                runner._out_of_scope_mutation_paths.update(offending)
                 runner.event_callback(
                     {
                         "type": "out_of_scope_shell_mutation_detected",
