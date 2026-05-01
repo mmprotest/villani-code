@@ -740,3 +740,41 @@ def test_inject_task_evidence_message_uses_safe_helper(monkeypatch: pytest.Monke
     ok = state_runtime.inject_task_evidence_message(runner, [{"role":"user","content":"x"}], "pkt")
     assert ok is False
     assert any(e.get('type') == 'task_evidence_injection_failed' for e in events)
+
+
+def test_runner_preserves_task_execution_contract_during_run(tmp_path: Path) -> None:
+    class Client:
+        def create_message(self, _payload, stream):
+            assert stream is False
+            return {"role": "assistant", "content": []}
+
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, benchmark_config=SimpleNamespace(enabled=False, visible_verification=["pytest -q"], expected_files=["src/app.py"], allowlist_paths=["src"], task_id="t", allowed_support_files=[]))
+    out = runner.run("fix bug")
+    assert out
+    assert runner._task_execution_contract is not None
+    assert runner._task_execution_contract.verification_commands == ["pytest -q"]
+
+
+def test_post_edit_verification_uses_contract_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = {}
+    runner = SimpleNamespace(
+        repo=tmp_path,
+        _task_execution_contract=state_runtime.TaskExecutionContract(["pytest -q"], [], [], [], True, False),
+        _patch_sanity_retry_pending=False,
+        _first_attempt_write_lock_active=True,
+        _task_verification_repair_attempts=1,
+        event_callback=lambda _e: None,
+    )
+
+    monkeypatch.setattr(state_runtime, '_run_patch_sanity_check', lambda _r: {"ran": False, "passed": True, "checked_files": []})
+    monkeypatch.setattr(state_runtime, 'run_verification', lambda _r, _t: 'verification-ran')
+
+    def fake_task_verify(_runner, command, timeout_seconds=120, cwd=None):
+        calls['command'] = command
+        return {"command": command, "passed": True, "timed_out": False, "exit_code": 0}
+
+    monkeypatch.setattr(state_runtime, 'run_task_verification_command', fake_task_verify)
+    out = state_runtime.run_post_edit_verification(runner, 'Patch execution')
+    assert out == 'verification-ran'
+    assert calls['command'] == 'pytest -q'
+    assert runner._task_verification_repair_attempts == 0

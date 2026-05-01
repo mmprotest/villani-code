@@ -513,7 +513,6 @@ class Runner:
         self._current_verification_before_contents: dict[str, str] = {}
         self._verification_baseline_changed: set[str] = set()
         self._scope_expansion_used = False
-        self._task_execution_contract = None
         self._last_task_verification_result = None
         self._last_task_verification_passed = False
         self._last_task_verification_failed = False
@@ -909,7 +908,6 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
-        self._task_execution_contract = None
         self._last_task_verification_result = None
         self._last_task_verification_passed = False
         self._last_task_verification_failed = False
