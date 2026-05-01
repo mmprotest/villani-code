@@ -44,6 +44,43 @@ def test_vague_suggestion_does_not_block() -> None:
     assert reason is None
 
 
+def test_new_concrete_edit_phrases_detected() -> None:
+    phrases = [
+        "The fix is simply adding slug_handler to the registry.",
+        "Need to register the handler.",
+        "Add slug to REGISTRY.",
+    ]
+    for phrase in phrases:
+        reason = final_answer_block_reason(
+            instruction="implement fix",
+            final_text=phrase,
+            has_any_edit=False,
+            changed_files=[],
+            known_verification_command=True,
+            verification_ran_after_last_edit=True,
+            last_verification_failed=False,
+            had_corrective_action_after_last_failure=False,
+            nudge_state={},
+        )
+        assert reason is not None
+
+
+def test_vague_add_suggestions_still_do_not_trigger() -> None:
+    for phrase in ["could add a handler", "might add a handler", "one option would be adding a handler"]:
+        reason = final_answer_block_reason(
+            instruction="implement fix",
+            final_text=phrase,
+            has_any_edit=False,
+            changed_files=[],
+            known_verification_command=True,
+            verification_ran_after_last_edit=True,
+            last_verification_failed=False,
+            had_corrective_action_after_last_failure=False,
+            nudge_state={},
+        )
+        assert reason is None
+
+
 def test_plan_only_task_does_not_block() -> None:
     reason = final_answer_block_reason(
         instruction="Plan only, do not implement.",

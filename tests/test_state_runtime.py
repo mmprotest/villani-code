@@ -199,7 +199,9 @@ def test_repeated_stale_verification_returns_compact_block(tmp_path: Path, monke
     _seed_repo(tmp_path)
     runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
     runner._verification_baseline_changed = set()
-    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["tests/test_x.py"])
 
     first = runner._run_verification("edit")
     second = runner._run_verification("edit")
@@ -236,6 +238,37 @@ def test_verification_detail_event_keeps_raw_trace(tmp_path: Path, monkeypatch: 
     detail = next(e for e in events if e.get("type") == "verification_detail")
     assert "<verification>" in str(detail.get("detail", ""))
     assert "last_validation_summary:" in out
+
+
+def test_failed_verification_summary_includes_visible_failure_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from villani_code.autonomy import VerificationStatus
+
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._verification_baseline_changed = set()
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_x.py").write_text("def test_x():\n    assert False\n", encoding="utf-8")
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["tests/test_x.py"])
+
+    def fake_run(_cmd, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="E       AssertionError: expected 2, got 3\nFile \"src/a.py\", line 10\nassert x == y",
+            stderr="",
+        )
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    runner._verification_engine.verify = lambda *args, **kwargs: SimpleNamespace(
+        status=VerificationStatus.FAIL,
+        confidence_score=0.1,
+        findings=[],
+        summary="failed",
+    )
+    out = runner._run_verification("edit")
+    assert "AssertionError" in out
+    assert "expected 2, got 3" in out
+    assert "Treat visible test assertions as authoritative evidence." in out
 
 
 def test_repeated_validation_updates_compact_state_without_repeated_prose(

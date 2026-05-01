@@ -73,11 +73,22 @@ _CONCRETE_EDIT_PATTERNS = (
     r"\bi(?:'ll| will)\s+(?:update|modify|change|patch|edit|add)\b",
     r"\bthe fix is to\b",
     r"\bchange the\b",
+    r"\bthe fix is simply adding\b",
+    r"\bthe fix is to add\b",
+    r"\brequires adding\b",
+    r"\bneed to add\b",
+    r"\bneed to register\b",
+    r"\bregister\b.{0,40}\bin\b",
+    r"\bmissing\b.{0,40}\bregistry\b",
+    r"\badd\b.{0,40}\bto registry\b",
 )
 _HEDGING_PATTERNS = (
     r"\bone possible fix would be\b",
     r"\byou could\b",
     r"\bi recommend\b",
+    r"\bcould add\b",
+    r"\bmight add\b",
+    r"\bone option would be\b",
     r"\bno code changes are needed\b",
 )
 
@@ -1265,9 +1276,6 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
-                    reason = _budget_reason(completed=True)
-                    if reason:
-                        return _finish_bounded(response, reason, reason == "completed")
                     final_text = "\n".join(
                         block.get("text", "")
                         for block in response.get("content", [])
@@ -1287,6 +1295,9 @@ class Runner:
                     if block_reason:
                         messages.append({"role": "user", "content": [{"type": "text", "text": block_reason}]})
                         continue
+                    reason = _budget_reason(completed=True)
+                    if reason:
+                        return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
@@ -1412,9 +1423,6 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
-                reason = _budget_reason(completed=True)
-                if reason:
-                    return _finish_bounded(response, reason, reason == "completed")
                 final_text = "\n".join(
                     block.get("text", "")
                     for block in response.get("content", [])
@@ -1434,6 +1442,9 @@ class Runner:
                 if block_reason:
                     messages.append({"role": "user", "content": [{"type": "text", "text": block_reason}]})
                     continue
+                reason = _budget_reason(completed=True)
+                if reason:
+                    return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
@@ -1510,8 +1521,17 @@ class Runner:
                         trigger=f"{tool_name} execution"
                     )
                     last_verification_turn = turns_used
-                    content_text = str(self._pending_verification)
-                    last_verification_failed = ("status=fail" in content_text) or ("status=uncertain" in content_text)
+                    exit_code = result.get("exit_code")
+                    if isinstance(exit_code, int):
+                        last_verification_failed = exit_code != 0
+                    elif result.get("is_error"):
+                        last_verification_failed = True
+                    else:
+                        content_text = str(self._pending_verification)
+                        tool_text = str(result.get("content", ""))
+                        exit_match = re.search(r"exit(?:_code)?\s*[=:]\s*(-?\d+)", tool_text, re.IGNORECASE)
+                        inferred_exit = int(exit_match.group(1)) if exit_match else 0
+                        last_verification_failed = inferred_exit != 0 or ("status=fail" in content_text) or ("status=uncertain" in content_text)
                 elif tool_name in {"Read", "Grep", "Search", "GitDiff", "GitStatus"}:
                     if last_verification_failed and not result.get("is_error"):
                         last_failure_followup_turn = turns_used

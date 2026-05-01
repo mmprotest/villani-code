@@ -1090,12 +1090,16 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     )
     if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
         failure_lines = _extract_visible_failure_lines(cmd_results)
+        failure_guidance = (
+            "Treat visible test assertions as authoritative evidence. "
+            "Do not guess replacement values when the expected value appears in the failure output."
+        )
         if failure_lines:
             lines.append("visible_failure_lines:")
             lines.extend(f"- {line}" for line in failure_lines)
-        lines.append(
-            "Treat visible test assertions as authoritative evidence. Do not guess replacement values when the expected value appears in the failure output."
-        )
+            summary += "; visible_failure_lines=" + " | ".join(failure_lines[:4])
+        summary += f"; guidance={failure_guidance}"
+        lines.append(failure_guidance)
         runner.event_callback(
             {
                 "type": "confidence_risk",
