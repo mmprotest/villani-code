@@ -499,7 +499,7 @@ def test_fail_first_localization_runs_without_strong_signal(tmp_path: Path, monk
     assert any(e.get("type") == "pre_edit_failure_signal_captured" for e in events)
 
 
-def test_fail_first_localization_skips_with_clear_expected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fail_first_localization_runs_with_clear_expected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     events: list[dict] = []
     runner = SimpleNamespace(
@@ -514,13 +514,17 @@ def test_fail_first_localization_skips_with_clear_expected_file(tmp_path: Path, 
     )
 
     def fake_run(_cmd, **_kwargs):
-        raise AssertionError("verification should be skipped when expected file is clear")
+        class P:
+            returncode = 1
+            stdout = "FAILED tests/test_api.py::test_runtime - AssertionError: boom"
+            stderr = ""
+        return P()
 
     monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
     evidence = state_runtime.run_pre_edit_failure_localization(runner)
 
-    assert evidence is None
-    assert any(e.get("type") == "pre_edit_failure_signal_skipped" for e in events)
+    assert evidence is not None
+    assert any(e.get("type") == "pre_edit_failure_signal_captured" for e in events)
 
 
 def test_parse_failure_signal_extracts_test_and_traceback() -> None:
@@ -664,3 +668,13 @@ def test_diagnosis_confidence_weak_without_file_evidence(tmp_path: Path) -> None
     }
     confidence = state_runtime.classify_diagnosis_target_confidence(runner, diagnosis, failure_evidence=None)
     assert confidence == "weak"
+
+
+def test_task_evidence_packet_contains_excerpt_and_scope() -> None:
+    runner = SimpleNamespace(
+        benchmark_config=SimpleNamespace(enabled=True, visible_verification=["pytest -q"], allowlist_paths=["src/app"], expected_files=["src/app/core.py"]),
+        _execution_plan=SimpleNamespace(relevant_files=["tests/test_core.py"]),
+    )
+    packet = state_runtime.build_task_evidence_packet(runner, {"exit_code":1, "timed_out":False, "error_summary":"AssertionError: x"})
+    assert "Failure excerpt:" in packet
+    assert "Allowed edit paths: src/app" in packet

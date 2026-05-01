@@ -507,3 +507,25 @@ def test_villani_run_agent_preserves_runtime_event_type(monkeypatch, tmp_path: P
     )
 
     assert any(event.type == 'tool_started' for event in result.events)
+
+
+def test_villani_run_agent_discovers_nested_telemetry_files(monkeypatch, tmp_path: Path) -> None:
+    from villani_code.benchmark.adapters.base import AdapterRunResult
+    from villani_code.benchmark.models import FieldQuality, TelemetryQuality
+
+    def fake_run_agent(self, repo_path, prompt, model, base_url, api_key, provider, timeout, benchmark_config_json=None, debug_dir=None):
+        return AdapterRunResult(stdout='ok', stderr='', exit_code=0, timeout=False, runtime_seconds=0.1, telemetry_quality=TelemetryQuality.INFERRED, telemetry_field_quality_map={'num_shell_commands': FieldQuality.INFERRED}, events=[])
+
+    monkeypatch.setattr('villani_code.benchmark.agents.base.AgentRunner.run_agent', fake_run_agent)
+    mdir = tmp_path / '.villani_code' / 'missions' / 'm1'
+    mdir.mkdir(parents=True)
+    (mdir / 'runtime_events.jsonl').write_text('{\"ts\": 11.0, \"type\": \"tool_started\", \"name\": \"Read\"}\n', encoding='utf-8')
+    ddir = tmp_path / 'villani_debug' / 'run1'
+    ddir.mkdir(parents=True)
+    (ddir / 'events.jsonl').write_text('{\"timestamp\": 12.0, \"event\": \"tool_finished\", \"name\": \"Read\"}\n', encoding='utf-8')
+
+    runner = VillaniAgentRunner()
+    result = runner.run_agent(repo_path=tmp_path, prompt='fix', model='m', base_url=None, api_key=None, provider='anthropic', timeout=10)
+    types = {e.type for e in result.events}
+    assert 'tool_started' in types
+    assert 'tool_finished' in types

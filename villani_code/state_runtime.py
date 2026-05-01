@@ -160,18 +160,11 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
     cfg = getattr(runner, "benchmark_config", None)
     visible_commands = list(getattr(cfg, "visible_verification", []) if cfg else [])
     visible_command = str(visible_commands[0]).strip() if visible_commands else ""
-    expected_file = _single_clear_file(list(getattr(cfg, "expected_files", []) if cfg else []))
-    plan = getattr(runner, "_execution_plan", None)
-    relevant_file = _single_clear_file(list(getattr(plan, "relevant_files", []) if plan else []))
-    has_traceback = bool(getattr(runner, "_pending_verification", "").strip())
-    broad_visible = _is_broad_visible_verification(visible_command)
-    strong_signal = bool(expected_file or relevant_file or has_traceback or not broad_visible)
-
-    if strong_signal or not visible_command:
+    if not visible_command:
         runner.event_callback(
             {
                 "type": "pre_edit_failure_signal_skipped",
-                "reason": "strong_signal" if strong_signal else "missing_visible_verification",
+                "reason": "missing_visible_verification",
                 "visible_verification_command": visible_command,
             }
         )
@@ -193,7 +186,12 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
                 cwd=isolated_repo,
                 capture_output=True,
                 text=True,
+                timeout=120,
             )
+            timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        proc = type("TimeoutProc", (), {"returncode": 124, "stdout": str(exc.stdout or ""), "stderr": str(exc.stderr or "")})()
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback(
             {
@@ -212,6 +210,9 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
         "raw_failure_excerpt": "",
         "command": visible_command,
         "exit_code": int(proc.returncode),
+        "timed_out": bool(timed_out),
+        "stdout_excerpt": "\n".join(str(proc.stdout or "").splitlines()[:20]),
+        "stderr_excerpt": "\n".join(str(proc.stderr or "").splitlines()[:20]),
     }
     if proc.returncode != 0:
         evidence.update(parse_failure_signal(proc.stdout, proc.stderr))
@@ -229,6 +230,26 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
     )
     return evidence
 
+
+def build_task_evidence_packet(runner: Any, failure_evidence: dict[str, Any] | None = None) -> str:
+    cfg = getattr(runner, "benchmark_config", None)
+    plan = getattr(runner, "_execution_plan", None)
+    if not cfg or not getattr(cfg, "enabled", False):
+        return ""
+    lines = ["Task evidence:"]
+    cmd = ", ".join(getattr(cfg, "visible_verification", [])[:1])
+    lines.append(f"- Verification command: {cmd or 'n/a'}")
+    if failure_evidence is not None:
+        lines.append(f"- Exit code: {failure_evidence.get('exit_code')}")
+        lines.append(f"- Timed out: {bool(failure_evidence.get('timed_out', False))}")
+        lines.append(f"- First failing test: {failure_evidence.get('first_failing_test') or 'n/a'}")
+        lines.append(f"- Failure excerpt: {failure_evidence.get('error_summary') or failure_evidence.get('raw_failure_excerpt', '')[:220] or 'n/a'}")
+    lines.append(f"- Allowed edit paths: {', '.join(getattr(cfg, 'allowlist_paths', [])[:6]) or 'n/a'}")
+    lines.append(f"- Candidate files: {', '.join(getattr(cfg, 'expected_files', [])[:6]) or 'n/a'}")
+    lines.append(f"- Relevant test/spec files if known: {', '.join(getattr(plan, 'relevant_files', [])[:6]) if plan else 'n/a'}")
+    lines.append("- Use verification and source evidence before patching. Apply an actual in-scope patch before summarising.")
+    lines.append("- Do not create scratch/helper files unless explicitly requested or in scope.")
+    return "\n".join(lines)
 
 def classify_diagnosis_target_confidence(
     runner: Any,

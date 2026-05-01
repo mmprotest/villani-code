@@ -746,6 +746,9 @@ class Runner:
                 from villani_code import state_runtime
 
                 pre_edit_failure_evidence = state_runtime.run_pre_edit_failure_localization(self)
+                evidence_packet = state_runtime.build_task_evidence_packet(self, pre_edit_failure_evidence)
+                if evidence_packet:
+                    messages[0]["content"].append({"type": "text", "text": evidence_packet})
                 diagnosis = state_runtime.run_pre_edit_diagnosis(
                     self,
                     instruction,
@@ -899,6 +902,22 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
+        def _task_requires_patch() -> bool:
+            text = instruction.lower()
+            asks_fix = any(k in text for k in ["fix", "implement", "update", "patch"])
+            cfg = self.benchmark_config
+            return bool((cfg.enabled and (cfg.allowlist_paths or cfg.expected_files or cfg.visible_verification)) or asks_fix)
+
+        def _has_in_scope_patch() -> bool:
+            changed = set(self._git_changed_files()) - set(baseline_changed)
+            if not changed:
+                return False
+            cfg = self.benchmark_config
+            if not cfg.enabled:
+                return True
+            scoped = set(str(p).replace("\\","/").lstrip("./") for p in (cfg.allowlist_paths + cfg.expected_files))
+            return any((c in scoped) or any(c.startswith(prefix.rstrip("/")+"/") for prefix in scoped) for c in changed)
+
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
         if self._first_attempt_write_lock_active:
@@ -1328,6 +1347,12 @@ class Runner:
                     reminder = "Benchmark mode requires a real patch in task scope before completion."
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                    continue
+                if _task_requires_patch() and not _has_in_scope_patch():
+                    self._benchmark_noop_completion_attempts += 1
+                    if self._benchmark_noop_completion_attempts > 2:
+                        return _finish_bounded(response, "incomplete_no_patch", False)
+                    messages.append({"role": "user", "content": [{"type": "text", "text": "You described or implied a fix, but no in-scope repository file was modified. Make exactly one targeted Patch or Write tool call now. Do not summarise."}]})
                     continue
                 reason = _budget_reason(completed=True)
                 if reason:
