@@ -110,3 +110,58 @@ def test_villani_task_reports_completed_when_done(tmp_path: Path) -> None:
 
     assert result["execution"]["completed"] is True
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_completed_budget_does_not_bypass_finalization_gate(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "text", "text": "I'll update x.py to fix this."}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        ],
+    )
+    budget = ExecutionBudget(max_turns=20, max_tool_calls=20, max_seconds=100.0, max_no_edit_turns=20, max_reconsecutive_recon_turns=20)
+
+    result = runner.run("implement fix", execution_budget=budget)
+
+    nudges = [
+        block.get("text", "")
+        for msg in result["messages"]
+        if msg.get("role") == "user"
+        for block in msg.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert any("no file was modified" in text for text in nudges)
+    assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_failed_bash_verification_uses_exit_code_for_followup_gate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("villani_code.state_runtime.run_verification", lambda _runner, _trigger="edit": "<verification>status=pass</verification>")
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "python -c \"import sys; sys.exit(1)\""}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        ],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_execute_tool_with_policy",
+        lambda tool_name, _tool_input, _tool_use_id, _msg_index: {
+            "content": "simulated bash run",
+            "is_error": False,
+            "exit_code": 1 if tool_name == "Bash" else 0,
+        },
+    )
+    budget = ExecutionBudget(max_turns=20, max_tool_calls=20, max_seconds=100.0, max_no_edit_turns=20, max_reconsecutive_recon_turns=20)
+
+    result = runner.run("implement fix", execution_budget=budget)
+    nudges = [
+        block.get("text", "")
+        for msg in result["messages"]
+        if msg.get("role") == "user"
+        for block in msg.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert any("last verification failed" in text for text in nudges)

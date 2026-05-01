@@ -69,6 +69,78 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return ordered
 
 
+_CONCRETE_EDIT_PATTERNS = (
+    r"\bi(?:'ll| will)\s+(?:update|modify|change|patch|edit|add)\b",
+    r"\bthe fix is to\b",
+    r"\bchange the\b",
+    r"\bthe fix is simply adding\b",
+    r"\bthe fix is to add\b",
+    r"\brequires adding\b",
+    r"\bneed to add\b",
+    r"\bneed to register\b",
+    r"\bregister\b.{0,40}\bin\b",
+    r"\bmissing\b.{0,40}\bregistry\b",
+    r"\badd\b.{0,40}\bto registry\b",
+    r"\bthe fix is (?:straightforward|simple)\s*:\s*(?:add|register|wire|hook|include)\b",
+    r"\b(?:register|add|wire|include)\s+it\b",
+    r"\bhook it up\b",
+    r"\bfix it by (?:adding|registering|wiring|including)\b",
+)
+_HEDGING_PATTERNS = (
+    r"\bone possible fix would be\b",
+    r"\byou could\b",
+    r"\bi recommend\b",
+    r"\bcould add\b",
+    r"\bmight add\b",
+    r"\bone option would be\b",
+    r"\bit might need to be\b",
+    r"\bmaybe\b",
+    r"\bno code changes are needed\b",
+)
+
+
+def _is_analysis_or_plan_only_request(instruction: str) -> bool:
+    lowered = instruction.lower()
+    return any(
+        phrase in lowered
+        for phrase in ("analysis only", "plan only", "just a plan", "do not implement", "no code changes")
+    )
+
+
+def _commits_to_concrete_edit(text: str) -> bool:
+    lowered = text.lower()
+    if any(re.search(pattern, lowered) for pattern in _HEDGING_PATTERNS):
+        return False
+    return any(re.search(pattern, lowered) for pattern in _CONCRETE_EDIT_PATTERNS)
+
+
+def final_answer_block_reason(*, instruction: str, final_text: str, has_any_edit: bool, changed_files: list[str], known_verification_command: bool, verification_ran_after_last_edit: bool, last_verification_failed: bool, had_corrective_action_after_last_failure: bool, nudge_state: dict[str, bool]) -> str | None:
+    if _is_analysis_or_plan_only_request(instruction):
+        return None
+    if (
+        _commits_to_concrete_edit(final_text)
+        and not has_any_edit
+        and not nudge_state.get("no_edit_after_concrete_claim", False)
+    ):
+        nudge_state["no_edit_after_concrete_claim"] = True
+        return "You described a concrete implementation change, but no file was modified. Apply the minimal implementation edit now. Do not explain further."
+    if (
+        changed_files
+        and known_verification_command
+        and not verification_ran_after_last_edit
+        and not nudge_state.get("no_verification_after_edit", False)
+    ):
+        nudge_state["no_verification_after_edit"] = True
+        return "You modified files but have not verified the change yet. Run the relevant verification command now."
+    if (
+        last_verification_failed
+        and not had_corrective_action_after_last_failure
+        and not nudge_state.get("failed_verification_no_followup", False)
+    ):
+        nudge_state["failed_verification_no_followup"] = True
+        return "The last verification failed. Use the failure output to inspect or patch the implementation before finalizing."
+    return None
+
 
 
 def _read_text_excerpt(path: Path, limit: int = 1400) -> str:
@@ -965,6 +1037,15 @@ class Runner:
                 }
             )
         previous_attributed = set()
+        finalization_nudge_state: dict[str, bool] = {}
+        known_verification_command = bool(self.benchmark_config.visible_verification) or self._task_mode in {
+            TaskMode.FIX_FAILING_TEST,
+            TaskMode.FIX_LINT_OR_TYPE,
+        }
+        last_edit_turn = 0
+        last_verification_turn = 0
+        last_verification_failed = False
+        last_failure_followup_turn = 0
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1201,6 +1282,25 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
+                    final_text = "\n".join(
+                        block.get("text", "")
+                        for block in response.get("content", [])
+                        if block.get("type") == "text"
+                    )
+                    block_reason = final_answer_block_reason(
+                        instruction=instruction,
+                        final_text=final_text,
+                        has_any_edit=bool(_change_summary()[0]),
+                        changed_files=_change_summary()[2],
+                        known_verification_command=known_verification_command,
+                        verification_ran_after_last_edit=last_verification_turn >= last_edit_turn,
+                        last_verification_failed=last_verification_failed,
+                        had_corrective_action_after_last_failure=last_failure_followup_turn > last_verification_turn,
+                        nudge_state=finalization_nudge_state,
+                    )
+                    if block_reason:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": block_reason}]})
+                        continue
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
@@ -1329,6 +1429,25 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
+                final_text = "\n".join(
+                    block.get("text", "")
+                    for block in response.get("content", [])
+                    if block.get("type") == "text"
+                )
+                block_reason = final_answer_block_reason(
+                    instruction=instruction,
+                    final_text=final_text,
+                    has_any_edit=bool(_change_summary()[0]),
+                    changed_files=_change_summary()[2],
+                    known_verification_command=known_verification_command,
+                    verification_ran_after_last_edit=last_verification_turn >= last_edit_turn,
+                    last_verification_failed=last_verification_failed,
+                    had_corrective_action_after_last_failure=last_failure_followup_turn > last_verification_turn,
+                    nudge_state=finalization_nudge_state,
+                )
+                if block_reason:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": block_reason}]})
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1401,10 +1520,27 @@ class Runner:
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    last_edit_turn = turns_used
+                    last_failure_followup_turn = turns_used
                 elif tool_name == "Bash":
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    last_verification_turn = turns_used
+                    exit_code = result.get("exit_code")
+                    if isinstance(exit_code, int):
+                        last_verification_failed = exit_code != 0
+                    elif result.get("is_error"):
+                        last_verification_failed = True
+                    else:
+                        content_text = str(self._pending_verification)
+                        tool_text = str(result.get("content", ""))
+                        exit_match = re.search(r"exit(?:_code)?\s*[=:]\s*(-?\d+)", tool_text, re.IGNORECASE)
+                        inferred_exit = int(exit_match.group(1)) if exit_match else 0
+                        last_verification_failed = inferred_exit != 0 or ("status=fail" in content_text) or ("status=uncertain" in content_text)
+                elif tool_name in {"Read", "Grep", "Search", "GitDiff", "GitStatus"}:
+                    if last_verification_failed and not result.get("is_error"):
+                        last_failure_followup_turn = turns_used
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
