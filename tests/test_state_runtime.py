@@ -471,30 +471,42 @@ def test_prepare_messages_for_model_repeated_calls_do_not_duplicate_injection() 
 
 def test_fail_first_localization_runs_without_strong_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
+    calls: dict[str, object] = {}
     events: list[dict] = []
     runner = SimpleNamespace(
         repo=tmp_path,
         benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], expected_files=[]),
+        _task_execution_contract=state_runtime.TaskExecutionContract(["pytest -q"], [], [], [], True, False),
         _execution_plan=SimpleNamespace(relevant_files=[]),
         _pending_verification="",
         event_callback=events.append,
     )
 
-    def fake_run(cmd, **_kwargs):
-        assert cmd == ["bash", "-lc", "pytest -q"]
+    def fake_verify(_runner, command, timeout_seconds=120, cwd=None):
+        calls["command"] = command
+        calls["timeout_seconds"] = timeout_seconds
+        calls["cwd"] = cwd
+        return {
+            "command": command,
+            "exit_code": 1,
+            "timed_out": False,
+            "stdout_excerpt": "FAILED tests/test_api.py::test_runtime - AssertionError: boom",
+            "stderr_excerpt": "",
+            "first_failing_test": "tests/test_api.py::test_runtime",
+            "error_summary": "AssertionError: boom",
+            "raw_failure_excerpt": "FAILED tests/test_api.py::test_runtime - AssertionError: boom",
+            "passed": False,
+        }
 
-        class P:
-            returncode = 1
-            stdout = "FAILED tests/test_api.py::test_runtime - AssertionError: boom"
-            stderr = ""
-
-        return P()
-
-    monkeypatch.setattr(state_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(state_runtime, "run_task_verification_command", fake_verify)
     evidence = state_runtime.run_pre_edit_failure_localization(runner)
 
     assert evidence is not None
     assert evidence["first_failing_test"] == "tests/test_api.py::test_runtime"
+    assert calls["command"] == "pytest -q"
+    assert calls["timeout_seconds"] == 120
+    assert calls["cwd"] is not None
+    assert Path(str(calls["cwd"])) != tmp_path
     assert any(e.get("type") == "pre_edit_failure_signal_attempted" for e in events)
     assert any(e.get("type") == "pre_edit_failure_signal_captured" for e in events)
 
