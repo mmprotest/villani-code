@@ -513,6 +513,11 @@ class Runner:
         self._current_verification_before_contents: dict[str, str] = {}
         self._verification_baseline_changed: set[str] = set()
         self._scope_expansion_used = False
+        self._task_execution_contract = None
+        self._last_task_verification_result = None
+        self._last_task_verification_passed = False
+        self._last_task_verification_failed = False
+        self._task_verification_repair_attempts = 0
         self._task_mode: TaskMode = TaskMode.GENERAL
         self._task_contract: dict[str, Any] = {}
         self._last_verification_fingerprint = ""
@@ -736,6 +741,8 @@ class Runner:
             self._ensure_project_memory_and_plan(instruction)
             self._task_mode = classify_task_mode(instruction)
         diagnosis = None
+        from villani_code import state_runtime
+        self._task_execution_contract = state_runtime.build_task_execution_contract(self, instruction)
         diagnosed_target_file = ""
         required_initial_read = ""
         initial_read_enforced = False
@@ -748,7 +755,7 @@ class Runner:
                 pre_edit_failure_evidence = state_runtime.run_pre_edit_failure_localization(self)
                 evidence_packet = state_runtime.build_task_evidence_packet(self, pre_edit_failure_evidence)
                 if evidence_packet:
-                    messages[0]["content"].append({"type": "text", "text": evidence_packet})
+                    state_runtime.inject_task_evidence_message(self, messages, evidence_packet)
                 diagnosis = state_runtime.run_pre_edit_diagnosis(
                     self,
                     instruction,
@@ -902,11 +909,18 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
+        self._task_execution_contract = None
+        self._last_task_verification_result = None
+        self._last_task_verification_passed = False
+        self._last_task_verification_failed = False
+        self._task_verification_repair_attempts = 0
         def _task_requires_patch() -> bool:
             text = instruction.lower()
             asks_fix = any(k in text for k in ["fix", "implement", "update", "patch"])
-            cfg = self.benchmark_config
-            return bool((cfg.enabled and (cfg.allowlist_paths or cfg.expected_files or cfg.visible_verification)) or asks_fix)
+            contract = getattr(self, "_task_execution_contract", None)
+            if contract is None:
+                return asks_fix
+            return bool(contract.requires_patch or asks_fix)
 
         def _has_in_scope_patch() -> bool:
             changed = set(self._git_changed_files()) - set(baseline_changed)
@@ -1353,6 +1367,32 @@ class Runner:
                     if self._benchmark_noop_completion_attempts > 2:
                         return _finish_bounded(response, "incomplete_no_patch", False)
                     messages.append({"role": "user", "content": [{"type": "text", "text": "You described or implied a fix, but no in-scope repository file was modified. Make exactly one targeted Patch or Write tool call now. Do not summarise."}]})
+                    continue
+                contract = getattr(self, "_task_execution_contract", None)
+                if contract and contract.verification_commands and _has_in_scope_patch() and self._last_task_verification_failed:
+                    self._task_verification_repair_attempts += 1
+                    if self._task_verification_repair_attempts > 2:
+                        return _finish_bounded(response, "verification_failed_after_patch", False)
+                    vr = self._last_task_verification_result or {}
+                    changed_files = sorted(set(self._git_changed_files()) - set(baseline_changed))
+                    repair = [
+                        "Verification failed after your patch.",
+                        "",
+                        f"Command:\n{vr.get('command','')}",
+                        "",
+                        f"Exit code:\n{vr.get('exit_code')}",
+                        "",
+                        f"Timed out:\n{bool(vr.get('timed_out'))}",
+                        "",
+                        f"Failure excerpt:\n{vr.get('error_summary') or vr.get('stderr_excerpt') or vr.get('stdout_excerpt') or 'n/a'}",
+                        "",
+                        f"Files changed:\n{', '.join(changed_files) or 'none'}",
+                        "",
+                        "Do not claim completion. Make one targeted repair patch, or revert the bad patch if the failure shows the change is wrong.",
+                    ]
+                    if vr.get("timed_out"):
+                        repair.append("The verification command timed out. Treat this as a failure signal. Inspect loops, pagination, waits, subprocesses, or unbounded retries related to your change.")
+                    messages.append({"role":"user","content":[{"type":"text","text":"\n".join(repair)}]})
                     continue
                 reason = _budget_reason(completed=True)
                 if reason:

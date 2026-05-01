@@ -88,9 +88,11 @@ class VillaniAgentRunner(AgentRunner):
         if legacy.exists():
             candidates.append(legacy)
         if candidates:
-            latest_mtime = max(p.stat().st_mtime for p in candidates if p.exists())
-            window = [p for p in candidates if p.exists() and p.stat().st_mtime >= latest_mtime - 120]
-            for path in window:
+            groups: dict[Path, list[Path]] = {}
+            for cp in candidates:
+                groups.setdefault(cp.parent, []).append(cp)
+            best_parent = max(groups.keys(), key=lambda pp: max(x.stat().st_mtime for x in groups[pp] if x.exists()))
+            for path in sorted(groups[best_parent], key=lambda x: x.name):
                 for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
                     if not raw.strip():
                         continue

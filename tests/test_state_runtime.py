@@ -678,3 +678,26 @@ def test_task_evidence_packet_contains_excerpt_and_scope() -> None:
     packet = state_runtime.build_task_evidence_packet(runner, {"exit_code":1, "timed_out":False, "error_summary":"AssertionError: x"})
     assert "Failure excerpt:" in packet
     assert "Allowed edit paths: src/app" in packet
+
+
+def test_build_task_execution_contract_from_benchmark_metadata() -> None:
+    runner = SimpleNamespace(
+        benchmark_config=SimpleNamespace(visible_verification=["pytest -q"], allowlist_paths=["src"], expected_files=["src/app.py"]),
+        _execution_plan=SimpleNamespace(relevant_files=["tests/test_app.py"]),
+    )
+    contract = state_runtime.build_task_execution_contract(runner, "fix bug")
+    assert contract.verification_commands == ["pytest -q"]
+    assert "src" in contract.allowed_edit_paths
+    assert contract.requires_patch is True
+
+def test_run_task_verification_command_uses_portable_shell(monkeypatch, tmp_path: Path) -> None:
+    calls = {}
+    runner = SimpleNamespace(repo=tmp_path)
+    def fake_run(cmd, **kwargs):
+        calls['shell'] = kwargs.get('shell')
+        class P: returncode=0; stdout='ok'; stderr=''
+        return P()
+    monkeypatch.setattr(state_runtime.subprocess, 'run', fake_run)
+    out = state_runtime.run_task_verification_command(runner, 'pytest -q')
+    assert calls['shell'] is True
+    assert out['passed'] is True
