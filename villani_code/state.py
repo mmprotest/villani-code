@@ -69,6 +69,61 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return ordered
 
 
+_CONCRETE_EDIT_PATTERNS = (
+    r"\bi(?:'ll| will)\s+(?:update|modify|change|patch|edit|add)\b",
+    r"\bthe fix is to\b",
+    r"\bchange the\b",
+)
+_HEDGING_PATTERNS = (
+    r"\bone possible fix would be\b",
+    r"\byou could\b",
+    r"\bi recommend\b",
+    r"\bno code changes are needed\b",
+)
+
+
+def _is_analysis_or_plan_only_request(instruction: str) -> bool:
+    lowered = instruction.lower()
+    return any(
+        phrase in lowered
+        for phrase in ("analysis only", "plan only", "just a plan", "do not implement", "no code changes")
+    )
+
+
+def _commits_to_concrete_edit(text: str) -> bool:
+    lowered = text.lower()
+    if any(re.search(pattern, lowered) for pattern in _HEDGING_PATTERNS):
+        return False
+    return any(re.search(pattern, lowered) for pattern in _CONCRETE_EDIT_PATTERNS)
+
+
+def final_answer_block_reason(*, instruction: str, final_text: str, has_any_edit: bool, changed_files: list[str], known_verification_command: bool, verification_ran_after_last_edit: bool, last_verification_failed: bool, had_corrective_action_after_last_failure: bool, nudge_state: dict[str, bool]) -> str | None:
+    if _is_analysis_or_plan_only_request(instruction):
+        return None
+    if (
+        _commits_to_concrete_edit(final_text)
+        and not has_any_edit
+        and not nudge_state.get("no_edit_after_concrete_claim", False)
+    ):
+        nudge_state["no_edit_after_concrete_claim"] = True
+        return "You described a concrete implementation change, but no file was modified. Apply the minimal implementation edit now. Do not explain further."
+    if (
+        changed_files
+        and known_verification_command
+        and not verification_ran_after_last_edit
+        and not nudge_state.get("no_verification_after_edit", False)
+    ):
+        nudge_state["no_verification_after_edit"] = True
+        return "You modified files but have not verified the change yet. Run the relevant verification command now."
+    if (
+        last_verification_failed
+        and not had_corrective_action_after_last_failure
+        and not nudge_state.get("failed_verification_no_followup", False)
+    ):
+        nudge_state["failed_verification_no_followup"] = True
+        return "The last verification failed. Use the failure output to inspect or patch the implementation before finalizing."
+    return None
+
 
 
 def _read_text_excerpt(path: Path, limit: int = 1400) -> str:
@@ -965,6 +1020,15 @@ class Runner:
                 }
             )
         previous_attributed = set()
+        finalization_nudge_state: dict[str, bool] = {}
+        known_verification_command = self._task_mode in {
+            TaskMode.FIX_FAILING_TEST,
+            TaskMode.FIX_LINT_OR_TYPE,
+        }
+        last_edit_turn = 0
+        last_verification_turn = 0
+        last_verification_failed = False
+        last_failure_followup_turn = 0
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1204,6 +1268,25 @@ class Runner:
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
+                    final_text = "\n".join(
+                        block.get("text", "")
+                        for block in response.get("content", [])
+                        if block.get("type") == "text"
+                    )
+                    block_reason = final_answer_block_reason(
+                        instruction=instruction,
+                        final_text=final_text,
+                        has_any_edit=bool(_change_summary()[0]),
+                        changed_files=_change_summary()[2],
+                        known_verification_command=known_verification_command,
+                        verification_ran_after_last_edit=last_verification_turn >= last_edit_turn,
+                        last_verification_failed=last_verification_failed,
+                        had_corrective_action_after_last_failure=last_failure_followup_turn > last_verification_turn,
+                        nudge_state=finalization_nudge_state,
+                    )
+                    if block_reason:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": block_reason}]})
+                        continue
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
@@ -1332,6 +1415,25 @@ class Runner:
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                final_text = "\n".join(
+                    block.get("text", "")
+                    for block in response.get("content", [])
+                    if block.get("type") == "text"
+                )
+                block_reason = final_answer_block_reason(
+                    instruction=instruction,
+                    final_text=final_text,
+                    has_any_edit=bool(_change_summary()[0]),
+                    changed_files=_change_summary()[2],
+                    known_verification_command=known_verification_command,
+                    verification_ran_after_last_edit=last_verification_turn >= last_edit_turn,
+                    last_verification_failed=last_verification_failed,
+                    had_corrective_action_after_last_failure=last_failure_followup_turn > last_verification_turn,
+                    nudge_state=finalization_nudge_state,
+                )
+                if block_reason:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": block_reason}]})
+                    continue
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
@@ -1401,10 +1503,18 @@ class Runner:
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    last_edit_turn = turns_used
+                    last_failure_followup_turn = turns_used
                 elif tool_name == "Bash":
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    last_verification_turn = turns_used
+                    content_text = str(self._pending_verification)
+                    last_verification_failed = ("status=fail" in content_text) or ("status=uncertain" in content_text)
+                elif tool_name in {"Read", "Grep", "Search", "GitDiff", "GitStatus"}:
+                    if last_verification_failed and not result.get("is_error"):
+                        last_failure_followup_turn = turns_used
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))

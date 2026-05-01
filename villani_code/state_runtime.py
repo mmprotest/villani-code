@@ -839,6 +839,24 @@ def _build_compact_validation_summary(
         "</validation_summary>"
     )
 
+def _extract_visible_failure_lines(cmd_results: list[dict[str, Any]]) -> list[str]:
+    patterns = ("AssertionError", "assert", "expected", "actual", "got", "E       ", 'File "')
+    picked: list[str] = []
+    for result in cmd_results:
+        raw = "\n".join(
+            str(part)
+            for part in (result.get("stdout", ""), result.get("stderr", ""))
+            if part
+        )
+        for line in raw.splitlines():
+            if any(marker in line for marker in patterns):
+                normalized = line.rstrip()
+                if normalized and normalized not in picked:
+                    picked.append(normalized)
+            if len(picked) >= 12:
+                return picked
+    return picked
+
 
 def run_post_edit_verification(runner: Any, trigger: str = "edit") -> str:
     had_pending_retry = bool(getattr(runner, "_patch_sanity_retry_pending", False))
@@ -1071,6 +1089,13 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         }
     )
     if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
+        failure_lines = _extract_visible_failure_lines(cmd_results)
+        if failure_lines:
+            lines.append("visible_failure_lines:")
+            lines.extend(f"- {line}" for line in failure_lines)
+        lines.append(
+            "Treat visible test assertions as authoritative evidence. Do not guess replacement values when the expected value appears in the failure output."
+        )
         runner.event_callback(
             {
                 "type": "confidence_risk",
