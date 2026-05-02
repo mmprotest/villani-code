@@ -524,6 +524,9 @@ class Runner:
         self._validation_repeated_without_new_evidence = False
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
+        self._provisional_scratch_candidates: set[str] = set()
+        self._non_scratch_created_files: set[str] = set()
+        self._cleanup_telemetry: dict[str, Any] = {}
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
         self._first_attempt_write_lock_active = False
@@ -992,6 +995,10 @@ class Runner:
             response: dict[str, Any], reason: str, completed: bool
         ) -> dict[str, Any]:
             elapsed = time.monotonic() - start
+            post = ""
+            if completed:
+                post = self._run_post_execution_validation(_change_summary()[2])
+                self._cleanup_provisional_scratch_after_success(post)
             intentional_changes, incidental_changes, all_changes = _change_summary()
             final_text = "\n".join(
                 block.get("text", "")
@@ -1020,7 +1027,6 @@ class Runner:
             transcript_path = None
             if not self._planning_read_only:
                 transcript_path = self._save_transcript_and_link(transcript)
-            post = self._run_post_execution_validation(_change_summary()[2])
             if post:
                 response.setdefault("content", []).append({"type": "text", "text": post})
             self._save_session_snapshot(messages)
@@ -1029,12 +1035,16 @@ class Runner:
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
             if self._debug_recorder is not None:
-                self._debug_recorder.write_final_summary(
+                summary_path = self._debug_recorder.write_final_summary(
                     status=mission_status,
                     termination_reason=reason,
                     total_turns=turns_used,
                     mission_id=self._mission_id,
                 )
+                if completed and summary_path.exists():
+                    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+                    payload.update(getattr(self, "_cleanup_telemetry", {}))
+                    summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             return {
                 "response": response,
                 "messages": messages,
@@ -1789,3 +1799,57 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.run_post_execution_validation(self, changed_files)
+
+    def _cleanup_provisional_scratch_after_success(self, post_validation_message: str) -> None:
+        telemetry = {
+            "cleanup_candidates_seen": len(getattr(self, "_provisional_scratch_candidates", set())),
+            "cleanup_candidates_eligible": 0,
+            "cleanup_files_removed": 0,
+            "cleanup_verification_rerun": False,
+            "cleanup_kept": False,
+            "cleanup_restored": False,
+            "cleanup_skipped_reason": "",
+        }
+        try:
+            if not str(post_validation_message).lower().startswith("validation: passed"):
+                telemetry["cleanup_skipped_reason"] = "post_validation_not_passed"
+                self._cleanup_telemetry = telemetry
+                return
+            repo_map = getattr(self, "_repo_map", None)
+            if not repo_map or (not repo_map.source_roots and not repo_map.test_roots):
+                telemetry["cleanup_skipped_reason"] = "root_detection_not_confident"
+                self._cleanup_telemetry = telemetry
+                return
+            roots = set(repo_map.source_roots + repo_map.test_roots + repo_map.package_roots)
+            eligible: list[Path] = []
+            for rel in sorted(self._provisional_scratch_candidates):
+                path = (self.repo / rel).resolve()
+                if rel in self._non_scratch_created_files or not path.exists() or not path.is_file() or not is_path_within(self.repo.resolve(), path):
+                    continue
+                if any(rel == r or rel.startswith(f"{r}/") for r in roots if r):
+                    continue
+                eligible.append(path)
+            telemetry["cleanup_candidates_eligible"] = len(eligible)
+            if not eligible:
+                telemetry["cleanup_skipped_reason"] = "no_eligible_candidates"
+                self._cleanup_telemetry = telemetry
+                return
+            backups: list[tuple[Path, bytes, int]] = []
+            for path in eligible:
+                st = path.stat()
+                backups.append((path, path.read_bytes(), st.st_mode))
+                path.unlink()
+            telemetry["cleanup_files_removed"] = len(backups)
+            verification = self._run_verification(trigger="finalization cleanup rerun")
+            telemetry["cleanup_verification_rerun"] = True
+            if "status: pass" in verification.lower():
+                telemetry["cleanup_kept"] = True
+            else:
+                for path, data, mode in backups:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    path.chmod(mode)
+                telemetry["cleanup_restored"] = True
+        except Exception as exc:
+            telemetry["cleanup_skipped_reason"] = f"cleanup_error:{exc.__class__.__name__}"
+        self._cleanup_telemetry = telemetry
