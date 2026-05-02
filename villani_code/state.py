@@ -526,6 +526,9 @@ class Runner:
         self._last_emitted_validation_fingerprint = ""
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
+        self._patch_effect_check_pending = False
+        self._patch_effect_check_attempts = 0
+        self._patch_effect_check_cap = 2
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
         self._context_governance = ContextGovernanceManager(self.repo)
@@ -889,6 +892,8 @@ class Runner:
         self._before_contents: dict[str, str] = {}
         self._current_verification_targets: set[str] = set()
         self._current_verification_before_contents: dict[str, str] = {}
+        self._patch_effect_check_pending = False
+        self._patch_effect_check_attempts = 0
         self._last_verification_fingerprint = ""
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional = set()
@@ -1329,6 +1334,12 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
+                if self._patch_effect_check_pending and self._patch_effect_check_attempts < self._patch_effect_check_cap:
+                    check_prompt = self._build_patch_effect_check_prompt(response, _attributed_changed_files())
+                    if check_prompt:
+                        self._patch_effect_check_attempts += 1
+                        messages.append({"role": "user", "content": [{"type": "text", "text": check_prompt}]})
+                        continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1401,6 +1412,8 @@ class Runner:
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    self._patch_effect_check_pending = True
+                    self._patch_effect_check_attempts = 0
                 elif tool_name == "Bash":
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
@@ -1500,6 +1513,8 @@ class Runner:
             previous_attributed = attributed
             if edited_this_turn:
                 consecutive_no_edit_turns = 0
+                self._patch_effect_check_pending = True
+                self._patch_effect_check_attempts = 0
                 if self.benchmark_config.enabled and _has_meaningful_benchmark_edit():
                     self._benchmark_noop_completion_attempts = 0
                     benchmark_mutation_denials = 0
@@ -1563,6 +1578,47 @@ class Runner:
         if self._debug_recorder is not None:
             self._debug_recorder.on_runner_event(event)
         self._user_event_callback(event)
+
+    def _build_patch_effect_check_prompt(self, response: dict[str, Any], changed_files: list[str]) -> str:
+        text = "\n".join(
+            str(block.get("text", ""))
+            for block in response.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        normalized = text.upper()
+        if normalized.startswith("YES"):
+            self._patch_effect_check_pending = False
+            return ""
+        if normalized.startswith("NO:") or normalized == "NO":
+            return (
+                "Patch-effect check reported a mismatch. "
+                f"{text[:400]}\nContinue normal repair loop and patch the specific mismatch."
+            )
+        if self._patch_effect_check_attempts > 0:
+            return (
+                "Patch-effect check could not be confirmed (malformed/uncertain answer). "
+                "Treat this as failed confirmation, state a specific mismatch, and continue repair."
+            )
+
+        candidates = list(changed_files) or sorted(self._intended_targets)
+        target = next((path for path in candidates if path and not path.startswith(("tmp", "temp", "debug", "scratch"))), "")
+        if not target:
+            self._patch_effect_check_pending = False
+            return ""
+        target_path = (self.repo / target).resolve()
+        if not target_path.exists() or not target_path.is_file():
+            self._patch_effect_check_pending = False
+            return ""
+        intended_effect = text.splitlines()[0][:220] if text else f"the recent edit should address the requested behaviour in {target}"
+        patched_excerpt = target_path.read_text(encoding="utf-8", errors="replace")[:2000]
+        return (
+            "You intended this change:\n"
+            f"{intended_effect}\n\n"
+            "Here is the patched code:\n"
+            f"```\n{patched_excerpt}\n```\n\n"
+            "Does the patched code actually implement the intended change?\n"
+            "Answer with either:\nYES\nor\nNO: <specific mismatch>"
+        )
 
     def _ensure_mission(self, instruction: str) -> None:
         mode = "autonomous" if self.villani_mode else self._runtime_mode
