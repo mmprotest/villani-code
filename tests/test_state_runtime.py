@@ -664,3 +664,85 @@ def test_diagnosis_confidence_weak_without_file_evidence(tmp_path: Path) -> None
     }
     confidence = state_runtime.classify_diagnosis_target_confidence(runner, diagnosis, failure_evidence=None)
     assert confidence == "weak"
+
+def _cleanup_runner(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        repo=tmp_path,
+        _provisional_scratch_candidates=set(),
+        benchmark_config=SimpleNamespace(visible_verification=["python -c 'print(\"ok\")'"]),
+        event_callback=lambda _e: None,
+    )
+
+
+def test_cleanup_removes_root_helper_when_verify_still_passes(tmp_path: Path) -> None:
+    runner = _cleanup_runner(tmp_path)
+    (tmp_path / "helper_tmp.py").write_text("print('x')\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    runner._provisional_scratch_candidates = {"helper_tmp.py"}
+    cleaned = state_runtime._cleanup_provisional_scratch_after_success(runner)
+    assert cleaned == ["helper_tmp.py"]
+    assert not (tmp_path / "helper_tmp.py").exists()
+
+
+def test_cleanup_restores_when_verify_fails(tmp_path: Path) -> None:
+    runner = _cleanup_runner(tmp_path)
+    runner.benchmark_config.visible_verification = ["python -c \"import pathlib; raise SystemExit(1 if not pathlib.Path('helper_tmp.py').exists() else 0)\""]
+    (tmp_path / "helper_tmp.py").write_text("print('x')\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    runner._provisional_scratch_candidates = {"helper_tmp.py"}
+    cleaned = state_runtime._cleanup_provisional_scratch_after_success(runner)
+    assert cleaned == []
+    assert (tmp_path / "helper_tmp.py").exists()
+
+
+def test_cleanup_keeps_existing_file_modifications(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _cleanup_runner(tmp_path)
+    (tmp_path / "helper_tmp.py").write_text("print('x')\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    runner._provisional_scratch_candidates = {"helper_tmp.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["helper_tmp.py"])
+    cleaned = state_runtime._cleanup_provisional_scratch_after_success(runner)
+    assert cleaned == []
+    assert (tmp_path / "helper_tmp.py").exists()
+
+
+def test_cleanup_keeps_files_inside_source_roots(tmp_path: Path) -> None:
+    runner = _cleanup_runner(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "helper_tmp.py").write_text("print('x')\n", encoding="utf-8")
+    runner._provisional_scratch_candidates = {"src/helper_tmp.py"}
+    cleaned = state_runtime._cleanup_provisional_scratch_after_success(runner)
+    assert cleaned == []
+    assert (tmp_path / "src" / "helper_tmp.py").exists()
+
+
+def test_cleanup_skips_when_root_detection_uncertain(tmp_path: Path) -> None:
+    runner = _cleanup_runner(tmp_path)
+    (tmp_path / "helper_tmp.py").write_text("print('x')\n", encoding="utf-8")
+    runner._provisional_scratch_candidates = {"helper_tmp.py"}
+    cleaned = state_runtime._cleanup_provisional_scratch_after_success(runner)
+    assert cleaned == []
+    assert (tmp_path / "helper_tmp.py").exists()
+
+def test_explicit_write_created_source_file_not_marked_scratch(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False)
+    before = runner._snapshot_repo_files()
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "new_module.py").write_text("x=1\n", encoding="utf-8")
+    created = runner._new_files_since(before)
+    runner._explicit_tool_created_files.update(created)
+    runner._provisional_scratch_candidates.update(created - runner._explicit_tool_created_files)
+    assert "src/new_module.py" not in runner._provisional_scratch_candidates
+
+
+def test_explicit_write_created_test_file_not_marked_scratch(tmp_path: Path) -> None:
+    _seed_repo(tmp_path)
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False)
+    before = runner._snapshot_repo_files()
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_new.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    created = runner._new_files_since(before)
+    runner._explicit_tool_created_files.update(created)
+    runner._provisional_scratch_candidates.update(created - runner._explicit_tool_created_files)
+    assert "tests/test_new.py" not in runner._provisional_scratch_candidates

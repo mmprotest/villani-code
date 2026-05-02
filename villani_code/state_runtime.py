@@ -161,6 +161,11 @@ def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
     visible_commands = list(getattr(cfg, "visible_verification", []) if cfg else [])
     visible_command = str(visible_commands[0]).strip() if visible_commands else ""
     expected_file = _single_clear_file(list(getattr(cfg, "expected_files", []) if cfg else []))
+    cleaned = _cleanup_provisional_scratch_after_success(runner)
+    if cleaned:
+        runner._cleaned_scratch_files = cleaned
+        runner.event_callback({"type": "scratch_cleanup_applied", "files": cleaned})
+        changed_files = [f for f in changed_files if f not in set(cleaned)]
     plan = getattr(runner, "_execution_plan", None)
     relevant_file = _single_clear_file(list(getattr(plan, "relevant_files", []) if plan else []))
     has_traceback = bool(getattr(runner, "_pending_verification", "").strip())
@@ -252,6 +257,11 @@ def classify_diagnosis_target_confidence(
         if excerpt_path and excerpt_path == target_file:
             return "strong"
 
+    cleaned = _cleanup_provisional_scratch_after_success(runner)
+    if cleaned:
+        runner._cleaned_scratch_files = cleaned
+        runner.event_callback({"type": "scratch_cleanup_applied", "files": cleaned})
+        changed_files = [f for f in changed_files if f not in set(cleaned)]
     plan = getattr(runner, "_execution_plan", None)
     relevant_file = _single_clear_file(list(getattr(plan, "relevant_files", []) if plan else []))
     if relevant_file and relevant_file == target_file:
@@ -291,6 +301,11 @@ def run_pre_edit_diagnosis(
 ) -> dict[str, str] | None:
     runner.event_callback({"type": "diagnosis_attempted"})
     evidence_lines = [f"Objective: {instruction.strip()}"]
+    cleaned = _cleanup_provisional_scratch_after_success(runner)
+    if cleaned:
+        runner._cleaned_scratch_files = cleaned
+        runner.event_callback({"type": "scratch_cleanup_applied", "files": cleaned})
+        changed_files = [f for f in changed_files if f not in set(cleaned)]
     plan = getattr(runner, "_execution_plan", None)
     if plan is not None:
         if getattr(plan, "validation_steps", None):
@@ -628,6 +643,11 @@ def _is_pytest_based_verification(runner: Any) -> bool:
     visible = list(getattr(cfg, "visible_verification", []) if cfg else [])
     if any("pytest" in str(cmd).lower() for cmd in visible):
         return True
+    cleaned = _cleanup_provisional_scratch_after_success(runner)
+    if cleaned:
+        runner._cleaned_scratch_files = cleaned
+        runner.event_callback({"type": "scratch_cleanup_applied", "files": cleaned})
+        changed_files = [f for f in changed_files if f not in set(cleaned)]
     plan = getattr(runner, "_execution_plan", None)
     steps = list(getattr(plan, "validation_steps", []) if plan else [])
     return any("pytest" in str(step).lower() for step in steps)
@@ -1278,11 +1298,69 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
 
 
 
+
+
+def _conservative_source_roots(repo: Path) -> set[str] | None:
+    roots = set()
+    for candidate in ("src", "tests", "test", "package"):
+        if (repo / candidate).exists():
+            roots.add(candidate)
+    return roots or None
+
+
+def _cleanup_provisional_scratch_after_success(runner: Any) -> list[str]:
+    candidates = sorted(set(getattr(runner, "_provisional_scratch_candidates", set())))
+    if not candidates:
+        return []
+    roots = _conservative_source_roots(runner.repo)
+    if roots is None:
+        return []
+    changed = set(git_changed_files(runner.repo))
+    eligible: list[str] = []
+    for rel in candidates:
+        p = runner.repo / rel
+        if not p.exists() or not p.is_file():
+            continue
+        if rel in changed:
+            continue
+        if any(rel == r or rel.startswith(r + "/") for r in roots):
+            continue
+        eligible.append(rel)
+    if not eligible:
+        return []
+    visible = list(getattr(getattr(runner, "benchmark_config", None), "visible_verification", []) or [])
+    if len(visible) != 1:
+        return []
+    cmd = visible[0]
+    backups: dict[str, bytes] = {}
+    for rel in eligible:
+        fp = runner.repo / rel
+        backups[rel] = fp.read_bytes()
+        fp.unlink(missing_ok=True)
+    ok = True
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=runner.repo, capture_output=True, text=True)
+        ok = proc.returncode == 0
+    except Exception:
+        ok = False
+    if not ok:
+        for rel, data in backups.items():
+            fp = runner.repo / rel
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_bytes(data)
+        return []
+    return eligible
+
 def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
     if getattr(runner, "_planning_read_only", False):
         return ""
     if not changed_files:
         return ""
+    cleaned = _cleanup_provisional_scratch_after_success(runner)
+    if cleaned:
+        runner._cleaned_scratch_files = cleaned
+        runner.event_callback({"type": "scratch_cleanup_applied", "files": cleaned})
+        changed_files = [f for f in changed_files if f not in set(cleaned)]
     plan = getattr(runner, "_execution_plan", None)
     plan_impact = getattr(plan, "change_impact", None)
     plan_actions = list(getattr(plan, "action_classes", [])) if plan else []
