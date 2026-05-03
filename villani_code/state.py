@@ -1586,7 +1586,11 @@ class Runner:
             for block in response.get("content", [])
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()
-        candidates = list(changed_files) or sorted(self._intended_targets)
+        candidates = []
+        for path in list(changed_files) + sorted(self._intended_targets):
+            normalized = self._normalise_modified_path(path)
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
         target = next((path for path in candidates if path and not path.startswith(("tmp", "temp", "debug", "scratch"))), "")
         if not target:
             self._patch_effect_check_pending = False
@@ -1595,12 +1599,13 @@ class Runner:
         if not target_path.exists() or not target_path.is_file():
             self._patch_effect_check_pending = False
             return ""
-        patched_excerpt = target_path.read_text(encoding="utf-8", errors="replace")[:2400]
+        patched_text = target_path.read_text(encoding="utf-8", errors="replace")
+        patched_excerpt = patched_text[:2400]
         intended_effect = self._derive_intended_effect(text, target, objective)
         syntax_result = "not_applicable"
         if target.endswith(".py"):
             try:
-                ast.parse(patched_excerpt)
+                ast.parse(patched_text)
                 syntax_result = "ok"
             except SyntaxError as exc:
                 line = exc.lineno or "?"
@@ -1625,7 +1630,11 @@ class Runner:
             return ""
         if stripped.startswith("NO:"):
             return f"Patch-effect check mismatch: {critic_text[:400]}"
-        return "Patch-effect check could not be confirmed from critic response. Continue repair with a concrete mismatch."
+        self._patch_effect_check_pending = False
+        return (
+            "Patch-effect check was inconclusive. No syntax error or concrete mismatch was found. "
+            "Do not create new verification/proof files. If the edited source already satisfies the task objective, provide the final answer."
+        )
 
     def _derive_intended_effect(self, rationale: str, target: str, objective: str) -> str:
         banned = {"## analysis", "## fix summary", "summary", "changes made", "implementation"}
@@ -1637,6 +1646,34 @@ class Runner:
                 continue
             return sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
         return f"The recent edit to {target} should address the requested behaviour."
+
+    def _normalise_modified_path(self, raw_path: str) -> str:
+        candidate = str(raw_path or "").strip().replace("\\", "/")
+        if not candidate:
+            return ""
+        repo_norm = str(self.repo.resolve()).replace("\\", "/")
+        repo_lower = repo_norm.lower()
+        cand_lower = candidate.lower()
+        if cand_lower.startswith(repo_lower + "/"):
+            return candidate[len(repo_norm) + 1 :].lstrip("./")
+        if ":/" in candidate:
+            repo_parts = [p for p in repo_norm.split("/") if p]
+            cand_parts = [p for p in candidate.split("/") if p]
+            for i in range(len(cand_parts)):
+                tail = cand_parts[i:]
+                if len(tail) >= len(repo_parts) and [p.lower() for p in tail[: len(repo_parts)]] == [p.lower() for p in repo_parts]:
+                    rel = "/".join(tail[len(repo_parts) :]).lstrip("./")
+                    return rel
+            return ""
+        normalized = candidate.lstrip("./")
+        if candidate.startswith("/"):
+            return ""
+        path = (self.repo / normalized).resolve()
+        try:
+            rel = path.relative_to(self.repo.resolve())
+            return str(rel).replace("\\", "/")
+        except Exception:
+            return ""
 
     def _ensure_mission(self, instruction: str) -> None:
         mode = "autonomous" if self.villani_mode else self._runtime_mode

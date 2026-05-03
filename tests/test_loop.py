@@ -307,7 +307,8 @@ def test_patch_effect_check_malformed_treated_as_not_confirmed(tmp_path: Path):
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
     runner.run("update constant")
     assert client.fourth_payload is not None
-    assert any("could not be confirmed" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
+    assert any("Patch-effect check was inconclusive" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
+    assert any("Do not create new verification/proof files" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
 
 
 def test_patch_effect_check_ignores_heading_for_intended_effect(tmp_path: Path):
@@ -367,6 +368,25 @@ def test_patch_effect_check_uses_fresh_code_after_repair(tmp_path: Path):
     assert "x=2" in client.critic_payload["messages"][0]["content"][0]["text"]
 
 
+def test_normalise_modified_path_windows_under_repo(tmp_path: Path):
+    runner = Runner(client=FakeClientEmptyThenDone(), repo=tmp_path, model="m", stream=False)
+    raw = f"C:\\sandbox\\repo\\{tmp_path.name}\\src\\billing\\totals.py"
+    repo = str(tmp_path).replace("/", "\\")
+    raw = f"{repo}\\src\\billing\\totals.py"
+    assert runner._normalise_modified_path(raw) == "src/billing/totals.py"
+
+
+def test_normalise_modified_path_posix_under_repo(tmp_path: Path):
+    runner = Runner(client=FakeClientEmptyThenDone(), repo=tmp_path, model="m", stream=False)
+    raw = f"{tmp_path}/src/billing/totals.py"
+    assert runner._normalise_modified_path(raw) == "src/billing/totals.py"
+
+
+def test_normalise_modified_path_outside_repo_ignored(tmp_path: Path):
+    runner = Runner(client=FakeClientEmptyThenDone(), repo=tmp_path, model="m", stream=False)
+    assert runner._normalise_modified_path("/outside/repo/file.py") == ""
+
+
 def test_patch_effect_check_cap_prevents_infinite_loop(tmp_path: Path):
     class Client:
         def __init__(self):
@@ -380,7 +400,7 @@ def test_patch_effect_check_cap_prevents_infinite_loop(tmp_path: Path):
     client = Client()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
     runner.run("update constant")
-    assert client.calls == 6
+    assert client.calls == 4
 
 
 def test_tool_result_followup_is_pure_tool_result_message(tmp_path: Path):
