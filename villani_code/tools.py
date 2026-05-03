@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -113,6 +115,11 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
 }
 
 DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
+MODEL_OUTPUT_CHAR_LIMIT = 8000
+INLINE_PYTHON_C_LIMIT = 500
+UNIX_ONLY_WINDOWS_PATTERNS = [r"\|\s*head\b", r"\|\s*tail\b", r"\bgrep\b", r"\bsed\b", r"\bawk\b", r"\bcat\s*>", r"<<\s*\w+", r"\brm\s+-rf\b", r"\btouch\b", r"\bpwd\b"]
+POWERSHELL_CMDLETS = [r"\bSelect-Object\b", r"\bGet-Content\b", r"\bSet-Content\b", r"\bOut-File\b", r"\bWhere-Object\b", r"\bForEach-Object\b"]
+RECOVERY_HINT = "Use Bash only for simple commands. Use Write/Patch for file edits. Do not use shell quoting to write source files."
 
 
 def _error(message: str) -> dict[str, Any]:
@@ -236,6 +243,7 @@ def _run_search(data: SearchInput, repo: Path) -> str:
 
 
 def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+    _preflight_shell_command(data.command, platform_name=sys.platform)
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
@@ -245,6 +253,11 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
     proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    stdout_model, stdout_truncated = _truncate_for_model(proc.stdout, "stdout")
+    stderr_model, stderr_truncated = _truncate_for_model(proc.stderr, "stderr")
+    has_shell_failure = _looks_like_shell_syntax_or_portability_failure(proc.stderr, proc.stdout)
+    if has_shell_failure:
+        stderr_model = f"{stderr_model.rstrip()}\n\nHint: {RECOVERY_HINT}\n"
     if callable(debug_callback):
         debug_callback(
             "command_finished",
@@ -254,11 +267,57 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 "exit_code": proc.returncode,
                 "stdout": proc.stdout,
                 "stderr": proc.stderr,
-                "truncated": False,
+                "truncated": stdout_truncated or stderr_truncated,
                 "tool_call_id": tool_call_id,
             },
         )
-    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": stdout_model, "stderr": stderr_model}, indent=2)
+
+
+def _preflight_shell_command(command: str, platform_name: str) -> None:
+    lowered = command.lower()
+    if _is_brittle_inline_source_command(command):
+        raise ValueError(f"Rejected shell command: brittle inline source writing detected. {RECOVERY_HINT}")
+    is_windows = platform_name.lower().startswith("win")
+    if not is_windows:
+        return
+    if _contains_any_pattern(command, UNIX_ONLY_WINDOWS_PATTERNS):
+        raise ValueError(f"Rejected shell command: Unix-style shell syntax/tooling is not portable in Windows cmd.exe. {RECOVERY_HINT}")
+    if _contains_any_pattern(command, POWERSHELL_CMDLETS) and "powershell" not in lowered:
+        raise ValueError("Rejected shell command: PowerShell cmdlet used without explicit PowerShell invocation (cmd.exe context).")
+
+
+def _contains_any_pattern(command: str, patterns: list[str]) -> bool:
+    return any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_brittle_inline_source_command(command: str) -> bool:
+    if "@'" in command or "'@" in command or '@"' in command or '"@' in command:
+        return True
+    if re.search(r"\bpython(\d+(\.\d+)*)?\s+-c\b", command, flags=re.IGNORECASE):
+        if "\n" in command or len(command) > INLINE_PYTHON_C_LIMIT:
+            return True
+    return bool(re.search(r"(echo|printf|python\s+-c).{200,}(>|>>)\s*\S+", command, flags=re.IGNORECASE))
+
+
+def _truncate_for_model(text: str, stream_name: str, limit: int = MODEL_OUTPUT_CHAR_LIMIT) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return f"{text[:limit]}\n[{stream_name} truncated to {limit} chars]", True
+
+
+def _looks_like_shell_syntax_or_portability_failure(stderr: str, stdout: str) -> bool:
+    combined = f"{stdout}\n{stderr}".lower()
+    patterns = [
+        "not recognized as an internal or external command",
+        "is not recognized",
+        "syntax error",
+        "unterminated",
+        "unexpected eof",
+        "here-string",
+        "the string is missing the terminator",
+    ]
+    return any(p in combined for p in patterns)
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
