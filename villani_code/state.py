@@ -1586,12 +1586,17 @@ class Runner:
             for block in response.get("content", [])
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()
-        candidates = []
-        for path in list(changed_files) + sorted(self._intended_targets):
-            normalized = self._normalise_modified_path(path)
-            if normalized and normalized not in candidates:
-                candidates.append(normalized)
-        target = next((path for path in candidates if path and not path.startswith(("tmp", "temp", "debug", "scratch"))), "")
+        candidates = self._canonical_modified_paths(list(changed_files) + sorted(self._current_verification_targets) + sorted(self._intended_targets))
+        target = next(
+            (
+                path
+                for path in candidates
+                if path
+                and not path.startswith(("tmp", "temp", "debug", "scratch", ".villani", ".villani_code", "__pycache__"))
+                and (path.endswith(".py") or path.startswith(("src/", "app/", "lib/", "config/")))
+            ),
+            "",
+        )
         if not target:
             self._patch_effect_check_pending = False
             return ""
@@ -1618,6 +1623,14 @@ class Runner:
             f"Syntax check:\n{syntax_result}\n\n"
             "Does the patched code actually implement the intended effect?\n"
             "Answer exactly one of:\nYES\nNO: <specific mismatch>"
+        )
+        self.event_callback(
+            {
+                "type": "patch_effect_critic_started",
+                "canonical_modified_paths": candidates,
+                "target_file": target,
+                "syntax_check": syntax_result,
+            }
         )
         critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
         critic_raw = self.client.create_message(critic_payload, stream=False)
@@ -1674,6 +1687,14 @@ class Runner:
             return str(rel).replace("\\", "/")
         except Exception:
             return ""
+
+    def _canonical_modified_paths(self, raw_paths: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in raw_paths:
+            normalized = self._normalise_modified_path(raw)
+            if normalized and normalized not in out:
+                out.append(normalized)
+        return out
 
     def _ensure_mission(self, instruction: str) -> None:
         mode = "autonomous" if self.villani_mode else self._runtime_mode

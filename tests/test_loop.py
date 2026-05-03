@@ -262,6 +262,29 @@ def test_patch_effect_check_yes_allows_completion(tmp_path: Path):
     assert "tools" not in client.critic_payload
 
 
+def test_patch_effect_critic_runs_as_separate_call_on_source_edit(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.critic_payload = None
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "src/billing/totals.py", "content": "x=1\n"}}]}
+            if self.calls == 2:
+                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "updated billing totals field mapping"}]}
+            self.critic_payload = payload
+            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "NO: wrong field name still used"}]}
+    (tmp_path / "src" / "billing").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "billing" / "totals.py").write_text("x=0\n", encoding="utf-8")
+    events: list[dict] = []
+    client = Client()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True, event_callback=events.append)
+    runner.run("fix billing mapping bug")
+    assert client.critic_payload is not None
+    assert any(e.get("type") == "patch_effect_critic_started" for e in events)
+
+
 class FakeClientPatchEffectNo:
     def __init__(self):
         self.calls = 0
