@@ -381,7 +381,7 @@ class DebugRecorder:
     def write_working_context(self, text: str) -> None:
         self._safe(append_text, self.artifacts.path("working_context.txt"), text)
 
-    def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
+    def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "", cleanup_summary: dict[str, Any] | None = None) -> Path:
         if status == "completed":
             self._emit("run_completed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
         elif status == "failed":
@@ -398,6 +398,8 @@ class DebugRecorder:
             summary_payload["changed_files"] = sorted(self._changed_files)
             summary_payload["last_failed_command"] = self._last_failed_command
             summary_payload["last_failed_validation"] = self._last_failed_validation
+            if isinstance(cleanup_summary, dict):
+                summary_payload.update(cleanup_summary)
             final_path = self.artifacts.path("final_summary.json")
             self._safe(write_json, final_path, summary_payload)
             return final_path

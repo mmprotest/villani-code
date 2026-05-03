@@ -510,6 +510,9 @@ class Runner:
         self._pending_verification = ""
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
+        self._provisional_scratch_candidates: set[str] = set()
+        self._explicit_mutation_created_paths: set[str] = set()
+        self._cleanup_summary = {}
         self._current_verification_targets: set[str] = set()
         self._current_verification_before_contents: dict[str, str] = {}
         self._verification_baseline_changed: set[str] = set()
@@ -891,6 +894,9 @@ class Runner:
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
+        self._provisional_scratch_candidates: set[str] = set()
+        self._explicit_mutation_created_paths: set[str] = set()
+        self._cleanup_summary: dict[str, Any] = {}
         self._current_verification_targets: set[str] = set()
         self._current_verification_before_contents: dict[str, str] = {}
         self._patch_effect_check_pending = False
@@ -1027,6 +1033,9 @@ class Runner:
             if not self._planning_read_only:
                 transcript_path = self._save_transcript_and_link(transcript)
             post = self._run_post_execution_validation(_change_summary()[2])
+            if completed and (not post or "passed" in post.lower()):
+                from villani_code import state_runtime
+                state_runtime.cleanup_provisional_scratch_artifacts(self, _change_summary()[2])
             if post:
                 response.setdefault("content", []).append({"type": "text", "text": post})
             self._save_session_snapshot(messages)
@@ -1040,6 +1049,7 @@ class Runner:
                     termination_reason=reason,
                     total_turns=turns_used,
                     mission_id=self._mission_id,
+                        cleanup_summary=getattr(self, "_cleanup_summary", None),
                 )
             return {
                 "response": response,

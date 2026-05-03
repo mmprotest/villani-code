@@ -269,7 +269,10 @@ def _benchmark_post_write_python_validation(
                 "message": message,
             }
             runner.event_callback(event_payload)
-            runner.event_callback(
+            if tool_name == "Bash":
+        files_after = _snapshot_repo_files(runner.repo)
+        runner._provisional_scratch_candidates.update(sorted(files_after - files_before))
+    runner.event_callback(
                 {
                     "type": "failure_classified",
                     "category": "benchmark_post_write_validation_failed",
@@ -492,6 +495,11 @@ def execute_tool_with_policy(
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
     if tool_name in {"Write", "Patch"}:
+        repo_path = runner.repo / str(tool_input.get("file_path", ""))
+        if not repo_path.exists():
+            normalized = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+            if normalized:
+                runner._explicit_mutation_created_paths.add(normalized)
         _normalize_mutation_payload(tool_name, tool_input)
 
     policy = runner.permissions.evaluate_with_reason(
@@ -593,6 +601,11 @@ def execute_tool_with_policy(
                 return {"content": msg, "is_error": True}
 
     if tool_name in {"Write", "Patch"}:
+        repo_path = runner.repo / str(tool_input.get("file_path", ""))
+        if not repo_path.exists():
+            normalized = str(tool_input.get("file_path", "")).replace("\\", "/").lstrip("./")
+            if normalized:
+                runner._explicit_mutation_created_paths.add(normalized)
         targets = _benchmark_mutation_targets(tool_name, tool_input)
         normalized_targets = sorted(
             {
@@ -624,6 +637,18 @@ def execute_tool_with_policy(
     )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
 
+
+
+
+def _snapshot_repo_files(repo: Path) -> set[str]:
+    files: set[str] = set()
+    for path in repo.rglob("*"):
+        if path.is_file():
+            try:
+                files.add(path.relative_to(repo).as_posix())
+            except ValueError:
+                continue
+    return files
 
 def execute_tool_with_lifecycle(
     *,
@@ -658,6 +683,7 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    files_before = _snapshot_repo_files(runner.repo) if tool_name == "Bash" else set()
     result = execute_tool(
         tool_name,
         tool_input,
