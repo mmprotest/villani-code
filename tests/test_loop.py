@@ -233,6 +233,199 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
     assert continuation_messages
 
 
+class FakeClientPatchEffectYes:
+    def __init__(self):
+        self.calls = 0
+        self.critic_payload = None
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "id": "1",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}],
+            }
+        if self.calls == 2:
+            return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "Implemented x update"}]}
+        self.critic_payload = payload
+        return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
+
+
+def test_patch_effect_check_yes_allows_completion(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    client = FakeClientPatchEffectYes()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
+    result = runner.run("set x to 1")
+    assert result["response"]["content"][0]["text"] == "Implemented x update"
+    assert client.critic_payload is not None
+    assert "tools" not in client.critic_payload
+
+
+def test_patch_effect_critic_runs_as_separate_call_on_source_edit(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.critic_payload = None
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "src/billing/totals.py", "content": "x=1\n"}}]}
+            if self.calls == 2:
+                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "updated billing totals field mapping"}]}
+            self.critic_payload = payload
+            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "NO: wrong field name still used"}]}
+    (tmp_path / "src" / "billing").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "billing" / "totals.py").write_text("x=0\n", encoding="utf-8")
+    events: list[dict] = []
+    client = Client()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True, event_callback=events.append)
+    runner.run("fix billing mapping bug")
+    assert client.critic_payload is not None
+    assert any(e.get("type") == "patch_effect_critic_started" for e in events)
+
+
+class FakeClientPatchEffectNo:
+    def __init__(self):
+        self.calls = 0
+        self.third_payload = None
+
+    def create_message(self, payload, stream):
+        self.calls += 1
+        if self.calls == 1:
+            return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
+        if self.calls == 2:
+            return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+        self.third_payload = payload
+        return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "NO: constant unchanged"}]}
+
+
+def test_patch_effect_check_no_feeds_mismatch_back(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    client = FakeClientPatchEffectNo()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
+    runner.run("update constant")
+    assert client.third_payload is not None
+    followups = [m for m in client.third_payload["messages"] if m["role"] == "user" and m["content"] and "Patch-effect check mismatch" in m["content"][0].get("text", "")]
+    assert followups
+
+
+def test_patch_effect_check_malformed_treated_as_not_confirmed(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.fourth_payload = None
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
+            if self.calls == 2:
+                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+            if self.calls == 3:
+                return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "maybe"}]}
+            self.fourth_payload = payload
+            return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "NO: mismatch"}]}
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    client = Client()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
+    runner.run("update constant")
+    assert client.fourth_payload is not None
+    assert any("Patch-effect check was inconclusive" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
+    assert any("Do not create new verification/proof files" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
+
+
+def test_patch_effect_check_ignores_heading_for_intended_effect(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.critic_payload = None
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
+            if self.calls == 2:
+                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "## Fix Summary"}]}
+            self.critic_payload = payload
+            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    client = Client()
+    Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True).run("update constant")
+    assert "## Fix Summary" not in client.critic_payload["messages"][0]["content"][0]["text"]
+
+
+def test_patch_effect_check_syntax_error_blocks_yes(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "def broken(:\n"}}]}
+            if self.calls == 2:
+                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, auto_approve=True)
+    runner.run("update constant")
+    assert "syntax_error" in runner._pending_verification or runner._patch_effect_check_pending is True
+
+
+def test_patch_effect_check_uses_fresh_code_after_repair(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self.critic_payload = None
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
+            if self.calls == 2:
+                return {"id": "2", "role": "assistant", "content": [{"type": "tool_use", "id": "w2", "name": "Write", "input": {"file_path": "a.py", "content": "x=2\n"}}]}
+            if self.calls == 3:
+                return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
+            self.critic_payload = payload
+            return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    client = Client()
+    Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True).run("update constant")
+    assert "x=2" in client.critic_payload["messages"][0]["content"][0]["text"]
+
+
+def test_normalise_modified_path_windows_under_repo(tmp_path: Path):
+    runner = Runner(client=FakeClientEmptyThenDone(), repo=tmp_path, model="m", stream=False)
+    raw = f"C:\\sandbox\\repo\\{tmp_path.name}\\src\\billing\\totals.py"
+    repo = str(tmp_path).replace("/", "\\")
+    raw = f"{repo}\\src\\billing\\totals.py"
+    assert runner._normalise_modified_path(raw) == "src/billing/totals.py"
+
+
+def test_normalise_modified_path_posix_under_repo(tmp_path: Path):
+    runner = Runner(client=FakeClientEmptyThenDone(), repo=tmp_path, model="m", stream=False)
+    raw = f"{tmp_path}/src/billing/totals.py"
+    assert runner._normalise_modified_path(raw) == "src/billing/totals.py"
+
+
+def test_normalise_modified_path_outside_repo_ignored(tmp_path: Path):
+    runner = Runner(client=FakeClientEmptyThenDone(), repo=tmp_path, model="m", stream=False)
+    assert runner._normalise_modified_path("/outside/repo/file.py") == ""
+
+
+def test_patch_effect_check_cap_prevents_infinite_loop(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+        def create_message(self, payload, stream):
+            self.calls += 1
+            if self.calls == 1:
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
+            return {"id": str(self.calls), "role": "assistant", "content": [{"type": "text", "text": "maybe"}]}
+    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
+    client = Client()
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
+    runner.run("update constant")
+    assert client.calls == 4
+
+
 def test_tool_result_followup_is_pure_tool_result_message(tmp_path: Path):
     client = FakeClientToolUseThenDone()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
