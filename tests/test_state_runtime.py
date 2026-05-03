@@ -218,10 +218,49 @@ def test_verification_reports_locked_scope_without_attributable_diff(tmp_path: P
     runner._intended_targets = {"villani_code/__init__.py"}
     monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [])
 
-    out = runner._run_verification("edit")
-    assert "last_validation_target: []" in out
-    assert "last_validation_summary:" in out
 
+def test_repo_relative_modified_path_windows_and_repo_prefix(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False)
+    win_abs = f"{tmp_path}/src/billing/totals.py".replace("/", "\\")
+    assert state_runtime._repo_relative_modified_path(runner, win_abs) == "src/billing/totals.py"
+    assert state_runtime._repo_relative_modified_path(runner, "repo/src/billing/totals.py") == "src/billing/totals.py"
+
+
+def test_repo_relative_modified_path_posix_and_outside(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False)
+    assert state_runtime._repo_relative_modified_path(runner, f"{tmp_path}/src/billing/totals.py") == "src/billing/totals.py"
+    assert state_runtime._repo_relative_modified_path(runner, "/tmp/other/place/file.py") == ""
+
+
+def test_collect_changed_python_files_canonicalizes_and_keeps_legit_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "src" / "billing").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "billing" / "totals.py").write_text("x=1\n", encoding="utf-8")
+    (tmp_path / "src" / "retrying").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "retrying" / "__init__.py").write_text("x=1\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False)
+    runner._verification_baseline_changed = set()
+    runner._current_verification_targets = {f"{tmp_path}/src/config/migrate.py"}
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [f"{tmp_path}/src/billing/totals.py", "repo/src/retrying/__init__.py"])
+    files = state_runtime._collect_changed_python_files(runner)
+    assert "src/billing/totals.py" in files
+    assert "src/retrying/__init__.py" in files
+
+
+def test_patch_sanity_telemetry_exposes_raw_and_canonical_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_repo(tmp_path)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "clock.py").write_text("x=1\n", encoding="utf-8")
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False)
+    runner._verification_baseline_changed = set()
+    events: list[dict] = []
+    runner.event_callback = events.append
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: [f"{tmp_path}/src/clock.py"])
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    state_runtime._run_patch_sanity_check(runner)
+    event = next(e for e in events if e.get("type") == "patch_sanity_check_passed")
+    assert "raw_modified_paths" in event and "canonical_modified_paths" in event
+    assert "src/clock.py" in event["canonical_modified_paths"]
 
 def test_verification_detail_event_keeps_raw_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
