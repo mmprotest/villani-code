@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import ast
 import json
 import re
 import time
@@ -1335,10 +1336,10 @@ class Runner:
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
                 if self._patch_effect_check_pending and self._patch_effect_check_attempts < self._patch_effect_check_cap:
-                    check_prompt = self._build_patch_effect_check_prompt(response, _attributed_changed_files())
-                    if check_prompt:
-                        self._patch_effect_check_attempts += 1
-                        messages.append({"role": "user", "content": [{"type": "text", "text": check_prompt}]})
+                    self._patch_effect_check_attempts += 1
+                    check_observation = self._run_patch_effect_check(response, _attributed_changed_files(), instruction)
+                    if check_observation:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": check_observation}]})
                         continue
                 reason = _budget_reason(completed=True)
                 if reason:
@@ -1579,27 +1580,12 @@ class Runner:
             self._debug_recorder.on_runner_event(event)
         self._user_event_callback(event)
 
-    def _build_patch_effect_check_prompt(self, response: dict[str, Any], changed_files: list[str]) -> str:
+    def _run_patch_effect_check(self, response: dict[str, Any], changed_files: list[str], objective: str) -> str:
         text = "\n".join(
             str(block.get("text", ""))
             for block in response.get("content", [])
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()
-        normalized = text.upper()
-        if normalized.startswith("YES"):
-            self._patch_effect_check_pending = False
-            return ""
-        if normalized.startswith("NO:") or normalized == "NO":
-            return (
-                "Patch-effect check reported a mismatch. "
-                f"{text[:400]}\nContinue normal repair loop and patch the specific mismatch."
-            )
-        if self._patch_effect_check_attempts > 0:
-            return (
-                "Patch-effect check could not be confirmed (malformed/uncertain answer). "
-                "Treat this as failed confirmation, state a specific mismatch, and continue repair."
-            )
-
         candidates = list(changed_files) or sorted(self._intended_targets)
         target = next((path for path in candidates if path and not path.startswith(("tmp", "temp", "debug", "scratch"))), "")
         if not target:
@@ -1609,16 +1595,48 @@ class Runner:
         if not target_path.exists() or not target_path.is_file():
             self._patch_effect_check_pending = False
             return ""
-        intended_effect = text.splitlines()[0][:220] if text else f"the recent edit should address the requested behaviour in {target}"
-        patched_excerpt = target_path.read_text(encoding="utf-8", errors="replace")[:2000]
-        return (
-            "You intended this change:\n"
-            f"{intended_effect}\n\n"
-            "Here is the patched code:\n"
-            f"```\n{patched_excerpt}\n```\n\n"
-            "Does the patched code actually implement the intended change?\n"
-            "Answer with either:\nYES\nor\nNO: <specific mismatch>"
+        patched_excerpt = target_path.read_text(encoding="utf-8", errors="replace")[:2400]
+        intended_effect = self._derive_intended_effect(text, target, objective)
+        syntax_result = "not_applicable"
+        if target.endswith(".py"):
+            try:
+                ast.parse(patched_excerpt)
+                syntax_result = "ok"
+            except SyntaxError as exc:
+                line = exc.lineno or "?"
+                syntax_result = f"syntax_error: {exc.msg} at line {line}"
+        prompt = (
+            "You are checking whether a code edit actually matches its intended effect.\n\n"
+            f"Task objective:\n{objective}\n\n"
+            f"Intended effect:\n{intended_effect}\n\n"
+            f"Fresh patched code:\n```\n{patched_excerpt}\n```\n\n"
+            f"Syntax check:\n{syntax_result}\n\n"
+            "Does the patched code actually implement the intended effect?\n"
+            "Answer exactly one of:\nYES\nNO: <specific mismatch>"
         )
+        critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
+        critic_raw = self.client.create_message(critic_payload, stream=False)
+        critic_text = "\n".join(str(b.get("text", "")) for b in critic_raw.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
+        stripped = critic_text.lstrip()
+        if syntax_result.startswith("syntax_error"):
+            return f"Patch-effect check failed: {syntax_result}. Fix syntax before completion."
+        if stripped.startswith("YES"):
+            self._patch_effect_check_pending = False
+            return ""
+        if stripped.startswith("NO:"):
+            return f"Patch-effect check mismatch: {critic_text[:400]}"
+        return "Patch-effect check could not be confirmed from critic response. Continue repair with a concrete mismatch."
+
+    def _derive_intended_effect(self, rationale: str, target: str, objective: str) -> str:
+        banned = {"## analysis", "## fix summary", "summary", "changes made", "implementation"}
+        for raw in re.split(r"(?<=[.!?])\s+", rationale):
+            sentence = raw.strip().strip("#").strip()
+            if len(sentence) < 20:
+                continue
+            if sentence.lower() in banned or sentence.lower().startswith("##"):
+                continue
+            return sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
+        return f"The recent edit to {target} should address the requested behaviour."
 
     def _ensure_mission(self, instruction: str) -> None:
         mode = "autonomous" if self.villani_mode else self._runtime_mode
