@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import py_compile
 import re
 from dataclasses import dataclass
@@ -25,6 +27,8 @@ class MutationGuardThresholds:
 
 
 MUTATION_GUARD_THRESHOLDS = MutationGuardThresholds()
+_TOOL_REPEAT_BLOCK_THRESHOLD = 3
+_OBSERVATION_TRUNCATE_CHARS = 4000
 
 
 @dataclass
@@ -83,6 +87,41 @@ def _extract_literal_content_from_payload(content: str) -> str:
         extracted = blocks[0]
         return extracted + ("" if extracted.endswith("\n") else "\n")
     return content
+
+
+def _normalize_repeat_value(value: Any, *, for_observation: bool) -> Any:
+    if isinstance(value, dict):
+        return {k: _normalize_repeat_value(value[k], for_observation=for_observation) for k in sorted(value)}
+    if isinstance(value, list):
+        return [_normalize_repeat_value(item, for_observation=for_observation) for item in value]
+    if isinstance(value, str):
+        normalized = value.strip()
+        if for_observation and len(normalized) > 200:
+            normalized = re.sub(r"\s+", " ", normalized)
+        return normalized
+    return value
+
+
+def _repeat_call_key(tool_name: str, tool_input: dict[str, Any]) -> str:
+    payload = {"tool": str(tool_name).strip(), "args": _normalize_repeat_value(tool_input, for_observation=False)}
+    material = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _repeat_observation_hash(result: dict[str, Any]) -> str:
+    normalized = _normalize_repeat_value(result, for_observation=True)
+    serialized = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    if len(serialized) > _OBSERVATION_TRUNCATE_CHARS:
+        serialized = serialized[:_OBSERVATION_TRUNCATE_CHARS]
+    return hashlib.sha256(serialized.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _tool_repeat_break_message() -> str:
+    return (
+        "Loop breaker: this exact action has already been repeated; it produced no new information. "
+        "The next action must be different. Suggested alternatives are: patch/edit a file, read a different relevant file, "
+        "run the configured verification command, or finish only if the task has already been verified."
+    )
 
 
 def _analyze_text_rewrite(
@@ -634,6 +673,13 @@ def execute_tool_with_lifecycle(
     forced: bool = False,
     turn_index: int | None = None,
 ) -> dict[str, Any]:
+    repeat_history = getattr(runner, "_tool_repeat_history", None)
+    repeat_key = _repeat_call_key(tool_name, tool_input)
+    if isinstance(repeat_history, dict):
+        prior = list(repeat_history.get(repeat_key, []))
+        if len(prior) >= _TOOL_REPEAT_BLOCK_THRESHOLD and len(set(prior[-_TOOL_REPEAT_BLOCK_THRESHOLD:])) == 1:
+            return {"content": _tool_repeat_break_message(), "is_error": False}
+
     stable_tool_use_id = str(tool_use_id or "").strip()
     if not stable_tool_use_id:
         current_turn = turn_index if isinstance(turn_index, int) else 0
@@ -666,6 +712,11 @@ def execute_tool_with_lifecycle(
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
     )
+    if isinstance(repeat_history, dict):
+        observation_hash = _repeat_observation_hash(result)
+        updated = list(repeat_history.get(repeat_key, []))
+        updated.append(observation_hash)
+        repeat_history[repeat_key] = updated[-6:]
     runner.event_callback(
         {
             "type": "tool_result",

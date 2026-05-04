@@ -542,6 +542,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._tool_repeat_history: dict[str, list[str]] = {}
         if self.small_model:
             self._init_small_model_support()
 
@@ -718,6 +719,7 @@ class Runner:
         if approved_plan is not None and not approved_plan.ready_to_execute:
             raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
+        self._tool_repeat_history = {}
         messages = messages or build_initial_messages(self.repo, instruction)
         if approved_plan is not None:
             if self._mission_dir is not None:
