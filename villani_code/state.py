@@ -70,6 +70,61 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return ordered
 
 
+def _is_generated_or_runtime_artifact(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip().lstrip("./")
+    if not normalized:
+        return True
+    segments = [s for s in normalized.split("/") if s]
+    for segment in segments:
+        lower = segment.lower()
+        if lower == "__pycache__":
+            return True
+        if lower.endswith(".egg-info"):
+            return True
+        if lower.startswith(".") and lower.endswith("_cache"):
+            return True
+        if lower in {"node_modules", "dist", "build", "target", ".git", ".villani", ".villani_code"}:
+            return True
+    lower_full = normalized.lower()
+    artifact_suffixes = (".pyc", ".pyo", ".class", ".o", ".obj", ".dll", ".so", ".dylib", ".exe", ".log", ".tmp", ".temp")
+    return lower_full.endswith(artifact_suffixes)
+
+
+def _is_code_change_oriented_request(text: str) -> bool:
+    lowered = text.lower()
+    read_only_markers = [
+        "explain", "review", "analyse", "analyze", "audit", "summarize", "find where", "plan",
+        "propose", "inspect only", "do not edit", "no changes", "read only",
+    ]
+    if any(marker in lowered for marker in read_only_markers):
+        return False
+    edit_markers = [
+        "fix", "patch", "update", "modify", "change", "implement", "make tests pass",
+        "resolve failure", "repair", "correct", "refactor", "add support", "adjust behavior",
+        "make this work", "failing test", "broken",
+    ]
+    return any(marker in lowered for marker in edit_markers)
+
+
+def _response_has_prose_only_edit_intent(text: str) -> bool:
+    lowered = text.lower()
+    if "no code change is needed" in lowered or "no changes needed" in lowered:
+        return False
+    intent_markers = [
+        "found the bug", "here's the fix", "the fix is", "let me fix", "need to change",
+        "should change", "replace ", "update ", "change ", " edit", " patch", " modify",
+        " adjust", " implement",
+    ]
+    return any(marker in lowered for marker in intent_markers)
+
+
+def _response_explicitly_no_change_or_blocked(text: str) -> bool:
+    lowered = text.lower()
+    markers = [
+        "no code change is needed", "no changes needed", "no change is needed", "blocked",
+        "missing file", "missing dependency", "insufficient information", "cannot proceed",
+    ]
+    return any(marker in lowered for marker in markers)
 
 
 def _read_text_excerpt(path: Path, limit: int = 1400) -> str:
@@ -887,6 +942,9 @@ class Runner:
         # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
         benchmark_mutation_denials = 0
         benchmark_denial_limit = 3
+        request_is_code_change_oriented = _is_code_change_oriented_request(instruction)
+        meaningful_repo_edit_made = False
+        prose_edit_intent_recovery_attempts = 0
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
@@ -1145,6 +1203,11 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    targets = self._extract_tool_targets(tool_name, tool_input)
+                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
+                        meaningful_repo_edit_made = True
+                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1341,6 +1404,32 @@ class Runner:
                     if check_observation:
                         messages.append({"role": "user", "content": [{"type": "text", "text": check_observation}]})
                         continue
+                assistant_text = "\n".join(
+                    str(block.get("text", ""))
+                    for block in response.get("content", [])
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ).strip()
+                if (
+                    request_is_code_change_oriented
+                    and not meaningful_repo_edit_made
+                    and _response_has_prose_only_edit_intent(assistant_text)
+                    and not _response_explicitly_no_change_or_blocked(assistant_text)
+                ):
+                    prose_edit_intent_recovery_attempts += 1
+                    if prose_edit_intent_recovery_attempts > 2:
+                        return _finish_bounded(response, "incomplete_no_patch_after_edit_intent", False)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "You identified the change but did not edit the repository. Use Patch or Write now. If no code change is needed, explicitly say so and explain why.",
+                                }
+                            ],
+                        }
+                    )
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
