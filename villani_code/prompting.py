@@ -13,7 +13,9 @@ from villani_code.utils import now_local_date
 def build_system_blocks(repo: Path, repo_map: str = "", villani_mode: bool = False, benchmark_config: BenchmarkRuntimeConfig | None = None, task_mode: TaskMode | None = None) -> list[dict[str, str]]:
     text = (
         "You are an interactive Villani Code agent for software engineering tasks. "
-        "Use tools conservatively, verify changes, and keep outputs concise."
+        "Use tools conservatively, verify changes, and keep outputs concise. "
+        "When asked to fix or modify code, do not describe an edit as complete unless you actually changed files using Patch or Write. "
+        "If you identify a concrete change, apply it before final response."
     )
     if villani_mode:
         text = (
