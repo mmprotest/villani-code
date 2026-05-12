@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import difflib
+import json
 import py_compile
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,9 @@ class MutationGuardThresholds:
 
 
 MUTATION_GUARD_THRESHOLDS = MutationGuardThresholds()
+_REPEATED_TOOL_WINDOW = 12
+_REPEATED_TOOL_THRESHOLD = 3
+_MAX_SIGNATURE_TEXT = 240
 
 
 @dataclass
@@ -38,6 +43,38 @@ class MutationEditAnalysis:
     touched_lines: int
     touched_ratio: float
     probable_rewrite: bool
+
+
+def _normalize_ws(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _normalize_tool_args(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _normalize_tool_args(value[k]) for k in sorted(value)}
+    if isinstance(value, list):
+        return [_normalize_tool_args(item) for item in value]
+    if isinstance(value, str):
+        return _normalize_ws(value)
+    return value
+
+
+def _tool_args_signature(tool_input: dict[str, Any]) -> str:
+    normalized = _normalize_tool_args(tool_input)
+    as_json = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return as_json[:800]
+
+
+def _tool_result_signature(result: dict[str, Any]) -> tuple[bool, bool, str]:
+    is_error = bool(result.get("is_error", False))
+    text = _normalize_ws(str(result.get("content", "")))
+    is_empty = not bool(text)
+    return is_error, is_empty, text[:_MAX_SIGNATURE_TEXT]
+
+
+def _is_no_progress_result(result_signature: tuple[bool, bool, str]) -> bool:
+    _is_error, is_empty, summary = result_signature
+    return is_empty or not summary
 
 
 def _extract_fenced_code(text: str) -> str | None:
@@ -614,6 +651,39 @@ def execute_tool_with_policy(
                     runner._before_contents[normalized_target] = before_text
                     runner._current_verification_before_contents[normalized_target] = before_text
             runner.checkpoints.create(checkpoint_paths, message_index=message_count)
+    tool_history = getattr(runner, "_recent_tool_calls", None)
+    if tool_history is None:
+        tool_history = deque(maxlen=_REPEATED_TOOL_WINDOW)
+        setattr(runner, "_recent_tool_calls", tool_history)
+
+    arg_signature = _tool_args_signature(tool_input)
+    repeated_signatures: dict[tuple[bool, bool, str], int] = {}
+    for item in tool_history:
+        if item.get("tool_name") != tool_name or item.get("arg_signature") != arg_signature:
+            continue
+        if not item.get("no_progress", False):
+            continue
+        sig = item.get("result_signature")
+        if isinstance(sig, tuple):
+            repeated_signatures[sig] = repeated_signatures.get(sig, 0) + 1
+    matching_no_progress = max(repeated_signatures.values(), default=0)
+    if matching_no_progress >= _REPEATED_TOOL_THRESHOLD:
+        blocked_message = (
+            "Repeated no-progress tool call blocked. This exact tool call has already returned the same result multiple "
+            "times. Do not repeat it. Choose a different action: inspect a different file, read nearby code, run visible "
+            "verification, apply a patch, or finish with the current evidence."
+        )
+        runner.event_callback(
+            {
+                "type": "guard_event",
+                "reason": "repeated_no_progress_tool_call",
+                "tool_name": tool_name,
+                "arg_signature": arg_signature,
+                "repeat_count": matching_no_progress,
+            }
+        )
+        return {"content": blocked_message, "is_error": False}
+
     result = execute_tool_with_lifecycle(
         runner=runner,
         tool_name=tool_name,
@@ -621,6 +691,16 @@ def execute_tool_with_policy(
         tool_use_id=tool_use_id,
         forced=False,
         turn_index=runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0,
+    )
+    result_signature = _tool_result_signature(result)
+    no_progress = _is_no_progress_result(result_signature)
+    tool_history.append(
+        {
+            "tool_name": tool_name,
+            "arg_signature": arg_signature,
+            "result_signature": result_signature,
+            "no_progress": no_progress,
+        }
     )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
 
