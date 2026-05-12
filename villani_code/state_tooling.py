@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import difflib
+import json
 import py_compile
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,15 @@ class MutationGuardThresholds:
 
 
 MUTATION_GUARD_THRESHOLDS = MutationGuardThresholds()
+REPEATED_TOOL_CALL_THRESHOLD = 3
+REPEATED_TOOL_CALL_WINDOW = 12
+MAX_SIGNATURE_TEXT_CHARS = 240
+
+REPEATED_NO_PROGRESS_TOOL_CALL_MESSAGE = (
+    "Repeated no-progress tool call blocked. This exact tool call has already returned the same result multiple times. "
+    "Do not repeat it. Choose a different action: inspect a different file, read nearby code, run visible verification, "
+    "apply a patch, or finish with the current evidence."
+)
 
 
 @dataclass
@@ -38,6 +49,35 @@ class MutationEditAnalysis:
     touched_lines: int
     touched_ratio: float
     probable_rewrite: bool
+
+
+def _normalize_whitespace(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _normalize_tool_argument_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _normalize_whitespace(value)
+    if isinstance(value, dict):
+        return {str(key): _normalize_tool_argument_value(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_normalize_tool_argument_value(item) for item in value]
+    return value
+
+
+def _normalized_tool_input_signature(tool_input: dict[str, Any]) -> str:
+    normalized = _normalize_tool_argument_value(tool_input)
+    text = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return text[:1024]
+
+
+def _result_signature(result: dict[str, Any]) -> tuple[str, bool]:
+    is_error = bool(result.get("is_error", False))
+    content = _normalize_whitespace(str(result.get("content", "")).strip())
+    summary = content[:MAX_SIGNATURE_TEXT_CHARS]
+    empty = len(summary) == 0
+    useful = (not empty) and (not is_error)
+    return f"error={int(is_error)}|empty={int(empty)}|summary={summary}", useful
 
 
 def _extract_fenced_code(text: str) -> str | None:
@@ -450,6 +490,8 @@ def execute_tool_with_policy(
     tool_use_id: str,
     message_count: int,
 ) -> dict[str, Any]:
+    if not hasattr(runner, "_recent_tool_calls"):
+        runner._recent_tool_calls = deque(maxlen=REPEATED_TOOL_CALL_WINDOW)
     hook_pre = runner.hooks.run_event(
         "PreToolUse",
         {"event": "PreToolUse", "tool": tool_name, "input": tool_input},
@@ -614,6 +656,33 @@ def execute_tool_with_policy(
                     runner._before_contents[normalized_target] = before_text
                     runner._current_verification_before_contents[normalized_target] = before_text
             runner.checkpoints.create(checkpoint_paths, message_index=message_count)
+    normalized_args = _normalized_tool_input_signature(tool_input)
+    matching_entries = [
+        entry
+        for entry in runner._recent_tool_calls
+        if entry.get("tool_name") == tool_name
+        and entry.get("args_signature") == normalized_args
+        and entry.get("result_signature")
+        and not bool(entry.get("useful", True))
+    ]
+    signature_counts: dict[str, int] = {}
+    for entry in matching_entries:
+        sig = str(entry.get("result_signature", ""))
+        signature_counts[sig] = signature_counts.get(sig, 0) + 1
+    repeat_count = max(signature_counts.values(), default=0)
+    if repeat_count >= REPEATED_TOOL_CALL_THRESHOLD:
+        runner.event_callback(
+            {
+                "type": "tool_call_blocked",
+                "name": tool_name,
+                "reason": "repeated_no_progress_tool_call",
+                "repeat_count": repeat_count,
+                "normalized_args_signature": normalized_args,
+                "tool_use_id": tool_use_id,
+            }
+        )
+        return {"content": REPEATED_NO_PROGRESS_TOOL_CALL_MESSAGE, "is_error": True}
+
     result = execute_tool_with_lifecycle(
         runner=runner,
         tool_name=tool_name,
@@ -621,6 +690,15 @@ def execute_tool_with_policy(
         tool_use_id=tool_use_id,
         forced=False,
         turn_index=runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0,
+    )
+    result_signature, useful = _result_signature(result)
+    runner._recent_tool_calls.append(
+        {
+            "tool_name": tool_name,
+            "args_signature": normalized_args,
+            "result_signature": result_signature,
+            "useful": useful,
+        }
     )
     return _benchmark_post_write_python_validation(runner, tool_name, tool_input, result)
 

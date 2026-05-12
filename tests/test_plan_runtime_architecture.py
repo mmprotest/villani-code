@@ -7,6 +7,7 @@ import pytest
 from villani_code.permissions import Decision
 from villani_code.plan_session import PlanSessionResult
 from villani_code.state import Runner, format_plan_text_to_artifact
+from villani_code import state_tooling
 from villani_code.state_tooling import execute_tool_with_policy
 
 
@@ -35,6 +36,7 @@ def _minimal_runner(repo: Path):
     runner._planning_read_only = True
     runner.bypass_permissions = True
     runner.auto_accept_edits = True
+    runner.plan_mode = "off"
     runner.unsafe = False
     runner.checkpoints = type("C", (), {"create": lambda self, *_a, **_k: None})()
     runner._intended_targets = set()
@@ -296,3 +298,63 @@ def test_planning_mode_blocks_write_patch_and_mutating_bash(tmp_path: Path) -> N
     assert execute_tool_with_policy(runner, "Write", {"file_path": "a.txt", "content": "x"}, "1", 0)["is_error"]
     assert execute_tool_with_policy(runner, "Patch", {"unified_diff": "--- a/a\n+++ b/a\n"}, "2", 0)["is_error"]
     assert execute_tool_with_policy(runner, "Bash", {"command": "git commit -m x"}, "3", 0)["is_error"]
+
+
+def test_repeated_no_progress_same_tool_args_result_gets_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _minimal_runner(tmp_path)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        state_tooling,
+        "execute_tool_with_lifecycle",
+        lambda **_kwargs: calls.__setitem__("n", calls["n"] + 1) or {"content": "", "is_error": False},
+    )
+    for _ in range(3):
+        execute_tool_with_policy(runner, "Read", {"file_path": "a.py"}, "tool-1", 0)
+    blocked = execute_tool_with_policy(runner, "Read", {"file_path": "a.py"}, "tool-1", 0)
+    assert blocked["is_error"] is True
+    assert "Repeated no-progress tool call blocked" in str(blocked["content"])
+    assert calls["n"] == 3
+
+
+def test_repeated_no_progress_different_args_not_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _minimal_runner(tmp_path)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        state_tooling,
+        "execute_tool_with_lifecycle",
+        lambda **_kwargs: calls.__setitem__("n", calls["n"] + 1) or {"content": "", "is_error": False},
+    )
+    for idx in range(4):
+        result = execute_tool_with_policy(runner, "Read", {"file_path": f"a{idx}.py"}, "tool-1", 0)
+        assert result["is_error"] is False
+    assert calls["n"] == 4
+
+
+def test_repeated_no_progress_same_args_different_result_not_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _minimal_runner(tmp_path)
+    outputs = iter(["", "still empty", "", "now data"])
+    monkeypatch.setattr(
+        state_tooling,
+        "execute_tool_with_lifecycle",
+        lambda **_kwargs: {"content": next(outputs), "is_error": False},
+    )
+    for _ in range(4):
+        result = execute_tool_with_policy(runner, "Read", {"file_path": "a.py"}, "tool-1", 0)
+        assert "Repeated no-progress tool call blocked" not in str(result["content"])
+
+
+def test_tool_arg_whitespace_normalization_for_repeat_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _minimal_runner(tmp_path)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        state_tooling,
+        "execute_tool_with_lifecycle",
+        lambda **_kwargs: calls.__setitem__("n", calls["n"] + 1) or {"content": "", "is_error": False},
+    )
+    execute_tool_with_policy(runner, "Read", {"file_path": " a.py "}, "tool-1", 0)
+    execute_tool_with_policy(runner, "Read", {"file_path": "a.py"}, "tool-1", 0)
+    execute_tool_with_policy(runner, "Read", {"file_path": "   a.py"}, "tool-1", 0)
+    blocked = execute_tool_with_policy(runner, "Read", {"file_path": "a.py   "}, "tool-1", 0)
+    assert blocked["is_error"] is True
+    assert "Repeated no-progress tool call blocked" in str(blocked["content"])
+    assert calls["n"] == 3
