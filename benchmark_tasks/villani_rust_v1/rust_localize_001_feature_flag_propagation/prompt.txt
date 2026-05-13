@@ -1,0 +1,1 @@
+A feature flag is enabled in the configuration but has no effect at runtime — the application always behaves as if the flag is disabled. Find the issue and make the minimal correct fix.

@@ -1,0 +1,8 @@
+[package]
+name = "item-printer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "item_printer"
+path = "src/lib.rs"

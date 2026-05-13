@@ -1,0 +1,1 @@
+The JSON output feature is implemented in the codebase and enabled by default in Cargo.toml, but tests expecting JSON output always fail — the function returns plain text instead. Find the misconfiguration and fix it so all tests pass.

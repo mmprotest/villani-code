@@ -1,0 +1,12 @@
+[package]
+name = "feature-flag-cargo"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["json_output"]
+json_output = []
+
+[[test]]
+name = "test_format"
+path = "tests/test_format.rs"

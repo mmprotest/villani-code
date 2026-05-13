@@ -1,0 +1,1 @@
+When both an environment variable and a config file value are present, the application should prefer the environment variable. Currently the config file value always wins regardless. Fix the precedence bug and verify it.

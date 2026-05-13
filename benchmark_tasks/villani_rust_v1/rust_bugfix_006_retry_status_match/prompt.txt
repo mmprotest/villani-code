@@ -1,0 +1,1 @@
+The API client retries on client errors like 400 and 404, which should not be retried. Fix the retry policy so only server errors (5xx) and 429 are retried. Verify the fix with the existing tests.
