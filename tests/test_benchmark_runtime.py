@@ -257,14 +257,18 @@ def test_benchmark_runner_uses_shared_prompt_contract_for_all_agents(tmp_path: P
     assert villani_payload_json["forbidden_paths"] == [".git/"]
     assert villani_payload_json["visible_verification"] == ["python -c 'print(1)'"]
     assert villani_payload_json["hidden_verification"] == ["python -c 'print(1)'"]
-    assert captured["claude-code"]["payload"] is None
+    claude_payload = captured["claude-code"]["payload"]
+    assert claude_payload is not None
+    assert json.loads(str(claude_payload))["task_id"] == "task_1"
     villani_prompt = str(captured["villani"]["prompt"] or "")
     claude_prompt = str(captured["claude-code"]["prompt"] or "")
     villani_lines = [line for line in villani_prompt.splitlines() if not line.startswith("Repository root:")]
     claude_lines = [line for line in claude_prompt.splitlines() if not line.startswith("Repository root:")]
-    assert villani_lines == claude_lines
+    assert villani_lines != claude_lines
     assert "Benchmark task contract (shared across all agents):" in villani_prompt
     assert "Objective: fix bug in app" in villani_prompt
+    assert "## Benchmark Runtime Contract" not in villani_prompt
+    assert "## Benchmark Runtime Contract" in claude_prompt
 
 
 def test_benchmark_scope_expansion_allowlisted_second_target_permitted(tmp_path: Path) -> None:
