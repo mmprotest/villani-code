@@ -665,6 +665,8 @@ def execute_tool_with_lifecycle(
         unsafe=runner.unsafe,
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
+        service_manager=getattr(runner, "_service_manager", None),
+        event_callback=runner.event_callback,
     )
     runner.event_callback(
         {
