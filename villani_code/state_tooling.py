@@ -443,6 +443,98 @@ def _prepare_global_mutation_policy(
     return tool_name, tool_input, None
 
 
+def _is_read_only_or_test_shell_command(command: str) -> bool:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return True
+    read_only_prefixes = (
+        "pwd",
+        "ls",
+        "cat ",
+        "rg ",
+        "grep ",
+        "find ",
+        "head ",
+        "tail ",
+        "wc ",
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git branch",
+        "git rev-parse",
+        "git ls-files",
+        "pytest",
+        "python -m pytest",
+        "uv run pytest",
+        "poetry run pytest",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+    )
+    if any(lowered.startswith(prefix) for prefix in read_only_prefixes):
+        return True
+    if "pytest" in lowered or " test" in lowered:
+        return True
+    return False
+
+
+def _looks_like_shell_rewrite_of_target(command: str, target_file: str) -> bool:
+    lowered = str(command or "").strip().lower()
+    target = str(target_file or "").replace("\\", "/").lstrip("./").lower()
+    if not lowered or not target:
+        return False
+    target_basename = target.split("/")[-1]
+    if target not in lowered and target_basename not in lowered:
+        return False
+    rewrite_markers = (
+        ">",
+        ">>",
+        "| tee",
+        "sed -i",
+        "perl -pi",
+        ".write_text(",
+        ".write_bytes(",
+        "open(",
+        " mv ",
+        " cp ",
+        " truncate ",
+        " dd ",
+    )
+    return any(marker in lowered for marker in rewrite_markers)
+
+
+def _validate_patch_recovery_bash_guard(
+    runner: Any, tool_name: str, tool_input: dict[str, Any]
+) -> str | None:
+    if tool_name != "Bash":
+        return None
+    active = getattr(runner, "_patch_recovery_state", None)
+    if not isinstance(active, dict):
+        return None
+    target_file = str(active.get("target_file", "") or "").replace("\\", "/").lstrip("./")
+    attempts = int(active.get("attempts_for_file", 0) or 0)
+    if not target_file or attempts >= 2:
+        return None
+    command = str(tool_input.get("command", ""))
+    if _is_read_only_or_test_shell_command(command):
+        return None
+    if not _looks_like_shell_rewrite_of_target(command, target_file):
+        return None
+    runner.event_callback(
+        {
+            "type": "patch_recovery_bash_blocked",
+            "target_file": target_file,
+            "attempts_for_file": attempts,
+        }
+    )
+    return (
+        "Patch recovery active: previous patch failed for "
+        f"{target_file}. Retry a smaller Patch against refreshed context before "
+        "using Bash/Python to rewrite this file."
+    )
+
+
 def execute_tool_with_policy(
     runner: Any,
     tool_name: str,
@@ -491,6 +583,11 @@ def execute_tool_with_policy(
             return {"content": policy_error, "is_error": True}
         if runner.small_model:
             runner._tighten_tool_input(tool_name, tool_input)
+    patch_recovery_bash_error = _validate_patch_recovery_bash_guard(
+        runner, tool_name, tool_input
+    )
+    if patch_recovery_bash_error:
+        return {"content": patch_recovery_bash_error, "is_error": True}
     if tool_name in {"Write", "Patch"}:
         _normalize_mutation_payload(tool_name, tool_input)
 

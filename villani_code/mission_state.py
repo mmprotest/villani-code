@@ -61,6 +61,9 @@ class MissionState:
     autonomous_satisfied_keys_summary: list[str] = field(default_factory=list)
     autonomous_blockers_summary: list[str] = field(default_factory=list)
     autonomous_stop_reason: str = ""
+    last_patch_failure: dict[str, Any] = field(default_factory=dict)
+    recent_tool_failures: list[str] = field(default_factory=list)
+    dirty_temp_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,6 +95,9 @@ class MissionState:
             autonomous_satisfied_keys_summary=[str(v) for v in payload.get("autonomous_satisfied_keys_summary", [])],
             autonomous_blockers_summary=[str(v) for v in payload.get("autonomous_blockers_summary", [])],
             autonomous_stop_reason=str(payload.get("autonomous_stop_reason", "")),
+            last_patch_failure=dict(payload.get("last_patch_failure", {}) or {}),
+            recent_tool_failures=[str(v) for v in payload.get("recent_tool_failures", [])],
+            dirty_temp_files=[str(v) for v in payload.get("dirty_temp_files", [])],
         )
 
 
