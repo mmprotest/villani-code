@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+import json
+import os
 import py_compile
 import re
 from dataclasses import dataclass
@@ -83,6 +85,62 @@ def _extract_literal_content_from_payload(content: str) -> str:
         extracted = blocks[0]
         return extracted + ("" if extracted.endswith("\n") else "\n")
     return content
+
+
+def _normalize_shell_command_for_retry(command: str, *, windows_case_insensitive: bool) -> str:
+    normalized = str(command or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = " ".join(normalized.split())
+    if windows_case_insensitive:
+        normalized = normalized.casefold()
+    return normalized
+
+
+def _should_block_failed_shell_retry(runner: Any, tool_name: str, tool_input: dict[str, Any]) -> bool:
+    if tool_name != "Bash":
+        return False
+    last_failed = getattr(runner, "_last_failed_shell_command", None)
+    if not isinstance(last_failed, dict) or not last_failed.get("failed"):
+        return False
+    windows_case_insensitive = bool(
+        getattr(runner, "_shell_retry_case_insensitive", os.name == "nt")
+    )
+    new_normalized = _normalize_shell_command_for_retry(
+        str(tool_input.get("command", "")),
+        windows_case_insensitive=windows_case_insensitive,
+    )
+    return new_normalized != "" and new_normalized == str(last_failed.get("normalized", ""))
+
+
+def _record_shell_retry_state(runner: Any, tool_name: str, tool_input: dict[str, Any], result: dict[str, Any]) -> None:
+    if tool_name != "Bash":
+        return
+    command = str(tool_input.get("command", ""))
+    windows_case_insensitive = bool(
+        getattr(runner, "_shell_retry_case_insensitive", os.name == "nt")
+    )
+    normalized = _normalize_shell_command_for_retry(
+        command,
+        windows_case_insensitive=windows_case_insensitive,
+    )
+    failed = bool(result.get("is_error", False))
+    stderr_summary = ""
+    if not failed:
+        try:
+            payload = json.loads(str(result.get("content", "")))
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            failed = int(payload.get("exit_code", 0) or 0) != 0
+            stderr_summary = str(payload.get("stderr", "")).strip().splitlines()[0][:160] if payload.get("stderr") else ""
+    if failed:
+        runner._last_failed_shell_command = {
+            "command": command,
+            "normalized": normalized,
+            "failed": True,
+            "stderr_summary": stderr_summary,
+        }
+    else:
+        runner._last_failed_shell_command = None
 
 
 def _analyze_text_rewrite(
@@ -493,6 +551,11 @@ def execute_tool_with_policy(
             runner._tighten_tool_input(tool_name, tool_input)
     if tool_name in {"Write", "Patch"}:
         _normalize_mutation_payload(tool_name, tool_input)
+    if _should_block_failed_shell_retry(runner, tool_name, tool_input):
+        return {
+            "content": "This shell command already failed in the previous attempt. Choose a materially different next action instead of retrying verbatim.",
+            "is_error": True,
+        }
 
     policy = runner.permissions.evaluate_with_reason(
         tool_name,
@@ -666,6 +729,7 @@ def execute_tool_with_lifecycle(
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
     )
+    _record_shell_retry_state(runner, tool_name, tool_input, result)
     runner.event_callback(
         {
             "type": "tool_result",
