@@ -28,7 +28,9 @@ def convert_tools_to_openai(anthropic_tools: list[dict[str, Any]]) -> list[dict[
 
 
 def _join_text_blocks(blocks: list[dict[str, Any]]) -> str:
-    return "\n\n".join(str(block.get("text", "")) for block in blocks if block.get("type") == "text")
+    return "\n\n".join(
+        str(block.get("text", "")) for block in blocks if block.get("type") == "text"
+    )
 
 
 def convert_messages_to_openai(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -98,9 +100,67 @@ def _map_openai_finish_reason_to_anthropic(finish_reason: str | None) -> str | N
     return mapping.get(finish_reason, finish_reason)
 
 
-def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) -> Generator[dict[str, Any], None, None]:
-    yield {"type": "message_start", "message": {"id": "openai", "type": "message", "role": "assistant", "model": model, "content": []}}
+def _extract_delta_text(delta: dict[str, Any]) -> str:
+    content = delta.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _extract_delta_thinking(delta: dict[str, Any]) -> str:
+    parts: list[str] = []
+
+    def _append_parts(value: Any) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+            return
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                    continue
+                content = item.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+
+    _append_parts(delta.get("thinking"))
+    _append_parts(delta.get("reasoning"))
+    _append_parts(delta.get("reasoning_content"))
+    return "".join(parts)
+
+
+def openai_stream_to_anthropic_events(
+    lines: Iterable[str | bytes], model: str
+) -> Generator[dict[str, Any], None, None]:
+    yield {
+        "type": "message_start",
+        "message": {
+            "id": "openai",
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [],
+        },
+    }
     text_started = False
+    text_index: int | None = None
+    thinking_started = False
+    thinking_index: int | None = None
+    next_block_index = 0
     tool_indices: dict[int, int] = {}
     last_usage: dict[str, Any] | None = None
     last_finish_reason: str | None = None
@@ -127,17 +187,47 @@ def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) 
         if isinstance(finish_reason, str) and finish_reason:
             last_finish_reason = finish_reason
         delta = choices[0].get("delta", {})
-        text_delta = delta.get("content")
+        thinking_delta = _extract_delta_thinking(delta)
+        if thinking_delta:
+            if not thinking_started:
+                thinking_started = True
+                thinking_index = next_block_index
+                next_block_index += 1
+                yield {
+                    "type": "content_block_start",
+                    "index": thinking_index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                }
+            if thinking_index is not None:
+                yield {
+                    "type": "content_block_delta",
+                    "index": thinking_index,
+                    "delta": {"type": "thinking_delta", "thinking": thinking_delta},
+                }
+
+        text_delta = _extract_delta_text(delta)
         if isinstance(text_delta, str) and text_delta:
             if not text_started:
                 text_started = True
-                yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
-            yield {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text_delta}}
+                text_index = next_block_index
+                next_block_index += 1
+                yield {
+                    "type": "content_block_start",
+                    "index": text_index,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            if text_index is not None:
+                yield {
+                    "type": "content_block_delta",
+                    "index": text_index,
+                    "delta": {"type": "text_delta", "text": text_delta},
+                }
 
         for tool_call in delta.get("tool_calls", []):
             call_idx = int(tool_call.get("index", 0))
             if call_idx not in tool_indices:
-                block_index = len(tool_indices) + 1
+                block_index = next_block_index
+                next_block_index += 1
                 tool_indices[call_idx] = block_index
                 function = tool_call.get("function", {})
                 yield {
@@ -158,8 +248,10 @@ def openai_stream_to_anthropic_events(lines: Iterable[str | bytes], model: str) 
                     "delta": {"type": "input_json_delta", "partial_json": fragment},
                 }
 
-    if text_started:
-        yield {"type": "content_block_stop", "index": 0}
+    if thinking_started and thinking_index is not None:
+        yield {"type": "content_block_stop", "index": thinking_index}
+    if text_started and text_index is not None:
+        yield {"type": "content_block_stop", "index": text_index}
     for block_index in tool_indices.values():
         yield {"type": "content_block_stop", "index": block_index}
     message_stop: dict[str, Any] = {"type": "message_stop"}
@@ -175,14 +267,23 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
     message = ((response.get("choices") or [{}])[0]).get("message", {})
     finish_reason = ((response.get("choices") or [{}])[0]).get("finish_reason")
     content: list[dict[str, Any]] = []
+    thinking = _extract_delta_thinking(message if isinstance(message, dict) else {})
+    if thinking:
+        content.append({"type": "thinking", "thinking": thinking})
     text = message.get("content")
     if isinstance(text, str) and text:
         content.append({"type": "text", "text": text})
+    elif isinstance(text, list):
+        text_from_parts = _extract_delta_text({"content": text})
+        if text_from_parts:
+            content.append({"type": "text", "text": text_from_parts})
     for tool_call in message.get("tool_calls", []) or []:
         function = tool_call.get("function", {})
         arguments = function.get("arguments", "{}")
         try:
-            parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+            parsed_arguments = (
+                json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
+            )
         except (json.JSONDecodeError, TypeError, ValueError):
             parsed_arguments = {}
         content.append(
@@ -203,7 +304,9 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
     usage = response.get("usage")
     if isinstance(usage, dict):
         out["usage"] = usage
-    stop_reason = _map_openai_finish_reason_to_anthropic(finish_reason if isinstance(finish_reason, str) else None)
+    stop_reason = _map_openai_finish_reason_to_anthropic(
+        finish_reason if isinstance(finish_reason, str) else None
+    )
     if stop_reason is not None:
         out["stop_reason"] = stop_reason
     return out
@@ -215,7 +318,9 @@ class OpenAIClient:
         self.api_key = api_key
         self.timeout = timeout
 
-    def create_message(self, payload: dict[str, Any], stream: bool) -> dict[str, Any] | Generator[dict[str, Any], None, None]:
+    def create_message(
+        self, payload: dict[str, Any], stream: bool
+    ) -> dict[str, Any] | Generator[dict[str, Any], None, None]:
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         request_payload = build_openai_payload(payload, stream)
@@ -230,6 +335,8 @@ class OpenAIClient:
             with httpx.Client(timeout=self.timeout) as client:
                 with client.stream("POST", url, json=request_payload, headers=headers) as response:
                     response.raise_for_status()
-                    yield from openai_stream_to_anthropic_events(response.iter_lines(), str(payload.get("model", "")))
+                    yield from openai_stream_to_anthropic_events(
+                        response.iter_lines(), str(payload.get("model", ""))
+                    )
 
         return gen()

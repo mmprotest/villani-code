@@ -145,3 +145,10 @@ Thumbs.db
 # Local secrets / config
 *.env
 .env.*
+
+# Docs / Agent notes (local only)
+AGENTS.md
+caveman.md
+mind-motive.md
+roadmap.md
+docs/
