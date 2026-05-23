@@ -658,6 +658,13 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    before_repo_files: set[str] = set()
+    if tool_name == "Bash":
+        before_repo_files = {
+            str(p.relative_to(runner.repo)).replace("\\", "/")
+            for p in runner.repo.rglob("*")
+            if p.is_file()
+        }
     result = execute_tool(
         tool_name,
         tool_input,
@@ -678,4 +685,19 @@ def execute_tool_with_lifecycle(
             **({"forced": True} if forced else {}),
         }
     )
+    if tool_name == "Bash":
+        after_repo_files = {
+            str(p.relative_to(runner.repo)).replace("\\", "/")
+            for p in runner.repo.rglob("*")
+            if p.is_file()
+        }
+        runner._provisional_scratch_candidates.update(after_repo_files - before_repo_files)
+    if tool_name in {"Write", "Patch"} and not bool(result.get("is_error", False)):
+        runner._non_scratch_created_files.update(
+            {
+                str(target).replace("\\", "/").lstrip("./")
+                for target in _benchmark_mutation_targets(tool_name, tool_input)
+                if str(target).strip()
+            }
+        )
     return result
