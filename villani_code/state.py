@@ -574,6 +574,9 @@ class Runner:
         self._last_verification_fingerprint = ""
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
+        self._provisional_scratch_candidates: set[str] = set()
+        self._explicit_tool_created_files: set[str] = set()
+        self._cleaned_scratch_files: list[str] = []
         self._last_verification_artifact_count = 0
         self._last_validation_target = ""
         self._last_validation_summary = ""
@@ -1489,9 +1492,18 @@ class Runner:
                         "transcript": transcript,
                     }
 
+                pre_repo_files: set[str] = set()
+                if tool_name in {"Bash", "Write", "Patch"}:
+                    pre_repo_files = set(self._snapshot_repo_files())
                 result = self._execute_tool_with_policy(
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
+                if tool_name in {"Write", "Patch"}:
+                    self._explicit_tool_created_files.update(self._new_files_since(pre_repo_files) if pre_repo_files else [])
+                if tool_name == "Bash":
+                    self._provisional_scratch_candidates.update(
+                        self._new_files_since(pre_repo_files) - self._explicit_tool_created_files
+                    )
                 tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
@@ -1659,6 +1671,21 @@ class Runner:
             )
             return not command.startswith(readonly_prefixes)
         return False
+
+
+    def _snapshot_repo_files(self) -> set[str]:
+        files: set[str] = set()
+        for path in self.repo.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.repo).as_posix()
+            if rel.startswith(".git/"):
+                continue
+            files.add(rel)
+        return files
+
+    def _new_files_since(self, before: set[str]) -> set[str]:
+        return self._snapshot_repo_files() - set(before)
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if "turn_index" not in event and isinstance(self._current_turn_index, int):
