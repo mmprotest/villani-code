@@ -20,6 +20,7 @@ from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.debug_mode import DebugMode, build_debug_config
 from villani_code.trace_summary import write_summary_from_events, write_tool_calls_from_events
+from villani_code.orchestrate import orchestrate
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -264,6 +265,75 @@ def takeover_cmd(
         console.print("Auto-approval: ON")
     result = runner.run_villani_mode()
     _print_response_text_blocks(result)
+
+
+@app.command("orchestrate")
+def orchestrate_cmd(
+    task: str = typer.Argument(..., help="Task to orchestrate"),
+    base_url: str = typer.Option(..., "--base-url", help="Base URL for compatible messages API server"),
+    model: str = typer.Option(..., "--model", help="Model name"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository path"),
+    max_tokens: int = typer.Option(4096, "--max-tokens"),
+    stream: bool = typer.Option(False, "--stream/--no-stream"),
+    thinking: Optional[str] = typer.Option(None, "--thinking"),
+    unsafe: bool = typer.Option(False, "--unsafe"),
+    verbose: bool = typer.Option(False, "--verbose"),
+    extra_json: Optional[str] = typer.Option(None, "--extra-json"),
+    redact: bool = typer.Option(False, "--redact"),
+    dangerously_skip_permissions: bool = typer.Option(False, "--dangerously-skip-permissions"),
+    auto_accept_edits: bool = typer.Option(False, "--auto-accept-edits"),
+    auto_approve: bool = typer.Option(True, "--auto-approve/--no-auto-approve"),
+    plan_mode: Literal["off", "auto", "strict"] = typer.Option("auto", "--plan-mode"),
+    max_repair_attempts: int = typer.Option(2, "--max-repair-attempts"),
+    small_model: bool = typer.Option(False, "--small-model"),
+    provider: Literal["anthropic", "openai"] = typer.Option("anthropic", "--provider"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+    benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
+    debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
+    debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
+    workers: int = typer.Option(3, "--workers"),
+    scout_workers: int = typer.Option(3, "--scout-workers"),
+    patch_workers: int = typer.Option(2, "--patch-workers"),
+    rounds: int = typer.Option(3, "--rounds"),
+    worker_timeout: int = typer.Option(300, "--worker-timeout"),
+    verify_command: Optional[str] = typer.Option(None, "--verify-command"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir"),
+    keep_worktrees: bool = typer.Option(False, "--keep-worktrees"),
+) -> None:
+    result = orchestrate(
+        task=task,
+        repo=repo.resolve(),
+        base_url=base_url,
+        model=model,
+        provider=provider,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        stream=stream,
+        thinking=thinking,
+        unsafe=unsafe,
+        verbose=verbose,
+        extra_json=extra_json,
+        redact=redact,
+        dangerously_skip_permissions=dangerously_skip_permissions,
+        auto_accept_edits=auto_accept_edits,
+        auto_approve=auto_approve,
+        plan_mode=plan_mode,
+        max_repair_attempts=max_repair_attempts,
+        small_model=small_model,
+        benchmark_runtime_json=benchmark_runtime_json,
+        debug=debug,
+        debug_dir=debug_dir.resolve() if debug_dir else None,
+        workers=workers,
+        scout_workers=scout_workers,
+        patch_workers=patch_workers,
+        rounds=rounds,
+        worker_timeout=worker_timeout,
+        verify_command=verify_command,
+        output_dir=output_dir.resolve() if output_dir else None,
+        keep_worktrees=keep_worktrees,
+    )
+    console.print_json(json.dumps(result))
+
 
 
 @app.command()
