@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from villani_code.services import ServiceManager, is_likely_service_command
 from urllib.parse import urlparse
 
 import httpx
@@ -143,6 +145,8 @@ def execute_tool(
     unsafe: bool = False,
     debug_callback: Any | None = None,
     tool_call_id: str = "",
+    service_manager: ServiceManager | None = None,
+    event_callback: Any | None = None,
 ) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
@@ -164,7 +168,7 @@ def execute_tool(
         if name == "Search":
             return _ok(_run_search(parsed, repo))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id))
+            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id, service_manager=service_manager, event_callback=event_callback))
         if name == "Write":
             return _ok(_run_write(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Patch":
@@ -235,13 +239,45 @@ def _run_search(data: SearchInput, repo: Path) -> str:
     return proc.stdout
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+def _run_bash(
+    data: BashInput,
+    repo: Path,
+    unsafe: bool,
+    debug_callback: Any | None = None,
+    tool_call_id: str = "",
+    service_manager: ServiceManager | None = None,
+    event_callback: Any | None = None,
+) -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
     cwd = _safe_path(repo, data.cwd)
+    if service_manager is not None and is_likely_service_command(data.command):
+        if callable(debug_callback):
+            debug_callback("service_launch_requested", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
+        service_result = service_manager.start_service(
+            data.command,
+            cwd=cwd,
+            env=None,
+            readiness_timeout_sec=max(1.0, min(float(data.timeout_sec), 20.0)),
+            event_callback=event_callback,
+        )
+        if callable(debug_callback):
+            debug_callback("service_process_spawned", {"tool_call_id": tool_call_id, **service_result})
+        return json.dumps(
+            {
+                "command": data.command,
+                "mode": "service",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "service": service_result,
+            },
+            indent=2,
+        )
+
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
     proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
@@ -258,7 +294,7 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 "tool_call_id": tool_call_id,
             },
         )
-    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+    return json.dumps({"command": data.command, "mode": "command", "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
