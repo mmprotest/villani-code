@@ -1425,3 +1425,64 @@ def run_post_execution_validation(runner: Any, changed_files: list[str]) -> str:
         runner._mission_state.last_checkpoint_id = checkpoint.checkpoint_id
         save_mission_state(runner.repo, runner._mission_state)
     return outcome.message
+
+
+def cleanup_provisional_scratch_artifacts(runner: Any, changed_files: list[str]) -> None:
+    summary = {"cleanup_candidates_seen": 0, "cleanup_candidates_eligible": 0, "cleanup_files_removed": [], "cleanup_verification_rerun": False, "cleanup_kept": False, "cleanup_restored": False, "cleanup_skipped_reason": ""}
+    candidates = set(getattr(runner, "_provisional_scratch_candidates", set()))
+    summary["cleanup_candidates_seen"] = len(candidates)
+    if not candidates:
+        summary["cleanup_skipped_reason"] = "no_candidates"
+        runner._cleanup_summary = summary
+        return
+    source_roots = ["src", "lib", "app"]
+    test_roots = ["tests", "test"]
+    pkg_roots = ["pkg"]
+    confident = any((runner.repo / root).exists() for root in source_roots + test_roots + pkg_roots)
+    if not confident:
+        summary["cleanup_skipped_reason"] = "root_detection_not_confident"
+        runner._cleanup_summary = summary
+        return
+    eligible=[]
+    for rel in sorted(candidates):
+        if rel in getattr(runner, "_explicit_mutation_created_paths", set()):
+            continue
+        path=(runner.repo/rel).resolve()
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            path.relative_to(runner.repo.resolve())
+        except ValueError:
+            continue
+        if rel in changed_files and rel not in candidates:
+            continue
+        if any(rel == r or rel.startswith(r + "/") for r in source_roots + test_roots + pkg_roots if (runner.repo / r).exists()):
+            continue
+        eligible.append(rel)
+    summary["cleanup_candidates_eligible"] = len(eligible)
+    if not eligible:
+        summary["cleanup_skipped_reason"] = "no_eligible_candidates"
+        runner._cleanup_summary = summary
+        return
+    backups=[]
+    try:
+        for rel in eligible:
+            p=runner.repo/rel
+            backups.append((rel,p.read_bytes(),p.stat().st_mode))
+            p.unlink()
+        summary["cleanup_files_removed"] = [b[0] for b in backups]
+        summary["cleanup_verification_rerun"] = True
+        result = run_validation(runner.repo, changed_files, event_callback=runner.event_callback, repo_map=load_repo_map(runner.repo), change_impact=getattr(getattr(runner,'_execution_plan',None),'change_impact',None), action_classes=list(getattr(getattr(runner,'_execution_plan',None),'action_classes',[])), task_mode=str(getattr(getattr(runner,'_execution_plan',None),'task_mode',TaskMode.GENERAL.value)))
+        if result.passed:
+            summary["cleanup_kept"] = True
+        else:
+            raise RuntimeError("verification_failed")
+    except Exception as exc:
+        for rel, data, mode in backups:
+            p=runner.repo/rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+            p.chmod(mode)
+        summary["cleanup_restored"] = bool(backups)
+        summary["cleanup_skipped_reason"] = f"restored:{exc}"
+    runner._cleanup_summary = summary
