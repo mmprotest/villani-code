@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import glob
 import json
+import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -114,6 +116,8 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
 
 DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
 
+SCRATCH_FILENAMES = {"test_fix.py", "check_fix.py", "verify.py", "verify_fix.py", "repro.py", "debug.py", "tmp_test.py", "test_resolver.py"}
+
 
 def _error(message: str) -> dict[str, Any]:
     return {"content": message, "is_error": True}
@@ -190,6 +194,70 @@ def _safe_path(repo: Path, raw: str) -> Path:
     return path
 
 
+
+
+def _scratch_root(repo: Path) -> Path:
+    mission_id = os.getenv("VILLANI_MISSION_ID", "").strip()
+    if mission_id:
+        return repo / ".villani_code" / "missions" / mission_id / "scratch"
+    run_id = os.getenv("VILLANI_RUN_ID", "").strip() or os.getenv("VILLANI_TASK_ID", "").strip()
+    if run_id:
+        return repo / ".villani_code" / "runs" / run_id / "scratch"
+    return repo / ".villani_code" / "scratch" / "default"
+
+
+def _resolve_scratch_alias(repo: Path, raw: str) -> Path:
+    normalized = raw.strip().replace("\\", "/")
+    candidate = _safe_path(repo, normalized)
+    if normalized in {"", "."} or "/" in normalized or candidate.exists():
+        return candidate
+    if Path(normalized).name not in SCRATCH_FILENAMES:
+        return candidate
+    scratch_candidate = (_scratch_root(repo) / Path(normalized).name).resolve()
+    try:
+        scratch_candidate.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes repository") from exc
+    if scratch_candidate.exists():
+        return scratch_candidate
+    return candidate
+
+
+def _resolve_write_target(repo: Path, raw: str) -> tuple[Path, str | None]:
+    path = _safe_path(repo, raw)
+    normalized = raw.strip().replace("\\", "/")
+    if path.exists() or "/" in normalized or Path(normalized).name not in SCRATCH_FILENAMES:
+        return path, None
+    redirected = (_scratch_root(repo) / Path(normalized).name).resolve()
+    try:
+        redirected.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes repository") from exc
+    message = (
+        f"Created scratch file {redirected.relative_to(repo)} instead of repo/{Path(normalized).name} "
+        "because it matched a temporary verification filename."
+    )
+    return redirected, message
+
+
+def _rewrite_bash_scratch_aliases(command: str, cwd: Path, repo: Path) -> str:
+    tokens = shlex.split(command)
+    rewritten = list(tokens)
+    changed = False
+    for i, token in enumerate(tokens):
+        if token.startswith("-"):
+            continue
+        try:
+            candidate = _safe_path(repo, str((cwd / token).relative_to(repo)) if not Path(token).is_absolute() else token)
+        except Exception:
+            continue
+        if candidate.exists() or "/" in token or Path(token).name not in SCRATCH_FILENAMES:
+            continue
+        scratch = _resolve_scratch_alias(repo, Path(token).name)
+        if scratch != candidate and scratch.exists():
+            rewritten[i] = str(scratch.relative_to(cwd))
+            changed = True
+    return shlex.join(rewritten) if changed else command
 def _run_ls(data: LsInput, repo: Path) -> str:
     target = _safe_path(repo, data.path)
     lines = []
@@ -201,7 +269,7 @@ def _run_ls(data: LsInput, repo: Path) -> str:
 
 
 def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
-    path = _safe_path(repo, data.file_path)
+    path = _resolve_scratch_alias(repo, data.file_path)
     raw = path.read_bytes()[: data.max_bytes]
     if callable(debug_callback):
         debug_callback("file_read", {"file_path": data.file_path, "size_bytes": len(raw), "ok": True, "tool_call_id": tool_call_id})
@@ -242,14 +310,19 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
     cwd = _safe_path(repo, data.cwd)
+    command = _rewrite_bash_scratch_aliases(data.command, cwd, repo)
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
-    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    env = dict(os.environ)
+    repo_path = str(repo.resolve())
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = repo_path if not existing_pythonpath else f"{repo_path}{os.pathsep}{existing_pythonpath}"
+    proc = subprocess.run(command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec, env=env)
     if callable(debug_callback):
         debug_callback(
             "command_finished",
             {
-                "command": data.command,
+                "command": command,
                 "cwd": data.cwd,
                 "exit_code": proc.returncode,
                 "stdout": proc.stdout,
@@ -258,11 +331,11 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 "tool_call_id": tool_call_id,
             },
         )
-    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+    return json.dumps({"command": command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
-    path = _safe_path(repo, data.file_path)
+    path, redirected_message = _resolve_write_target(repo, data.file_path)
     if data.mkdirs:
         path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data.content, encoding="utf-8")
@@ -276,6 +349,8 @@ def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, 
                 "tool_call_id": tool_call_id,
             },
         )
+    if redirected_message:
+        return f"Wrote {path}\n{redirected_message}"
     return f"Wrote {path}"
 
 
