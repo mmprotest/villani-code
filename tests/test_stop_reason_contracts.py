@@ -5,6 +5,7 @@ from pathlib import Path
 from villani_code.autonomous_stop import DoneReason, StopDecision, category_exhaustion_reason
 from villani_code.execution import ExecutionBudget
 from villani_code.state import Runner
+from villani_code.state_runtime import evaluate_completion_gate
 from villani_code.task_contract import ObservableKind, RequiredObservable, TaskOutcomeContract
 
 
@@ -89,6 +90,54 @@ def test_completion_gate_satisfied_event_emitted(tmp_path: Path, monkeypatch) ->
     out = runner.run("Ensure required.txt exists.", execution_budget=ExecutionBudget(max_turns=3, max_tool_calls=3, max_seconds=30, max_no_edit_turns=5, max_reconsecutive_recon_turns=5))
     assert "response" in out
     assert any(event.get("type") == "completion_gate_satisfied" for event in events)
+
+
+def test_completion_gate_existing_file_repair_requires_change_evidence(tmp_path: Path) -> None:
+    target = tmp_path / "src" / "foo.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('buggy')\n", encoding="utf-8")
+
+    contract = TaskOutcomeContract(
+        objective="Fix the bug in src/foo.py",
+        task_mode="general",
+        success_predicate="src/foo.py changed and validated",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.MODIFIED_FILE.value,
+                path="src/foo.py",
+                description="repair target",
+                purpose="must_change",
+                must_exist=True,
+            )
+        ],
+        behavioral_checks=[],
+    )
+    dummy = type(
+        "_DummyRunner",
+        (),
+        {
+            "repo": tmp_path,
+            "_task_outcome_contract": contract,
+            "_last_inspection_summary": "",
+            "_inspection_summary": "",
+        },
+    )()
+
+    blocked_gate = evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=[])
+    assert blocked_gate["allowed"] is False
+    assert blocked_gate["contract_satisfied"] is False
+    assert (
+        "missing change evidence" in blocked_gate["reason"].lower()
+        or any("missing_change_evidence" == finding.get("category") for finding in blocked_gate["findings"])
+    )
+
+    allowed_gate = evaluate_completion_gate(
+        dummy,
+        changed_files=["src/foo.py"],
+        validation_artifacts=["pytest tests/test_foo.py -q (exit=0)"],
+    )
+    assert allowed_gate["allowed"] is True
+    assert allowed_gate["contract_satisfied"] is True
 
 
 from types import SimpleNamespace
