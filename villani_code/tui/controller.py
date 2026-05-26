@@ -30,7 +30,9 @@ class ControllerRunner(Protocol):
         approved_plan: PlanSessionResult | None = None,
     ) -> dict[str, Any]: ...
 
-    def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult: ...
+    def plan(
+        self, instruction: str, answers: list[PlanAnswer] | None = None
+    ) -> PlanSessionResult: ...
 
     def run_villani_mode(self) -> dict[str, Any]: ...
 
@@ -76,16 +78,22 @@ class RunnerController:
         self.runner.event_callback = self.on_runner_event
 
     def _validate_runner_contract(self, runner: object) -> None:
-        required_callables = ("run", "plan", "run_villani_mode")
+        required_callables = ("run", "run_villani_mode")
         missing = [name for name in required_callables if not callable(getattr(runner, name, None))]
         if missing:
-            raise TypeError(f"RunnerController runner is missing required method(s): {', '.join(missing)}")
+            raise TypeError(
+                f"RunnerController runner is missing required method(s): {', '.join(missing)}"
+            )
         for attr in ("print_stream", "approval_callback", "event_callback", "permissions"):
             if not hasattr(runner, attr):
                 raise TypeError(f"RunnerController runner is missing required attribute: {attr}")
-        first_param = next(iter(inspect.signature(getattr(runner, "run")).parameters.values()), None)
+        first_param = next(
+            iter(inspect.signature(getattr(runner, "run")).parameters.values()), None
+        )
         if first_param is None:
-            raise TypeError("RunnerController runner.run must accept an instruction positional argument")
+            raise TypeError(
+                "RunnerController runner.run must accept an instruction positional argument"
+            )
 
     def run_prompt(self, text: str) -> None:
         threading.Thread(target=self._run_prompt_worker, args=(text,), daemon=True).start()
@@ -94,7 +102,9 @@ class RunnerController:
         threading.Thread(target=self._run_plan_prompt_worker, args=(text,), daemon=True).start()
 
     def submit_plan_answer(self, answer: PlanAnswer) -> None:
-        threading.Thread(target=self._submit_plan_answer_worker, args=(answer,), daemon=True).start()
+        threading.Thread(
+            target=self._submit_plan_answer_worker, args=(answer,), daemon=True
+        ).start()
 
     def replan(self) -> None:
         threading.Thread(target=self._replan_worker, daemon=True).start()
@@ -117,7 +127,11 @@ class RunnerController:
             kwargs["approved_plan"] = approved_plan
         return self.runner.run(instruction, **kwargs)
 
-    def _runner_plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
+    def _runner_plan(
+        self, instruction: str, answers: list[PlanAnswer] | None = None
+    ) -> PlanSessionResult:
+        if not hasattr(self.runner, "plan") or not callable(self.runner.plan):
+            raise NotImplementedError("Runner does not support planning")
         return self.runner.plan(instruction, answers=answers)
 
     def _runner_run_villani_mode(self) -> dict[str, Any]:
@@ -146,20 +160,26 @@ class RunnerController:
             self._ui_call(callback, stage)
 
     def _run_villani_mode_worker(self) -> None:
-        self.app.post_message(LogAppend("[villani-mode] Autonomous repo improvement started.", kind="meta"))
+        self.app.post_message(
+            LogAppend("[villani-mode] Autonomous repo improvement started.", kind="meta")
+        )
         self.app.post_message(SpinnerState(True, None))
         self.app.post_message(StatusUpdate("scanning repo"))
         try:
             result = self._runner_run_villani_mode()
             content = result.get("response", {}).get("content", [])
-            response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
+            response_text = "\n".join(
+                block.get("text", "") for block in content if block.get("type") == "text"
+            ).strip()
             if response_text:
                 self.app.post_message(LogAppend(response_text, kind="ai"))
             self.app.post_message(SpinnerState(False, "villani mode done"))
             self.app.post_message(StatusUpdate("summarizing"))
         except Exception as exc:  # noqa: BLE001
             tb = traceback.format_exc()
-            self.app.post_message(LogAppend(f"[villani-mode] ERROR {type(exc).__name__}: {exc}", kind="meta"))
+            self.app.post_message(
+                LogAppend(f"[villani-mode] ERROR {type(exc).__name__}: {exc}", kind="meta")
+            )
             self.app.post_message(LogAppend(tb, kind="meta"))
             self.app.post_message(SpinnerState(False, "villani mode failed"))
             self.app.post_message(StatusUpdate("Idle"))
@@ -175,7 +195,9 @@ class RunnerController:
         if isinstance(result_messages, list) and result_messages:
             self._session_messages = result_messages
         content = result.get("response", {}).get("content", [])
-        response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
+        response_text = "\n".join(
+            block.get("text", "") for block in content if block.get("type") == "text"
+        ).strip()
         if response_text and not self._assistant_stream_saw_text:
             self.app.post_message(LogAppend(response_text, kind="ai"))
         self.app.post_message(SpinnerState(False, "Idle"))
@@ -192,7 +214,11 @@ class RunnerController:
             result = self._runner_plan(text)
             self._ui_call(self.app.apply_plan_result, result, True)
             self.app.post_message(SpinnerState(False, None))
-            self.app.post_message(StatusUpdate("Plan ready" if result.ready_to_execute else "Plan awaiting clarification"))
+            self.app.post_message(
+                StatusUpdate(
+                    "Plan ready" if result.ready_to_execute else "Plan awaiting clarification"
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             self._set_plan_stage("idle")
             self.app.post_message(SpinnerState(False, "Planning failed"))
@@ -208,7 +234,9 @@ class RunnerController:
     def _replan_worker(self, auto: bool = False) -> None:
         instruction = self._ui_call(self.app.get_plan_instruction)
         if not instruction:
-            self.app.post_message(LogAppend("No active planning instruction. Use /plan first.", kind="meta"))
+            self.app.post_message(
+                LogAppend("No active planning instruction. Use /plan first.", kind="meta")
+            )
             return
         self._set_plan_stage("planning")
         self.app.post_message(SpinnerState(True, None))
@@ -221,7 +249,9 @@ class RunnerController:
             self._ui_call(self.app.apply_plan_result, result, False)
             self.app.post_message(SpinnerState(False, None))
             label = "Replanned" if not auto else "Plan updated"
-            self.app.post_message(StatusUpdate(label if result.ready_to_execute else "Plan awaiting clarification"))
+            self.app.post_message(
+                StatusUpdate(label if result.ready_to_execute else "Plan awaiting clarification")
+            )
         except Exception as exc:  # noqa: BLE001
             self._set_plan_stage("idle")
             self.app.post_message(SpinnerState(False, "Planning failed"))
@@ -233,7 +263,12 @@ class RunnerController:
     def _run_execute_plan_worker(self) -> None:
         plan = self._ui_call(self.app.get_last_ready_plan)
         if plan is None or not plan.ready_to_execute:
-            self.app.post_message(LogAppend("Cannot execute: no ready plan. Resolve clarifications or run /replan.", kind="meta"))
+            self.app.post_message(
+                LogAppend(
+                    "Cannot execute: no ready plan. Resolve clarifications or run /replan.",
+                    kind="meta",
+                )
+            )
             return
         self._set_plan_stage("executing")
         self.app.post_message(LogAppend("> /execute", kind="user"))
@@ -243,7 +278,9 @@ class RunnerController:
         try:
             result = self._runner_run(plan.instruction, approved_plan=plan)
             content = result.get("response", {}).get("content", [])
-            response_text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
+            response_text = "\n".join(
+                block.get("text", "") for block in content if block.get("type") == "text"
+            ).strip()
             if response_text and not self._assistant_stream_saw_text:
                 self.app.post_message(LogAppend(response_text, kind="ai"))
             self._set_plan_stage("idle")
@@ -326,7 +363,9 @@ class RunnerController:
         request_id = str(uuid.uuid4())
         waiter = ApprovalWaiter(event=threading.Event())
         self._approval_waiters[request_id] = waiter
-        self.app.post_message(ApprovalRequest(f"Allow {tool_name} on {target}?", ["yes", "always", "no"], request_id))
+        self.app.post_message(
+            ApprovalRequest(f"Allow {tool_name} on {target}?", ["yes", "always", "no"], request_id)
+        )
         self.app.post_message(StatusUpdate("Waiting for approval"))
         waiter.event.wait()
         choice = waiter.choice or "no"

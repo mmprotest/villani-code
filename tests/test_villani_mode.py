@@ -102,9 +102,7 @@ def test_done_state_when_no_worthwhile_candidates(tmp_path: Path) -> None:
 
 
 def test_runner_villani_mode_auto_approves_edits(tmp_path: Path) -> None:
-    runner = Runner(
-        client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=True
-    )
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=True)
     events: list[dict] = []
     runner.event_callback = events.append
     result = runner._execute_tool_with_policy(
@@ -115,9 +113,7 @@ def test_runner_villani_mode_auto_approves_edits(tmp_path: Path) -> None:
 
 
 def test_hard_shell_denylist_still_active_in_villani_mode(tmp_path: Path) -> None:
-    runner = Runner(
-        client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=True
-    )
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=True)
     result = runner._execute_tool_with_policy(
         "Bash",
         {"command": "curl https://example.com", "cwd": ".", "timeout_sec": 5},
@@ -131,6 +127,7 @@ def test_cli_has_villani_mode_subcommand() -> None:
     cli_runner = CliRunner()
     result = cli_runner.invoke(cli.app, ["villani-mode", "--help"])
     assert result.exit_code == 0
+
 
 def test_cli_primary_help_mentions_villani_mode() -> None:
     cli_runner = CliRunner()
@@ -154,9 +151,7 @@ def test_cli_flag_overrides_settings(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (home / ".villani").mkdir(parents=True)
-    (home / ".villani" / "settings.json").write_text(
-        '{"villani_mode": true}', encoding="utf-8"
-    )
+    (home / ".villani" / "settings.json").write_text('{"villani_mode": true}', encoding="utf-8")
 
     settings = SettingsManager(repo, home=home).load()
     assert settings.villani_mode is True
@@ -205,6 +200,14 @@ def test_villani_mode_startup_without_prompt(tmp_path: Path) -> None:
 
     class MinimalRunner:
         model = "m"
+        repo = tmp_path
+        print_stream = False
+        event_callback = None
+        approval_callback = None
+        permissions = {}
+
+        def run(self, prompt: str, execution_budget=None, approved_plan=None):
+            return {"response": {"content": [{"type": "text", "text": "done"}]}}
 
         def run_villani_mode(self):
             return {"response": {"content": [{"type": "text", "text": "done"}]}}
@@ -240,9 +243,7 @@ class SequencedRunner:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         return {
-            "response": {
-                "content": [{"type": "text", "text": step.get("text", "done")}]
-            },
+            "response": {"content": [{"type": "text", "text": step.get("text", "done")}]},
             "transcript": {"tool_results": step.get("tool_results", [])},
             "execution": {
                 "turns_used": 1,
@@ -299,9 +300,7 @@ def test_failed_task_is_not_terminal_just_because_attempted(tmp_path: Path) -> N
 
 
 def test_controller_rediscoveries_opportunities_each_wave(tmp_path: Path) -> None:
-    runner = SequencedRunner(
-        tmp_path, [{"inspection_summary": "x"}, {"inspection_summary": "x"}]
-    )
+    runner = SequencedRunner(tmp_path, [{"inspection_summary": "x"}, {"inspection_summary": "x"}])
     planner = SequencedPlanner(
         [
             [_op("Task A", TaskContract.INSPECTION.value)],
@@ -343,8 +342,7 @@ def test_post_edit_validation_followup_enqueued_after_changes(tmp_path: Path) ->
     controller.planner = SequencedPlanner([[_op("Bootstrap minimal tests")]])
     controller.run()
     assert any(
-        op.title == "Validate recent autonomous changes"
-        for op in controller._followup_queue
+        op.title == "Validate recent autonomous changes" for op in controller._followup_queue
     )
 
 
@@ -355,9 +353,7 @@ def test_retry_budget_exhausts_task_lineage(tmp_path: Path) -> None:
     )
     controller.planner = SequencedPlanner([[_op("Task A")]] * 4)
     summary = controller.run()
-    statuses = [
-        t["status"] for t in summary["tasks_attempted"] if t["title"] == "Task A"
-    ]
+    statuses = [t["status"] for t in summary["tasks_attempted"] if t["title"] == "Task A"]
     assert "exhausted" in statuses
 
 
@@ -378,14 +374,9 @@ def test_stop_reason_not_triggered_by_attempted_titles_alone(tmp_path: Path) -> 
     controller = VillaniModeController(
         runner, tmp_path, takeover_config=TakeoverConfig(max_waves=2)
     )
-    controller.planner = SequencedPlanner(
-        [[_op("Task A", TaskContract.INSPECTION.value)]] * 2
-    )
+    controller.planner = SequencedPlanner([[_op("Task A", TaskContract.INSPECTION.value)]] * 2)
     summary = controller.run()
-    assert (
-        summary["done_reason"]
-        != "No remaining opportunities above confidence threshold."
-    )
+    assert summary["done_reason"] != "No remaining opportunities above confidence threshold."
 
 
 def test_task_local_changed_files_excludes_preexisting_dirt(tmp_path: Path) -> None:
@@ -406,9 +397,7 @@ def test_task_local_changed_files_excludes_preexisting_dirt(tmp_path: Path) -> N
     )
     (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "README.md").write_text("dirty\n", encoding="utf-8")
 
     runner = SequencedRunner(
