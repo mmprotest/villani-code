@@ -783,6 +783,12 @@ class Runner:
         if approved_plan is not None and not approved_plan.ready_to_execute:
             raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
+        self.event_callback(
+            {
+                "type": "reliability_layer_loaded",
+                "version": "contract-progress-gate-v1",
+            }
+        )
         messages = messages or build_initial_messages(self.repo, instruction)
         if approved_plan is not None:
             if self._mission_dir is not None:
@@ -1026,19 +1032,18 @@ class Runner:
             benchmark_config=self.benchmark_config,
             task_mode=self._task_mode,
         )
-        if self.small_model or self.villani_mode or self.benchmark_config.enabled:
-            contract_block = format_contract_for_model(contract)
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": contract_block,
-                        }
-                    ],
-                }
-            )
+        contract_block = format_contract_for_model(contract)
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": contract_block,
+                    }
+                ],
+            }
+        )
         previous_attributed = set()
 
         def _attributed_changed_files() -> list[str]:

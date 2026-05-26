@@ -61,8 +61,12 @@ class RecordingRunner:
 
 
 class RunnerClientStub:
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
     def create_message(self, payload, stream=True):
-        del payload, stream
+        del stream
+        self.payloads.append(payload)
         return {"content": [{"type": "text", "text": "Applied minimal fix and validated."}]}
 
 
@@ -126,8 +130,9 @@ def test_missing_required_runner_method_fails_early() -> None:
 
 def test_runner_creates_task_outcome_contract_and_compatibility_dict(tmp_path) -> None:
     events: list[dict] = []
+    client = RunnerClientStub()
     runner = Runner(
-        client=RunnerClientStub(),
+        client=client,
         repo=tmp_path,
         model="x",
         stream=False,
@@ -147,3 +152,22 @@ def test_runner_creates_task_outcome_contract_and_compatibility_dict(tmp_path) -
     assert contract_events
     payload = contract_events[-1]["contract"]
     assert payload["task_mode"] == runner._task_contract["task_mode"]
+
+    reliability_events = [event for event in events if event.get("type") == "reliability_layer_loaded"]
+    assert reliability_events
+    assert reliability_events[-1]["version"] == "contract-progress-gate-v1"
+
+    assert client.payloads
+    first_messages = client.payloads[0]["messages"]
+    assert len(first_messages) > 1 or any(
+        "<task_outcome_contract>" in str(part.get("text", ""))
+        for message in first_messages
+        for part in (message.get("content", []) if isinstance(message.get("content", []), list) else [])
+        if isinstance(part, dict)
+    )
+    assert any(
+        "<task_outcome_contract>" in str(part.get("text", ""))
+        for message in first_messages
+        for part in (message.get("content", []) if isinstance(message.get("content", []), list) else [])
+        if isinstance(part, dict)
+    )
