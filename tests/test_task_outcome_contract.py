@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.planning import ExecutionPlan, PlanRiskLevel, TaskMode
-from villani_code.task_contract import ObservableKind, TaskOutcomeContract, build_task_outcome_contract
+from villani_code.task_contract import ObservableKind, TaskOutcomeContract, build_task_outcome_contract, format_contract_for_model
 
 
 class RuntimeCfg:
@@ -95,3 +95,21 @@ def test_empty_minimal_inputs_yield_valid_contract(tmp_path: Path) -> None:
     assert contract.task_mode == ""
     assert isinstance(contract.required_observables, list)
     assert isinstance(contract.behavioral_checks, list)
+
+
+def test_formatted_contract_includes_objective_required_observables_and_behavioral_checks(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Fix failing test in src/foo.py",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=_plan(),
+        benchmark_config=RuntimeCfg(["build/report.txt"]),
+        existing_preferred_targets=["src/foo.py"],
+    )
+    text = format_contract_for_model(contract)
+    assert "<task_outcome_contract>" in text
+    assert "objective: Fix failing test in src/foo.py" in text
+    assert "required_observables:" in text
+    assert "kind=file path=src/foo.py" in text
+    assert "behavioral_checks:" in text
+    assert "Run validation step: pytest -q tests/test_state.py" in text

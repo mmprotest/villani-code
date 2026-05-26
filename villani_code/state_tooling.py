@@ -197,7 +197,8 @@ def _sanitize_tool_input_file_path(tool_input: dict[str, Any], repo: Path) -> No
                 fp = str(rel).replace("\\", "/")
             except Exception:
                 pass
-        fp = fp.lstrip("./")
+        while fp.startswith("./"):
+            fp = fp[2:]
         if fp.startswith("/"):
             fp = fp.lstrip("/")
         tool_input["file_path"] = fp
