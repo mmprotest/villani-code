@@ -36,11 +36,28 @@ def test_mission_state_roundtrip(tmp_path: Path) -> None:
         status="active",
         verified_facts=[VerifiedFact(kind="k", value="v", source="s")],
         open_hypotheses=[OpenHypothesis(hypothesis_id="h1", statement="maybe", confidence=0.4, status="open")],
+        task_outcome_contract={"task_mode": "general", "success_predicate": "ok"},
     )
     save_mission_state(tmp_path, state)
     loaded = load_mission_state(tmp_path, "m1")
     assert loaded.verified_facts[0].value == "v"
     assert loaded.open_hypotheses[0].hypothesis_id == "h1"
+    assert loaded.task_outcome_contract["task_mode"] == "general"
+
+
+def test_mission_state_load_without_task_outcome_contract(tmp_path: Path) -> None:
+    payload = {
+        "mission_id": "legacy",
+        "objective": "obj",
+        "mode": "execution",
+        "repo_root": str(tmp_path),
+        "status": "active",
+    }
+    mission_dir = get_mission_dir(tmp_path, "legacy")
+    mission_dir.mkdir(parents=True, exist_ok=True)
+    (mission_dir / "mission_state.json").write_text(json.dumps(payload), encoding="utf-8")
+    loaded = load_mission_state(tmp_path, "legacy")
+    assert loaded.task_outcome_contract == {}
 
 
 def test_mission_directory_and_current_pointer(tmp_path: Path) -> None:

@@ -45,6 +45,7 @@ from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
+from villani_code.task_contract import build_task_outcome_contract
 from villani_code.state_execution import (
     collect_runner_failures,
     collect_validation_artifacts,
@@ -571,6 +572,7 @@ class Runner:
         self._scope_expansion_used = False
         self._task_mode: TaskMode = TaskMode.GENERAL
         self._task_contract: dict[str, Any] = {}
+        self._task_outcome_contract = None
         self._last_verification_fingerprint = ""
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
@@ -990,20 +992,24 @@ class Runner:
         no_go_paths = [".git/", ".villani_code/", "__pycache__/"]
         if self.benchmark_config.enabled:
             no_go_paths.extend(self.benchmark_config.forbidden_paths)
-        success_predicates = {
-            TaskMode.FIX_FAILING_TEST: "patch the failing implementation or directly relevant test target and improve failing verification",
-            TaskMode.FIX_LINT_OR_TYPE: "resolve the lint/type issue with minimal file scope",
-            TaskMode.NARROW_REFACTOR: "perform a bounded refactor without widening scope",
-            TaskMode.DOCS_UPDATE_SAFE: "docs-only update with no code edits",
-            TaskMode.INSPECT_AND_PLAN: "inspect repo and stop without code edits unless explicit evidence makes a tiny patch unavoidable",
-            TaskMode.GENERAL: "make one bounded, verifiable repo improvement",
-        }
+        contract = build_task_outcome_contract(
+            repo=self.repo,
+            instruction=instruction,
+            task_mode=self._task_mode,
+            execution_plan=getattr(self, "_execution_plan", None),
+            benchmark_config=self.benchmark_config,
+            existing_preferred_targets=preferred_targets[:6],
+        )
+        contract.no_go_paths = sorted(set(no_go_paths))
+        self._task_outcome_contract = contract
         self._task_contract = {
-            "task_mode": self._task_mode.value,
-            "success_predicate": success_predicates.get(self._task_mode, success_predicates[TaskMode.GENERAL]),
-            "preferred_targets": preferred_targets[:6],
-            "no_go_paths": sorted(set(no_go_paths)),
+            "task_mode": contract.task_mode,
+            "success_predicate": contract.success_predicate,
+            "preferred_targets": list(contract.preferred_targets),
+            "no_go_paths": list(contract.no_go_paths),
         }
+        self.event_callback({"type": "task_outcome_contract_created", "contract": contract.to_dict()})
+        self._update_mission_state(task_outcome_contract=contract.to_dict())
         system = build_system_blocks(
             self.repo,
             repo_map=self._repo_map if self.small_model else "",
