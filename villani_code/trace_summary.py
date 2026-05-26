@@ -481,6 +481,16 @@ def aggregate_summary_from_events(run_dir: Path, *, status_override: str | None 
     run_terminal_count = 0
     patch_failed_event_tool_ids: set[str] = set()
 
+    contract_required_observables_count: int | None = None
+    contract_behavioral_checks_count: int | None = None
+    contract_satisfaction_final: bool | None = None
+    completion_gate_blocks = 0
+    recovery_packets_injected = 0
+    repeated_file_patch_stalls = 0
+    repeated_failed_command_stalls = 0
+    repeated_verification_stalls = 0
+    feedback_interpretations_created = 0
+
     for event in events:
         event_type = str(event.get("event_type") or event.get("type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -590,6 +600,43 @@ def aggregate_summary_from_events(run_dir: Path, *, status_override: str | None 
                 model_terminal_request_ids.add(request_id)
             continue
 
+        if event_type == "task_outcome_contract_created":
+            contract_payload = payload.get("contract") if isinstance(payload.get("contract"), dict) else {}
+            observables = contract_payload.get("required_observables")
+            behavioral = contract_payload.get("behavioral_checks")
+            if isinstance(observables, list):
+                contract_required_observables_count = len(observables)
+            if isinstance(behavioral, list):
+                contract_behavioral_checks_count = len(behavioral)
+            continue
+
+        if event_type == "contract_satisfaction_checked":
+            sat = payload.get("satisfied")
+            if isinstance(sat, bool):
+                contract_satisfaction_final = sat
+            continue
+
+        if event_type == "completion_gate_blocked":
+            completion_gate_blocks += 1
+            continue
+
+        if event_type == "recovery_packet_injected":
+            recovery_packets_injected += 1
+            continue
+
+        if event_type == "progress_assessed":
+            if bool(payload.get("repeated_file_patch")):
+                repeated_file_patch_stalls += 1
+            if bool(payload.get("repeated_failed_command")):
+                repeated_failed_command_stalls += 1
+            if bool(payload.get("repeated_verification")):
+                repeated_verification_stalls += 1
+            continue
+
+        if event_type == "feedback_interpretation_created":
+            feedback_interpretations_created += 1
+            continue
+
         if event_type == "model_request_completed":
             model_request_completions += 1
             request_id = str(payload.get("request_id", "")).strip()
@@ -648,6 +695,15 @@ def aggregate_summary_from_events(run_dir: Path, *, status_override: str | None 
         "commands_failed": len(shell_tools_failed_ids),
         "artifacts": artifacts,
         "aggregation_version": AGGREGATION_VERSION,
+        "contract_required_observables_count": contract_required_observables_count,
+        "contract_behavioral_checks_count": contract_behavioral_checks_count,
+        "contract_satisfaction_final": contract_satisfaction_final,
+        "completion_gate_blocks": completion_gate_blocks,
+        "recovery_packets_injected": recovery_packets_injected,
+        "repeated_file_patch_stalls": repeated_file_patch_stalls,
+        "repeated_failed_command_stalls": repeated_failed_command_stalls,
+        "repeated_verification_stalls": repeated_verification_stalls,
+        "feedback_interpretations_created": feedback_interpretations_created,
     }
 
     if saw_turn_events and summary["turn_count"] == 0:
