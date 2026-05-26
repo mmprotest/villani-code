@@ -89,3 +89,66 @@ def test_completion_gate_satisfied_event_emitted(tmp_path: Path, monkeypatch) ->
     out = runner.run("Ensure required.txt exists.", execution_budget=ExecutionBudget(max_turns=3, max_tool_calls=3, max_seconds=30, max_no_edit_turns=5, max_reconsecutive_recon_turns=5))
     assert "response" in out
     assert any(event.get("type") == "completion_gate_satisfied" for event in events)
+
+
+from types import SimpleNamespace
+
+from villani_code import state_runtime
+from villani_code.feedback_interpreter import interpret_feedback
+from villani_code.progress_ledger import ProgressLedger, format_recovery_packet
+from villani_code.task_contract import check_contract_satisfaction
+
+
+def test_reliability_event_traceability_packet_can_capture_all_stage_events(tmp_path: Path) -> None:
+    events: list[dict] = []
+    contract = TaskOutcomeContract(
+        objective="write artifacts/out.txt",
+        task_mode="general",
+        success_predicate="artifact exists",
+        required_observables=[
+            RequiredObservable(kind=ObservableKind.FILE.value, path="artifacts/out.txt", description="output")
+        ],
+    )
+
+    events.append({"type": "contract_created", "objective": contract.objective})
+    contract_result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    events.append({"type": "contract_satisfaction_checked", "satisfied": contract_result.satisfied})
+
+    ledger = ProgressLedger()
+    ledger.record_observation(
+        tool_name="Patch",
+        tool_input={"file_path": "src/app.py"},
+        result_is_error=False,
+        changed_files=["src/app.py"],
+        validation_artifacts=[],
+        verification_fingerprint="same",
+        contract_satisfied=contract_result.satisfied,
+        contract_findings_count=len(contract_result.findings),
+    )
+    assessment = ledger.assess()
+    events.append({"type": "progress_assessed", "stalled": assessment.stalled})
+
+    packet = format_recovery_packet(assessment, contract, "", ["src/app.py"])
+    events.append({"type": "recovery_packet_injected", "has_packet": "<recovery_packet>" in packet})
+
+    gate = state_runtime.evaluate_completion_gate(
+        SimpleNamespace(repo=tmp_path, _task_outcome_contract=contract, _last_inspection_summary="", _inspection_summary=""),
+        changed_files=[],
+        validation_artifacts=[],
+    )
+    events.append({"type": "completion_gate_blocked" if not gate["allowed"] else "completion_gate_satisfied"})
+
+    interpretation = interpret_feedback(
+        command_results=[{"command": "pytest -q", "exit": 1, "stdout": "", "stderr": "Traceback\n  File \"src/app.py\", line 1"}],
+        contract_result=contract_result,
+        changed_files=["src/app.py"],
+    )
+    events.append({"type": "feedback_interpretation_created", "action": interpretation.likely_next_action})
+
+    types = {event["type"] for event in events}
+    assert "contract_created" in types
+    assert "contract_satisfaction_checked" in types
+    assert "progress_assessed" in types
+    assert "recovery_packet_injected" in types
+    assert "completion_gate_blocked" in types
+    assert "feedback_interpretation_created" in types

@@ -688,3 +688,21 @@ def test_run_verification_includes_feedback_interpretation_and_event(tmp_path: P
     assert "<feedback_interpretation>" in detail.get("detail", "")
     assert any(e.get("type") == "feedback_interpretation_created" for e in events)
     assert "status=" in text
+
+
+def test_feedback_interpretation_traceback_in_stderr_extracts_target_file() -> None:
+    interpretation = interpret_feedback(
+        command_results=[
+            {
+                "command": "python -m pytest -q",
+                "exit": 1,
+                "stdout": "",
+                "stderr": 'Traceback (most recent call last):\n  File "src/service/core.py", line 42, in <module>\nValueError: boom',
+            }
+        ],
+        contract_result=None,
+        changed_files=["src/service/core.py"],
+    )
+    assert interpretation.failed is True
+    assert interpretation.likely_next_action == "inspect_or_patch_traceback_target"
+    assert "src/service/core.py" in interpretation.evidence_excerpt
