@@ -1133,10 +1133,10 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "occurrence": runner._repeated_stale_verification_count,
             }
         )
-        summary = "status repeated without new validation evidence"
+        summary = "status repeated without new task outcome contract validation evidence"
         lines.append("verification state repeated")
-        lines.append("no new evidence was produced")
-        lines.append("next step must either change target, change validation evidence, or stop")
+        lines.append("no new validation evidence was produced for the task outcome contract")
+        lines.append("next step must either change target, change validation evidence, or start progress recovery")
         lines.append("</verification>")
         runner.event_callback(
             {

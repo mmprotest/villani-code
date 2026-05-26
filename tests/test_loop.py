@@ -651,7 +651,7 @@ def test_constrained_run_injects_task_contract_message(tmp_path: Path):
     texts = [b.get("text", "") for m in runtime_payload["messages"] for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
     contract_lines = [t for t in texts if "<task_outcome_contract>" in t]
     assert contract_lines
-    assert "completion_rule: Claim completion after required observables and behavioral checks have supporting evidence." in contract_lines[-1]
+    assert "completion_gate: Claim completion after required observables and behavioral checks have supporting validation evidence for the task outcome contract." in contract_lines[-1]
 
 
 def test_constrained_recovery_stages_then_terminates(tmp_path: Path):
