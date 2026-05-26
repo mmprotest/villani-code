@@ -331,3 +331,78 @@ def test_missing_modified_file_evidence_uses_specific_category(tmp_path: Path) -
     gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=[])
     assert gate["allowed"] is False
     assert any(f.get("category") == "missing_change_evidence" for f in gate["findings"])
+
+
+def test_completion_gate_soft_missing_observable_allows_with_validation_evidence(tmp_path: Path) -> None:
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="ref",
+            task_mode="general",
+            success_predicate="s",
+            required_observables=[
+                RequiredObservable(
+                    kind=ObservableKind.FILE.value,
+                    path="missing.txt",
+                    description="soft",
+                    strength="soft",
+                    confidence=0.6,
+                )
+            ],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=["pytest -q (exit=0)"])
+    assert gate["allowed"] is True
+
+
+def test_completion_gate_hard_missing_generated_file_blocks(tmp_path: Path) -> None:
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="gen",
+            task_mode="general",
+            success_predicate="s",
+            required_observables=[
+                RequiredObservable(
+                    kind=ObservableKind.GENERATED_FILE.value,
+                    path="out/report.txt",
+                    description="hard",
+                    strength="hard",
+                    confidence=0.9,
+                )
+            ],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=["pytest -q (exit=0)"])
+    assert gate["allowed"] is False
+
+
+def test_completion_gate_hard_missing_modified_file_blocks(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("x=1\n", encoding="utf-8")
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="mod",
+            task_mode="general",
+            success_predicate="s",
+            required_observables=[
+                RequiredObservable(
+                    kind=ObservableKind.MODIFIED_FILE.value,
+                    path="src/foo.py",
+                    description="hard",
+                    purpose="must_change",
+                    strength="hard",
+                    confidence=0.9,
+                )
+            ],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=["pytest -q (exit=0)"])
+    assert gate["allowed"] is False

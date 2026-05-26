@@ -20,6 +20,7 @@ class ObservableKind(str, Enum):
     GENERATED_FILE = "generated_file"
     GENERATED_DIRECTORY = "generated_directory"
     VALIDATION_EVIDENCE = "validation_evidence"
+    ABSENT_PATH = "absent_path"
 
 
 @dataclass(slots=True)
@@ -29,8 +30,10 @@ class RequiredObservable:
     description: str
     must_exist: bool = True
     evidence_command: str = ""
-    source: str = "inferred"
+    source: str = "inferred_instruction"
     purpose: str = "evidence"
+    strength: str = "soft"
+    confidence: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -43,8 +46,10 @@ class RequiredObservable:
             description=str(payload.get("description", "")),
             must_exist=bool(payload.get("must_exist", True)),
             evidence_command=str(payload.get("evidence_command", "")),
-            source=str(payload.get("source", "inferred")),
+            source=str(payload.get("source", "inferred_instruction")),
             purpose=str(payload.get("purpose", "evidence")),
+            strength=str(payload.get("strength", "soft")),
+            confidence=float(payload.get("confidence", 0.5)),
         )
 
 
@@ -93,6 +98,9 @@ class ContractCheckFinding:
     message: str
     path: str = ""
     severity: str = "medium"
+    strength: str = "soft"
+    confidence: float = 0.5
+    source: str = "inferred_instruction"
 
 
 @dataclass(slots=True)
@@ -127,7 +135,23 @@ def check_contract_satisfaction(
         purpose = str(observable.purpose or "").strip().lower()
         target_path = _normalize_path(observable.path)
         checked_observables.append(f"{kind}:{target_path}")
-        absolute_path = repo / target_path
+        absolute_path = Path(target_path) if target_path.startswith("/") else repo / target_path
+        obs_strength = str(observable.strength or "soft")
+        obs_confidence = float(observable.confidence or 0.0)
+        is_default_strength = (str(observable.strength or "soft") == "soft") and float(observable.confidence or 0.5) == 0.5
+        if obs_strength == "soft" and is_default_strength and (
+            purpose in {"must_change", "must_generate", "must_validate", "must_be_absent"}
+            or kind in {
+                ObservableKind.MODIFIED_FILE.value,
+                ObservableKind.GENERATED_FILE.value,
+                ObservableKind.VALIDATION_EVIDENCE.value,
+                ObservableKind.FILE.value,
+                ObservableKind.ABSENT_PATH.value,
+            }
+        ):
+            obs_strength = "hard"
+            obs_confidence = max(obs_confidence, 0.85)
+        obs_source = str(observable.source or "inferred_instruction")
 
         satisfied = True
         if purpose in {"reference", "must_exist", "must_generate"}:
@@ -144,6 +168,9 @@ def check_contract_satisfaction(
                         message=f"Referenced file exists but no modification evidence was found: {target_path}",
                         path=target_path,
                         severity="high",
+                        strength=obs_strength,
+                        confidence=obs_confidence,
+                        source=obs_source,
                     )
                 )
                 continue
@@ -161,6 +188,9 @@ def check_contract_satisfaction(
                         message=f"Referenced file exists but no modification evidence was found: {target_path}",
                         path=target_path,
                         severity="high",
+                        strength=obs_strength,
+                        confidence=obs_confidence,
+                        source=obs_source,
                     )
                 )
                 continue
@@ -179,6 +209,8 @@ def check_contract_satisfaction(
                 target_path in normalized_changed
                 or any(path.startswith(f"{target_path}/") for path in normalized_changed)
             )
+        elif kind == ObservableKind.ABSENT_PATH.value or purpose == "must_be_absent":
+            satisfied = not absolute_path.exists()
 
         if not satisfied:
             category = "missing_required_file"
@@ -196,6 +228,9 @@ def check_contract_satisfaction(
                     message=f"Required observable not satisfied: {kind} {target_path}",
                     path=target_path,
                     severity="high",
+                    strength=obs_strength,
+                    confidence=obs_confidence,
+                    source=obs_source,
                 )
             )
 
@@ -211,6 +246,9 @@ def check_contract_satisfaction(
                     message=f"Required behavioral check has no supporting evidence: {check.command.strip()}",
                     path="",
                     severity="high",
+                    strength="hard",
+                    confidence=0.9,
+                    source="behavioral_check",
                 )
             )
 
@@ -223,7 +261,7 @@ def check_contract_satisfaction(
             summary="Contract has no required observables or behavioral checks.",
         )
 
-    satisfied = not findings
+    satisfied = not [f for f in findings if f.strength == "hard" and f.confidence >= 0.75]
     summary = "Contract satisfied." if satisfied else f"Contract unsatisfied with {len(findings)} finding(s)."
     return ContractCheckResult(
         satisfied=satisfied,
@@ -235,7 +273,10 @@ def check_contract_satisfaction(
 
 
 def _normalize_path(value: str) -> str:
-    return str(value or "").replace("\\", "/").strip().lstrip("./")
+    normalized = str(value or "").replace("\\", "/").strip()
+    if normalized.startswith("/"):
+        return normalized
+    return normalized.lstrip("./")
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -289,7 +330,21 @@ def extract_instruction_paths(instruction: str) -> list[str]:
         if path:
             extracted.append(path)
 
-    return _dedupe(extracted)
+    filtered: list[str] = []
+    allowed_filename = re.compile(rf"^[\w.-]+{suffix_pattern}$", flags=re.IGNORECASE)
+    system_roots = ("/etc/", "/var/", "/usr/", "/tmp/", "/opt/", "/run/")
+    for candidate in _dedupe(extracted):
+        lower = candidate.lower()
+        if lower in {"start/restart"}:
+            continue
+        if re.fullmatch(r"\d+\.\d+", candidate):
+            continue
+        if "/" not in candidate and "." in candidate and not allowed_filename.match(candidate):
+            continue
+        if candidate.startswith("/") and not (candidate.startswith(system_roots) or len(candidate) > 1):
+            continue
+        filtered.append(candidate)
+    return filtered
 
 
 def _has_context_keyword(context: str, keywords: tuple[str, ...]) -> bool:
@@ -309,6 +364,7 @@ def classify_instruction_path_mentions(instruction: str) -> list[RequiredObserva
         "fix", "update", "modify", "edit", "patch", "change", "repair", "refactor", "implement",
     )
     reference_keywords = ("inspect", "read", "check", "look at", "review", "use")
+    remove_keywords = ("remove", "delete", "ensure absent")
 
     for path in extract_instruction_paths(instruction):
         if not path or path in dedupe_seen:
@@ -322,15 +378,29 @@ def classify_instruction_path_mentions(instruction: str) -> list[RequiredObserva
 
         kind = ObservableKind.EXISTING_FILE.value
         purpose = "reference"
+        strength = "soft"
+        confidence = 0.6
+        source = "inferred_instruction"
         if _has_context_keyword(context, generate_keywords):
             kind = ObservableKind.GENERATED_FILE.value
             purpose = "must_generate"
+            strength = "hard"
+            confidence = 0.9
         elif _has_context_keyword(context, modify_keywords):
             kind = ObservableKind.MODIFIED_FILE.value
             purpose = "must_change"
+            strength = "hard"
+            confidence = 0.9
+        elif _has_context_keyword(context, remove_keywords):
+            kind = ObservableKind.ABSENT_PATH.value
+            purpose = "must_be_absent"
+            strength = "hard"
+            confidence = 0.9
         elif _has_context_keyword(context, reference_keywords):
             kind = ObservableKind.EXISTING_FILE.value
             purpose = "reference"
+            strength = "advisory"
+            confidence = 0.7
 
         observables.append(
             RequiredObservable(
@@ -338,8 +408,10 @@ def classify_instruction_path_mentions(instruction: str) -> list[RequiredObserva
                 path=path,
                 description=f"Instruction-referenced target: {path}",
                 must_exist=True,
-                source="instruction",
+                source=source,
                 purpose=purpose,
+                strength=strength,
+                confidence=confidence,
             )
         )
 
@@ -375,6 +447,8 @@ def build_task_outcome_contract(
                 description=f"Runtime-expected artifact: {path}",
                 must_exist=True,
                 source="runtime_config",
+                strength="soft",
+                confidence=0.7,
             )
         )
 
@@ -399,7 +473,9 @@ def build_task_outcome_contract(
                 description="Validation evidence for the modified behavior",
                 purpose="must_validate",
                 must_exist=False,
-                source="inferred",
+                source="inferred_instruction",
+                strength="soft",
+                confidence=0.65,
             )
         )
 

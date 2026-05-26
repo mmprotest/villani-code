@@ -163,10 +163,9 @@ class ProgressLedger:
     def _update_file_patch_streak(self, observation: ProgressObservation) -> None:
         single = observation.action_changed_files[0] if len(observation.action_changed_files) == 1 else ""
         has_contract_improvement = self._is_contract_improvement(observation)
-        has_verification_growth = len(observation.validation_artifacts) > self._prev_validation_artifact_count
         has_successful_recovery = self._is_successful_recovery(observation)
 
-        if has_contract_improvement or has_verification_growth or has_successful_recovery:
+        if has_contract_improvement or has_successful_recovery:
             self._same_file_patch_streak = 0
             self._last_single_changed_file = ""
             return
@@ -196,7 +195,8 @@ class ProgressLedger:
 
     def _update_verification_repeat(self, observation: ProgressObservation) -> None:
         fingerprint = observation.verification_fingerprint
-        if not fingerprint:
+        has_real_validation_result = bool(observation.validation_artifacts)
+        if not fingerprint or not has_real_validation_result:
             self._verification_repeat_streak = 0
             self._last_verification_fingerprint = ""
             return
