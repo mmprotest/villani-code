@@ -10,6 +10,7 @@ from villani_code.task_contract import (
     TaskOutcomeContract,
     build_task_outcome_contract,
     check_contract_satisfaction,
+    extract_instruction_paths,
     format_contract_for_model,
 )
 
@@ -279,6 +280,21 @@ def test_contract_checker_reference_file_observable_satisfied_when_file_exists_u
     )
     result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
     assert result.satisfied is True
+
+
+def test_extract_instruction_paths_included_patterns() -> None:
+    assert extract_instruction_paths("Fix src/foo.py") == ["src/foo.py"]
+    assert extract_instruction_paths("Write to output/results.txt") == ["output/results.txt"]
+    assert extract_instruction_paths("Create `report.jsonl`") == ["report.jsonl"]
+    assert extract_instruction_paths("Inspect README.md") == ["README.md"]
+
+
+def test_extract_instruction_paths_excluded_non_paths() -> None:
+    assert extract_instruction_paths("Use Python 3.11") == []
+    assert extract_instruction_paths("Install package foo.bar") == []
+    assert extract_instruction_paths("The function my.module.name failed") == []
+    assert extract_instruction_paths("Version v1.2.3 is broken") == []
+    assert extract_instruction_paths("Use sklearn.model_selection") == []
 
 
 
