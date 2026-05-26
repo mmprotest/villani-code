@@ -616,7 +616,9 @@ def test_small_model_run_injects_task_contract_steering_message(tmp_path: Path):
         for b in m.get("content", [])
         if isinstance(b, dict) and b.get("type") == "text"
     ]
-    assert any("Task contract" in t and "name likely target file first" in t for t in user_texts)
+    assert any("<task_outcome_contract>" in t and "objective:" in t for t in user_texts)
+    assert any("required_observables:" in t for t in user_texts)
+    assert any("behavioral_checks:" in t for t in user_texts)
 
 
 def test_stall_in_villani_mode_terminates_without_relax_prompt(tmp_path: Path):
@@ -647,9 +649,9 @@ def test_constrained_run_injects_task_contract_message(tmp_path: Path):
     assert client.first_payload is not None
     runtime_payload = client.payloads[1] if hasattr(client, "payloads") else client.first_payload
     texts = [b.get("text", "") for m in runtime_payload["messages"] for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
-    contract_lines = [t for t in texts if "Task contract" in t]
+    contract_lines = [t for t in texts if "<task_outcome_contract>" in t]
     assert contract_lines
-    assert "name likely target file first" in contract_lines[-1]
+    assert "completion_rule: Claim completion after required observables and behavioral checks have supporting evidence." in contract_lines[-1]
 
 
 def test_constrained_recovery_stages_then_terminates(tmp_path: Path):

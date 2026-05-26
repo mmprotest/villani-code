@@ -153,3 +153,32 @@ def build_task_outcome_contract(
         confidence=0.5,
         source="inferred",
     )
+
+
+def format_contract_for_model(contract: TaskOutcomeContract) -> str:
+    objective = contract.objective.strip() or "unspecified objective"
+    success_predicate = contract.success_predicate.strip() or "Provide auditable evidence of progress."
+    preferred_targets = [target.strip() for target in contract.preferred_targets if target.strip()][:4]
+    required_observables = contract.required_observables[:6]
+    behavioral_checks = [check.description.strip() for check in contract.behavioral_checks if check.description.strip()][:6]
+
+    lines = [
+        "<task_outcome_contract>",
+        f"objective: {objective}",
+        f"success_predicate: {success_predicate}",
+        "preferred_targets:",
+        *([f"- {target}" for target in preferred_targets] or ["- none"]),
+        "required_observables:",
+        *(
+            [
+                f"- kind={obs.kind} path={obs.path} description={obs.description}"
+                for obs in required_observables
+            ]
+            or ["- none"]
+        ),
+        "behavioral_checks:",
+        *([f"- {description}" for description in behavioral_checks] or ["- none"]),
+        "completion_rule: Claim completion after required observables and behavioral checks have supporting evidence.",
+        "</task_outcome_contract>",
+    ]
+    return "\n".join(lines)

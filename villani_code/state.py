@@ -45,7 +45,7 @@ from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
-from villani_code.task_contract import build_task_outcome_contract
+from villani_code.task_contract import build_task_outcome_contract, format_contract_for_model
 from villani_code.state_execution import (
     collect_runner_failures,
     collect_validation_artifacts,
@@ -1018,18 +1018,14 @@ class Runner:
             task_mode=self._task_mode,
         )
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
-            preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
+            contract_block = format_contract_for_model(contract)
             messages.append(
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                f"Task contract ({self._task_contract['task_mode']}): name likely target file first (prefer {preferred_text}); "
-                                f"keep scope tight; verify against: {self._task_contract['success_predicate']}; avoid speculative multi-file edits."
-                                " Stop if verification repeats without new evidence."
-                            ),
+                            "text": contract_block,
                         }
                     ],
                 }
@@ -1209,11 +1205,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
