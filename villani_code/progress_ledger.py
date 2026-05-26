@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from typing import Any
+from villani_code.task_contract import TaskOutcomeContract
 
 
 @dataclass(frozen=True)
@@ -168,3 +169,60 @@ class ProgressLedger:
         )
         self._prev_contract_satisfied = observation.contract_satisfied
         self._prev_contract_findings_count = observation.contract_findings_count
+
+
+def format_recovery_packet(
+    assessment: ProgressAssessment,
+    contract: TaskOutcomeContract | None,
+    last_validation_summary: str,
+    changed_files: list[str],
+) -> str:
+    objective = (
+        contract.objective.strip()
+        if contract is not None and contract.objective.strip()
+        else "unspecified objective"
+    )
+    validation = (last_validation_summary or "").strip()
+    unsatisfied_items: list[str] = []
+    if contract is not None:
+        summary_lower = validation.lower()
+        for observable in contract.required_observables:
+            path = str(observable.path or "").strip()
+            if path and path not in changed_files and path not in summary_lower:
+                unsatisfied_items.append(f"required_observable: {observable.kind} {path}")
+        for check in contract.behavioral_checks:
+            command = str(check.command or "").strip()
+            if command and command.lower() not in summary_lower:
+                unsatisfied_items.append(f"behavioral_check: {command}")
+    if not unsatisfied_items:
+        unsatisfied_items.append("No explicit contract gaps identified; gather fresh evidence.")
+
+    changed = sorted({str(path).strip() for path in changed_files if str(path).strip()})
+    stalled_signal = (
+        "repeated_file_patch"
+        if assessment.repeated_file_patch
+        else "repeated_failed_command"
+        if assessment.repeated_failed_command
+        else "repeated_verification"
+        if assessment.repeated_verification
+        else "generic_stall"
+    )
+    reason = assessment.reason or "stall_detected"
+    lines = [
+        "<recovery_packet>",
+        f"reason: {reason}",
+        f"stalled_signal: {stalled_signal}",
+        f"contract_objective: {objective}",
+        "unsatisfied_contract_items:",
+        *[f"- {item}" for item in unsatisfied_items[:8]],
+        "changed_files:",
+        *([f"- {path}" for path in changed[:12]] or ["- (none)"]),
+        "required_next_action:",
+        "Choose one recovery action:",
+        "1. inspect the most relevant current diff or file",
+        "2. simplify the repeated edit",
+        "3. run one targeted validation command",
+        "4. make one minimal patch tied to the unsatisfied contract",
+        "</recovery_packet>",
+    ]
+    return "\n".join(lines)

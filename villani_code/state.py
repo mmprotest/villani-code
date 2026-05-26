@@ -43,7 +43,7 @@ from villani_code.context_projection import build_model_context_packet, render_m
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
-from villani_code.progress_ledger import ProgressLedger
+from villani_code.progress_ledger import ProgressLedger, format_recovery_packet
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.task_contract import build_task_outcome_contract, format_contract_for_model
@@ -601,6 +601,8 @@ class Runner:
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
         self._progress_ledger = ProgressLedger()
+        self._recovery_packet_injections = 0
+        self._recovery_packet_injection_cap = 2
         self._last_contract_satisfied: bool | None = None
         self._last_contract_findings_count: int | None = None
         if self.small_model:
@@ -969,6 +971,7 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
+        self._recovery_packet_injections = 0
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
         if self._first_attempt_write_lock_active:
@@ -1457,6 +1460,7 @@ class Runner:
                 }
 
             tool_results: list[dict[str, Any]] = []
+            pending_recovery_packet = ""
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
@@ -1605,6 +1609,22 @@ class Runner:
                         "suggested_recovery_mode": progress.suggested_recovery_mode,
                     }
                 )
+                if progress.stalled and self._recovery_packet_injections < self._recovery_packet_injection_cap:
+                    pending_recovery_packet = format_recovery_packet(
+                        assessment=progress,
+                        contract=self._task_outcome_contract,
+                        last_validation_summary=self._last_validation_summary,
+                        changed_files=_attributed_changed_files(),
+                    )
+                    self._recovery_packet_injections += 1
+                    self.event_callback(
+                        {
+                            "type": "recovery_packet_injected",
+                            "count": self._recovery_packet_injections,
+                            "cap": self._recovery_packet_injection_cap,
+                            "reason": progress.reason,
+                        }
+                    )
 
                 reason = _budget_reason()
                 if reason:
@@ -1658,6 +1678,13 @@ class Runner:
                     else self._pending_verification
                 )
                 self._pending_verification = ""
+            if pending_recovery_packet and next_user_content:
+                existing = str(next_user_content[-1].get("content", ""))
+                next_user_content[-1]["content"] = (
+                    f"{existing}\n\n{pending_recovery_packet}"
+                    if existing
+                    else pending_recovery_packet
+                )
             messages.append({"role": "user", "content": next_user_content})
 
             reason = _budget_reason()

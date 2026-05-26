@@ -7,6 +7,7 @@ from villani_code.autonomous import AutonomousTask, VillaniModeController
 from villani_code.state import Runner
 from villani_code import state_runtime
 from villani_code.task_contract import ObservableKind, RequiredObservable, TaskOutcomeContract
+from villani_code.execution import ExecutionBudget
 
 
 class _Client:
@@ -257,6 +258,66 @@ def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Pat
     err = runner._small_model_tool_guard("Patch", {"file_path": "src/a.py", "patch": "x"})
     assert err is None
     assert runner._before_contents["src/a.py"] == "x=0\n"
+
+
+class _SequenceClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._idx = 0
+
+    def create_message(self, payload, stream):
+        del payload, stream
+        if self._idx >= len(self._responses):
+            return {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+        current = self._responses[self._idx]
+        self._idx += 1
+        return current
+
+
+def test_repeated_failed_command_injects_recovery_packet_and_event(tmp_path: Path) -> None:
+    events: list[dict] = []
+    client = _SequenceClient(
+        [
+                {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "id": "1", "input": {"command": "definitely_not_a_real_command"}}]},
+                {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "id": "2", "input": {"command": "definitely_not_a_real_command"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "stop"}]},
+        ]
+    )
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=False, event_callback=events.append)
+    def _fake_execute(*_args, **_kwargs):
+        return {"content": "failed", "is_error": True}
+    runner._execute_tool_with_policy = _fake_execute  # type: ignore[method-assign]
+    result = runner.run("Run a command.", execution_budget=ExecutionBudget(max_turns=3, max_tool_calls=5, max_seconds=30, max_no_edit_turns=5, max_reconsecutive_recon_turns=5))
+    assert any(event.get("type") == "recovery_packet_injected" for event in events)
+
+
+def test_recovery_packet_cap_and_contract_objective(tmp_path: Path) -> None:
+    target = tmp_path / "a.py"
+    target.write_text("x=0\n", encoding="utf-8")
+    responses = [
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "Write", "id": "w1", "input": {"file_path": "a.py", "content": "x=1\n"}}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "Write", "id": "w2", "input": {"file_path": "a.py", "content": "x=2\n"}}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "Write", "id": "w3", "input": {"file_path": "a.py", "content": "x=3\n"}}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "Write", "id": "w4", "input": {"file_path": "a.py", "content": "x=4\n"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+    runner = Runner(client=_SequenceClient(responses), repo=tmp_path, model="m", stream=False, small_model=True)
+    runner._task_outcome_contract = TaskOutcomeContract(
+        objective="Fix stall behavior",
+        task_mode="general",
+        success_predicate="x",
+        required_observables=[RequiredObservable(kind=ObservableKind.FILE.value, path="a.py", description="a")],
+    )
+    outcome = runner.run("Update a.py", execution_budget=ExecutionBudget(max_turns=5, max_tool_calls=8, max_seconds=30, max_no_edit_turns=6, max_reconsecutive_recon_turns=6))
+    packets = [
+        str(block.get("content", ""))
+        for message in outcome["messages"]
+        if message.get("role") == "user"
+        for block in message.get("content", [])
+        if isinstance(block, dict) and "<recovery_packet>" in str(block.get("content", ""))
+    ]
+    assert len(packets) <= runner._recovery_packet_injection_cap
+    assert any("contract_objective: Update a.py" in packet or "contract_objective: Fix stall behavior" in packet for packet in packets)
 
 
 def test_run_verification_emits_contract_satisfaction_checked(tmp_path: Path, monkeypatch) -> None:
