@@ -1299,13 +1299,18 @@ class Runner:
                         )
                         if self._completion_gate_retry_count >= self._completion_gate_retry_cap:
                             return _finish_bounded(response, "contract_unsatisfied", False)
-                        unsatisfied_items = []
+                        missing_evidence_items = []
                         for finding in list(gate.get("findings", [])):
-                            message = str(finding.get("message", "")).strip()
-                            if message:
-                                unsatisfied_items.append(f"- {message}")
-                        if not unsatisfied_items:
-                            unsatisfied_items.append("- Missing task outcome contract validation evidence.")
+                            category = str(finding.get("category", "")).strip() or "unknown"
+                            path = str(finding.get("path", "")).strip()
+                            message = str(finding.get("message", "")).strip() or "Missing required evidence."
+                            line = f"- category={category}"
+                            if path:
+                                line += f" path={path}"
+                            line += f" message={message}"
+                            missing_evidence_items.append(line)
+                        if not missing_evidence_items:
+                            missing_evidence_items.append("- category=unknown message=Missing task outcome contract validation evidence.")
                         messages.append(
                             {
                                 "role": "user",
@@ -1316,8 +1321,8 @@ class Runner:
                                             "<completion_gate>\n"
                                             "completion_blocked: true\n"
                                             f"reason: {gate.get('reason', 'task outcome contract validation evidence missing')}\n"
-                                            "unsatisfied_items:\n"
-                                            + "\n".join(unsatisfied_items)
+                                            "missing_evidence:\n"
+                                            + "\n".join(missing_evidence_items)
                                             + "\nrequired_next_action:\n"
                                             "Produce validation evidence for missing required observables, run behavioral checks, or explain why the task outcome contract cannot be satisfied.\n"
                                             "</completion_gate>"
@@ -1515,13 +1520,18 @@ class Runner:
                     )
                     if self._completion_gate_retry_count >= self._completion_gate_retry_cap:
                         return _finish_bounded(response, "contract_unsatisfied", False)
-                    unsatisfied_items = []
+                    missing_evidence_items = []
                     for finding in list(gate.get("findings", [])):
-                        message = str(finding.get("message", "")).strip()
-                        if message:
-                            unsatisfied_items.append(f"- {message}")
-                    if not unsatisfied_items:
-                        unsatisfied_items.append("- Missing task outcome contract validation evidence.")
+                        category = str(finding.get("category", "")).strip() or "unknown"
+                        path = str(finding.get("path", "")).strip()
+                        message = str(finding.get("message", "")).strip() or "Missing required evidence."
+                        line = f"- category={category}"
+                        if path:
+                            line += f" path={path}"
+                        line += f" message={message}"
+                        missing_evidence_items.append(line)
+                    if not missing_evidence_items:
+                        missing_evidence_items.append("- category=unknown message=Missing task outcome contract validation evidence.")
                     messages.append(
                         {
                             "role": "user",
@@ -1532,8 +1542,8 @@ class Runner:
                                         "<completion_gate>\n"
                                         "completion_blocked: true\n"
                                         f"reason: {gate.get('reason', 'task outcome contract validation evidence missing')}\n"
-                                        "unsatisfied_items:\n"
-                                        + "\n".join(unsatisfied_items)
+                                        "missing_evidence:\n"
+                                        + "\n".join(missing_evidence_items)
                                         + "\nrequired_next_action:\n"
                                         "Produce validation evidence for missing required observables, run behavioral checks, or explain why the task outcome contract cannot be satisfied.\n"
                                         "</completion_gate>"

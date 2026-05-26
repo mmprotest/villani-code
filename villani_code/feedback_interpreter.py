@@ -47,7 +47,7 @@ def interpret_feedback(
     failed_commands = [r for r in command_results if int(r.get("exit", 0)) != 0]
     has_missing_observable = bool(
         contract_result
-        and any(str(f.category) == "required_observable" for f in contract_result.findings)
+        and any(str(f.category).startswith("missing_") for f in contract_result.findings)
     )
     failed = bool(failed_commands or has_missing_observable)
 
@@ -63,9 +63,9 @@ def interpret_feedback(
             str(failed_commands[0].get("stdout", "")),
         )
     elif has_missing_observable:
-        failed_check = "task_outcome_contract.required_observable"
+        failed_check = "task_outcome_contract.missing_evidence"
         disproved_assumption = "required_observables_were_produced"
-        first = next((f for f in (contract_result.findings if contract_result else []) if str(f.category) == "required_observable"), None)
+        first = next((f for f in (contract_result.findings if contract_result else []) if str(f.category).startswith("missing_")), None)
         evidence_excerpt = _compact_excerpt(first.message if first else "")
 
     unsatisfied_contract_items = []
