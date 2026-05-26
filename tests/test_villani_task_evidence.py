@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from villani_code.autonomy import TaskContract, VerificationEngine, VerificationStatus
 from villani_code.autonomous import AutonomousTask, VillaniModeController
+from villani_code.state import Runner
+from villani_code.execution import ExecutionBudget
+from villani_code import state_runtime
+from villani_code.task_contract import ObservableKind, RequiredObservable, TaskOutcomeContract
 
 
 class StaticRunner:
@@ -195,3 +200,61 @@ def test_outer_controller_does_not_override_noop_execution_to_pass(
 
     status, _ = controller._adjudicate_task(task, verification)
     assert status != "passed"
+
+
+def test_completion_gate_missing_required_file_blocks() -> None:
+    repo = Path(".")
+    dummy = SimpleNamespace(
+        repo=repo,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="require file",
+            task_mode="general",
+            success_predicate="file exists",
+            required_observables=[RequiredObservable(kind=ObservableKind.FILE.value, path="does/not/exist.txt", description="required")],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=[])
+    assert gate["allowed"] is False
+    assert gate["contract_satisfied"] is False
+
+
+def test_completion_gate_existing_required_file_allows(tmp_path: Path) -> None:
+    (tmp_path / "required.txt").write_text("ok\n", encoding="utf-8")
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="require file",
+            task_mode="general",
+            success_predicate="file exists",
+            required_observables=[RequiredObservable(kind=ObservableKind.FILE.value, path="required.txt", description="required")],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=["required.txt"], validation_artifacts=[])
+    assert gate["allowed"] is True
+    assert gate["contract_satisfied"] is True
+
+
+def test_completion_gate_empty_contract_allows(tmp_path: Path) -> None:
+    dummy = SimpleNamespace(repo=tmp_path, _task_outcome_contract=TaskOutcomeContract(objective="x", task_mode="general", success_predicate="x"), _last_inspection_summary="", _inspection_summary="")
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=[])
+    assert gate["allowed"] is True
+
+
+def test_completion_gate_inspection_evidence_allows(tmp_path: Path) -> None:
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="inspect",
+            task_mode="inspect_and_plan",
+            success_predicate="inspection evidence",
+            required_observables=[RequiredObservable(kind=ObservableKind.FILE.value, path="missing.txt", description="missing")],
+        ),
+        _last_inspection_summary="Checked files and reported findings.",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=["inspection completed"])
+    assert gate["allowed"] is True

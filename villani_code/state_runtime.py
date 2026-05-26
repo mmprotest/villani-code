@@ -157,6 +157,53 @@ def _has_useful_failure_signal(evidence: dict[str, Any] | None) -> bool:
     )
 
 
+def evaluate_completion_gate(
+    runner: Any,
+    changed_files: list[str],
+    validation_artifacts: list[str],
+) -> dict[str, Any]:
+    contract = getattr(runner, "_task_outcome_contract", None)
+    if contract is None:
+        return {"allowed": True, "reason": "no_contract", "findings": [], "contract_satisfied": None}
+
+    contract_result = check_contract_satisfaction(
+        repo=runner.repo,
+        contract=contract,
+        changed_files=changed_files,
+        validation_artifacts=validation_artifacts,
+    )
+    if contract_result.satisfied:
+        return {
+            "allowed": True,
+            "reason": "contract_satisfied",
+            "findings": [asdict(finding) for finding in contract_result.findings],
+            "contract_satisfied": True,
+        }
+
+    mode = str(getattr(contract, "task_mode", "")).strip().lower()
+    if mode == TaskMode.INSPECT_AND_PLAN.value:
+        inspection = str(getattr(runner, "_last_inspection_summary", "") or "").strip()
+        if not inspection:
+            inspection = str(getattr(runner, "_inspection_summary", "") or "").strip()
+        artifact_text = "\n".join(str(item) for item in validation_artifacts if str(item).strip())
+        if inspection and ("inspection" in artifact_text.lower() or "inspect" in artifact_text.lower()):
+            return {
+                "allowed": True,
+                "reason": "inspection_evidence",
+                "findings": [asdict(finding) for finding in contract_result.findings],
+                "contract_satisfied": False,
+            }
+
+    findings = [asdict(finding) for finding in contract_result.findings]
+    reason = "missing required observables or behavioral check evidence"
+    return {
+        "allowed": False,
+        "reason": reason,
+        "findings": findings,
+        "contract_satisfied": False,
+    }
+
+
 def run_pre_edit_failure_localization(runner: Any) -> dict[str, Any] | None:
     cfg = getattr(runner, "benchmark_config", None)
     visible_commands = list(getattr(cfg, "visible_verification", []) if cfg else [])
