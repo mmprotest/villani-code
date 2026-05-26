@@ -258,3 +258,30 @@ def test_completion_gate_inspection_evidence_allows(tmp_path: Path) -> None:
     )
     gate = state_runtime.evaluate_completion_gate(dummy, changed_files=[], validation_artifacts=["inspection completed"])
     assert gate["allowed"] is True
+
+
+def test_completion_gate_validation_evidence_observable_allows(tmp_path: Path) -> None:
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="validate",
+            task_mode="general",
+            success_predicate="validation evidence",
+            required_observables=[
+                RequiredObservable(
+                    kind=ObservableKind.VALIDATION_EVIDENCE.value,
+                    path="pytest -q tests/test_state.py",
+                    description="must validate",
+                    purpose="must_validate",
+                )
+            ],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+    gate = state_runtime.evaluate_completion_gate(
+        dummy,
+        changed_files=[],
+        validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
+    )
+    assert gate["allowed"] is True

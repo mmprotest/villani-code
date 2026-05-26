@@ -117,14 +117,58 @@ def check_contract_satisfaction(
     normalized_changed = {_normalize_path(path) for path in changed_files}
     artifact_text = "\n".join(str(item) for item in validation_artifacts)
 
+    def _path_exists(path: Path, observable_kind: str) -> bool:
+        if observable_kind in (ObservableKind.DIRECTORY.value, ObservableKind.GENERATED_DIRECTORY.value):
+            return path.exists() and path.is_dir()
+        return path.exists()
+
     for observable in contract.required_observables:
         kind = str(observable.kind)
+        purpose = str(observable.purpose or "").strip().lower()
         target_path = _normalize_path(observable.path)
         checked_observables.append(f"{kind}:{target_path}")
         absolute_path = repo / target_path
 
         satisfied = True
-        if kind == ObservableKind.FILE.value:
+        if purpose in {"reference", "must_exist", "must_generate"}:
+            satisfied = _path_exists(absolute_path, kind)
+        elif purpose == "must_change":
+            satisfied = bool(target_path) and (
+                target_path in normalized_changed
+                or any(path.startswith(f"{target_path}/") for path in normalized_changed)
+            )
+            if not satisfied and _path_exists(absolute_path, kind):
+                findings.append(
+                    ContractCheckFinding(
+                        category="missing_change_evidence",
+                        message=f"Referenced file exists but no modification evidence was found: {target_path}",
+                        path=target_path,
+                        severity="high",
+                    )
+                )
+                continue
+        elif purpose == "must_validate":
+            satisfied = bool(target_path) and target_path in artifact_text
+        elif kind == ObservableKind.MODIFIED_FILE.value:
+            satisfied = bool(target_path) and (
+                target_path in normalized_changed
+                or any(path.startswith(f"{target_path}/") for path in normalized_changed)
+            )
+            if not satisfied and _path_exists(absolute_path, kind):
+                findings.append(
+                    ContractCheckFinding(
+                        category="missing_change_evidence",
+                        message=f"Referenced file exists but no modification evidence was found: {target_path}",
+                        path=target_path,
+                        severity="high",
+                    )
+                )
+                continue
+        elif kind == ObservableKind.GENERATED_FILE.value:
+            satisfied = _path_exists(absolute_path, kind)
+        elif kind == ObservableKind.VALIDATION_EVIDENCE.value:
+            satisfied = bool(target_path) and target_path in artifact_text
+        elif kind == ObservableKind.FILE.value:
             satisfied = absolute_path.exists() and absolute_path.is_file()
         elif kind == ObservableKind.DIRECTORY.value:
             satisfied = absolute_path.exists() and absolute_path.is_dir()

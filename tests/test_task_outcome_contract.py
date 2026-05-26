@@ -198,6 +198,89 @@ def test_contract_checker_empty_contract_is_satisfied(tmp_path: Path) -> None:
     assert result.satisfied is True
 
 
+def test_contract_checker_existing_file_with_must_change_without_diff_is_unsatisfied(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("print('ok')\n", encoding="utf-8")
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.EXISTING_FILE.value,
+                path="src/foo.py",
+                description="must change existing file",
+                purpose="must_change",
+            )
+        ],
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is False
+    assert any(f.category == "missing_change_evidence" for f in result.findings)
+
+
+def test_contract_checker_existing_file_with_must_change_with_diff_is_satisfied(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "foo.py").write_text("print('ok')\n", encoding="utf-8")
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.EXISTING_FILE.value,
+                path="src/foo.py",
+                description="must change existing file",
+                purpose="must_change",
+            )
+        ],
+    )
+    result = check_contract_satisfaction(
+        tmp_path, contract, changed_files=["src/foo.py"], validation_artifacts=[]
+    )
+    assert result.satisfied is True
+
+
+def test_contract_checker_generated_file_observable_satisfied_when_file_exists(tmp_path: Path) -> None:
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "report.txt").write_text("ok\n", encoding="utf-8")
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.GENERATED_FILE.value,
+                path="build/report.txt",
+                description="generated output",
+                purpose="must_generate",
+            )
+        ],
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is True
+
+
+def test_contract_checker_reference_file_observable_satisfied_when_file_exists_unchanged(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.EXISTING_FILE.value,
+                path="docs/guide.md",
+                description="reference file",
+                purpose="reference",
+            )
+        ],
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is True
+
+
 
 
 def test_classify_fix_instruction_marks_modified_file(tmp_path: Path) -> None:
