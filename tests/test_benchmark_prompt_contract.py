@@ -55,3 +55,13 @@ def test_render_prompt_includes_artifact_requirements(tmp_path: Path) -> None:
     assert "- tests/test_regression.py" in prompt
     assert "Visible verification commands:" in prompt
     assert "- pytest -q tests/test_regression.py" in prompt
+
+
+def test_benchmark_prompt_still_uses_benchmark_policy_text(tmp_path: Path) -> None:
+    from villani_code.prompting import build_system_blocks
+    from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
+
+    cfg = BenchmarkRuntimeConfig(enabled=True, task_id="t1", allowlist_paths=["src/"], expected_files=["src/app.py"])
+    text = build_system_blocks(tmp_path / "task" / "repo", benchmark_config=cfg)[0]["text"]
+    assert "You are running a bounded benchmark task." in text
+    assert "In benchmark mode, do not create exploratory helper files" in text

@@ -132,3 +132,18 @@ def test_verification_avoids_ignored_paths(tmp_path: Path) -> None:
     verifier = VerificationEngine(tmp_path)
     result = verifier.verify("edit", ["__pycache__/a.pyc", "a.py"], [])
     assert "__pycache__/a.pyc" not in result.files_examined
+
+
+def test_villani_mode_system_prompt_keeps_contract_vocabulary(tmp_path: Path) -> None:
+    from villani_code.prompting import build_system_blocks
+
+    text = build_system_blocks(tmp_path, villani_mode=True)[0]["text"]
+    assert "verify" in text.lower()
+
+
+def test_small_model_contract_text_contains_task_outcome_contract_vocabulary() -> None:
+    from villani_code.task_contract import TaskOutcomeContract, format_contract_for_model
+
+    text = format_contract_for_model(TaskOutcomeContract(objective="x", task_mode="general", success_predicate="y"))
+    assert "<task_outcome_contract>" in text
+    assert "completion_gate:" in text

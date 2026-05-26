@@ -813,3 +813,38 @@ def test_mutation_denial_summary_logged_and_surfaced(monkeypatch, capsys) -> Non
     assert row.policy_warning == 'benchmark_mutation_denials'
     assert row.policy_warning_detail is not None
     assert 'count=1' in row.policy_warning_detail
+
+
+def test_completion_gate_text_uses_contract_vocabulary(tmp_path: Path) -> None:
+    from villani_code.task_contract import BehavioralCheck, RequiredObservable, TaskOutcomeContract, ObservableKind, format_contract_for_model
+
+    contract = TaskOutcomeContract(
+        objective="Fix behavior",
+        task_mode="general",
+        success_predicate="done",
+        required_observables=[RequiredObservable(kind=ObservableKind.FILE.value, path="src/app.py", description="updated")],
+        behavioral_checks=[BehavioralCheck(description="run pytest", command="pytest -q")],
+    )
+    text = format_contract_for_model(contract)
+    assert "<task_outcome_contract>" in text
+    assert "required_observables:" in text
+    assert "behavioral_checks:" in text
+    assert "completion_gate:" in text
+
+
+def test_recovery_packet_uses_progress_recovery_vocabulary() -> None:
+    from villani_code.progress_ledger import ProgressAssessment, format_recovery_packet
+
+    assessment = ProgressAssessment(
+        stalled=True,
+        improving=False,
+        reason="stall_detected",
+        repeated_file_patch=False,
+        repeated_failed_command=True,
+        repeated_verification=False,
+        suggested_recovery_mode="strategy_shift",
+    )
+    packet = format_recovery_packet(assessment, contract=None, last_validation_summary="", changed_files=[])
+    assert "<recovery_packet>" in packet
+    assert "unsatisfied_task_outcome_contract_items:" in packet
+    assert "Choose one progress recovery action:" in packet

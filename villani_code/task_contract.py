@@ -272,7 +272,7 @@ def format_contract_for_model(contract: TaskOutcomeContract) -> str:
         ),
         "behavioral_checks:",
         *([f"- {description}" for description in behavioral_checks] or ["- none"]),
-        "completion_rule: Claim completion after required observables and behavioral checks have supporting evidence.",
+        "completion_gate: Claim completion after required observables and behavioral checks have supporting validation evidence for the task outcome contract.",
         "</task_outcome_contract>",
     ]
     return "\n".join(lines)

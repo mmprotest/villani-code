@@ -195,7 +195,7 @@ def format_recovery_packet(
             if command and command.lower() not in summary_lower:
                 unsatisfied_items.append(f"behavioral_check: {command}")
     if not unsatisfied_items:
-        unsatisfied_items.append("No explicit contract gaps identified; gather fresh evidence.")
+        unsatisfied_items.append("No explicit task outcome contract gaps identified; gather fresh validation evidence for required observables and behavioral checks.")
 
     changed = sorted({str(path).strip() for path in changed_files if str(path).strip()})
     stalled_signal = (
@@ -213,12 +213,12 @@ def format_recovery_packet(
         f"reason: {reason}",
         f"stalled_signal: {stalled_signal}",
         f"contract_objective: {objective}",
-        "unsatisfied_contract_items:",
+        "unsatisfied_task_outcome_contract_items:",
         *[f"- {item}" for item in unsatisfied_items[:8]],
         "changed_files:",
         *([f"- {path}" for path in changed[:12]] or ["- (none)"]),
         "required_next_action:",
-        "Choose one recovery action:",
+        "Choose one progress recovery action:",
         "1. inspect the most relevant current diff or file",
         "2. simplify the repeated edit",
         "3. run one targeted validation command",

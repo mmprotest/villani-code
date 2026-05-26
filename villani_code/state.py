@@ -1292,7 +1292,7 @@ class Runner:
                         self.event_callback(
                             {
                                 "type": "completion_gate_blocked",
-                                "reason": gate.get("reason", ""),
+                                "reason": gate.get("reason", "task outcome contract completion gate blocked"),
                                 "attempt": self._completion_gate_retry_count,
                                 "findings": gate.get("findings", []),
                             }
@@ -1305,7 +1305,7 @@ class Runner:
                             if message:
                                 unsatisfied_items.append(f"- {message}")
                         if not unsatisfied_items:
-                            unsatisfied_items.append("- Missing required contract evidence.")
+                            unsatisfied_items.append("- Missing task outcome contract validation evidence.")
                         messages.append(
                             {
                                 "role": "user",
@@ -1315,11 +1315,11 @@ class Runner:
                                         "text": (
                                             "<completion_gate>\n"
                                             "completion_blocked: true\n"
-                                            f"reason: {gate.get('reason', 'contract evidence missing')}\n"
+                                            f"reason: {gate.get('reason', 'task outcome contract validation evidence missing')}\n"
                                             "unsatisfied_items:\n"
                                             + "\n".join(unsatisfied_items)
                                             + "\nrequired_next_action:\n"
-                                            "Produce evidence for the missing observable, run a targeted check, or explain why the contract cannot be satisfied.\n"
+                                            "Produce validation evidence for missing required observables, run behavioral checks, or explain why the task outcome contract cannot be satisfied.\n"
                                             "</completion_gate>"
                                         ),
                                     }
@@ -1331,7 +1331,7 @@ class Runner:
                     self.event_callback(
                         {
                             "type": "completion_gate_satisfied",
-                            "reason": gate.get("reason", ""),
+                            "reason": gate.get("reason", "task outcome contract completion gate blocked"),
                             "findings_count": len(list(gate.get("findings", []))),
                         }
                     )
@@ -1508,7 +1508,7 @@ class Runner:
                     self.event_callback(
                         {
                             "type": "completion_gate_blocked",
-                            "reason": gate.get("reason", ""),
+                            "reason": gate.get("reason", "task outcome contract completion gate blocked"),
                             "attempt": self._completion_gate_retry_count,
                             "findings": gate.get("findings", []),
                         }
@@ -1521,7 +1521,7 @@ class Runner:
                         if message:
                             unsatisfied_items.append(f"- {message}")
                     if not unsatisfied_items:
-                        unsatisfied_items.append("- Missing required contract evidence.")
+                        unsatisfied_items.append("- Missing task outcome contract validation evidence.")
                     messages.append(
                         {
                             "role": "user",
@@ -1531,11 +1531,11 @@ class Runner:
                                     "text": (
                                         "<completion_gate>\n"
                                         "completion_blocked: true\n"
-                                        f"reason: {gate.get('reason', 'contract evidence missing')}\n"
+                                        f"reason: {gate.get('reason', 'task outcome contract validation evidence missing')}\n"
                                         "unsatisfied_items:\n"
                                         + "\n".join(unsatisfied_items)
                                         + "\nrequired_next_action:\n"
-                                        "Produce evidence for the missing observable, run a targeted check, or explain why the contract cannot be satisfied.\n"
+                                        "Produce validation evidence for missing required observables, run behavioral checks, or explain why the task outcome contract cannot be satisfied.\n"
                                         "</completion_gate>"
                                     ),
                                 }
@@ -1547,7 +1547,7 @@ class Runner:
                 self.event_callback(
                     {
                         "type": "completion_gate_satisfied",
-                        "reason": gate.get("reason", ""),
+                        "reason": gate.get("reason", "task outcome contract completion gate blocked"),
                         "findings_count": len(list(gate.get("findings", []))),
                     }
                 )
