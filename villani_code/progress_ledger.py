@@ -164,13 +164,23 @@ class ProgressLedger:
         single = observation.action_changed_files[0] if len(observation.action_changed_files) == 1 else ""
         has_contract_improvement = self._is_contract_improvement(observation)
         has_verification_growth = len(observation.validation_artifacts) > self._prev_validation_artifact_count
-        if single and single == self._last_single_changed_file and not has_contract_improvement and not has_verification_growth:
-            self._same_file_patch_streak += 1
-        elif single:
-            self._same_file_patch_streak = 1
-        else:
+        has_successful_recovery = self._is_successful_recovery(observation)
+
+        if has_contract_improvement or has_verification_growth or has_successful_recovery:
             self._same_file_patch_streak = 0
-        self._last_single_changed_file = single
+            self._last_single_changed_file = ""
+            return
+
+        if single:
+            if single == self._last_single_changed_file:
+                self._same_file_patch_streak += 1
+            else:
+                self._same_file_patch_streak = 1
+            self._last_single_changed_file = single
+
+
+    def _is_successful_recovery(self, observation: ProgressObservation) -> bool:
+        return observation.tool_name == "Recovery" and not observation.result_is_error
 
     def _update_failed_command_streak(self, observation: ProgressObservation) -> None:
         if observation.tool_name != "Bash" or not observation.result_is_error:

@@ -517,3 +517,27 @@ def test_progress_ledger_mutating_different_files_breaks_same_file_patch_streak(
         contract_findings_count=2,
     )
     assert ledger.assess().repeated_file_patch is False
+
+def test_progress_ledger_non_mutating_observations_preserve_same_file_patch_streak() -> None:
+    ledger = ProgressLedger()
+    observations = [
+        ("Patch", {"file_path": "src/foo.py"}, False, ["src/foo.py"]),
+        ("Bash", {"command": "pytest -q"}, True, []),
+        ("Patch", {"file_path": "src/foo.py"}, False, ["src/foo.py"]),
+        ("Bash", {"command": "pytest -q"}, True, []),
+        ("Patch", {"file_path": "src/foo.py"}, False, ["src/foo.py"]),
+    ]
+    for tool_name, tool_input, result_is_error, action_changed_files in observations:
+        ledger.record_observation(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            result_is_error=result_is_error,
+            action_changed_files=action_changed_files,
+            cumulative_changed_files=["src/foo.py"],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+
+    assert ledger.assess().repeated_file_patch is True
