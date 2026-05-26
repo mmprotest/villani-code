@@ -148,7 +148,7 @@ def check_contract_satisfaction(
                 )
                 continue
         elif purpose == "must_validate":
-            satisfied = bool(target_path) and target_path in artifact_text
+            satisfied = bool(validation_artifacts) if not target_path else target_path in artifact_text
         elif kind == ObservableKind.MODIFIED_FILE.value:
             satisfied = bool(target_path) and (
                 target_path in normalized_changed
@@ -167,7 +167,7 @@ def check_contract_satisfaction(
         elif kind == ObservableKind.GENERATED_FILE.value:
             satisfied = _path_exists(absolute_path, kind)
         elif kind == ObservableKind.VALIDATION_EVIDENCE.value:
-            satisfied = bool(target_path) and target_path in artifact_text
+            satisfied = bool(validation_artifacts) if not target_path else target_path in artifact_text
         elif kind == ObservableKind.FILE.value:
             satisfied = absolute_path.exists() and absolute_path.is_file()
         elif kind == ObservableKind.DIRECTORY.value:
@@ -373,6 +373,26 @@ def build_task_outcome_contract(
         BehavioralCheck(description=f"Run validation step: {step}", command=step, required=True)
         for step in validation_steps
     ]
+
+    has_must_change = any((obs.purpose or "").strip().lower() == "must_change" for obs in required_observables)
+    if has_must_change:
+        behavioral_checks.append(
+            BehavioralCheck(
+                description="Validate the modified behavior or explain the validation evidence",
+                command="",
+                required=True,
+            )
+        )
+        required_observables.append(
+            RequiredObservable(
+                kind=ObservableKind.VALIDATION_EVIDENCE.value,
+                path="",
+                description="Validation evidence for the modified behavior",
+                purpose="must_validate",
+                must_exist=False,
+                source="inferred",
+            )
+        )
 
     mode_value = getattr(task_mode, "value", task_mode)
     mode_text = str(mode_value or "")
