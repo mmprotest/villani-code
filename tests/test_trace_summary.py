@@ -356,3 +356,49 @@ def test_failed_patch_tool_without_patch_failure_event_fails(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="missing canonical file_patch_failed events"):
         aggregate_summary_from_events(run_dir)
+
+def test_reliability_metrics_in_summary(tmp_path: Path) -> None:
+    run_dir, logger = _logger(tmp_path)
+    logger.emit(
+        "task_outcome_contract_created",
+        {"contract": {"required_observables": ["a", "b"], "behavioral_checks": ["x"]}},
+        turn_index=1,
+    )
+    logger.emit("contract_satisfaction_checked", {"satisfied": False}, turn_index=1)
+    logger.emit("completion_gate_blocked", {"reason": "missing evidence"}, turn_index=1)
+    logger.emit("recovery_packet_injected", {"reason": "stall"}, turn_index=2)
+    logger.emit(
+        "progress_assessed",
+        {"repeated_file_patch": True, "repeated_failed_command": True, "repeated_verification": False},
+        turn_index=2,
+    )
+    logger.emit("feedback_interpretation_created", {"summary": "do x"}, turn_index=2)
+    logger.emit("contract_satisfaction_checked", {"satisfied": True}, turn_index=3)
+    _finish_run(logger)
+
+    summary = aggregate_summary_from_events(run_dir)
+    assert summary["contract_required_observables_count"] == 2
+    assert summary["contract_behavioral_checks_count"] == 1
+    assert summary["contract_satisfaction_final"] is True
+    assert summary["completion_gate_blocks"] == 1
+    assert summary["recovery_packets_injected"] == 1
+    assert summary["repeated_file_patch_stalls"] == 1
+    assert summary["repeated_failed_command_stalls"] == 1
+    assert summary["repeated_verification_stalls"] == 0
+    assert summary["feedback_interpretations_created"] == 1
+
+
+def test_reliability_metrics_safe_defaults_for_old_or_missing_events(tmp_path: Path) -> None:
+    run_dir, logger = _logger(tmp_path)
+    _finish_run(logger)
+    summary = aggregate_summary_from_events(run_dir)
+
+    assert summary["contract_required_observables_count"] is None
+    assert summary["contract_behavioral_checks_count"] is None
+    assert summary["contract_satisfaction_final"] is None
+    assert summary["completion_gate_blocks"] == 0
+    assert summary["recovery_packets_injected"] == 0
+    assert summary["repeated_file_patch_stalls"] == 0
+    assert summary["repeated_failed_command_stalls"] == 0
+    assert summary["repeated_verification_stalls"] == 0
+    assert summary["feedback_interpretations_created"] == 0

@@ -107,6 +107,13 @@ class RuntimeEvent:
             "model_request_started",
             "first_text_delta",
             "autonomous_phase",
+            "task_outcome_contract_created",
+            "contract_satisfaction_checked",
+            "progress_assessed",
+            "recovery_packet_injected",
+            "completion_gate_blocked",
+            "completion_gate_satisfied",
+            "feedback_interpretation_created",
         }:
             mapped = RuntimeEventType.SPINNER if etype in {"model_request_started", "first_text_delta"} else RuntimeEventType.STATUS
             return cls(

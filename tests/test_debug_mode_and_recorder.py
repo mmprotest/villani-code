@@ -159,3 +159,26 @@ def test_progress_assessed_runner_event_is_recorded(tmp_path: Path) -> None:
     progress = next(e for e in events if e["event_type"] == "progress_assessed")
     assert progress["turn_index"] == 2
     assert progress["payload"]["stalled"] is True
+
+def test_debug_recorder_persists_reliability_events(tmp_path: Path) -> None:
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "rel", "obj", tmp_path, "execution", "m")
+    recorder.on_runner_event({"type": "task_outcome_contract_created", "contract": {"required_observables": ["x"]}, "turn_index": 1})
+    recorder.on_runner_event({"type": "contract_satisfaction_checked", "satisfied": False, "turn_index": 1})
+    recorder.on_runner_event({"type": "progress_assessed", "repeated_file_patch": True, "turn_index": 2})
+    recorder.on_runner_event({"type": "recovery_packet_injected", "reason": "stall", "turn_index": 2})
+    recorder.on_runner_event({"type": "completion_gate_blocked", "reason": "missing", "turn_index": 2})
+    recorder.on_runner_event({"type": "completion_gate_satisfied", "reason": "ok", "turn_index": 3})
+    recorder.on_runner_event({"type": "feedback_interpretation_created", "summary": "next", "turn_index": 3})
+
+    events = [json.loads(line) for line in (tmp_path / "rel" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    types = {e["event_type"] for e in events}
+    for required in {
+        "task_outcome_contract_created",
+        "contract_satisfaction_checked",
+        "progress_assessed",
+        "recovery_packet_injected",
+        "completion_gate_blocked",
+        "completion_gate_satisfied",
+        "feedback_interpretation_created",
+    }:
+        assert required in types
