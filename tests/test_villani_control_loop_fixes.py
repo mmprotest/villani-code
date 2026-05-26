@@ -306,7 +306,7 @@ def test_summary_includes_control_loop_metrics() -> None:
     assert "model_requests: 2" in text
     assert "stop_reason:" in text
 
-from villani_code.progress_ledger import ProgressLedger
+from villani_code.progress_ledger import ProgressLedger, infer_action_target_files
 
 
 def test_progress_ledger_same_file_patched_three_times_stalls() -> None:
@@ -326,6 +326,31 @@ def test_progress_ledger_same_file_patched_three_times_stalls() -> None:
     assessment = ledger.assess()
     assert assessment.stalled is True
     assert assessment.repeated_file_patch is True
+
+
+def test_infer_action_target_files_patch_path() -> None:
+    assert infer_action_target_files("Patch", {"path": "src/foo.py"}) == ["src/foo.py"]
+
+
+def test_infer_action_target_files_write_file_path() -> None:
+    assert infer_action_target_files("Write", {"file_path": "src/foo.py"}) == ["src/foo.py"]
+
+
+def test_infer_action_target_files_nested_target_file() -> None:
+    assert infer_action_target_files("Patch", {"patch": {"target_file": "src/foo.py"}}) == ["src/foo.py"]
+
+
+def test_infer_action_target_files_readonly_tools_return_empty() -> None:
+    assert infer_action_target_files("Read", {"path": "src/foo.py"}) == []
+    assert infer_action_target_files("List", {"path": "src"}) == []
+    assert infer_action_target_files("Search", {"path": "src", "pattern": "x"}) == []
+
+
+def test_infer_action_target_files_deduplicates_targets() -> None:
+    assert infer_action_target_files(
+        "Patch",
+        {"path": "src/foo.py", "patch": {"target_file": "src/foo.py"}},
+    ) == ["src/foo.py"]
 
 
 def test_progress_ledger_same_failed_command_twice_stalls() -> None:

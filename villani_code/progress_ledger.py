@@ -5,6 +5,55 @@ import json
 from typing import Any
 from villani_code.task_contract import TaskOutcomeContract
 
+_MUTATING_TOOL_ALLOWLIST = {
+    "Patch",
+    "Write",
+    "Edit",
+    "MultiEdit",
+}
+_TARGET_PATH_KEYS = ("path", "file_path", "filename", "target", "target_file")
+
+
+def _normalize_relative_target_path(value: str) -> str:
+    normalized = str(value or "").strip().replace("\\", "/")
+    if not normalized:
+        return ""
+    if normalized.startswith("/"):
+        return ""
+    return normalized.lstrip("./")
+
+
+def infer_action_target_files(tool_name: str, tool_input: Any) -> list[str]:
+    if str(tool_name or "") not in _MUTATING_TOOL_ALLOWLIST:
+        return []
+    if not isinstance(tool_input, dict):
+        return []
+
+    candidates: list[str] = []
+
+    def _collect(mapping: dict[str, Any]) -> None:
+        for key in _TARGET_PATH_KEYS:
+            value = mapping.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value)
+            elif isinstance(value, list):
+                candidates.extend(str(item) for item in value if str(item).strip())
+
+    _collect(tool_input)
+    for value in tool_input.values():
+        if isinstance(value, dict):
+            _collect(value)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = _normalize_relative_target_path(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
 
 @dataclass(frozen=True)
 class ProgressObservation:
