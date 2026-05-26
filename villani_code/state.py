@@ -605,6 +605,8 @@ class Runner:
         self._recovery_packet_injection_cap = 2
         self._last_contract_satisfied: bool | None = None
         self._last_contract_findings_count: int | None = None
+        self._completion_gate_retry_count = 0
+        self._completion_gate_retry_cap = 2
         if self.small_model:
             self._init_small_model_support()
 
@@ -1274,9 +1276,65 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
-                    reason = _budget_reason(completed=True)
+                    reason = _budget_reason()
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
+                    from villani_code import state_runtime
+                    gate = state_runtime.evaluate_completion_gate(
+                        self,
+                        changed_files=_attributed_changed_files(),
+                        validation_artifacts=collect_validation_artifacts(transcript),
+                    )
+                    self._last_contract_satisfied = gate.get("contract_satisfied")
+                    self._last_contract_findings_count = len(list(gate.get("findings", [])))
+                    if not gate.get("allowed", False):
+                        self._completion_gate_retry_count += 1
+                        self.event_callback(
+                            {
+                                "type": "completion_gate_blocked",
+                                "reason": gate.get("reason", ""),
+                                "attempt": self._completion_gate_retry_count,
+                                "findings": gate.get("findings", []),
+                            }
+                        )
+                        if self._completion_gate_retry_count >= self._completion_gate_retry_cap:
+                            return _finish_bounded(response, "contract_unsatisfied", False)
+                        unsatisfied_items = []
+                        for finding in list(gate.get("findings", [])):
+                            message = str(finding.get("message", "")).strip()
+                            if message:
+                                unsatisfied_items.append(f"- {message}")
+                        if not unsatisfied_items:
+                            unsatisfied_items.append("- Missing required contract evidence.")
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "<completion_gate>\n"
+                                            "completion_blocked: true\n"
+                                            f"reason: {gate.get('reason', 'contract evidence missing')}\n"
+                                            "unsatisfied_items:\n"
+                                            + "\n".join(unsatisfied_items)
+                                            + "\nrequired_next_action:\n"
+                                            "Produce evidence for the missing observable, run a targeted check, or explain why the contract cannot be satisfied.\n"
+                                            "</completion_gate>"
+                                        ),
+                                    }
+                                ],
+                            }
+                        )
+                        continue
+                    self._completion_gate_retry_count = 0
+                    self.event_callback(
+                        {
+                            "type": "completion_gate_satisfied",
+                            "reason": gate.get("reason", ""),
+                            "findings_count": len(list(gate.get("findings", []))),
+                        }
+                    )
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
@@ -1434,9 +1492,65 @@ class Runner:
                         }
                     )
                     continue
-                reason = _budget_reason(completed=True)
+                reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                from villani_code import state_runtime
+                gate = state_runtime.evaluate_completion_gate(
+                    self,
+                    changed_files=_attributed_changed_files(),
+                    validation_artifacts=collect_validation_artifacts(transcript),
+                )
+                self._last_contract_satisfied = gate.get("contract_satisfied")
+                self._last_contract_findings_count = len(list(gate.get("findings", [])))
+                if not gate.get("allowed", False):
+                    self._completion_gate_retry_count += 1
+                    self.event_callback(
+                        {
+                            "type": "completion_gate_blocked",
+                            "reason": gate.get("reason", ""),
+                            "attempt": self._completion_gate_retry_count,
+                            "findings": gate.get("findings", []),
+                        }
+                    )
+                    if self._completion_gate_retry_count >= self._completion_gate_retry_cap:
+                        return _finish_bounded(response, "contract_unsatisfied", False)
+                    unsatisfied_items = []
+                    for finding in list(gate.get("findings", [])):
+                        message = str(finding.get("message", "")).strip()
+                        if message:
+                            unsatisfied_items.append(f"- {message}")
+                    if not unsatisfied_items:
+                        unsatisfied_items.append("- Missing required contract evidence.")
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "<completion_gate>\n"
+                                        "completion_blocked: true\n"
+                                        f"reason: {gate.get('reason', 'contract evidence missing')}\n"
+                                        "unsatisfied_items:\n"
+                                        + "\n".join(unsatisfied_items)
+                                        + "\nrequired_next_action:\n"
+                                        "Produce evidence for the missing observable, run a targeted check, or explain why the contract cannot be satisfied.\n"
+                                        "</completion_gate>"
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                self._completion_gate_retry_count = 0
+                self.event_callback(
+                    {
+                        "type": "completion_gate_satisfied",
+                        "reason": gate.get("reason", ""),
+                        "findings_count": len(list(gate.get("findings", []))),
+                    }
+                )
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
