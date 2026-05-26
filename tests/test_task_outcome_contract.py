@@ -3,7 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from villani_code.planning import ExecutionPlan, PlanRiskLevel, TaskMode
-from villani_code.task_contract import ObservableKind, TaskOutcomeContract, build_task_outcome_contract, format_contract_for_model
+from villani_code.task_contract import (
+    BehavioralCheck,
+    ObservableKind,
+    RequiredObservable,
+    TaskOutcomeContract,
+    build_task_outcome_contract,
+    check_contract_satisfaction,
+    format_contract_for_model,
+)
 
 
 class RuntimeCfg:
@@ -113,3 +121,78 @@ def test_formatted_contract_includes_objective_required_observables_and_behavior
     assert "kind=file path=src/foo.py" in text
     assert "behavioral_checks:" in text
     assert "Run validation step: pytest -q tests/test_state.py" in text
+
+
+def test_contract_checker_missing_required_file_is_unsatisfied(tmp_path: Path) -> None:
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(kind=ObservableKind.FILE.value, path="missing.txt", description="required file")
+        ],
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is False
+
+
+def test_contract_checker_existing_required_file_is_satisfied(tmp_path: Path) -> None:
+    (tmp_path / "present.txt").write_text("ok", encoding="utf-8")
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(kind=ObservableKind.FILE.value, path="present.txt", description="required file")
+        ],
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is True
+
+
+def test_contract_checker_validation_artifact_observable_is_satisfied(tmp_path: Path) -> None:
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.VALIDATION_ARTIFACT.value,
+                path="pytest -q tests/test_state.py",
+                description="validation evidence",
+            )
+        ],
+    )
+    result = check_contract_satisfaction(
+        tmp_path,
+        contract,
+        changed_files=[],
+        validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
+    )
+    assert result.satisfied is True
+
+
+def test_contract_checker_behavioral_command_is_satisfied_by_validation_evidence(tmp_path: Path) -> None:
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+        behavioral_checks=[BehavioralCheck(description="run tests", command="pytest -q", required=True)],
+    )
+    result = check_contract_satisfaction(
+        tmp_path,
+        contract,
+        changed_files=[],
+        validation_artifacts=["pytest -q (exit=0)"],
+    )
+    assert result.satisfied is True
+
+
+def test_contract_checker_empty_contract_is_satisfied(tmp_path: Path) -> None:
+    contract = TaskOutcomeContract(
+        objective="o",
+        task_mode="general",
+        success_predicate="s",
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is True
