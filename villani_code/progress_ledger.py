@@ -11,7 +11,8 @@ class ProgressObservation:
     tool_name: str
     tool_input: dict[str, Any]
     result_is_error: bool
-    changed_files: list[str]
+    action_changed_files: list[str]
+    cumulative_changed_files: list[str]
     validation_artifacts: list[str]
     verification_fingerprint: str
     contract_satisfied: bool | None
@@ -51,7 +52,8 @@ class ProgressLedger:
         tool_name: str,
         tool_input: dict[str, Any],
         result_is_error: bool,
-        changed_files: list[str],
+        action_changed_files: list[str],
+        cumulative_changed_files: list[str],
         validation_artifacts: list[str],
         verification_fingerprint: str,
         contract_satisfied: bool | None,
@@ -61,7 +63,8 @@ class ProgressLedger:
             tool_name=str(tool_name or ""),
             tool_input=dict(tool_input or {}),
             result_is_error=bool(result_is_error),
-            changed_files=sorted({str(path) for path in changed_files if str(path)}),
+            action_changed_files=sorted({str(path) for path in action_changed_files if str(path)}),
+            cumulative_changed_files=sorted({str(path) for path in cumulative_changed_files if str(path)}),
             validation_artifacts=[str(v) for v in validation_artifacts],
             verification_fingerprint=str(verification_fingerprint or ""),
             contract_satisfied=contract_satisfied,
@@ -109,7 +112,7 @@ class ProgressLedger:
         )
 
     def _update_file_patch_streak(self, observation: ProgressObservation) -> None:
-        single = observation.changed_files[0] if len(observation.changed_files) == 1 else ""
+        single = observation.action_changed_files[0] if len(observation.action_changed_files) == 1 else ""
         has_contract_improvement = self._is_contract_improvement(observation)
         has_verification_growth = len(observation.validation_artifacts) > self._prev_validation_artifact_count
         if single and single == self._last_single_changed_file and not has_contract_improvement and not has_verification_growth:
@@ -145,7 +148,7 @@ class ProgressLedger:
         self._last_verification_fingerprint = fingerprint
 
     def _update_growth(self, observation: ProgressObservation) -> None:
-        self._prev_changed_file_count = len(observation.changed_files)
+        self._prev_changed_file_count = len(observation.cumulative_changed_files)
         self._prev_validation_artifact_count = len(observation.validation_artifacts)
 
     def _is_contract_improvement(self, observation: ProgressObservation) -> bool:
