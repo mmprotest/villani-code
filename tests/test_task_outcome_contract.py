@@ -196,3 +196,46 @@ def test_contract_checker_empty_contract_is_satisfied(tmp_path: Path) -> None:
     )
     result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
     assert result.satisfied is True
+
+
+def test_required_observable_round_trip_with_must_change_purpose() -> None:
+    original = RequiredObservable(
+        kind=ObservableKind.MODIFIED_FILE.value,
+        path="villani_code/task_contract.py",
+        description="must be updated",
+        purpose="must_change",
+    )
+    loaded = RequiredObservable.from_dict(original.to_dict())
+    assert loaded == original
+
+
+def test_required_observable_round_trip_with_must_generate_purpose() -> None:
+    original = RequiredObservable(
+        kind=ObservableKind.GENERATED_FILE.value,
+        path="build/report.json",
+        description="generated artifact",
+        purpose="must_generate",
+    )
+    loaded = RequiredObservable.from_dict(original.to_dict())
+    assert loaded == original
+
+
+def test_required_observable_from_legacy_payload_defaults_purpose_to_evidence() -> None:
+    legacy = {
+        "kind": ObservableKind.FILE.value,
+        "path": "README.md",
+        "description": "existing reference",
+        "must_exist": True,
+        "evidence_command": "",
+        "source": "inferred",
+    }
+    loaded = RequiredObservable.from_dict(legacy)
+    assert loaded.purpose == "evidence"
+
+
+def test_observable_kind_includes_extended_values() -> None:
+    kinds = {kind.value for kind in ObservableKind}
+    assert ObservableKind.MODIFIED_FILE.value in kinds
+    assert ObservableKind.GENERATED_FILE.value in kinds
+    assert ObservableKind.GENERATED_DIRECTORY.value in kinds
+    assert ObservableKind.VALIDATION_EVIDENCE.value in kinds

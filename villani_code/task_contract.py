@@ -15,6 +15,11 @@ class ObservableKind(str, Enum):
     VALIDATION_ARTIFACT = "validation_artifact"
     DIFF = "diff"
     INSPECTION_SUMMARY = "inspection_summary"
+    EXISTING_FILE = "existing_file"
+    MODIFIED_FILE = "modified_file"
+    GENERATED_FILE = "generated_file"
+    GENERATED_DIRECTORY = "generated_directory"
+    VALIDATION_EVIDENCE = "validation_evidence"
 
 
 @dataclass(slots=True)
@@ -25,6 +30,22 @@ class RequiredObservable:
     must_exist: bool = True
     evidence_command: str = ""
     source: str = "inferred"
+    purpose: str = "evidence"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RequiredObservable":
+        return cls(
+            kind=str(payload.get("kind", "")),
+            path=str(payload.get("path", "")),
+            description=str(payload.get("description", "")),
+            must_exist=bool(payload.get("must_exist", True)),
+            evidence_command=str(payload.get("evidence_command", "")),
+            source=str(payload.get("source", "inferred")),
+            purpose=str(payload.get("purpose", "evidence")),
+        )
 
 
 @dataclass(slots=True)
@@ -56,7 +77,9 @@ class TaskOutcomeContract:
             task_mode=str(payload.get("task_mode", "")),
             success_predicate=str(payload.get("success_predicate", "")),
             preferred_targets=[str(v) for v in payload.get("preferred_targets", [])],
-            required_observables=[RequiredObservable(**item) for item in payload.get("required_observables", [])],
+            required_observables=[
+                RequiredObservable.from_dict(item) for item in payload.get("required_observables", [])
+            ],
             behavioral_checks=[BehavioralCheck(**item) for item in payload.get("behavioral_checks", [])],
             no_go_paths=[str(v) for v in payload.get("no_go_paths", [])],
             confidence=float(payload.get("confidence", 0.5)),
