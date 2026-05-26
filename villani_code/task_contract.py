@@ -64,6 +64,100 @@ class TaskOutcomeContract:
         )
 
 
+@dataclass(slots=True)
+class ContractCheckFinding:
+    category: str
+    message: str
+    path: str = ""
+    severity: str = "medium"
+
+
+@dataclass(slots=True)
+class ContractCheckResult:
+    satisfied: bool
+    findings: list[ContractCheckFinding]
+    checked_observables: list[str]
+    checked_behavioral_checks: list[str]
+    summary: str
+
+
+def check_contract_satisfaction(
+    repo: Path,
+    contract: TaskOutcomeContract,
+    changed_files: list[str],
+    validation_artifacts: list[str],
+) -> ContractCheckResult:
+    findings: list[ContractCheckFinding] = []
+    checked_observables: list[str] = []
+    checked_behavioral_checks: list[str] = []
+
+    normalized_changed = {_normalize_path(path) for path in changed_files}
+    artifact_text = "\n".join(str(item) for item in validation_artifacts)
+
+    for observable in contract.required_observables:
+        kind = str(observable.kind)
+        target_path = _normalize_path(observable.path)
+        checked_observables.append(f"{kind}:{target_path}")
+        absolute_path = repo / target_path
+
+        satisfied = True
+        if kind == ObservableKind.FILE.value:
+            satisfied = absolute_path.exists() and absolute_path.is_file()
+        elif kind == ObservableKind.DIRECTORY.value:
+            satisfied = absolute_path.exists() and absolute_path.is_dir()
+        elif kind == ObservableKind.VALIDATION_ARTIFACT.value:
+            satisfied = bool(target_path) and target_path in artifact_text
+        elif kind == ObservableKind.DIFF.value:
+            satisfied = bool(target_path) and (
+                target_path in normalized_changed
+                or any(path.startswith(f"{target_path}/") for path in normalized_changed)
+            )
+
+        if not satisfied:
+            findings.append(
+                ContractCheckFinding(
+                    category="required_observable",
+                    message=f"Required observable not satisfied: {kind} {target_path}",
+                    path=target_path,
+                    severity="high",
+                )
+            )
+
+    for check in contract.behavioral_checks:
+        descriptor = check.command.strip() or check.description.strip()
+        if not descriptor:
+            continue
+        checked_behavioral_checks.append(descriptor)
+        if check.command.strip() and check.command.strip() not in artifact_text:
+            findings.append(
+                ContractCheckFinding(
+                    category="behavioral_check",
+                    message=f"Required behavioral check has no supporting evidence: {check.command.strip()}",
+                    path="",
+                    severity="high",
+                )
+            )
+
+    if not contract.required_observables and not contract.behavioral_checks:
+        return ContractCheckResult(
+            satisfied=True,
+            findings=[],
+            checked_observables=[],
+            checked_behavioral_checks=[],
+            summary="Contract has no required observables or behavioral checks.",
+        )
+
+    satisfied = not findings
+    summary = "Contract satisfied." if satisfied else f"Contract unsatisfied with {len(findings)} finding(s)."
+    return ContractCheckResult(
+        satisfied=satisfied,
+        findings=findings,
+        checked_observables=checked_observables,
+        checked_behavioral_checks=checked_behavioral_checks,
+        summary=summary,
+    )
+
+
 def _normalize_path(value: str) -> str:
     return str(value or "").replace("\\", "/").strip().lstrip("./")
 
