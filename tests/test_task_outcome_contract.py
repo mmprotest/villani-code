@@ -43,7 +43,7 @@ def test_instruction_output_file_creates_required_observable(tmp_path: Path) -> 
         existing_preferred_targets=[],
     )
     assert any(
-        o.kind == ObservableKind.FILE.value and o.path == "reports/result.json"
+        o.kind == ObservableKind.GENERATED_FILE.value and o.path == "reports/result.json"
         for o in contract.required_observables
     )
 
@@ -118,7 +118,7 @@ def test_formatted_contract_includes_objective_required_observables_and_behavior
     assert "<task_outcome_contract>" in text
     assert "objective: Fix failing test in src/foo.py" in text
     assert "required_observables:" in text
-    assert "kind=file path=src/foo.py" in text
+    assert "kind=modified_file path=src/foo.py" in text
     assert "behavioral_checks:" in text
     assert "Run validation step: pytest -q tests/test_state.py" in text
 
@@ -197,6 +197,76 @@ def test_contract_checker_empty_contract_is_satisfied(tmp_path: Path) -> None:
     result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
     assert result.satisfied is True
 
+
+
+
+def test_classify_fix_instruction_marks_modified_file(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Fix the bug in src/foo.py",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+    obs = next(o for o in contract.required_observables if o.path == "src/foo.py")
+    assert obs.kind == ObservableKind.MODIFIED_FILE.value
+    assert obs.purpose == "must_change"
+
+
+def test_classify_write_instruction_marks_generated_file(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Write the result to output/results.txt",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+    obs = next(o for o in contract.required_observables if o.path == "output/results.txt")
+    assert obs.kind == ObservableKind.GENERATED_FILE.value
+    assert obs.purpose == "must_generate"
+
+
+def test_classify_inspect_instruction_marks_existing_reference(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Inspect config/settings.yaml",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+    obs = next(o for o in contract.required_observables if o.path == "config/settings.yaml")
+    assert obs.kind == ObservableKind.EXISTING_FILE.value
+    assert obs.purpose == "reference"
+
+
+def test_classify_use_instruction_marks_existing_reference(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Use README.md as context",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+    obs = next(o for o in contract.required_observables if o.path == "README.md")
+    assert obs.kind == ObservableKind.EXISTING_FILE.value
+    assert obs.purpose == "reference"
+
+
+def test_classify_multiple_path_mentions_returns_all(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Fix src/foo.py and write output to build/results.json. Also inspect config/settings.yaml",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+    paths = {o.path for o in contract.required_observables}
+    assert {"src/foo.py", "build/results.json", "config/settings.yaml"}.issubset(paths)
 
 def test_required_observable_round_trip_with_must_change_purpose() -> None:
     original = RequiredObservable(

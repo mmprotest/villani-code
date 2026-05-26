@@ -203,6 +203,62 @@ def _extract_instruction_paths(instruction: str) -> list[str]:
     return _dedupe(matches)
 
 
+def _has_context_keyword(context: str, keywords: tuple[str, ...]) -> bool:
+    text = f" {context.lower()} "
+    return any(f" {keyword} " in text for keyword in keywords)
+
+
+def classify_instruction_path_mentions(instruction: str) -> list[RequiredObservable]:
+    pattern = re.compile(r"(?:[\w.-]+/)+[\w.-]+|[\w.-]+\.[A-Za-z0-9_]+")
+    dedupe_seen: set[str] = set()
+    observables: list[RequiredObservable] = []
+
+    generate_keywords = (
+        "write", "create", "generate", "produce", "output", "save", "export",
+        "report", "results", "artifact", "file named", "write to", "save to",
+    )
+    modify_keywords = (
+        "fix", "update", "modify", "edit", "patch", "change", "repair", "refactor", "implement",
+    )
+    reference_keywords = ("inspect", "read", "check", "look at", "review", "use")
+
+    for match in pattern.finditer(instruction or ""):
+        raw_path = match.group(0).strip("'\"`[](){}<>,.;:!?")
+        path = _normalize_path(raw_path)
+        if not path or path in dedupe_seen:
+            continue
+        dedupe_seen.add(path)
+
+        start = max(0, match.start() - 120)
+        end = min(len(instruction or ""), match.end() + 40)
+        context = (instruction or "")[start:end]
+
+        kind = ObservableKind.EXISTING_FILE.value
+        purpose = "reference"
+        if _has_context_keyword(context, generate_keywords):
+            kind = ObservableKind.GENERATED_FILE.value
+            purpose = "must_generate"
+        elif _has_context_keyword(context, modify_keywords):
+            kind = ObservableKind.MODIFIED_FILE.value
+            purpose = "must_change"
+        elif _has_context_keyword(context, reference_keywords):
+            kind = ObservableKind.EXISTING_FILE.value
+            purpose = "reference"
+
+        observables.append(
+            RequiredObservable(
+                kind=kind,
+                path=path,
+                description=f"Instruction-referenced target: {path}",
+                must_exist=True,
+                source="instruction",
+                purpose=purpose,
+            )
+        )
+
+    return observables
+
+
 def build_task_outcome_contract(
     repo: Path,
     instruction: str,
@@ -212,7 +268,8 @@ def build_task_outcome_contract(
     existing_preferred_targets: list[str] | None = None,
 ) -> TaskOutcomeContract:
     del repo  # reserved for future heuristics
-    instruction_paths = _extract_instruction_paths(instruction)
+    instruction_observables = classify_instruction_path_mentions(instruction)
+    instruction_paths = [obs.path for obs in instruction_observables]
     plan_files = [str(v) for v in list(getattr(execution_plan, "relevant_files", []) or [])]
     validation_steps = [str(v) for v in list(getattr(execution_plan, "validation_steps", []) or []) if str(v).strip()]
     runtime_expected = [str(v) for v in list(getattr(benchmark_config, "expected_files", []) or [])]
@@ -221,21 +278,7 @@ def build_task_outcome_contract(
         list(existing_preferred_targets or []) + plan_files + instruction_paths
     )
 
-    required_observables: list[RequiredObservable] = []
-    for path in instruction_paths:
-        if "." in Path(path).name:
-            kind = ObservableKind.FILE.value
-        else:
-            kind = ObservableKind.DIRECTORY.value
-        required_observables.append(
-            RequiredObservable(
-                kind=kind,
-                path=path,
-                description=f"Instruction-referenced target: {path}",
-                must_exist=True,
-                source="instruction",
-            )
-        )
+    required_observables: list[RequiredObservable] = list(instruction_observables)
 
     for path in _dedupe(runtime_expected):
         required_observables.append(
