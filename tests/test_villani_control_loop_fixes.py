@@ -386,3 +386,41 @@ def test_progress_ledger_repeated_verification_fingerprint_stalls() -> None:
     assessment = ledger.assess()
     assert assessment.stalled is True
     assert assessment.repeated_verification is True
+
+
+def test_progress_ledger_repeated_same_file_patch_with_static_verification_suggests_recovery() -> None:
+    ledger = ProgressLedger()
+    for _ in range(3):
+        ledger.record_observation(
+            tool_name="Patch",
+            tool_input={"file_path": "src/app.py"},
+            result_is_error=False,
+            changed_files=["src/app.py"],
+            validation_artifacts=["pytest -q (exit=1)"],
+            verification_fingerprint="same-fingerprint",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assessment = ledger.assess()
+    assert assessment.stalled is True
+    assert assessment.repeated_file_patch is True
+    assert assessment.suggested_recovery_mode == "verification"
+
+
+def test_progress_ledger_repeated_failed_same_command_suggests_strategy_shift() -> None:
+    ledger = ProgressLedger()
+    for _ in range(2):
+        ledger.record_observation(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q tests/test_target.py"},
+            result_is_error=True,
+            changed_files=["src/app.py"],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assessment = ledger.assess()
+    assert assessment.stalled is True
+    assert assessment.repeated_failed_command is True
+    assert assessment.suggested_recovery_mode == "strategy_shift"
