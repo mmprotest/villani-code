@@ -612,3 +612,79 @@ def test_non_pytest_sanity_skips_collection_check(tmp_path: Path, monkeypatch) -
     assert out == "verification-ran"
     assert len(calls) == 1
     assert calls[0][0] == state_runtime.sys.executable
+
+from villani_code.feedback_interpreter import interpret_feedback
+from villani_code.task_contract import ContractCheckFinding, ContractCheckResult
+
+
+def test_feedback_interpretation_failed_command_produces_failed_true() -> None:
+    interpretation = interpret_feedback(
+        command_results=[{"command": "pytest -q", "exit": 1, "stdout": "", "stderr": "boom"}],
+        contract_result=None,
+        changed_files=["villani_code/state_runtime.py"],
+    )
+    assert interpretation.failed is True
+
+
+def test_feedback_interpretation_extracts_traceback_path() -> None:
+    interpretation = interpret_feedback(
+        command_results=[
+            {
+                "command": "pytest -q",
+                "exit": 1,
+                "stdout": 'Traceback\n  File "villani_code/state_runtime.py", line 10, in <module>',
+                "stderr": "",
+            }
+        ],
+        contract_result=None,
+        changed_files=["villani_code/state_runtime.py"],
+    )
+    assert interpretation.likely_next_action == "inspect_or_patch_traceback_target"
+
+
+def test_feedback_interpretation_missing_required_observable_action() -> None:
+    contract = ContractCheckResult(
+        satisfied=False,
+        findings=[
+            ContractCheckFinding(
+                category="required_observable",
+                message="Required observable not satisfied: file out.txt",
+                path="out.txt",
+                severity="high",
+            )
+        ],
+        checked_observables=["file:out.txt"],
+        checked_behavioral_checks=[],
+        summary="bad",
+    )
+    interpretation = interpret_feedback(
+        command_results=[],
+        contract_result=contract,
+        changed_files=["villani_code/state_runtime.py"],
+    )
+    assert interpretation.likely_next_action == "produce_or_verify_required_observable"
+
+
+def test_run_verification_includes_feedback_interpretation_and_event(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    events: list[dict] = []
+    runner.event_callback = lambda event: events.append(event)
+
+    monkeypatch.setattr(state_runtime, "git_changed_files", lambda _repo: ["src/a.py"])
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("x=1\n", encoding="utf-8")
+
+    class _Proc:
+        def __init__(self):
+            self.returncode = 1
+            self.stdout = 'Traceback\n  File "src/a.py", line 1, in <module>'
+            self.stderr = "boom"
+
+    monkeypatch.setattr(state_runtime.subprocess, "run", lambda *args, **kwargs: _Proc())
+
+    text = state_runtime.run_verification(runner, "edit")
+
+    detail = next(e for e in events if e.get("type") == "verification_detail")
+    assert "<feedback_interpretation>" in detail.get("detail", "")
+    assert any(e.get("type") == "feedback_interpretation_created" for e in events)
+    assert "status=" in text
