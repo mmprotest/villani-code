@@ -138,3 +138,24 @@ def test_debug_metadata_records_configured_provider_not_internal_format(tmp_path
 
     assert session_meta["provider"] == "openai"
     assert run_started["payload"]["provider"] == "openai"
+
+
+def test_progress_assessed_runner_event_is_recorded(tmp_path: Path) -> None:
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "progress", "obj", tmp_path, "execution", "m")
+    recorder.on_runner_event(
+        {
+            "type": "progress_assessed",
+            "improving": False,
+            "stalled": True,
+            "repeated_file_patch": True,
+            "repeated_failed_command": False,
+            "repeated_verification": False,
+            "reason": "same_file_patched_without_new_verification_or_contract_progress",
+            "suggested_recovery_mode": "strategy_shift",
+            "turn_index": 2,
+        }
+    )
+    events = [json.loads(line) for line in (tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    progress = next(e for e in events if e["event_type"] == "progress_assessed")
+    assert progress["turn_index"] == 2
+    assert progress["payload"]["stalled"] is True

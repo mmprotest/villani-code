@@ -43,6 +43,7 @@ from villani_code.context_projection import build_model_context_packet, render_m
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
+from villani_code.progress_ledger import ProgressLedger
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.task_contract import build_task_outcome_contract, format_contract_for_model
@@ -599,6 +600,9 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._progress_ledger = ProgressLedger()
+        self._last_contract_satisfied: bool | None = None
+        self._last_contract_findings_count: int | None = None
         if self.small_model:
             self._init_small_model_support()
 
@@ -1575,6 +1579,30 @@ class Runner:
                         "tool_use_id": tool_use_id,
                         "content": result["content"],
                         "is_error": result["is_error"],
+                    }
+                )
+                observation = self._progress_ledger.record_observation(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    result_is_error=bool(result.get("is_error")),
+                    changed_files=_attributed_changed_files(),
+                    validation_artifacts=collect_validation_artifacts(transcript),
+                    verification_fingerprint=self._last_verification_fingerprint,
+                    contract_satisfied=self._last_contract_satisfied,
+                    contract_findings_count=self._last_contract_findings_count,
+                )
+                _ = observation
+                progress = self._progress_ledger.assess()
+                self.event_callback(
+                    {
+                        "type": "progress_assessed",
+                        "improving": progress.improving,
+                        "stalled": progress.stalled,
+                        "repeated_file_patch": progress.repeated_file_patch,
+                        "repeated_failed_command": progress.repeated_failed_command,
+                        "repeated_verification": progress.repeated_verification,
+                        "reason": progress.reason,
+                        "suggested_recovery_mode": progress.suggested_recovery_mode,
                     }
                 )
 

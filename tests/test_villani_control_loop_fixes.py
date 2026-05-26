@@ -305,3 +305,84 @@ def test_summary_includes_control_loop_metrics() -> None:
     assert "## Villani control loop" in text
     assert "model_requests: 2" in text
     assert "stop_reason:" in text
+
+from villani_code.progress_ledger import ProgressLedger
+
+
+def test_progress_ledger_same_file_patched_three_times_stalls() -> None:
+    ledger = ProgressLedger()
+    for _ in range(3):
+        ledger.record_observation(
+            tool_name="Patch",
+            tool_input={"file_path": "a.py"},
+            result_is_error=False,
+            changed_files=["a.py"],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assessment = ledger.assess()
+    assert assessment.stalled is True
+    assert assessment.repeated_file_patch is True
+
+
+def test_progress_ledger_same_failed_command_twice_stalls() -> None:
+    ledger = ProgressLedger()
+    for _ in range(2):
+        ledger.record_observation(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            result_is_error=True,
+            changed_files=[],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assessment = ledger.assess()
+    assert assessment.stalled is True
+    assert assessment.repeated_failed_command is True
+
+
+def test_progress_ledger_contract_improvement_is_improving() -> None:
+    ledger = ProgressLedger()
+    ledger.record_observation(
+        tool_name="Patch",
+        tool_input={"file_path": "a.py"},
+        result_is_error=False,
+        changed_files=["a.py"],
+        validation_artifacts=[],
+        verification_fingerprint="v1",
+        contract_satisfied=False,
+        contract_findings_count=3,
+    )
+    ledger.record_observation(
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+        result_is_error=False,
+        changed_files=["a.py"],
+        validation_artifacts=["pytest"],
+        verification_fingerprint="v2",
+        contract_satisfied=True,
+        contract_findings_count=0,
+    )
+    assert ledger.assess().improving is True
+
+
+def test_progress_ledger_repeated_verification_fingerprint_stalls() -> None:
+    ledger = ProgressLedger()
+    for _ in range(2):
+        ledger.record_observation(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            result_is_error=False,
+            changed_files=["a.py"],
+            validation_artifacts=["pytest"],
+            verification_fingerprint="same-fingerprint",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assessment = ledger.assess()
+    assert assessment.stalled is True
+    assert assessment.repeated_verification is True

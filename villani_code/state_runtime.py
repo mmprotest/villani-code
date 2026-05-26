@@ -1027,6 +1027,8 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 "checked_behavioral_checks": contract_result.checked_behavioral_checks,
             }
         )
+        runner._last_contract_satisfied = bool(contract_result.satisfied)
+        runner._last_contract_findings_count = len(contract_result.findings)
     validation_target_paths = sorted(set(runner._current_verification_targets) or set(attributed_intentional))
     validation_target = json.dumps(validation_target_paths)
     artifact_signature = json.dumps(sorted(verification_artifacts))
