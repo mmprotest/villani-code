@@ -127,3 +127,22 @@ def test_progress_ledger_catches_repeated_same_file_mutation() -> None:
         )
 
     assert ledger.assess().repeated_file_patch is True
+
+
+def test_repeated_empty_verification_fingerprints_do_not_stall() -> None:
+    ledger = ProgressLedger()
+    for _ in range(3):
+        ledger.record_observation(
+            tool_name="Bash",
+            tool_input={"command": "echo ok"},
+            result_is_error=False,
+            action_changed_files=[],
+            cumulative_changed_files=[],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=1,
+        )
+    assessment = ledger.assess()
+    assert assessment.repeated_verification is False
+    assert assessment.stalled is False

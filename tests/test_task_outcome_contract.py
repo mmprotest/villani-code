@@ -499,3 +499,48 @@ def test_build_repair_contract_adds_validation_requirements(tmp_path: Path) -> N
         and o.path == ""
         for o in contract.required_observables
     )
+
+
+def test_extract_instruction_paths_preserves_absolute_nginx_path() -> None:
+    paths = extract_instruction_paths("Update /etc/nginx/sites-enabled/default and reload")
+    assert "/etc/nginx/sites-enabled/default" in paths
+
+
+def test_extract_instruction_paths_rejects_start_restart_false_candidate() -> None:
+    paths = extract_instruction_paths("Start/restart the service")
+    assert "Start/restart" not in paths
+
+
+def test_remove_absolute_path_creates_absent_path_observable(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Remove /etc/nginx/sites-enabled/default",
+        task_mode="general",
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+    obs = [o for o in contract.required_observables if o.path == "/etc/nginx/sites-enabled/default"]
+    assert obs
+    assert obs[0].kind == ObservableKind.ABSENT_PATH.value
+    assert obs[0].purpose == "must_be_absent"
+
+
+def test_absent_path_observable_passes_when_path_absent(tmp_path: Path) -> None:
+    contract = TaskOutcomeContract(
+        objective="remove x",
+        task_mode="general",
+        success_predicate="absent",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.ABSENT_PATH.value,
+                path="gone.txt",
+                description="must be absent",
+                purpose="must_be_absent",
+                strength="hard",
+                confidence=0.9,
+            )
+        ],
+    )
+    result = check_contract_satisfaction(tmp_path, contract, changed_files=[], validation_artifacts=[])
+    assert result.satisfied is True

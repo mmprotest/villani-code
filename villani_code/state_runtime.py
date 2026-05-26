@@ -173,11 +173,18 @@ def evaluate_completion_gate(
         changed_files=changed_files,
         validation_artifacts=validation_artifacts,
     )
+    findings = [asdict(finding) for finding in contract_result.findings]
+    blocking_findings = [
+        finding
+        for finding in contract_result.findings
+        if str(finding.strength) == "hard" and float(finding.confidence) >= 0.75
+    ]
     if contract_result.satisfied:
         return {
             "allowed": True,
             "reason": "contract_satisfied",
-            "findings": [asdict(finding) for finding in contract_result.findings],
+            "findings": findings,
+            "warnings": findings,
             "contract_satisfied": True,
         }
 
@@ -191,16 +198,34 @@ def evaluate_completion_gate(
             return {
                 "allowed": True,
                 "reason": "inspection_evidence",
-                "findings": [asdict(finding) for finding in contract_result.findings],
+                "findings": findings,
+                "warnings": findings,
                 "contract_satisfied": False,
             }
 
-    findings = [asdict(finding) for finding in contract_result.findings]
+    has_positive_evidence = bool(validation_artifacts) or bool(changed_files)
+    has_generated_artifact = bool(
+        [
+            obs
+            for obs in getattr(contract, "required_observables", [])
+            if str(getattr(obs, "kind", "")) == "generated_file"
+            and (runner.repo / str(getattr(obs, "path", "")).lstrip("./")).exists()
+        ]
+    )
+    if not blocking_findings and (has_positive_evidence or has_generated_artifact):
+        return {
+            "allowed": True,
+            "reason": "only_soft_or_advisory_findings_with_evidence",
+            "findings": findings,
+            "warnings": findings,
+            "contract_satisfied": False,
+        }
     reason = "missing required observables or behavioral check evidence"
     return {
         "allowed": False,
         "reason": reason,
         "findings": findings,
+        "warnings": [asdict(f) for f in contract_result.findings if f not in blocking_findings],
         "contract_satisfied": False,
     }
 
