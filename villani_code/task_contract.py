@@ -242,9 +242,45 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _extract_instruction_paths(instruction: str) -> list[str]:
-    pattern = re.compile(r"(?:[\w.-]+/)+[\w.-]+|[\w.-]+\.[A-Za-z0-9_]+")
-    matches = [_normalize_path(m.group(0)) for m in pattern.finditer(instruction or "")]
-    return _dedupe(matches)
+    return extract_instruction_paths(instruction)
+
+
+def extract_instruction_paths(instruction: str) -> list[str]:
+    text = instruction or ""
+    extensions = (
+        "py", "js", "ts", "tsx", "jsx", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg",
+        "txt", "md", "csv", "html", "css", "sh", "ps1", "sql", "rs", "go", "java", "c", "cpp",
+        "h", "hpp",
+    )
+    ext_group = "|".join(re.escape(ext) for ext in extensions)
+    suffix_pattern = r"\.(?:" + ext_group + r")"
+    slash_path_pattern = re.compile(r"(?:\./|/|[\w.-]+/)[\w./-]*[\w.-]")
+    quoted_filename_pattern = re.compile(rf"['\"`]([\w.-]+{suffix_pattern})['\"`]")
+    bare_filename_pattern = re.compile(rf"\b[\w-]+{suffix_pattern}\b", flags=re.IGNORECASE)
+
+    punctuation_to_strip = "'\"`,.:;()"
+    extracted: list[str] = []
+    used_spans: list[tuple[int, int]] = []
+
+    for match in slash_path_pattern.finditer(text):
+        path = _normalize_path(match.group(0).strip(punctuation_to_strip))
+        if path:
+            extracted.append(path)
+            used_spans.append(match.span())
+    for match in quoted_filename_pattern.finditer(text):
+        path = _normalize_path(match.group(1).strip(punctuation_to_strip))
+        if path:
+            extracted.append(path)
+            used_spans.append(match.span(1))
+    for match in bare_filename_pattern.finditer(text):
+        span = match.span()
+        if any(start <= span[0] and span[1] <= end for start, end in used_spans):
+            continue
+        path = _normalize_path(match.group(0).strip(punctuation_to_strip))
+        if path:
+            extracted.append(path)
+
+    return _dedupe(extracted)
 
 
 def _has_context_keyword(context: str, keywords: tuple[str, ...]) -> bool:
@@ -253,7 +289,6 @@ def _has_context_keyword(context: str, keywords: tuple[str, ...]) -> bool:
 
 
 def classify_instruction_path_mentions(instruction: str) -> list[RequiredObservable]:
-    pattern = re.compile(r"(?:[\w.-]+/)+[\w.-]+|[\w.-]+\.[A-Za-z0-9_]+")
     dedupe_seen: set[str] = set()
     observables: list[RequiredObservable] = []
 
@@ -266,15 +301,14 @@ def classify_instruction_path_mentions(instruction: str) -> list[RequiredObserva
     )
     reference_keywords = ("inspect", "read", "check", "look at", "review", "use")
 
-    for match in pattern.finditer(instruction or ""):
-        raw_path = match.group(0).strip("'\"`[](){}<>,.;:!?")
-        path = _normalize_path(raw_path)
+    for path in extract_instruction_paths(instruction):
         if not path or path in dedupe_seen:
             continue
         dedupe_seen.add(path)
 
-        start = max(0, match.start() - 120)
-        end = min(len(instruction or ""), match.end() + 40)
+        index = (instruction or "").find(path)
+        start = max(0, index - 120) if index >= 0 else 0
+        end = min(len(instruction or ""), index + len(path) + 40) if index >= 0 else len(instruction or "")
         context = (instruction or "")[start:end]
 
         kind = ObservableKind.EXISTING_FILE.value
