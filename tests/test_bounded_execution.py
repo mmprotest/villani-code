@@ -209,3 +209,46 @@ def test_explicit_no_change_needed_allows_prose_only_completion(tmp_path: Path) 
     runner = _runner(tmp_path, [{"role": "assistant", "content": [{"type": "text", "text": "No code change is needed because behavior matches spec."}]}])
     result = runner.run("Fix the bug", execution_budget=_default_budget())
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_completion_gate_allows_when_no_edits_after_successful_validation(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "echo ok"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+        ],
+    )
+    result = runner.run("Validate and summarize", execution_budget=_default_budget())
+    assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_completion_gate_blocks_when_edits_happen_after_validation(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "echo validated"}}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "src/app.py", "content": "print('x')\n"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "All done."}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "3", "name": "Bash", "input": {"command": "echo revalidated"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Now done."}]},
+        ],
+    )
+    result = runner.run("Review and validate changes", execution_budget=_default_budget())
+    assert runner.client.calls >= 5
+    assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_completion_gate_blocks_when_outputs_not_checked(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Write", "input": {"file_path": "src/app.py", "content": "print('x')\n"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "2", "name": "Read", "input": {"file_path": "src/app.py"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Final."}]},
+        ],
+    )
+    result = runner.run("Review and finalize", execution_budget=_default_budget())
+    assert runner.client.calls >= 4
+    assert result["execution"]["terminated_reason"] == "completed"

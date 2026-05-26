@@ -1029,6 +1029,8 @@ class Runner:
                 }
             )
         previous_attributed = set()
+        last_successful_validation_changed: set[str] = set()
+        completion_gate_output_checked = False
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1106,6 +1108,55 @@ class Runner:
                 "transcript": transcript,
                 "execution": execution.to_dict(),
             }
+
+        def _known_validation_commands() -> list[str]:
+            commands: list[str] = []
+            for artifact in collect_validation_artifacts(transcript):
+                command = artifact.split(" (exit=", 1)[0].strip()
+                if command:
+                    commands.append(command)
+            return commands
+
+        def _completion_gate_observation() -> str | None:
+            nonlocal last_successful_validation_changed, completion_gate_output_checked
+            current_changed = set(_attributed_changed_files())
+            artifacts = collect_validation_artifacts(transcript)
+            has_successful_validation = any("(exit=0)" in item for item in artifacts)
+            if has_successful_validation:
+                last_successful_validation_changed = set(current_changed)
+                completion_gate_output_checked = True
+            changed_since_validation = sorted(current_changed - last_successful_validation_changed)
+            if changed_since_validation:
+                known = _known_validation_commands()
+                required = known[-1] if known else "inspect required output artifacts tied to the task prompt and recent observations"
+                self.event_callback(
+                    {
+                        "type": "completion_gate_blocked",
+                        "reason": "edits_after_last_successful_validation",
+                        "changed_files": changed_since_validation,
+                        "required_check": required,
+                    }
+                )
+                return (
+                    "Completion gate blocked finalization: files changed after the last successful validation. "
+                    f"Changed since validation: {changed_since_validation}. "
+                    f"Run one minimal relevant validation action now (e.g., `{required}`), then finalize."
+                )
+            if not completion_gate_output_checked and current_changed:
+                required = "inspect required output artifacts tied to the task prompt and recent observations"
+                self.event_callback(
+                    {
+                        "type": "completion_gate_blocked",
+                        "reason": "required_observable_outputs_not_checked",
+                        "changed_files": sorted(current_changed),
+                        "required_check": required,
+                    }
+                )
+                return (
+                    "Completion gate blocked finalization: required observable outputs have not been checked "
+                    "for the edited files. Perform one minimal relevant validation or output-artifact inspection, then finalize."
+                )
+            return None
 
         def _budget_reason(
             completed: bool = False, model_idle: bool = False
@@ -1257,6 +1308,10 @@ class Runner:
                     )
                     continue
                 if empty:
+                    completion_gate_msg = _completion_gate_observation()
+                    if completion_gate_msg:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": completion_gate_msg}]})
+                        continue
                     if (
                         self.benchmark_config.enabled
                         and not benchmark_forced_read_no_progress_guard_active
@@ -1431,6 +1486,10 @@ class Runner:
                     )
                     continue
                 reason = _budget_reason(completed=True)
+                completion_gate_msg = _completion_gate_observation()
+                if completion_gate_msg:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": completion_gate_msg}]})
+                    continue
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
