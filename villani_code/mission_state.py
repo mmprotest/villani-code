@@ -61,6 +61,7 @@ class MissionState:
     autonomous_satisfied_keys_summary: list[str] = field(default_factory=list)
     autonomous_blockers_summary: list[str] = field(default_factory=list)
     autonomous_stop_reason: str = ""
+    task_outcome_contract: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,6 +93,7 @@ class MissionState:
             autonomous_satisfied_keys_summary=[str(v) for v in payload.get("autonomous_satisfied_keys_summary", [])],
             autonomous_blockers_summary=[str(v) for v in payload.get("autonomous_blockers_summary", [])],
             autonomous_stop_reason=str(payload.get("autonomous_stop_reason", "")),
+            task_outcome_contract=dict(payload.get("task_outcome_contract", {}) or {}),
         )
 
 
