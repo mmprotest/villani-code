@@ -181,9 +181,18 @@ def check_contract_satisfaction(
             )
 
         if not satisfied:
+            category = "missing_required_file"
+            if kind in (ObservableKind.DIRECTORY.value, ObservableKind.GENERATED_DIRECTORY.value):
+                category = "missing_required_directory"
+            elif kind == ObservableKind.MODIFIED_FILE.value or purpose == "must_change":
+                category = "missing_change_evidence"
+            elif kind == ObservableKind.GENERATED_FILE.value:
+                category = "missing_generated_file"
+            elif kind in (ObservableKind.VALIDATION_EVIDENCE.value, ObservableKind.VALIDATION_ARTIFACT.value) or purpose == "must_validate":
+                category = "missing_validation_evidence"
             findings.append(
                 ContractCheckFinding(
-                    category="required_observable",
+                    category=category,
                     message=f"Required observable not satisfied: {kind} {target_path}",
                     path=target_path,
                     severity="high",
@@ -198,7 +207,7 @@ def check_contract_satisfaction(
         if check.command.strip() and check.command.strip() not in artifact_text:
             findings.append(
                 ContractCheckFinding(
-                    category="behavioral_check",
+                    category="missing_behavioral_check_evidence",
                     message=f"Required behavioral check has no supporting evidence: {check.command.strip()}",
                     path="",
                     severity="high",

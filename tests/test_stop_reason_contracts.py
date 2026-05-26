@@ -168,7 +168,8 @@ def test_reliability_event_traceability_packet_can_capture_all_stage_events(tmp_
         tool_name="Patch",
         tool_input={"file_path": "src/app.py"},
         result_is_error=False,
-        changed_files=["src/app.py"],
+        action_changed_files=["src/app.py"],
+        cumulative_changed_files=["src/app.py"],
         validation_artifacts=[],
         verification_fingerprint="same",
         contract_satisfied=contract_result.satisfied,
@@ -201,3 +202,43 @@ def test_reliability_event_traceability_packet_can_capture_all_stage_events(tmp_
     assert "recovery_packet_injected" in types
     assert "completion_gate_blocked" in types
     assert "feedback_interpretation_created" in types
+
+
+def test_completion_gate_block_message_contains_category_and_path(tmp_path: Path, monkeypatch) -> None:
+    events: list[dict] = []
+    runner = Runner(
+        client=_SequenceClient([{"role": "assistant", "content": [{"type": "text", "text": "done"}]}] * 2),
+        repo=tmp_path,
+        model="m",
+        stream=False,
+        small_model=True,
+        event_callback=events.append,
+    )
+    monkeypatch.setattr(
+        "villani_code.state.build_task_outcome_contract",
+        lambda *args, **kwargs: TaskOutcomeContract(
+            objective="Fix src/foo.py",
+            task_mode="general",
+            success_predicate="file changed",
+            required_observables=[
+                RequiredObservable(kind=ObservableKind.MODIFIED_FILE.value, path="src/foo.py", description="required", purpose="must_change")
+            ],
+            behavioral_checks=[],
+        ),
+    )
+    out = runner.run(
+        "Fix src/foo.py",
+        execution_budget=ExecutionBudget(max_turns=2, max_tool_calls=2, max_seconds=30, max_no_edit_turns=5, max_reconsecutive_recon_turns=5),
+    )
+    gate_msgs = []
+    for message in out["messages"]:
+        if message.get("role") != "user":
+            continue
+        for part in message.get("content", []):
+            text = part.get("text", "")
+            if "<completion_gate>" in text:
+                gate_msgs.append(text)
+    assert gate_msgs
+    assert "missing_evidence:" in gate_msgs[-1]
+    assert "category=missing_change_evidence" in gate_msgs[-1]
+    assert "path=src/foo.py" in gate_msgs[-1]
