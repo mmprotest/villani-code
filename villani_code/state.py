@@ -43,7 +43,7 @@ from villani_code.context_projection import build_model_context_packet, render_m
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
-from villani_code.progress_ledger import ProgressLedger, format_recovery_packet
+from villani_code.progress_ledger import ProgressLedger, format_recovery_packet, infer_action_target_files
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.task_contract import build_task_outcome_contract, format_contract_for_model
@@ -1694,8 +1694,7 @@ class Runner:
                 transcript["tool_results"].append(result)
                 after_changed_files = set(_attributed_changed_files())
                 action_changed_files = set(after_changed_files - before_changed_files)
-                if self._is_mutating_tool_call(tool_name, tool_input):
-                    action_changed_files.update(self._targeted_mutation_files(tool_name, tool_input))
+                action_changed_files.update(infer_action_target_files(tool_name, tool_input))
                 cumulative_changed_files = sorted(after_changed_files)
                 tool_results.append(
                     {
