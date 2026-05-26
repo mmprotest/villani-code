@@ -26,6 +26,7 @@ from villani_code.retrieval import Retriever
 from villani_code.mission_state import save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.task_contract import check_contract_satisfaction
+from villani_code.feedback_interpreter import interpret_feedback
 from villani_code.utils import ensure_dir
 
 
@@ -1172,6 +1173,33 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
                 lines.append(f"  path: {finding.path}")
                 lines.append(f"  message: {finding.message}")
                 lines.append(f"  severity: {finding.severity}")
+
+    if verification.status in {VerificationStatus.FAIL, VerificationStatus.UNCERTAIN}:
+        feedback = interpret_feedback(
+            command_results=cmd_results,
+            contract_result=contract_result,
+            changed_files=attributed_intentional,
+        )
+        lines.append("<feedback_interpretation>")
+        lines.append(f"failed_check: {feedback.failed_check}")
+        lines.append(f"disproved_assumption: {feedback.disproved_assumption}")
+        lines.append("unsatisfied_contract_items:")
+        if feedback.unsatisfied_contract_items:
+            for item in feedback.unsatisfied_contract_items[:8]:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- none")
+        lines.append(f"likely_next_action: {feedback.likely_next_action}")
+        lines.append(f"evidence_excerpt: {feedback.evidence_excerpt}")
+        lines.append("</feedback_interpretation>")
+        runner.event_callback(
+            {
+                "type": "feedback_interpretation_created",
+                "failed": feedback.failed,
+                "failed_check": feedback.failed_check,
+                "likely_next_action": feedback.likely_next_action,
+            }
+        )
     lines.append("</verification>")
     summary = f"status={verification.status.value}; confidence={verification.confidence_score}"
     if verification.findings:
