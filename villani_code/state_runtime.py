@@ -25,6 +25,7 @@ from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.retrieval import Retriever
 from villani_code.mission_state import save_mission_state
 from villani_code.summarizer import summarize_mission_state
+from villani_code.task_contract import check_contract_satisfaction
 from villani_code.utils import ensure_dir
 
 
@@ -1009,6 +1010,23 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
     verification_artifacts = [
         r.get("command", "") for r in cmd_results if int(r.get("exit", 1)) == 0
     ]
+    contract_result = None
+    if getattr(runner, "_task_outcome_contract", None) is not None:
+        contract_result = check_contract_satisfaction(
+            repo=runner.repo,
+            contract=runner._task_outcome_contract,
+            changed_files=attributed_intentional,
+            validation_artifacts=verification_artifacts,
+        )
+        runner.event_callback(
+            {
+                "type": "contract_satisfaction_checked",
+                "satisfied": contract_result.satisfied,
+                "findings_count": len(contract_result.findings),
+                "checked_observables": contract_result.checked_observables,
+                "checked_behavioral_checks": contract_result.checked_behavioral_checks,
+            }
+        )
     validation_target_paths = sorted(set(runner._current_verification_targets) or set(attributed_intentional))
     validation_target = json.dumps(validation_target_paths)
     artifact_signature = json.dumps(sorted(verification_artifacts))
@@ -1096,10 +1114,24 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         lines.append("findings:")
         for finding in verification.findings[:6]:
             lines.append(f"- {finding.category.value}: {finding.message}")
+    if contract_result is not None:
+        lines.append(f"contract_satisfied: {str(contract_result.satisfied).lower()}")
+        if contract_result.findings:
+            lines.append("contract_findings:")
+            for finding in contract_result.findings[:6]:
+                lines.append(f"- category: {finding.category}")
+                lines.append(f"  path: {finding.path}")
+                lines.append(f"  message: {finding.message}")
+                lines.append(f"  severity: {finding.severity}")
     lines.append("</verification>")
     summary = f"status={verification.status.value}; confidence={verification.confidence_score}"
     if verification.findings:
         summary += f"; findings={len(verification.findings)}"
+    if contract_result is not None:
+        summary += f"; contract_satisfied={str(contract_result.satisfied).lower()}"
+        if contract_result.findings:
+            first_finding = contract_result.findings[0]
+            summary += f"; finding={first_finding.category}:{first_finding.path or '-'}"
     runner.event_callback(
         {
             "type": "verification_detail",

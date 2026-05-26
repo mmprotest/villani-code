@@ -6,6 +6,7 @@ from villani_code.autonomy import FailureCategory, FailureClassifier, TaskContra
 from villani_code.autonomous import AutonomousTask, VillaniModeController
 from villani_code.state import Runner
 from villani_code import state_runtime
+from villani_code.task_contract import ObservableKind, RequiredObservable, TaskOutcomeContract
 
 
 class _Client:
@@ -256,6 +257,83 @@ def test_small_model_guard_captures_before_contents_when_admitting(tmp_path: Pat
     err = runner._small_model_tool_guard("Patch", {"file_path": "src/a.py", "patch": "x"})
     assert err is None
     assert runner._before_contents["src/a.py"] == "x=0\n"
+
+
+def test_run_verification_emits_contract_satisfaction_checked(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    events: list[dict] = []
+    runner.event_callback = lambda event: events.append(event)
+    runner._verification_baseline_changed = set()
+    runner._task_outcome_contract = TaskOutcomeContract(
+        objective="ensure file exists",
+        task_mode="general",
+        success_predicate="required observable exists",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.FILE.value,
+                path="src/created.py",
+                description="created file",
+            )
+        ],
+    )
+    monkeypatch.setattr(runner, "_git_changed_files", lambda: ["src/created.py"])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "created.py").write_text("x=1\n", encoding="utf-8")
+
+    runner._run_verification("edit")
+
+    contract_events = [e for e in events if e.get("type") == "contract_satisfaction_checked"]
+    assert contract_events
+    assert contract_events[-1]["satisfied"] is True
+
+
+def test_missing_required_observable_is_reported_in_verification_text(tmp_path: Path, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    runner._verification_baseline_changed = set()
+    runner._task_outcome_contract = TaskOutcomeContract(
+        objective="require artifact",
+        task_mode="general",
+        success_predicate="observable exists",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.FILE.value,
+                path="src/missing.py",
+                description="missing file",
+            )
+        ],
+    )
+    monkeypatch.setattr(runner, "_git_changed_files", lambda: [])
+
+    detail = runner._run_verification("edit")
+
+    assert "contract_satisfied=false" in detail
+    assert "finding=required_observable:src/missing.py" in detail
+
+
+def test_existing_required_observable_marks_contract_satisfied_in_verification_text(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = _runner(tmp_path)
+    runner._verification_baseline_changed = set()
+    runner._task_outcome_contract = TaskOutcomeContract(
+        objective="require existing artifact",
+        task_mode="general",
+        success_predicate="observable exists",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.FILE.value,
+                path="src/ready.py",
+                description="ready file",
+            )
+        ],
+    )
+    monkeypatch.setattr(runner, "_git_changed_files", lambda: ["src/ready.py"])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "ready.py").write_text("x=1\n", encoding="utf-8")
+
+    detail = runner._run_verification("edit")
+
+    assert "contract_satisfied=true" in detail
 
 
 def test_patch_sanity_gate_catches_broken_python_edit(tmp_path: Path, monkeypatch) -> None:
