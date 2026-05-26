@@ -1579,6 +1579,7 @@ class Runner:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
                 tool_use_id = str(block.get("id"))
+                before_changed_files = set(_attributed_changed_files())
                 self.event_callback(
                     {
                         "type": "tool_use",
@@ -1691,6 +1692,11 @@ class Runner:
                     {"name": tool_name, "input": tool_input, "id": tool_use_id}
                 )
                 transcript["tool_results"].append(result)
+                after_changed_files = set(_attributed_changed_files())
+                action_changed_files = set(after_changed_files - before_changed_files)
+                if self._is_mutating_tool_call(tool_name, tool_input):
+                    action_changed_files.update(self._targeted_mutation_files(tool_name, tool_input))
+                cumulative_changed_files = sorted(after_changed_files)
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -1703,7 +1709,8 @@ class Runner:
                     tool_name=tool_name,
                     tool_input=tool_input,
                     result_is_error=bool(result.get("is_error")),
-                    changed_files=_attributed_changed_files(),
+                    action_changed_files=sorted(action_changed_files),
+                    cumulative_changed_files=cumulative_changed_files,
                     validation_artifacts=collect_validation_artifacts(transcript),
                     verification_fingerprint=self._last_verification_fingerprint,
                     contract_satisfied=self._last_contract_satisfied,
@@ -1950,6 +1957,29 @@ class Runner:
             if normalized and normalized not in out:
                 out.append(normalized)
         return out
+
+    def _targeted_mutation_files(self, tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        for key in ("file_path", "path", "target_path"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value)
+        for key in ("file_paths", "paths", "targets"):
+            value = tool_input.get(key)
+            if isinstance(value, list):
+                candidates.extend(str(item) for item in value if str(item).strip())
+        if tool_name == "Patch":
+            for key in ("patch", "content", "diff"):
+                payload = tool_input.get(key)
+                if isinstance(payload, str) and payload.strip():
+                    for line in payload.splitlines():
+                        if line.startswith("+++ ") or line.startswith("--- "):
+                            raw = line[4:].strip()
+                            if raw.startswith(("a/", "b/")):
+                                raw = raw[2:]
+                            if raw and raw != "/dev/null":
+                                candidates.append(raw)
+        return self._canonical_modified_paths(candidates)
 
     def _ensure_mission(self, instruction: str) -> None:
         mode = "autonomous" if self.villani_mode else self._runtime_mode

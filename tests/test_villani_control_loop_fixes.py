@@ -316,7 +316,8 @@ def test_progress_ledger_same_file_patched_three_times_stalls() -> None:
             tool_name="Patch",
             tool_input={"file_path": "a.py"},
             result_is_error=False,
-            changed_files=["a.py"],
+            action_changed_files=["a.py"],
+            cumulative_changed_files=["a.py"],
             validation_artifacts=[],
             verification_fingerprint="",
             contract_satisfied=False,
@@ -334,7 +335,8 @@ def test_progress_ledger_same_failed_command_twice_stalls() -> None:
             tool_name="Bash",
             tool_input={"command": "pytest -q"},
             result_is_error=True,
-            changed_files=[],
+            action_changed_files=[],
+            cumulative_changed_files=[],
             validation_artifacts=[],
             verification_fingerprint="",
             contract_satisfied=False,
@@ -351,7 +353,8 @@ def test_progress_ledger_contract_improvement_is_improving() -> None:
         tool_name="Patch",
         tool_input={"file_path": "a.py"},
         result_is_error=False,
-        changed_files=["a.py"],
+        action_changed_files=["a.py"],
+            cumulative_changed_files=["a.py"],
         validation_artifacts=[],
         verification_fingerprint="v1",
         contract_satisfied=False,
@@ -361,7 +364,8 @@ def test_progress_ledger_contract_improvement_is_improving() -> None:
         tool_name="Bash",
         tool_input={"command": "pytest -q"},
         result_is_error=False,
-        changed_files=["a.py"],
+        action_changed_files=["a.py"],
+            cumulative_changed_files=["a.py"],
         validation_artifacts=["pytest"],
         verification_fingerprint="v2",
         contract_satisfied=True,
@@ -377,7 +381,8 @@ def test_progress_ledger_repeated_verification_fingerprint_stalls() -> None:
             tool_name="Bash",
             tool_input={"command": "pytest -q"},
             result_is_error=False,
-            changed_files=["a.py"],
+            action_changed_files=["a.py"],
+            cumulative_changed_files=["a.py"],
             validation_artifacts=["pytest"],
             verification_fingerprint="same-fingerprint",
             contract_satisfied=False,
@@ -395,7 +400,8 @@ def test_progress_ledger_repeated_same_file_patch_with_static_verification_sugge
             tool_name="Patch",
             tool_input={"file_path": "src/app.py"},
             result_is_error=False,
-            changed_files=["src/app.py"],
+            action_changed_files=["src/app.py"],
+            cumulative_changed_files=["src/app.py"],
             validation_artifacts=["pytest -q (exit=1)"],
             verification_fingerprint="same-fingerprint",
             contract_satisfied=False,
@@ -414,7 +420,8 @@ def test_progress_ledger_repeated_failed_same_command_suggests_strategy_shift() 
             tool_name="Bash",
             tool_input={"command": "pytest -q tests/test_target.py"},
             result_is_error=True,
-            changed_files=["src/app.py"],
+            action_changed_files=["src/app.py"],
+            cumulative_changed_files=["src/app.py"],
             validation_artifacts=[],
             verification_fingerprint="",
             contract_satisfied=False,
@@ -424,3 +431,64 @@ def test_progress_ledger_repeated_failed_same_command_suggests_strategy_shift() 
     assert assessment.stalled is True
     assert assessment.repeated_failed_command is True
     assert assessment.suggested_recovery_mode == "strategy_shift"
+
+
+def test_progress_ledger_cumulative_only_observations_do_not_trigger_same_file_stall() -> None:
+    ledger = ProgressLedger()
+    for _ in range(3):
+        ledger.record_observation(
+            tool_name="Bash",
+            tool_input={"command": "pytest -q"},
+            result_is_error=False,
+            action_changed_files=[],
+            cumulative_changed_files=["src/foo.py"],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assert ledger.assess().repeated_file_patch is False
+
+
+def test_progress_ledger_three_action_mutations_same_file_trigger_stall() -> None:
+    ledger = ProgressLedger()
+    for _ in range(3):
+        ledger.record_observation(
+            tool_name="Patch",
+            tool_input={"file_path": "src/foo.py"},
+            result_is_error=False,
+            action_changed_files=["src/foo.py"],
+            cumulative_changed_files=["src/foo.py"],
+            validation_artifacts=[],
+            verification_fingerprint="",
+            contract_satisfied=False,
+            contract_findings_count=2,
+        )
+    assert ledger.assess().repeated_file_patch is True
+
+
+def test_progress_ledger_mutating_different_files_breaks_same_file_patch_streak() -> None:
+    ledger = ProgressLedger()
+    ledger.record_observation(
+        tool_name="Patch",
+        tool_input={"file_path": "src/foo.py"},
+        result_is_error=False,
+        action_changed_files=["src/foo.py"],
+        cumulative_changed_files=["src/foo.py"],
+        validation_artifacts=[],
+        verification_fingerprint="",
+        contract_satisfied=False,
+        contract_findings_count=2,
+    )
+    ledger.record_observation(
+        tool_name="Patch",
+        tool_input={"file_path": "src/bar.py"},
+        result_is_error=False,
+        action_changed_files=["src/bar.py"],
+        cumulative_changed_files=["src/bar.py", "src/foo.py"],
+        validation_artifacts=[],
+        verification_fingerprint="",
+        contract_satisfied=False,
+        contract_findings_count=2,
+    )
+    assert ledger.assess().repeated_file_patch is False
