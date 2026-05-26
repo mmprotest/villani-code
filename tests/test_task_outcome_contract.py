@@ -408,3 +408,94 @@ def test_observable_kind_includes_extended_values() -> None:
     assert ObservableKind.GENERATED_FILE.value in kinds
     assert ObservableKind.GENERATED_DIRECTORY.value in kinds
     assert ObservableKind.VALIDATION_EVIDENCE.value in kinds
+
+
+def test_repair_contract_requires_both_change_and_validation_evidence(tmp_path: Path) -> None:
+    contract = TaskOutcomeContract(
+        objective="repair",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.MODIFIED_FILE.value,
+                path="src/foo.py",
+                description="must change",
+                purpose="must_change",
+            ),
+            RequiredObservable(
+                kind=ObservableKind.VALIDATION_EVIDENCE.value,
+                path="",
+                description="must validate",
+                purpose="must_validate",
+                must_exist=False,
+            ),
+        ],
+    )
+
+    only_changed = check_contract_satisfaction(
+        tmp_path, contract, changed_files=["src/foo.py"], validation_artifacts=[]
+    )
+    assert only_changed.satisfied is False
+
+    only_validated = check_contract_satisfaction(
+        tmp_path,
+        contract,
+        changed_files=[],
+        validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
+    )
+    assert only_validated.satisfied is False
+
+    both = check_contract_satisfaction(
+        tmp_path,
+        contract,
+        changed_files=["src/foo.py"],
+        validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
+    )
+    assert both.satisfied is True
+
+
+def test_generated_output_contract_only_requires_generated_artifact_without_behavioral_checks(tmp_path: Path) -> None:
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "report.txt").write_text("ok\n", encoding="utf-8")
+    contract = TaskOutcomeContract(
+        objective="generate",
+        task_mode="general",
+        success_predicate="s",
+        required_observables=[
+            RequiredObservable(
+                kind=ObservableKind.GENERATED_FILE.value,
+                path="build/report.txt",
+                description="generated output",
+                purpose="must_generate",
+            )
+        ],
+        behavioral_checks=[],
+    )
+
+    result = check_contract_satisfaction(
+        tmp_path, contract, changed_files=[], validation_artifacts=[]
+    )
+    assert result.satisfied is True
+
+
+def test_build_repair_contract_adds_validation_requirements(tmp_path: Path) -> None:
+    contract = build_task_outcome_contract(
+        repo=tmp_path,
+        instruction="Fix bug in src/foo.py",
+        task_mode=TaskMode.GENERAL,
+        execution_plan=None,
+        benchmark_config=None,
+        existing_preferred_targets=[],
+    )
+
+    assert any(
+        c.description == "Validate the modified behavior or explain the validation evidence"
+        and c.required is True
+        for c in contract.behavioral_checks
+    )
+    assert any(
+        o.kind == ObservableKind.VALIDATION_EVIDENCE.value
+        and o.purpose == "must_validate"
+        and o.path == ""
+        for o in contract.required_observables
+    )

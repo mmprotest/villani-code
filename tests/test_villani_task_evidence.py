@@ -285,3 +285,50 @@ def test_completion_gate_validation_evidence_observable_allows(tmp_path: Path) -
         validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
     )
     assert gate["allowed"] is True
+
+
+def test_completion_gate_repair_contract_requires_change_and_validation(tmp_path: Path) -> None:
+    dummy = SimpleNamespace(
+        repo=tmp_path,
+        _task_outcome_contract=TaskOutcomeContract(
+            objective="repair",
+            task_mode="general",
+            success_predicate="repair evidence",
+            required_observables=[
+                RequiredObservable(
+                    kind=ObservableKind.MODIFIED_FILE.value,
+                    path="src/foo.py",
+                    description="must change",
+                    purpose="must_change",
+                ),
+                RequiredObservable(
+                    kind=ObservableKind.VALIDATION_EVIDENCE.value,
+                    path="",
+                    description="must validate",
+                    purpose="must_validate",
+                    must_exist=False,
+                ),
+            ],
+        ),
+        _last_inspection_summary="",
+        _inspection_summary="",
+    )
+
+    gate_only_change = state_runtime.evaluate_completion_gate(
+        dummy, changed_files=["src/foo.py"], validation_artifacts=[]
+    )
+    assert gate_only_change["allowed"] is False
+
+    gate_only_validation = state_runtime.evaluate_completion_gate(
+        dummy,
+        changed_files=[],
+        validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
+    )
+    assert gate_only_validation["allowed"] is False
+
+    gate_both = state_runtime.evaluate_completion_gate(
+        dummy,
+        changed_files=["src/foo.py"],
+        validation_artifacts=["pytest -q tests/test_state.py (exit=0)"],
+    )
+    assert gate_both["allowed"] is True
