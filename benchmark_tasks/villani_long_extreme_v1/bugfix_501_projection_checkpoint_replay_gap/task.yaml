@@ -1,0 +1,26 @@
+id: bugfix_501_projection_checkpoint_replay_gap
+family: bugfix
+difficulty: hard
+language: python
+max_minutes: 25
+max_files_touched: 4
+expected_artifacts:
+- patch
+visible_verification:
+- pytest -q tests/test_projection.py::test_resume_after_checkpoint_rebuilds_missing_projection_rows
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths: &id001
+- src/
+- tests/
+benchmark_track: core
+forbidden_paths:
+- docs/
+task_type: two_stage_fix
+allowed_paths: *id001
+expected_touched_max: 4

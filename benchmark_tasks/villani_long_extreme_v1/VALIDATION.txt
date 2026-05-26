@@ -1,0 +1,81 @@
+bugfix_501_projection_checkpoint_replay_gap
+returncode=1
+STDOUT:
+int_rebuilds_missing_projection_rows - AssertionError: assert 0 == 7
+ +  where 0 = get_balance('b')
+ +    where get_balance = <app.projection_store.ProjectionStore object at 0x7f2e06cf0d70>.get_balance
+1 failed in 0.28s
+
+STDERR:
+
+
+bugfix_502_incremental_pipeline_dependency_frontier
+returncode=1
+STDOUT:
+est summary info ============================
+FAILED tests/test_build.py::test_rebuild_refreshes_transitive_runtime_consumers_only - AssertionError: assert ('runtime_bundle' in ['schema', 'ui_assets'])
+1 failed in 0.24s
+
+STDERR:
+
+
+bugfix_503_content_negotiation_backward_compat
+returncode=1
+STDOUT:
+m:
+  {'meta': {'score': 0.9, 'source': 'db'}}
+  
+  Full diff:
+    {
+        'id': 'p1',
+  +     'meta': {
+  +         'score': 0.9,
+  +         'source': 'db',
+  +     },
+        'name': 'alpha',
+    }
+1 failed in 0.25s
+
+STDERR:
+
+
+localize_501_nested_scope_alias_shadowing
+returncode=1
+STDOUT:
+ tests/test_resolution.py::test_nested_lambda_uses_outer_alias_not_local_value - AssertionError: assert 'value::local_string' == 'alias::pkg.database'
+  
+  - alias::pkg.database
+  + value::local_string
+1 failed in 0.23s
+
+STDERR:
+
+
+localize_502_profiled_retrieval_cross_contamination
+returncode=1
+STDOUT:
+nError: assert ['n1'] == ['g1', 'p1']
+  
+  At index 0 diff: 'n1' != 'g1'
+  Right contains one more item: 'p1'
+  
+  Full diff:
+    [
+  -     'g1',
+  ?      ^
+  +     'n1',
+  ?      ^
+  -     'p1',
+    ]
+1 failed in 0.20s
+
+STDERR:
+
+
+terminal_501_checkpointed_worker_orchestration
+returncode=1
+STDOUT:
+
+STDERR:
+                          output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/opt/pyvenv/bin/python', 'scripts/run_batch.py', '/tmp/tmpv01ygsby/state.json', 'once']' returned non-zero exit status 1.

@@ -1,0 +1,1 @@
+Compatibility bug across unfinished adapter migration. Preserve both public surfaces.

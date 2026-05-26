@@ -1,0 +1,1 @@
+Wrong formatted output for a shadowed name. Symptom appears in formatting, root cause is resolution. Do not patch formatting.

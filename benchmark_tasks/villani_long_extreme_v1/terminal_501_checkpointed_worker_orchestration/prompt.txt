@@ -1,0 +1,1 @@
+Repair the worker orchestration so checkpointed batch processing completes reliably across repeated runs.

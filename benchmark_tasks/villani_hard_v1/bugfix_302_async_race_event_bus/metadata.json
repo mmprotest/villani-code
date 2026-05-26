@@ -1,0 +1,34 @@
+{
+  "name": "bugfix_302_async_race_event_bus",
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/stats.py"
+  ],
+  "reference_patch_size_lines": 14,
+  "primary_skill": "concurrency-debugging",
+  "secondary_skills": [
+    "threading",
+    "pytest"
+  ],
+  "runtime_stressors": [
+    "stress_test",
+    "race_condition",
+    "retry_pressure"
+  ],
+  "task_type": "concurrency_bugfix",
+  "requires_repo_navigation": false,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": true,
+  "likely_tool_sequence": [
+    "run_tests",
+    "read_files",
+    "edit_files",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "thread_safety",
+    "correctness"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

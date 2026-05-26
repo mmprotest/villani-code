@@ -1,0 +1,1 @@
+A user creation flow broke after a schema refactor. Visible tests point at the API layer, but the real issue is in cross-layer contract handling. Repair the contract drift without breaking new-format payloads.

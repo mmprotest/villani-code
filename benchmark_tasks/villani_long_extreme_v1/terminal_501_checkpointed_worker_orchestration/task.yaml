@@ -1,0 +1,25 @@
+id: terminal_501_checkpointed_worker_orchestration
+family: terminal_workflow
+difficulty: hard
+language: python
+max_minutes: 28
+max_files_touched: 5
+expected_artifacts: []
+visible_verification:
+- python tests/verify_terminal_501.py
+hidden_verification:
+- pytest -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- scripts/
+- src/
+- tests/
+benchmark_track: core
+forbidden_paths:
+- docs/
+task_type: two_stage_fix
+expected_touched_max: 5

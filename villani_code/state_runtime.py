@@ -645,12 +645,54 @@ def git_changed_files(repo: Any) -> list[str]:
 
 def _collect_changed_python_files(runner: Any) -> list[str]:
     current_changed = set(git_changed_files(runner.repo))
-    attributed_changed = sorted(current_changed - runner._verification_baseline_changed)
-    return [
+    observed = list(current_changed - runner._verification_baseline_changed)
+    observed.extend(list(getattr(runner, "_current_verification_targets", set())))
+    observed.extend(list(getattr(runner, "_intended_targets", set())))
+    canonical: list[str] = []
+    for raw in observed:
+        normalized = _repo_relative_modified_path(runner, raw)
+        if normalized and normalized not in canonical:
+            canonical.append(normalized)
+    relevant = [
         path
-        for path in attributed_changed
-        if path.endswith(".py") and not is_ignored_repo_path(path)
+        for path in canonical
+        if path.endswith(".py")
+        and not is_ignored_repo_path(path)
+        and not path.startswith(("villani_debug/", ".villani/", ".villani_code/", "__pycache__/"))
+        and Path(path).name not in {"test_fix.py", "verify_fix.py", "final_check.py"}
+        and not Path(path).name.startswith("debug_")
     ]
+    runner._last_patch_sanity_paths = {"raw": observed, "canonical": canonical, "relevant": relevant}
+    return relevant
+
+
+def _repo_relative_modified_path(runner: Any, raw_path: Any) -> str:
+    candidate = str(raw_path or "").strip().replace("\\", "/")
+    if not candidate:
+        return ""
+    if candidate.startswith("repo/"):
+        candidate = candidate[5:]
+    repo_norm = str(Path(runner.repo).resolve()).replace("\\", "/")
+    repo_lower = repo_norm.lower()
+    cand_lower = candidate.lower()
+    if cand_lower.startswith(repo_lower + "/"):
+        return candidate[len(repo_norm) + 1 :].lstrip("./")
+    if ":/" in candidate:
+        repo_parts = [p for p in repo_norm.split("/") if p]
+        cand_parts = [p for p in candidate.split("/") if p]
+        for i in range(len(cand_parts)):
+            tail = cand_parts[i:]
+            if len(tail) >= len(repo_parts) and [p.lower() for p in tail[: len(repo_parts)]] == [p.lower() for p in repo_parts]:
+                return "/".join(tail[len(repo_parts) :]).lstrip("./")
+        return ""
+    if candidate.startswith("/"):
+        return ""
+    resolved = (Path(runner.repo) / candidate.lstrip("./")).resolve()
+    try:
+        rel = resolved.relative_to(Path(runner.repo).resolve())
+        return str(rel).replace("\\", "/")
+    except Exception:
+        return ""
 
 
 def _is_pytest_based_verification(runner: Any) -> bool:
@@ -665,12 +707,16 @@ def _is_pytest_based_verification(runner: Any) -> bool:
 
 def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
     checked_files = _collect_changed_python_files(runner)
+    path_telemetry = getattr(runner, "_last_patch_sanity_paths", {"raw": [], "canonical": [], "relevant": []})
     telemetry = {
         "first_attempt_write_lock_active": bool(
             getattr(runner, "_first_attempt_write_lock_active", False)
         ),
         "locked_target_file": str(getattr(runner, "_first_attempt_locked_target", "") or ""),
         "syntax_sanity_ran": bool(checked_files),
+        "raw_modified_paths": list(path_telemetry.get("raw", [])),
+        "canonical_modified_paths": list(path_telemetry.get("canonical", [])),
+        "relevant_changed_python_files": list(path_telemetry.get("relevant", [])),
         "collection_sanity_ran": False,
         "collection_sanity_passed": None,
     }
@@ -679,6 +725,7 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
             {
                 "type": "patch_sanity_check_skipped",
                 "reason": "no_relevant_changed_python_files",
+                "skip_reason": "no_relevant_changed_python_files",
                 **telemetry,
             }
         )

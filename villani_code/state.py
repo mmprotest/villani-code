@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import ast
 import json
 import re
 import time
@@ -69,6 +70,61 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return ordered
 
 
+def _is_generated_or_runtime_artifact(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip().lstrip("./")
+    if not normalized:
+        return True
+    segments = [s for s in normalized.split("/") if s]
+    for segment in segments:
+        lower = segment.lower()
+        if lower == "__pycache__":
+            return True
+        if lower.endswith(".egg-info"):
+            return True
+        if lower.startswith(".") and lower.endswith("_cache"):
+            return True
+        if lower in {"node_modules", "dist", "build", "target", ".git", ".villani", ".villani_code"}:
+            return True
+    lower_full = normalized.lower()
+    artifact_suffixes = (".pyc", ".pyo", ".class", ".o", ".obj", ".dll", ".so", ".dylib", ".exe", ".log", ".tmp", ".temp")
+    return lower_full.endswith(artifact_suffixes)
+
+
+def _is_code_change_oriented_request(text: str) -> bool:
+    lowered = text.lower()
+    read_only_markers = [
+        "explain", "review", "analyse", "analyze", "audit", "summarize", "find where", "plan",
+        "propose", "inspect only", "do not edit", "no changes", "read only",
+    ]
+    if any(marker in lowered for marker in read_only_markers):
+        return False
+    edit_markers = [
+        "fix", "patch", "update", "modify", "change", "implement", "make tests pass",
+        "resolve failure", "repair", "correct", "refactor", "add support", "adjust behavior",
+        "make this work", "failing test", "broken",
+    ]
+    return any(marker in lowered for marker in edit_markers)
+
+
+def _response_has_prose_only_edit_intent(text: str) -> bool:
+    lowered = text.lower()
+    if "no code change is needed" in lowered or "no changes needed" in lowered:
+        return False
+    intent_markers = [
+        "found the bug", "here's the fix", "the fix is", "let me fix", "need to change",
+        "should change", "replace ", "update ", "change ", " edit", " patch", " modify",
+        " adjust", " implement",
+    ]
+    return any(marker in lowered for marker in intent_markers)
+
+
+def _response_explicitly_no_change_or_blocked(text: str) -> bool:
+    lowered = text.lower()
+    markers = [
+        "no code change is needed", "no changes needed", "no change is needed", "blocked",
+        "missing file", "missing dependency", "insufficient information", "cannot proceed",
+    ]
+    return any(marker in lowered for marker in markers)
 
 
 def _read_text_excerpt(path: Path, limit: int = 1400) -> str:
@@ -526,6 +582,9 @@ class Runner:
         self._last_emitted_validation_fingerprint = ""
         self._failure_classifier = FailureClassifier()
         self._patch_sanity_retry_pending = False
+        self._patch_effect_check_pending = False
+        self._patch_effect_check_attempts = 0
+        self._patch_effect_check_cap = 2
         self._first_attempt_write_lock_active = False
         self._first_attempt_locked_target = ""
         self._context_governance = ContextGovernanceManager(self.repo)
@@ -883,12 +942,17 @@ class Runner:
         # Conservative benchmark-only fast-fail for repeated out-of-scope mutation attempts.
         benchmark_mutation_denials = 0
         benchmark_denial_limit = 3
+        request_is_code_change_oriented = _is_code_change_oriented_request(instruction)
+        meaningful_repo_edit_made = False
+        prose_edit_intent_recovery_attempts = 0
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
         self._current_verification_targets: set[str] = set()
         self._current_verification_before_contents: dict[str, str] = {}
+        self._patch_effect_check_pending = False
+        self._patch_effect_check_attempts = 0
         self._last_verification_fingerprint = ""
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional = set()
@@ -1139,6 +1203,11 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    targets = self._extract_tool_targets(tool_name, tool_input)
+                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
+                        meaningful_repo_edit_made = True
+                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1329,6 +1398,38 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
+                if self._patch_effect_check_pending and self._patch_effect_check_attempts < self._patch_effect_check_cap:
+                    self._patch_effect_check_attempts += 1
+                    check_observation = self._run_patch_effect_check(response, _attributed_changed_files(), instruction)
+                    if check_observation:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": check_observation}]})
+                        continue
+                assistant_text = "\n".join(
+                    str(block.get("text", ""))
+                    for block in response.get("content", [])
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ).strip()
+                if (
+                    request_is_code_change_oriented
+                    and not meaningful_repo_edit_made
+                    and _response_has_prose_only_edit_intent(assistant_text)
+                    and not _response_explicitly_no_change_or_blocked(assistant_text)
+                ):
+                    prose_edit_intent_recovery_attempts += 1
+                    if prose_edit_intent_recovery_attempts > 2:
+                        return _finish_bounded(response, "incomplete_no_patch_after_edit_intent", False)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "You identified the change but did not edit the repository. Use Patch or Write now. If no code change is needed, explicitly say so and explain why.",
+                                }
+                            ],
+                        }
+                    )
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1401,6 +1502,8 @@ class Runner:
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
+                    self._patch_effect_check_pending = True
+                    self._patch_effect_check_attempts = 0
                 elif tool_name == "Bash":
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
@@ -1500,6 +1603,8 @@ class Runner:
             previous_attributed = attributed
             if edited_this_turn:
                 consecutive_no_edit_turns = 0
+                self._patch_effect_check_pending = True
+                self._patch_effect_check_attempts = 0
                 if self.benchmark_config.enabled and _has_meaningful_benchmark_edit():
                     self._benchmark_noop_completion_attempts = 0
                     benchmark_mutation_denials = 0
@@ -1563,6 +1668,122 @@ class Runner:
         if self._debug_recorder is not None:
             self._debug_recorder.on_runner_event(event)
         self._user_event_callback(event)
+
+    def _run_patch_effect_check(self, response: dict[str, Any], changed_files: list[str], objective: str) -> str:
+        text = "\n".join(
+            str(block.get("text", ""))
+            for block in response.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        candidates = self._canonical_modified_paths(list(changed_files) + sorted(self._current_verification_targets) + sorted(self._intended_targets))
+        target = next(
+            (
+                path
+                for path in candidates
+                if path
+                and not path.startswith(("tmp", "temp", "debug", "scratch", ".villani", ".villani_code", "__pycache__"))
+                and (path.endswith(".py") or path.startswith(("src/", "app/", "lib/", "config/")))
+            ),
+            "",
+        )
+        if not target:
+            self._patch_effect_check_pending = False
+            return ""
+        target_path = (self.repo / target).resolve()
+        if not target_path.exists() or not target_path.is_file():
+            self._patch_effect_check_pending = False
+            return ""
+        patched_text = target_path.read_text(encoding="utf-8", errors="replace")
+        patched_excerpt = patched_text[:2400]
+        intended_effect = self._derive_intended_effect(text, target, objective)
+        syntax_result = "not_applicable"
+        if target.endswith(".py"):
+            try:
+                ast.parse(patched_text)
+                syntax_result = "ok"
+            except SyntaxError as exc:
+                line = exc.lineno or "?"
+                syntax_result = f"syntax_error: {exc.msg} at line {line}"
+        prompt = (
+            "You are checking whether a code edit actually matches its intended effect.\n\n"
+            f"Task objective:\n{objective}\n\n"
+            f"Intended effect:\n{intended_effect}\n\n"
+            f"Fresh patched code:\n```\n{patched_excerpt}\n```\n\n"
+            f"Syntax check:\n{syntax_result}\n\n"
+            "Does the patched code actually implement the intended effect?\n"
+            "Answer exactly one of:\nYES\nNO: <specific mismatch>"
+        )
+        self.event_callback(
+            {
+                "type": "patch_effect_critic_started",
+                "canonical_modified_paths": candidates,
+                "target_file": target,
+                "syntax_check": syntax_result,
+            }
+        )
+        critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
+        critic_raw = self.client.create_message(critic_payload, stream=False)
+        critic_text = "\n".join(str(b.get("text", "")) for b in critic_raw.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
+        stripped = critic_text.lstrip()
+        if syntax_result.startswith("syntax_error"):
+            return f"Patch-effect check failed: {syntax_result}. Fix syntax before completion."
+        if stripped.startswith("YES"):
+            self._patch_effect_check_pending = False
+            return ""
+        if stripped.startswith("NO:"):
+            return f"Patch-effect check mismatch: {critic_text[:400]}"
+        self._patch_effect_check_pending = False
+        return (
+            "Patch-effect check was inconclusive. No syntax error or concrete mismatch was found. "
+            "Do not create new verification/proof files. If the edited source already satisfies the task objective, provide the final answer."
+        )
+
+    def _derive_intended_effect(self, rationale: str, target: str, objective: str) -> str:
+        banned = {"## analysis", "## fix summary", "summary", "changes made", "implementation"}
+        for raw in re.split(r"(?<=[.!?])\s+", rationale):
+            sentence = raw.strip().strip("#").strip()
+            if len(sentence) < 20:
+                continue
+            if sentence.lower() in banned or sentence.lower().startswith("##"):
+                continue
+            return sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
+        return f"The recent edit to {target} should address the requested behaviour."
+
+    def _normalise_modified_path(self, raw_path: str) -> str:
+        candidate = str(raw_path or "").strip().replace("\\", "/")
+        if not candidate:
+            return ""
+        repo_norm = str(self.repo.resolve()).replace("\\", "/")
+        repo_lower = repo_norm.lower()
+        cand_lower = candidate.lower()
+        if cand_lower.startswith(repo_lower + "/"):
+            return candidate[len(repo_norm) + 1 :].lstrip("./")
+        if ":/" in candidate:
+            repo_parts = [p for p in repo_norm.split("/") if p]
+            cand_parts = [p for p in candidate.split("/") if p]
+            for i in range(len(cand_parts)):
+                tail = cand_parts[i:]
+                if len(tail) >= len(repo_parts) and [p.lower() for p in tail[: len(repo_parts)]] == [p.lower() for p in repo_parts]:
+                    rel = "/".join(tail[len(repo_parts) :]).lstrip("./")
+                    return rel
+            return ""
+        normalized = candidate.lstrip("./")
+        if candidate.startswith("/"):
+            return ""
+        path = (self.repo / normalized).resolve()
+        try:
+            rel = path.relative_to(self.repo.resolve())
+            return str(rel).replace("\\", "/")
+        except Exception:
+            return ""
+
+    def _canonical_modified_paths(self, raw_paths: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in raw_paths:
+            normalized = self._normalise_modified_path(raw)
+            if normalized and normalized not in out:
+                out.append(normalized)
+        return out
 
     def _ensure_mission(self, instruction: str) -> None:
         mode = "autonomous" if self.villani_mode else self._runtime_mode

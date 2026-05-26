@@ -1,0 +1,30 @@
+{
+  "name": "bugfix_503_content_negotiation_backward_compat",
+  "difficulty": "very_hard",
+  "primary_skill": "api_compatibility_repair",
+  "expected_files": [
+    "src/app/negotiation.py",
+    "src/app/serializer.py"
+  ],
+  "reference_patch_size_lines": 19,
+  "runtime_stressors": [
+    "false_fix_trap",
+    "hidden_multi_file_bug",
+    "two_stage_fix"
+  ],
+  "task_type": "two_stage_fix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "pytest target",
+    "trace request path",
+    "run full pytest"
+  ],
+  "evaluation_focus": [
+    "backward compatibility",
+    "boundary repair"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

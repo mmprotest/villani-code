@@ -36,6 +36,22 @@ from villani_code.benchmark.task_loader import load_tasks
 from villani_code.benchmark.verifier import run_commands
 from villani_code.benchmark.workspace import WorkspaceManager
 
+def append_benchmark_contract(prompt: str, benchmark_config_json: str | None) -> str:
+    if not benchmark_config_json:
+        return prompt
+    return f"""{prompt}
+
+## Benchmark Runtime Contract
+
+The following JSON describes the benchmark execution constraints. Follow it exactly.
+
+```json
+{benchmark_config_json}
+```
+
+Only modify allowed files. Do not modify forbidden paths. Do not finish unless you made a real in-scope patch that addresses the task.
+"""
+
 
 class BenchmarkRunner:
     def __init__(self, output_dir: Path, keep_workspace: bool = False, private_suite_dir: Path | None = None) -> None:
@@ -567,13 +583,15 @@ class BenchmarkRunner:
                     encoding="utf-8",
                 )
 
-                benchmark_config_json = None
-                if agent == "villani":
-                    benchmark_config_json = benchmark_runtime_config_from_task(task).model_dump_json()
+                benchmark_runtime_config = benchmark_runtime_config_from_task(task)
+                benchmark_config_json = benchmark_runtime_config.model_dump_json()
+                effective_prompt = benchmark_prompt
+                if agent != "villani":
+                    effective_prompt = append_benchmark_contract(benchmark_prompt, benchmark_config_json)
 
                 execution = adapter.run_agent(
                     repo_path=workspace_repo,
-                    prompt=benchmark_prompt,
+                    prompt=effective_prompt,
                     model=model,
                     base_url=base_url,
                     api_key=api_key,

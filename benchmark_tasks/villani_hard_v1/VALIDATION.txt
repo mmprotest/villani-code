@@ -1,0 +1,49 @@
+bugfix_301_cross_layer_contract_drift exit=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_legacy_name_payload_still_creates_user __________________
+
+    def test_legacy_name_payload_still_creates_user():
+>       result = post_user({'name': 'Ada Lovelace', 'email': 'ADA@EXAMPLE.COM'})
+
+bugfix_302_async_race_event_bus exit=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_parallel_recording_is_lossless ______________________
+
+    def test_parallel_recording_is_lossless():
+>       assert record_many('message.sent', 400, workers=16) == 400
+
+localize_301_retrieval_pipeline_metadata_corruption exit=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_topic_filtered_search_returns_expected_doc ________________
+
+    def test_topic_filtered_search_returns_expected_doc():
+        result = search(DOCS, query='privacy consent', topic='legal')
+
+bugfix_303_partial_refactor_compat_adapter exit=4
+
+==================================== ERRORS ====================================
+_______________ ERROR collecting tests/test_visible_refactor.py ________________
+/opt/pyvenv/lib/python3.13/site-packages/_pytest/python.py:507: in importtestmodule
+    mod = import_path(
+/opt/pyvenv/lib/python3.13/site-packages/_pytest/pathlib.py:587: in import_path
+
+terminal_301_persistent_process_readiness_hang exit=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________ test_smoke_script_returns_healthy_status ___________________
+
+    def test_smoke_script_returns_healthy_status():
+>       assert run_smoke(port=8765) == {'status': 'ok'}
+
+localize_302_semantic_edgecase_minimal_patch exit=1
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_credit_cannot_increase_total _______________________
+
+    def test_credit_cannot_increase_total():
+>       assert invoice_summary(1000, -200, fee_cents=50)['total_cents'] == 1050
+
+Schema compatibility patch: family enum normalized to bugfix/localize_patch/terminal_workflow and benchmark_track/benchmark_bucket normalized to baseline|runtime_stressing.

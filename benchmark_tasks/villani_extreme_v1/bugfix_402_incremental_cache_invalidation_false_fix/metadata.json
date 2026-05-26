@@ -1,0 +1,37 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": [
+    "src/app/buildsystem.py"
+  ],
+  "reference_patch_size_lines": 12,
+  "primary_skill": "incremental-invalidation",
+  "secondary_skills": [
+    "graphs",
+    "caching",
+    "pytest"
+  ],
+  "name": "bugfix_402_incremental_cache_invalidation_false_fix",
+  "difficulty": "hard",
+  "runtime_stressors": [
+    "false_fix_trap",
+    "performance_constraint",
+    "graph_reasoning"
+  ],
+  "task_type": "multi_file_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": true,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": [
+    "run_tests",
+    "inspect_graph_logic",
+    "edit_file",
+    "run_tests"
+  ],
+  "evaluation_focus": [
+    "correctness",
+    "incrementality",
+    "minimal_patch"
+  ],
+  "benchmark_bucket": "runtime_stressing"
+}

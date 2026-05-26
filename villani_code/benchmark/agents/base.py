@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -94,6 +96,8 @@ class AgentRunner(ABC):
         stdout_path = debug_dir / "agent_stdout.txt"
         stderr_path = debug_dir / "agent_stderr.txt"
         meta_path = debug_dir / "agent_run_meta.json"
+        stdout = stdout or ""
+        stderr = stderr or ""
 
         command_path.write_text(" ".join(command) + "\n", encoding="utf-8")
         stdout_path.write_text(stdout, encoding="utf-8")
@@ -141,6 +145,7 @@ class AgentRunner(ABC):
         started = time.monotonic()
         launch_prompt = self.render_launch_prompt(prompt)
         command = self.build_command(repo_path, launch_prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
+        command = self._resolve_subprocess_command(command)
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]
         proc = subprocess.Popen(command, cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -178,3 +183,25 @@ class AgentRunner(ABC):
             events=events,
             debug_artifacts=debug_artifacts,
         )
+
+    @staticmethod
+    def _resolve_subprocess_command(command: list[str]) -> list[str]:
+        if not command:
+            return command
+        executable = command[0]
+        if os.path.isabs(executable) or os.sep in executable or (os.altsep and os.altsep in executable):
+            return command
+
+        is_windows = sys.platform.startswith("win")
+        resolved = shutil.which(executable)
+        if resolved is None and is_windows:
+            for suffix in (".cmd", ".bat", ".exe"):
+                resolved = shutil.which(f"{executable}{suffix}")
+                if resolved:
+                    break
+        if not resolved:
+            return command
+
+        if is_windows and resolved.lower().endswith((".cmd", ".bat")):
+            return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", resolved, *command[1:]]
+        return [resolved, *command[1:]]

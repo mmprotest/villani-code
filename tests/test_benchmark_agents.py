@@ -1,9 +1,11 @@
 from __future__ import annotations
-
+import json
+import shutil
 from pathlib import Path
 
 from villani_code.benchmark.agents import AGENTS, build_agent_runner
 from villani_code.benchmark.agents.aider import AiderAgentRunner
+from villani_code.benchmark.agents.base import AgentRunner
 from villani_code.benchmark.agents.claude_code import ClaudeCodeAgentRunner
 from villani_code.benchmark.agents.command import CommandAgentRunner
 from villani_code.benchmark.agents.opencode import OpenCodeAgentRunner
@@ -49,30 +51,243 @@ def test_aider_command_forwards_model_and_endpoint() -> None:
     ]
 
 
-def test_opencode_command_and_env_forward_model_and_endpoint() -> None:
+def test_opencode_command_with_base_url_uses_local_provider_prefix() -> None:
     runner = OpenCodeAgentRunner()
+    prompt = "line one\nline two\nline three"
     cmd = runner.build_command(
         Path("."),
-        "fix bug",
+        prompt,
         model="qwen-9b",
         base_url="http://127.0.0.1:1234",
         api_key="sk-test",
         provider="openai",
     )
     env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
-    assert cmd == [
+    assert cmd[0:3] == [
         "opencode",
         "run",
+        "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done.",
+    ]
+    assert cmd[3:9] == [
+        "--model",
+        "villani-openai-compatible/benchmark-model",
+        "--format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--file",
+    ]
+    file_arg_idx = cmd.index("--file") + 1
+    prompt_path = Path(cmd[file_arg_idx])
+    assert prompt_path.exists()
+    assert prompt_path.read_text(encoding="utf-8") == prompt
+    assert cmd[2] == "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done."
+    assert "\n" not in cmd[2]
+    assert cmd[-1] == str(prompt_path)
+    shutil.rmtree(prompt_path.parent, ignore_errors=True)
+    assert env["OPENAI_API_KEY"] == "sk-test"
+
+
+def test_opencode_command_without_base_url_preserves_model() -> None:
+    runner = OpenCodeAgentRunner()
+    cmd = runner.build_command(
+        Path("."),
+        "fix bug",
+        model="qwen-9b",
+        base_url=None,
+        api_key=None,
+        provider="openai",
+    )
+    assert cmd[0:3] == [
+        "opencode",
+        "run",
+        "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done.",
+    ]
+    assert cmd[3:9] == [
         "--model",
         "qwen-9b",
-        "--hostname",
-        "http://127.0.0.1:1234",
-        "--command",
+        "--format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--file",
+    ]
+    prompt_path = Path(cmd[cmd.index("--file") + 1])
+    assert cmd[-1] == str(prompt_path)
+    shutil.rmtree(prompt_path.parent, ignore_errors=True)
+
+
+def test_opencode_env_sets_openai_api_key_from_api_key() -> None:
+    runner = OpenCodeAgentRunner()
+    env = runner.build_env(base_url="http://127.0.0.1:1234", api_key="sk-test")
+    assert env["OPENAI_API_KEY"] == "sk-test"
+
+
+def test_opencode_base_url_normalization() -> None:
+    runner = OpenCodeAgentRunner()
+    assert runner._normalize_base_url("http://127.0.0.1:1234") == "http://127.0.0.1:1234/v1"
+    assert runner._normalize_base_url("http://127.0.0.1:1234/v1") == "http://127.0.0.1:1234/v1"
+
+
+def test_opencode_env_defaults_api_key_to_dummy_when_base_url_present() -> None:
+    runner = OpenCodeAgentRunner()
+    env = runner.build_env(base_url="http://127.0.0.1:1234", api_key=None)
+    assert env["OPENAI_API_KEY"] == "dummy"
+
+
+def test_resolve_subprocess_command_wraps_windows_cmd_shim(monkeypatch) -> None:
+    monkeypatch.setattr("villani_code.benchmark.agents.base.sys.platform", "win32")
+    monkeypatch.setenv("COMSPEC", "C:\\Windows\\System32\\cmd.exe")
+
+    def fake_which(executable: str) -> str | None:
+        if executable == "opencode":
+            return None
+        if executable == "opencode.cmd":
+            return "C:\\Users\\me\\AppData\\Roaming\\npm\\opencode.cmd"
+        return None
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.shutil.which", fake_which)
+    resolved = AgentRunner._resolve_subprocess_command(["opencode", "run", "fix bug"])
+    assert resolved == [
+        "C:\\Windows\\System32\\cmd.exe",
+        "/d",
+        "/c",
+        "C:\\Users\\me\\AppData\\Roaming\\npm\\opencode.cmd",
+        "run",
         "fix bug",
     ]
-    assert env["OPENAI_API_BASE"] == "http://127.0.0.1:1234"
-    assert env["OPENAI_API_KEY"] == "sk-test"
-    assert "OPENAI_PROVIDER" not in env
+
+
+def test_opencode_run_agent_writes_project_config_for_base_url(tmp_path: Path, monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    captured: dict[str, object] = {}
+
+    class DummyProc:
+        returncode = 0
+
+        def communicate(self, timeout):
+            return ("", "")
+
+    def fake_popen(command, cwd, stdout, stderr, text, env):
+        captured["command"] = command
+        captured["env"] = env
+        config_path = Path(cwd) / "opencode.json"
+        assert config_path.exists()
+        captured["config"] = json.loads(config_path.read_text(encoding="utf-8"))
+        prompt_path = Path(command[-1])
+        captured["prompt_exists_during_run"] = prompt_path.exists()
+        captured["prompt_contents"] = prompt_path.read_text(encoding="utf-8")
+        return DummyProc()
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
+    runner.run_agent(
+        repo_path=tmp_path,
+        prompt="fix bug",
+        model="qwen-9b",
+        base_url="http://127.0.0.1:1234",
+        api_key=None,
+        provider="openai",
+        timeout=10,
+    )
+    assert (tmp_path / "opencode.json").exists() is False
+    assert captured["command"][0:3] == [
+        "opencode",
+        "run",
+        "Complete the benchmark task described in the attached file. Modify the current repository. Do not ask for clarification. Stop when done.",
+    ]
+    assert captured["command"][3:9] == [
+        "--model",
+        "villani-openai-compatible/benchmark-model",
+        "--format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--file",
+    ]
+    prompt_path = Path(captured["command"][-1])
+    assert captured["prompt_exists_during_run"] is True
+    assert captured["prompt_contents"] == "fix bug"
+    assert captured["command"][-1] == str(prompt_path)
+    config_data = captured["config"]
+    assert isinstance(config_data, dict)
+    assert config_data["provider"]["villani-openai-compatible"]["models"]["benchmark-model"]["name"] == "qwen-9b"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["OPENAI_API_KEY"] == "dummy"
+
+
+def test_opencode_base_url_with_slashes_in_model_uses_model_alias(tmp_path: Path, monkeypatch) -> None:
+    runner = OpenCodeAgentRunner()
+    seen: dict[str, list[str]] = {}
+
+    class DummyProc:
+        returncode = 0
+
+        def communicate(self, timeout):
+            return ("", "")
+
+    def fake_popen(command, cwd, stdout, stderr, text, env):
+        seen["command"] = command
+        return DummyProc()
+
+    monkeypatch.setattr("villani_code.benchmark.agents.base.subprocess.Popen", fake_popen)
+    runner.run_agent(
+        repo_path=tmp_path,
+        prompt="fix bug",
+        model="villanis/models/qwen3.6-27b-iq4_xs.gguf",
+        base_url="http://127.0.0.1:1234",
+        api_key="sk-test",
+        provider="openai",
+        timeout=10,
+    )
+    command = seen["command"]
+    assert command[command.index("--model") + 1] == "villani-openai-compatible/benchmark-model"
+
+
+def test_opencode_run_agent_fails_if_opencode_json_exists(tmp_path: Path) -> None:
+    runner = OpenCodeAgentRunner()
+    (tmp_path / "opencode.json").write_text("{}", encoding="utf-8")
+    try:
+        runner.run_agent(
+            repo_path=tmp_path,
+            prompt="fix bug",
+            model="qwen-9b",
+            base_url="http://127.0.0.1:1234",
+            api_key="sk-test",
+            provider="openai",
+            timeout=10,
+        )
+    except RuntimeError as exc:
+        assert "cannot safely overwrite existing config" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError when opencode.json already exists")
+
+
+def test_debug_artifacts_handles_none_stdout_stderr(tmp_path: Path) -> None:
+    class DummyRunner(AgentRunner):
+        def build_command(
+            self,
+            repo_path: Path,
+            prompt: str,
+            model: str | None,
+            base_url: str | None,
+            api_key: str | None,
+            provider: str | None,
+            benchmark_config_json: str | None = None,
+        ) -> list[str]:
+            return ["echo", "ok"]
+
+    runner = DummyRunner()
+    artifacts = runner._write_debug_artifacts(
+        tmp_path,
+        command=["echo", "ok"],
+        cwd=tmp_path,
+        env={},
+        stdout=None,  # type: ignore[arg-type]
+        stderr=None,  # type: ignore[arg-type]
+        exit_code=0,
+        timeout_hit=False,
+        runtime_seconds=0.1,
+    )
+    assert Path(artifacts["agent_stdout"]).read_text(encoding="utf-8") == ""
+    assert Path(artifacts["agent_stderr"]).read_text(encoding="utf-8") == ""
 
 def test_claude_code_command_and_env_forward_model_and_endpoint() -> None:
     runner = ClaudeCodeAgentRunner()

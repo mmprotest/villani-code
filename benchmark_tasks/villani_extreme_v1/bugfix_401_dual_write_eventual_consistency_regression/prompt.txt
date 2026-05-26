@@ -1,0 +1,1 @@
+Dual write migration bug. Visible failure looks like a read-model issue. Hidden checks cover idempotency and retry semantics.
