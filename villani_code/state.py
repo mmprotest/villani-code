@@ -1031,6 +1031,9 @@ class Runner:
         previous_attributed = set()
         last_successful_validation_changed: set[str] = set()
         completion_gate_output_checked = False
+        edit_revision = 0
+        validation_revision = 0
+        successful_validation_count = 0
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1118,27 +1121,32 @@ class Runner:
             return commands
 
         def _completion_gate_observation() -> str | None:
-            nonlocal last_successful_validation_changed, completion_gate_output_checked
+            nonlocal last_successful_validation_changed, completion_gate_output_checked, validation_revision, successful_validation_count
             current_changed = set(_attributed_changed_files())
             artifacts = collect_validation_artifacts(transcript)
-            has_successful_validation = any("(exit=0)" in item for item in artifacts)
-            if has_successful_validation:
+            current_successful_count = sum(1 for item in artifacts if "(exit=0)" in item)
+            if current_successful_count > successful_validation_count:
+                successful_validation_count = current_successful_count
                 last_successful_validation_changed = set(current_changed)
                 completion_gate_output_checked = True
+                validation_revision = edit_revision
             changed_since_validation = sorted(current_changed - last_successful_validation_changed)
-            if changed_since_validation:
+            if validation_revision < edit_revision:
                 known = _known_validation_commands()
                 required = known[-1] if known else "inspect required output artifacts tied to the task prompt and recent observations"
                 self.event_callback(
                     {
                         "type": "completion_gate_blocked",
                         "reason": "edits_after_last_successful_validation",
+                        "edit_revision": edit_revision,
+                        "validation_revision": validation_revision,
                         "changed_files": changed_since_validation,
                         "required_check": required,
                     }
                 )
                 return (
-                    "Completion gate blocked finalization: files changed after the last successful validation. "
+                    "Completion gate blocked finalization: workspace edits have not been validated since the most recent edit. "
+                    f"edit_revision={edit_revision}, validation_revision={validation_revision}. "
                     f"Changed since validation: {changed_since_validation}. "
                     f"Run one minimal relevant validation action now (e.g., `{required}`), then finalize."
                 )
@@ -1661,6 +1669,7 @@ class Runner:
             edited_this_turn = attributed != previous_attributed
             previous_attributed = attributed
             if edited_this_turn:
+                edit_revision += 1
                 consecutive_no_edit_turns = 0
                 self._patch_effect_check_pending = True
                 self._patch_effect_check_attempts = 0

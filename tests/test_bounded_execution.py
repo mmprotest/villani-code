@@ -252,3 +252,36 @@ def test_completion_gate_blocks_when_outputs_not_checked(tmp_path: Path) -> None
     result = runner.run("Review and finalize", execution_budget=_default_budget())
     assert runner.client.calls >= 4
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_completion_gate_failed_validation_does_not_refresh_revision(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Write", "input": {"file_path": "src/app.py", "content": "print('x')\n"}}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "2", "name": "Bash", "input": {"command": "python -c \"import sys; sys.exit(1)\""}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "3", "name": "Bash", "input": {"command": "echo revalidated"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Now done."}]},
+        ],
+    )
+    result = runner.run("Validate after edit", execution_budget=_default_budget())
+    assert runner.client.calls >= 5
+    assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_completion_gate_blocks_multiple_edits_until_post_edit_validation(tmp_path: Path) -> None:
+    runner = _runner(
+        tmp_path,
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "echo baseline"}}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "src/a.py", "content": "print('a')\n"}}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "3", "name": "Write", "input": {"file_path": "src/b.py", "content": "print('b')\n"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "All done."}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "4", "name": "Bash", "input": {"command": "echo post-edit-validation"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "Final."}]},
+        ],
+    )
+    result = runner.run("Make edits and validate once", execution_budget=_default_budget())
+    assert runner.client.calls >= 6
+    assert result["execution"]["terminated_reason"] == "completed"
