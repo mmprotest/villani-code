@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import py_compile
 import re
 from dataclasses import dataclass
@@ -11,6 +12,29 @@ from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targe
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.tools import execute_tool
+
+
+_RETRY_BLOCK_MESSAGE = (
+    "The previous identical command already failed and nothing relevant appears to have changed. "
+    "Inspect the failure, change the code/config, or run a different diagnostic command before retrying."
+)
+
+
+def _normalize_command_text(command: str) -> str:
+    return " ".join(str(command or "").strip().split())
+
+
+def _failure_excerpt(tool_result: dict[str, Any]) -> str:
+    content = tool_result.get("content")
+    if not isinstance(content, str):
+        return ""
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return ""
+    stderr = str(payload.get("stderr") or "").strip()
+    stdout = str(payload.get("stdout") or "").strip()
+    return (stderr or stdout)[:240]
 
 
 _FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
@@ -639,6 +663,31 @@ def execute_tool_with_lifecycle(
         current_turn = turn_index if isinstance(turn_index, int) else 0
         stable_tool_use_id = f"tool-{tool_name.lower()}-{current_turn}-{len(str(tool_input))}"
     emit_turn_index = turn_index if isinstance(turn_index, int) else 0
+    revision = int(getattr(runner, "_tool_state_revision", 0))
+    if tool_name == "Bash":
+        remembered_failure = getattr(runner, "_last_failed_bash_command", None)
+        normalized_command = _normalize_command_text(str(tool_input.get("command", "")))
+        if (
+            isinstance(remembered_failure, dict)
+            and remembered_failure.get("command") == normalized_command
+            and int(remembered_failure.get("revision", -1)) == revision
+        ):
+            runner.event_callback(
+                {
+                    "type": "tool_result",
+                    "name": tool_name,
+                    "input": tool_input,
+                    "tool_use_id": stable_tool_use_id,
+                    "is_error": False,
+                    "result": runner._build_tool_result_event_payload(
+                        tool_name, stable_tool_use_id, {"content": _RETRY_BLOCK_MESSAGE, "is_error": False}
+                    ),
+                    "turn_index": emit_turn_index,
+                    **({"forced": True} if forced else {}),
+                }
+            )
+            runner.event_callback({"type": "runner_log", "level": "info", "message": f"Blocked identical failed command retry: {normalized_command[:200]}"})
+            return {"content": _RETRY_BLOCK_MESSAGE, "is_error": False}
     runner.event_callback(
         {
             "type": "tool_started",
@@ -666,6 +715,27 @@ def execute_tool_with_lifecycle(
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
     )
+    if tool_name in {"Write", "Patch", "GitCommit", "GitCheckout"} and not bool(result.get("is_error", False)):
+        runner._tool_state_revision = revision + 1
+    if tool_name == "Bash":
+        normalized_command = _normalize_command_text(str(tool_input.get("command", "")))
+        exit_code = None
+        content = result.get("content")
+        if isinstance(content, str):
+            try:
+                exit_code = int(json.loads(content).get("exit_code"))
+            except Exception:
+                exit_code = None
+        if exit_code and exit_code != 0:
+            runner._last_failed_bash_command = {
+                "command": normalized_command,
+                "revision": int(getattr(runner, "_tool_state_revision", revision)),
+                "turn_index": emit_turn_index,
+                "failure_excerpt": _failure_excerpt(result),
+            }
+            runner.event_callback({"type": "runner_log", "level": "info", "message": f"Remembered failed command: {normalized_command[:200]}"})
+        elif exit_code == 0:
+            runner._last_failed_bash_command = None
     runner.event_callback(
         {
             "type": "tool_result",
