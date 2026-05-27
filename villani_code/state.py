@@ -43,6 +43,7 @@ from villani_code.context_projection import build_model_context_packet, render_m
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
+from villani_code.evidence import parse_command_evidence
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.state_execution import (
@@ -1033,7 +1034,6 @@ class Runner:
         completion_gate_output_checked = False
         edit_revision = 0
         validation_revision = 0
-        successful_validation_count = 0
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1121,15 +1121,8 @@ class Runner:
             return commands
 
         def _completion_gate_observation() -> str | None:
-            nonlocal last_successful_validation_changed, completion_gate_output_checked, validation_revision, successful_validation_count
+            nonlocal last_successful_validation_changed, completion_gate_output_checked, validation_revision
             current_changed = set(_attributed_changed_files())
-            artifacts = collect_validation_artifacts(transcript)
-            current_successful_count = sum(1 for item in artifacts if "(exit=0)" in item)
-            if current_successful_count > successful_validation_count:
-                successful_validation_count = current_successful_count
-                last_successful_validation_changed = set(current_changed)
-                completion_gate_output_checked = True
-                validation_revision = edit_revision
             changed_since_validation = sorted(current_changed - last_successful_validation_changed)
             if validation_revision < edit_revision:
                 known = _known_validation_commands()
@@ -1639,6 +1632,34 @@ class Runner:
                     {"name": tool_name, "input": tool_input, "id": tool_use_id}
                 )
                 transcript["tool_results"].append(result)
+                command_evidence = parse_command_evidence(str(result.get("content", "")))
+                successful_validation = any(
+                    isinstance(record, dict) and record.get("exit") == 0
+                    for record in command_evidence
+                )
+                if successful_validation:
+                    current_changed = set(_attributed_changed_files())
+                    prior_validation_revision = validation_revision
+                    validation_revision = edit_revision
+                    last_successful_validation_changed = set(current_changed)
+                    completion_gate_output_checked = True
+                    validation_commands = [
+                        str(record.get("command", "")).strip()
+                        for record in command_evidence
+                        if isinstance(record, dict)
+                        and record.get("exit") == 0
+                        and str(record.get("command", "")).strip()
+                    ]
+                    self.event_callback(
+                        {
+                            "type": "validation_revision_updated",
+                            "action": tool_name,
+                            "commands": validation_commands,
+                            "edit_revision": edit_revision,
+                            "validation_revision_before": prior_validation_revision,
+                            "validation_revision_after": validation_revision,
+                        }
+                    )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -1669,7 +1690,25 @@ class Runner:
             edited_this_turn = attributed != previous_attributed
             previous_attributed = attributed
             if edited_this_turn:
+                prior_edit_revision = edit_revision
                 edit_revision += 1
+                self.event_callback(
+                    {
+                        "type": "edit_revision_incremented",
+                        "old_revision": prior_edit_revision,
+                        "new_revision": edit_revision,
+                        "reason": "workspace_mutation_detected",
+                        "mutating_tools": [
+                            str(b.get("name", ""))
+                            for b in tool_uses
+                            if self._is_mutating_tool_call(
+                                str(b.get("name", "")), dict(b.get("input", {}))
+                            )
+                        ],
+                        "changed_files": sorted(attributed - previous_attributed)
+                        or sorted(attributed),
+                    }
+                )
                 consecutive_no_edit_turns = 0
                 self._patch_effect_check_pending = True
                 self._patch_effect_check_attempts = 0
