@@ -128,7 +128,7 @@ def test_patch_existing_file_rewrite_heavy_is_rejected(tmp_path: Path) -> None:
     assert "Rewrite-heavy mutation rejected" in str(result["content"])
 
 
-def test_failed_bash_is_remembered_and_identical_retry_blocked(tmp_path: Path) -> None:
+def test_failed_bash_identical_stale_retry_warns_then_blocks(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     first = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(3)\""}, "1", 0)
     assert first["is_error"] is False
@@ -138,10 +138,14 @@ def test_failed_bash_is_remembered_and_identical_retry_blocked(tmp_path: Path) -
 
     second = execute_tool_with_policy(runner, "Bash", {"command": "python   -c   \"import sys; sys.exit(3)\""}, "2", 1)
     assert second["is_error"] is False
-    assert "previous identical command already failed" in str(second["content"])
+    assert "Loop warning: this exact command already failed" in str(second["content"])
+
+    third = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(3)\""}, "3", 2)
+    assert third["is_error"] is False
+    assert "previous identical command already failed" in str(third["content"])
 
 
-def test_failed_bash_allows_retry_after_edit_change_and_different_command(tmp_path: Path) -> None:
+def test_failed_bash_retry_count_resets_after_edit_and_different_command(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     failed = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(4)\""}, "1", 0)
     assert failed["is_error"] is False
@@ -153,6 +157,13 @@ def test_failed_bash_allows_retry_after_edit_change_and_different_command(tmp_pa
     assert allowed_after_edit["is_error"] is False
     assert "previous identical command already failed" not in str(allowed_after_edit["content"])
 
-    different = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"print('ok')\""}, "4", 3)
+    retry_after_edit = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(4)\""}, "4", 3)
+    assert retry_after_edit["is_error"] is False
+    assert "Loop warning: this exact command already failed" in str(retry_after_edit["content"])
+
+    different = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"print('ok')\""}, "5", 4)
     assert different["is_error"] is False
-    assert "previous identical command already failed" not in str(different["content"])
+
+    retry_after_different = execute_tool_with_policy(runner, "Bash", {"command": "python -c \"import sys; sys.exit(4)\""}, "6", 5)
+    assert retry_after_different["is_error"] is False
+    assert "previous identical command already failed" not in str(retry_after_different["content"])
