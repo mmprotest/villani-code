@@ -19,6 +19,12 @@ _RETRY_BLOCK_MESSAGE = (
     "Inspect the failure, change the code/config, or run a different diagnostic command before retrying."
 )
 
+_LOOP_WARNING_MESSAGE = (
+    "Loop warning: this exact command already failed and nothing relevant appears to have changed. "
+    "You may retry once, but the next useful action is likely to inspect the failure, "
+    "change code/config, or run a narrower diagnostic command."
+)
+
 
 def _normalize_command_text(command: str) -> str:
     return " ".join(str(command or "").strip().split())
@@ -667,27 +673,34 @@ def execute_tool_with_lifecycle(
     if tool_name == "Bash":
         remembered_failure = getattr(runner, "_last_failed_bash_command", None)
         normalized_command = _normalize_command_text(str(tool_input.get("command", "")))
+        if isinstance(remembered_failure, dict) and remembered_failure.get("command") != normalized_command:
+            runner._last_failed_bash_command = None
+            remembered_failure = None
         if (
             isinstance(remembered_failure, dict)
             and remembered_failure.get("command") == normalized_command
             and int(remembered_failure.get("revision", -1)) == revision
         ):
-            runner.event_callback(
-                {
-                    "type": "tool_result",
-                    "name": tool_name,
-                    "input": tool_input,
-                    "tool_use_id": stable_tool_use_id,
-                    "is_error": False,
-                    "result": runner._build_tool_result_event_payload(
-                        tool_name, stable_tool_use_id, {"content": _RETRY_BLOCK_MESSAGE, "is_error": False}
-                    ),
-                    "turn_index": emit_turn_index,
-                    **({"forced": True} if forced else {}),
-                }
-            )
-            runner.event_callback({"type": "runner_log", "level": "info", "message": f"Blocked identical failed command retry: {normalized_command[:200]}"})
-            return {"content": _RETRY_BLOCK_MESSAGE, "is_error": False}
+            stale_retries = int(remembered_failure.get("stale_retries", 0))
+            if stale_retries >= 1:
+                runner.event_callback(
+                    {
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "input": tool_input,
+                        "tool_use_id": stable_tool_use_id,
+                        "is_error": False,
+                        "result": runner._build_tool_result_event_payload(
+                            tool_name, stable_tool_use_id, {"content": _RETRY_BLOCK_MESSAGE, "is_error": False}
+                        ),
+                        "turn_index": emit_turn_index,
+                        **({"forced": True} if forced else {}),
+                    }
+                )
+                runner.event_callback({"type": "runner_log", "level": "info", "message": f"Blocked identical failed command retry: {normalized_command[:200]}"})
+                return {"content": _RETRY_BLOCK_MESSAGE, "is_error": False}
+            remembered_failure["stale_retries"] = 1
+            runner.event_callback({"type": "runner_log", "level": "info", "message": f"Loop warning issued for identical failed command retry: {normalized_command[:200]}"})
     runner.event_callback(
         {
             "type": "tool_started",
@@ -719,6 +732,10 @@ def execute_tool_with_lifecycle(
         runner._tool_state_revision = revision + 1
     if tool_name == "Bash":
         normalized_command = _normalize_command_text(str(tool_input.get("command", "")))
+        loop_warning = False
+        remembered_failure = getattr(runner, "_last_failed_bash_command", None)
+        if isinstance(remembered_failure, dict) and remembered_failure.get("command") == normalized_command:
+            loop_warning = int(remembered_failure.get("stale_retries", 0)) == 1
         exit_code = None
         content = result.get("content")
         if isinstance(content, str):
@@ -732,10 +749,15 @@ def execute_tool_with_lifecycle(
                 "revision": int(getattr(runner, "_tool_state_revision", revision)),
                 "turn_index": emit_turn_index,
                 "failure_excerpt": _failure_excerpt(result),
+                "stale_retries": 1 if loop_warning else 0,
             }
             runner.event_callback({"type": "runner_log", "level": "info", "message": f"Remembered failed command: {normalized_command[:200]}"})
         elif exit_code == 0:
             runner._last_failed_bash_command = None
+        if loop_warning:
+            content = result.get("content")
+            if isinstance(content, str):
+                result["content"] = (_LOOP_WARNING_MESSAGE + "\n\n" + content) if content else _LOOP_WARNING_MESSAGE
     runner.event_callback(
         {
             "type": "tool_result",
