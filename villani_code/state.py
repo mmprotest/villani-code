@@ -6,7 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -597,6 +597,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self.workspace_revision = 0
         if self.small_model:
             self._init_small_model_support()
 
@@ -1029,6 +1030,7 @@ class Runner:
                 }
             )
         previous_attributed = set()
+        previous_workspace_revision = int(getattr(self, "workspace_revision", 0))
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1203,11 +1205,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1599,7 +1596,9 @@ class Runner:
                 self._last_failed_tool_sig = sig
 
             attributed = set(_attributed_changed_files())
-            edited_this_turn = attributed != previous_attributed
+            revision_changed_this_turn = int(getattr(self, "workspace_revision", 0)) != previous_workspace_revision
+            previous_workspace_revision = int(getattr(self, "workspace_revision", 0))
+            edited_this_turn = attributed != previous_attributed or revision_changed_this_turn
             previous_attributed = attributed
             if edited_this_turn:
                 consecutive_no_edit_turns = 0
@@ -1642,23 +1641,7 @@ class Runner:
     def _is_mutating_tool_call(
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> bool:
-        if tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}:
-            return True
-        if tool_name == "Bash":
-            command = str(tool_input.get("command", "")).strip().lower()
-            readonly_prefixes = (
-                "git status",
-                "git diff",
-                "git log",
-                "ls",
-                "cat",
-                "rg ",
-                "grep ",
-                "find ",
-                "pwd",
-            )
-            return not command.startswith(readonly_prefixes)
-        return False
+        return tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if "turn_index" not in event and isinstance(self._current_turn_index, int):

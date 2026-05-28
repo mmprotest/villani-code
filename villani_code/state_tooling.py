@@ -11,6 +11,7 @@ from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targe
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.tools import execute_tool
+from villani_code.workspace_snapshot import diff_workspace_snapshots, snapshot_workspace
 
 
 _FENCED_BLOCK_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]+)?\n(.*?)```", re.DOTALL)
@@ -658,6 +659,28 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    before_snapshot = None
+    command_text = str(tool_input.get("command", "")) if tool_name == "Bash" else ""
+    command_preview = command_text[:200]
+    if tool_name == "Bash":
+        before_snapshot = snapshot_workspace(getattr(runner, "repo", None))
+        before_payload = {
+            "type": "workspace_snapshot_before_bash",
+            "workspace_root": before_snapshot.root,
+            "files_scanned": before_snapshot.scanned_files,
+            "truncated": before_snapshot.truncated,
+            "unavailable": before_snapshot.unavailable,
+            "reason": before_snapshot.reason,
+            "command": command_preview,
+            "tool_use_id": stable_tool_use_id,
+            "turn_index": emit_turn_index,
+        }
+        runner.event_callback(before_payload)
+        if before_snapshot.truncated:
+            runner.event_callback({**before_payload, "type": "workspace_snapshot_truncated", "phase": "before_bash"})
+        if before_snapshot.unavailable:
+            runner.event_callback({**before_payload, "type": "workspace_snapshot_unavailable", "phase": "before_bash"})
+
     result = execute_tool(
         tool_name,
         tool_input,
@@ -666,6 +689,64 @@ def execute_tool_with_lifecycle(
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
     )
+
+    if tool_name == "Bash" and before_snapshot is not None:
+        after_snapshot = snapshot_workspace(getattr(runner, "repo", None))
+        diff = diff_workspace_snapshots(before_snapshot, after_snapshot)
+        after_payload = {
+            "type": "workspace_snapshot_after_bash",
+            "workspace_root": after_snapshot.root,
+            "files_scanned_before": before_snapshot.scanned_files,
+            "files_scanned_after": after_snapshot.scanned_files,
+            "truncated": after_snapshot.truncated,
+            "unavailable": after_snapshot.unavailable,
+            "reason": after_snapshot.reason,
+            "added_count": diff.added,
+            "removed_count": diff.removed,
+            "modified_count": diff.modified,
+            "command": command_preview,
+            "tool_use_id": stable_tool_use_id,
+            "turn_index": emit_turn_index,
+        }
+        runner.event_callback(after_payload)
+        if after_snapshot.truncated:
+            runner.event_callback({**after_payload, "type": "workspace_snapshot_truncated", "phase": "after_bash"})
+        if after_snapshot.unavailable:
+            runner.event_callback({**after_payload, "type": "workspace_snapshot_unavailable", "phase": "after_bash"})
+        if not before_snapshot.unavailable and not after_snapshot.unavailable and diff.changed:
+            old_revision = int(getattr(runner, "workspace_revision", 0))
+            new_revision = old_revision + 1
+            runner.workspace_revision = new_revision
+            runner.event_callback(
+                {
+                    "type": "workspace_revision_incremented",
+                    "workspace_root": after_snapshot.root,
+                    "files_scanned_before": before_snapshot.scanned_files,
+                    "files_scanned_after": after_snapshot.scanned_files,
+                    "added_count": diff.added,
+                    "removed_count": diff.removed,
+                    "modified_count": diff.modified,
+                    "old_revision": old_revision,
+                    "new_revision": new_revision,
+                    "command": command_preview,
+                    "tool_use_id": stable_tool_use_id,
+                    "turn_index": emit_turn_index,
+                }
+            )
+    elif tool_name in {"Write", "Patch"} and not result.get("is_error"):
+        old_revision = int(getattr(runner, "workspace_revision", 0))
+        new_revision = old_revision + 1
+        runner.workspace_revision = new_revision
+        runner.event_callback(
+            {
+                "type": "workspace_revision_incremented",
+                "workspace_root": str(getattr(runner, "repo", "")),
+                "old_revision": old_revision,
+                "new_revision": new_revision,
+                "tool_use_id": stable_tool_use_id,
+                "turn_index": emit_turn_index,
+            }
+        )
     runner.event_callback(
         {
             "type": "tool_result",
