@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import ast
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -597,6 +598,9 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._bash_commands_since_last_edit: int = 0
+        self._milestone_reset_pending: bool = False
+        self._milestone_reset_injected_for_streak: bool = False
         if self.small_model:
             self._init_small_model_support()
 
@@ -1493,6 +1497,7 @@ class Runner:
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
                 tool_calls_used += 1
+                self._record_bash_command_for_milestone_reset(tool_name)
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
@@ -1548,6 +1553,12 @@ class Runner:
                             "occurrence": failure.occurrence_count,
                         }
                     )
+
+                if (
+                    tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}
+                    and not result.get("is_error")
+                ):
+                    self._reset_bash_milestone_streak("workspace_edit", tool_name)
 
                 self.hooks.run_event(
                     "PostToolUse",
@@ -1859,6 +1870,52 @@ class Runner:
             tool_input,
             tool_use_id,
             message_count,
+        )
+
+    def _record_bash_command_for_milestone_reset(self, tool_name: str) -> None:
+        if tool_name != "Bash":
+            return
+        self._bash_commands_since_last_edit += 1
+        logging.getLogger(__name__).debug(
+            "milestone_reset bash_streak_incremented turn_index=%s tool_call_count=%s bash_streak_count=%s reason=%s tool_name=%s",
+            self._current_turn_index,
+            None,
+            self._bash_commands_since_last_edit,
+            "bash_tool_call",
+            tool_name,
+        )
+        if (
+            self._bash_commands_since_last_edit >= 5
+            and not self._milestone_reset_injected_for_streak
+            and not self._milestone_reset_pending
+        ):
+            self._milestone_reset_pending = True
+            logging.getLogger(__name__).debug(
+                "milestone_reset marked_pending turn_index=%s tool_call_count=%s bash_streak_count=%s reason=%s tool_name=%s",
+                self._current_turn_index,
+                None,
+                self._bash_commands_since_last_edit,
+                "bash_threshold_reached",
+                tool_name,
+            )
+
+    def _reset_bash_milestone_streak(self, reason: str, tool_name: str) -> None:
+        if (
+            self._bash_commands_since_last_edit == 0
+            and not self._milestone_reset_pending
+            and not self._milestone_reset_injected_for_streak
+        ):
+            return
+        self._bash_commands_since_last_edit = 0
+        self._milestone_reset_pending = False
+        self._milestone_reset_injected_for_streak = False
+        logging.getLogger(__name__).debug(
+            "milestone_reset bash_streak_reset turn_index=%s tool_call_count=%s bash_streak_count=%s reason=%s tool_name=%s",
+            self._current_turn_index,
+            None,
+            self._bash_commands_since_last_edit,
+            reason,
+            tool_name,
         )
 
     def _build_tool_result_event_payload(

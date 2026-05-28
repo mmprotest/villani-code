@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from copy import deepcopy
 from dataclasses import asdict
@@ -29,6 +30,15 @@ from villani_code.utils import ensure_dir
 
 
 _DIAGNOSIS_KEYS = ("target_file", "bug_class", "fix_intent")
+_RUNNER_MILESTONE_RESET_NOTE = (
+    "RUNNER MILESTONE RESET\n\n"
+    "You have run several shell commands without changing the workspace.\n\n"
+    "Before running another shell command, identify:\n"
+    "1. The concrete milestone you are trying to reach.\n"
+    "2. Whether the recent command outputs proved that milestone.\n"
+    "3. The smallest next action: targeted edit, narrower diagnostic, or abandon this path.\n\n"
+    "Do not continue broad exploration."
+)
 
 
 def _user_message_is_safe_for_text_injection(message: dict[str, Any]) -> bool:
@@ -371,6 +381,19 @@ def inject_diagnosis_hint(messages: list[dict[str, Any]], diagnosis: dict[str, s
 
 def prepare_messages_for_model(runner: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prepared = deepcopy(messages)
+    if getattr(runner, "_milestone_reset_pending", False):
+        injected = prepend_text_to_latest_safe_user_message(prepared, _RUNNER_MILESTONE_RESET_NOTE)
+        if injected:
+            runner._milestone_reset_pending = False
+            runner._milestone_reset_injected_for_streak = True
+            logging.getLogger(__name__).debug(
+                "milestone_reset injected turn_index=%s tool_call_count=%s bash_streak_count=%s reason=%s tool_name=%s",
+                getattr(runner, "_current_turn_index", None),
+                None,
+                getattr(runner, "_bash_commands_since_last_edit", 0),
+                "pending_reset_injected",
+                "Bash",
+            )
     if runner.small_model:
         inject_retrieval_briefing(runner, prepared)
         if runner._context_budget:

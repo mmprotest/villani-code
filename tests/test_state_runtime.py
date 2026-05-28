@@ -508,6 +508,68 @@ def test_prepare_messages_for_model_repeated_calls_do_not_duplicate_injection() 
         ) == 1
 
 
+def test_milestone_reset_not_injected_before_threshold() -> None:
+    class _CtxGov:
+        def load_inventory(self):
+            return SimpleNamespace(task_id="")
+
+        def register_item(self, *args, **kwargs):
+            return None
+
+        def prune_for_budget(self, _inventory):
+            return None
+
+        def save_inventory(self, _inventory):
+            return None
+
+    runner = SimpleNamespace(
+        small_model=False,
+        _retriever=None,
+        _context_budget=None,
+        _context_governance=_CtxGov(),
+        _execution_plan=SimpleNamespace(task_goal="t"),
+        _milestone_reset_pending=False,
+        _milestone_reset_injected_for_streak=False,
+        _bash_commands_since_last_edit=4,
+        _current_turn_index=1,
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "continue"}]}]
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+    assert "RUNNER MILESTONE RESET" not in str(prepared)
+
+
+def test_milestone_reset_injects_once_per_streak_and_resets_after_edit(tmp_path: Path) -> None:
+    runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, print_stream=False)
+    runner._current_turn_index = 2
+    for _ in range(5):
+        runner._record_bash_command_for_milestone_reset("Bash")
+    assert runner._bash_commands_since_last_edit == 5
+    assert runner._milestone_reset_pending is True
+
+    messages = [{"role": "user", "content": [{"type": "text", "text": "keep going"}]}]
+    prepared = state_runtime.prepare_messages_for_model(runner, messages)
+    assert "RUNNER MILESTONE RESET" in str(prepared)
+    assert runner._milestone_reset_pending is False
+    assert runner._milestone_reset_injected_for_streak is True
+
+    runner._record_bash_command_for_milestone_reset("Bash")
+    second = state_runtime.prepare_messages_for_model(runner, messages)
+    assert "RUNNER MILESTONE RESET" not in str(second)
+
+    runner._reset_bash_milestone_streak("workspace_edit", "Write")
+    assert runner._bash_commands_since_last_edit == 0
+    assert runner._milestone_reset_pending is False
+    assert runner._milestone_reset_injected_for_streak is False
+
+    runner._record_bash_command_for_milestone_reset("Read")
+    assert runner._bash_commands_since_last_edit == 0
+    for _ in range(5):
+        runner._record_bash_command_for_milestone_reset("Bash")
+    assert runner._milestone_reset_pending is True
+    third = state_runtime.prepare_messages_for_model(runner, messages)
+    assert "RUNNER MILESTONE RESET" in str(third)
+
+
 def test_fail_first_localization_runs_without_strong_signal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_repo(tmp_path)
     events: list[dict] = []
