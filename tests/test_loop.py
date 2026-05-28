@@ -608,10 +608,10 @@ def test_small_model_run_injects_task_contract_steering_message(tmp_path: Path):
     client = FakeClientStall()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True)
     runner.run("fix failing test in src/foo.py")
-    first_payload = client.payloads[1]
     user_texts = [
         b.get("text", "")
-        for m in first_payload["messages"]
+        for p in client.payloads[1:]
+        for m in p["messages"]
         if m.get("role") == "user"
         for b in m.get("content", [])
         if isinstance(b, dict) and b.get("type") == "text"
@@ -645,8 +645,7 @@ def test_constrained_run_injects_task_contract_message(tmp_path: Path):
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, small_model=True, plan_mode="off")
     runner.run("fix failing test in src/app.py")
     assert client.first_payload is not None
-    runtime_payload = client.payloads[1] if hasattr(client, "payloads") else client.first_payload
-    texts = [b.get("text", "") for m in runtime_payload["messages"] for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
+    texts = [b.get("text", "") for p in client.payloads[1:] for m in p["messages"] for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text"]
     contract_lines = [t for t in texts if "Task contract" in t]
     assert contract_lines
     assert "name likely target file first" in contract_lines[-1]

@@ -571,6 +571,10 @@ class Runner:
         self._scope_expansion_used = False
         self._task_mode: TaskMode = TaskMode.GENERAL
         self._task_contract: dict[str, Any] = {}
+        self.task_contract_checklist: str | None = None
+        self.task_contract_first_turn_injected = False
+        self.task_contract_last_reminder_tool_count = 0
+        self._task_contract_final_check_injected = False
         self._last_verification_fingerprint = ""
         self._repeated_stale_verification_count = 0
         self._last_verification_intentional: set[str] = set()
@@ -773,7 +777,20 @@ class Runner:
         if approved_plan is not None and not approved_plan.ready_to_execute:
             raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
+        self.task_contract_checklist = None
+        self.task_contract_first_turn_injected = False
+        self.task_contract_last_reminder_tool_count = 0
+        self._task_contract_final_check_injected = False
         messages = messages or build_initial_messages(self.repo, instruction)
+        self.task_contract_checklist = self._generate_task_contract_checklist(instruction)
+        self.event_callback(
+            {
+                "type": "task_contract_created",
+                "turn_index": 0,
+                "tool_call_count": 0,
+                "checklist_char_count": len(self.task_contract_checklist or ""),
+            }
+        )
         if approved_plan is not None:
             if self._mission_dir is not None:
                 (self._mission_dir / "plan_artifact.json").write_text(json.dumps(approved_plan.to_dict(), indent=2), encoding="utf-8")
@@ -1137,6 +1154,44 @@ class Runner:
             self._live_stream_buffer = ""
             self._live_stream_started = False
             self._coalescer = StreamCoalescer()
+            if self.task_contract_checklist and not self.task_contract_first_turn_injected:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "TASK CONTRACT CHECKLIST\n\n"
+                                    "The task is only complete if these observable requirements are satisfied:\n\n"
+                                    f"{self.task_contract_checklist}\n\n"
+                                    "Use this as a checklist, not as an implementation plan."
+                                ),
+                            }
+                        ],
+                    }
+                )
+                self.task_contract_first_turn_injected = True
+                self.event_callback({"type": "task_contract_injected_first_turn", "turn_index": self._current_turn_index, "tool_call_count": tool_calls_used, "checklist_char_count": len(self.task_contract_checklist)})
+            elif self.task_contract_checklist and (tool_calls_used - self.task_contract_last_reminder_tool_count) >= 8:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "TASK CONTRACT REMINDER\n\n"
+                                    "The task is only complete if these observable requirements are satisfied:\n\n"
+                                    f"{self.task_contract_checklist}\n\n"
+                                    "Before continuing, make sure the next action moves toward one of these observable completion conditions."
+                                ),
+                            }
+                        ],
+                    }
+                )
+                self.task_contract_last_reminder_tool_count = tool_calls_used
+                self.event_callback({"type": "task_contract_reminder_injected", "turn_index": self._current_turn_index, "tool_call_count": tool_calls_used, "checklist_char_count": len(self.task_contract_checklist), "reminder_reason": "every_8_tool_calls"})
             turn_messages = self._prepare_messages_for_model(messages)
             payload = {
                 "model": self.model,
@@ -1269,6 +1324,11 @@ class Runner:
                         reminder = "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue."
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                        continue
+                    if self.task_contract_checklist and not self._task_contract_final_check_injected:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": "TASK CONTRACT FINAL CHECK\n\nBefore finalizing, compare the current workspace state against the task contract checklist:\n\n" + self.task_contract_checklist + "\n\nOnly finish if the required outputs, behaviours, constraints, and validation signals have been directly checked."}]})
+                        self._task_contract_final_check_injected = True
+                        self.event_callback({"type": "task_contract_finalization_reminder_injected", "turn_index": self._current_turn_index, "tool_call_count": tool_calls_used, "checklist_char_count": len(self.task_contract_checklist), "reminder_reason": "finalization_attempt"})
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -1431,6 +1491,11 @@ class Runner:
                     )
                     continue
                 reason = _budget_reason(completed=True)
+                if self.task_contract_checklist and not self._task_contract_final_check_injected:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": "TASK CONTRACT FINAL CHECK\n\nBefore finalizing, compare the current workspace state against the task contract checklist:\n\n" + self.task_contract_checklist + "\n\nOnly finish if the required outputs, behaviours, constraints, and validation signals have been directly checked."}]})
+                    self._task_contract_final_check_injected = True
+                    self.event_callback({"type": "task_contract_finalization_reminder_injected", "turn_index": self._current_turn_index, "tool_call_count": tool_calls_used, "checklist_char_count": len(self.task_contract_checklist), "reminder_reason": "finalization_attempt"})
+                    continue
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
@@ -1925,6 +1990,50 @@ class Runner:
         from villani_code import state_runtime
 
         return state_runtime.prepare_messages_for_model(self, messages)
+
+    def _fallback_task_contract_checklist(self) -> str:
+        return (
+            "TASK CONTRACT CHECKLIST\n\n"
+            "Required outputs:\n"
+            "- Check the original task for required files or artifacts.\n\n"
+            "Required behaviours:\n"
+            "- Check the original task for required behaviour.\n\n"
+            "Required constraints:\n"
+            "- Check the original task for explicit constraints.\n\n"
+            "Validation signals:\n"
+            "- Use direct checks against the original task requirements before finalizing."
+        )
+
+    def _generate_task_contract_checklist(self, instruction: str) -> str:
+        prompt = (
+            "Generate a compact checklist from this task prompt.\n\n"
+            "Required output format:\n"
+            "TASK CONTRACT CHECKLIST\n\n"
+            "Required outputs:\n- ...\n\n"
+            "Required behaviours:\n- ...\n\n"
+            "Required constraints:\n- ...\n\n"
+            "Validation signals:\n- ...\n\n"
+            "Rules:\n"
+            "- Max 8 bullets total.\n"
+            "- Only include requirements explicitly stated or directly implied by the task.\n"
+            "- Focus on observable completion conditions.\n"
+            "- Do not write an implementation plan.\n"
+            "- Do not propose steps.\n"
+            "- Do not invent requirements.\n\n"
+            f"Task prompt:\n{instruction}"
+        )
+        payload = {"model": self.model, "stream": False, "max_tokens": 400, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]}
+        try:
+            response = self.client.create_message(payload, stream=False)
+            content = response.get("content", []) if isinstance(response, dict) else []
+            text = "\n".join(str(block.get("text", "")) for block in content if isinstance(block, dict) and block.get("type") == "text").strip()
+            if not text or "TASK CONTRACT CHECKLIST" not in text:
+                raise ValueError("invalid_task_contract_checklist")
+            return text
+        except Exception:
+            fallback = self._fallback_task_contract_checklist()
+            self.event_callback({"type": "task_contract_generation_failed", "turn_index": 0, "tool_call_count": 0, "checklist_char_count": len(fallback)})
+            return fallback
 
     def _inject_retrieval_briefing(self, messages: list[dict[str, Any]]) -> None:
         from villani_code import state_runtime
