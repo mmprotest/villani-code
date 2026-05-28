@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -113,6 +114,11 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
 }
 
 DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
+MASKED_FAILURE_WARNING = (
+    "Note: this command exited 0, but the shell expression may have masked a failed subcommand. "
+    "Treat the output as diagnostic evidence, not confirmed success."
+)
+logger = logging.getLogger(__name__)
 
 
 def _error(message: str) -> dict[str, Any]:
@@ -258,7 +264,17 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
                 "tool_call_id": tool_call_id,
             },
         )
-    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+    result: dict[str, Any] = {"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+    matched_pattern = ""
+    if proc.returncode == 0:
+        for pattern in ("|| echo", "|| true"):
+            if pattern in lowered:
+                matched_pattern = pattern
+                break
+    if matched_pattern:
+        logger.debug("appended masked-failure warning pattern=%s exit_code=%s command=%s", matched_pattern, proc.returncode, data.command[:200])
+        result["note"] = MASKED_FAILURE_WARNING
+    return json.dumps(result, indent=2)
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
