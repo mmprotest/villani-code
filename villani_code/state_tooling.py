@@ -12,6 +12,7 @@ from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targe
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
 from villani_code.tools import execute_tool
+from villani_code.workspace_snapshot import diff_workspace_snapshots, snapshot_workspace
 
 
 _RETRY_BLOCK_MESSAGE = (
@@ -719,6 +720,28 @@ def execute_tool_with_lifecycle(
         debug_callback = getattr(runner, "_debug_tool_callback", None)
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
+
+    before_snapshot = None
+    command_text = str(tool_input.get("command", "")) if tool_name == "Bash" else ""
+    command_preview = command_text[:200]
+    if tool_name == "Bash":
+        before_snapshot = snapshot_workspace(getattr(runner, "repo", None))
+        before_payload = {
+            "type": "workspace_snapshot_before_bash",
+            "workspace_root": before_snapshot.root,
+            "files_scanned": before_snapshot.scanned_files,
+            "truncated": before_snapshot.truncated,
+            "unavailable": before_snapshot.unavailable,
+            "reason": before_snapshot.reason,
+            "command": command_preview,
+            "tool_use_id": stable_tool_use_id,
+            "turn_index": emit_turn_index,
+        }
+        runner.event_callback(before_payload)
+        if before_snapshot.truncated:
+            runner.event_callback({**before_payload, "type": "workspace_snapshot_truncated", "phase": "before_bash"})
+        if before_snapshot.unavailable:
+            runner.event_callback({**before_payload, "type": "workspace_snapshot_unavailable", "phase": "before_bash"})
 
     result = execute_tool(
         tool_name,
