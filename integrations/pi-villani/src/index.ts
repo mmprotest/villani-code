@@ -6,10 +6,14 @@ import { startVillaniBridgeProcess, VillaniBridgeProcess } from "./process.js";
 import { PiModelProxy } from "./modelProxy.js";
 import { PiLikeOutput, renderEvent } from "./render.js";
 
+type ActiveRunPhase = "starting" | "running" | "aborting" | "completed";
+
 interface ActiveVillaniRun {
   id: string;
   repo: string;
-  bridge: VillaniBridgeProcess;
+  phase: ActiveRunPhase;
+  abortController: AbortController;
+  bridge?: VillaniBridgeProcess;
   proxy?: PiModelProxy;
   done: Promise<void>;
   resolveDone: () => void;
@@ -42,38 +46,45 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
 
   const repo = ctx.cwd || process.cwd();
   const runId = randomUUID();
-  const explicitConfig = useExplicitVillaniConfig();
-  const model = ctx.model as Model<string> | undefined;
-  if (!explicitConfig && !model) {
-    output.error?.("No active Pi model is available for Villani. Select/configure a Pi model, or set VILLANI_USE_PI_MODEL=false with VILLANI_PROVIDER, VILLANI_MODEL, and VILLANI_BASE_URL.");
-    return;
-  }
+  const abortController = new AbortController();
+  let resolveDone!: () => void;
+  const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+  const run: ActiveVillaniRun = { id: runId, repo, phase: "starting", abortController, done, resolveDone };
+  activeRun = run;
 
-  const proxy = !explicitConfig && model ? new PiModelProxy({ model, signal: ctx.signal }) : undefined;
-  let bridge: VillaniBridgeProcess | undefined;
   let finished = false;
   let resolveFinal!: () => void;
   const finalEvent = new Promise<void>((resolve) => { resolveFinal = resolve; });
-  let resolveDone!: () => void;
-  const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+  ctx.signal?.addEventListener("abort", () => {
+    void abortActiveRun("Pi command cancellation requested");
+  }, { once: true });
 
   try {
-    const proxyUrl = proxy ? await proxy.start() : undefined;
-    bridge = await startVillaniBridgeProcess({ command: process.env.VILLANI_COMMAND, cwd: repo });
-    activeRun = { id: runId, repo, bridge, proxy, done, resolveDone };
-    bridge.onEvent((event: BridgeEvent) => {
+    const explicitConfig = useExplicitVillaniConfig();
+    const model = ctx.model as Model<string> | undefined;
+    if (!explicitConfig && !model) {
+      throw new Error("Villani could not start: no active Pi model is selected. Select a model in Pi, or set VILLANI_USE_PI_MODEL=false and configure Villani explicitly.");
+    }
+    if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
+
+    const auth = !explicitConfig && model ? await resolveModelAuth(ctx, model) : undefined;
+    if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
+
+    run.proxy = !explicitConfig && model ? new PiModelProxy({ model, apiKey: auth?.apiKey, headers: auth?.headers, signal: abortController.signal }) : undefined;
+    const proxyUrl = run.proxy ? await run.proxy.start() : undefined;
+    if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
+
+    run.bridge = await startVillaniBridgeProcess({ command: process.env.VILLANI_COMMAND, cwd: repo, signal: abortController.signal });
+    run.phase = "running";
+    run.bridge.onEvent((event: BridgeEvent) => {
+      if (abortController.signal.aborted && event.type === "run_completed") return;
       renderEvent(event, output);
       if (event.type === "run_completed" || event.type === "run_failed" || event.type === "run_aborted") {
-        finished = true;
+        finished = event.type === "run_completed";
         resolveFinal();
       }
-      if (event.type === "error") {
-        output.error?.(`Villani bridge error: ${event.error}`);
-      }
+      if (event.type === "error") output.error?.(`Villani bridge error: ${event.error}`);
     });
-    ctx.signal?.addEventListener("abort", () => {
-      void abortActiveRun("Pi command cancellation requested");
-    }, { once: true });
 
     const command: RunCommand = {
       type: "run",
@@ -83,21 +94,23 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       mode: (process.env.VILLANI_MODE as VillaniMode | undefined) || "runner",
       config: buildRunConfig(proxyUrl, model),
     };
-    bridge.send(command);
+    run.bridge.send(command);
     await Promise.race([
       finalEvent,
-      bridge.waitForExit().then((code) => {
-        if (!finished) throw new Error(`Villani bridge exited before a final event with code ${code}. ${bridge?.stderr() ?? ""}`.trim());
+      run.bridge.waitForExit().then((code) => {
+        if (!finished && !abortController.signal.aborted) throw new Error(`Villani bridge exited before a final event with code ${code}. ${run.bridge?.stderr() ?? ""}`.trim());
       }),
     ]);
   } catch (error) {
-    output.error?.(error instanceof Error ? error.message : String(error));
+    if (abortController.signal.aborted) output.warn?.(!run.bridge ? "Villani run cancelled during startup." : "Villani run cancelled.");
+    else output.error?.(error instanceof Error ? error.message : String(error));
   } finally {
-    if (!finished && bridge) {
-      try { bridge.abort(runId); } catch { /* ignore cleanup races */ }
+    run.phase = "completed";
+    if (!finished && run.bridge && !abortController.signal.aborted) {
+      try { run.bridge.abort(runId); } catch { /* ignore cleanup races */ }
     }
-    bridge?.kill();
-    await proxy?.stop();
+    run.bridge?.kill();
+    await run.proxy?.stop();
     if (activeRun?.id === runId) activeRun = undefined;
     resolveDone();
   }
@@ -109,22 +122,30 @@ export async function abortVillaniRun(ctx: ExtensionCommandContext): Promise<voi
     output.info?.("No active Villani run to abort.");
     return;
   }
-  output.warn?.("Aborting active Villani run…");
+  output.warn?.(activeRun.phase === "starting" ? "Aborting Villani run during startup…" : "Aborting active Villani run…");
   await abortActiveRun("Aborted by /villani-abort");
 }
 
 async function abortActiveRun(_reason: string): Promise<void> {
   const run = activeRun;
   if (!run) return;
+  run.phase = "aborting";
+  run.abortController.abort();
   try {
-    run.bridge.abort(run.id);
+    run.bridge?.abort(run.id);
   } catch {
-    run.bridge.kill();
+    run.bridge?.kill();
   }
   await Promise.race([
     run.done,
-    new Promise<void>((resolve) => setTimeout(resolve, 5_000)).then(() => run.bridge.kill()),
+    new Promise<void>((resolve) => setTimeout(resolve, 5_000)).then(() => run.bridge?.kill()),
   ]);
+}
+
+async function resolveModelAuth(ctx: ExtensionCommandContext, model: Model<string>): Promise<{ apiKey?: string; headers?: Record<string, string> }> {
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) throw new Error(`Villani could not resolve Pi model authentication: ${sanitizeErrorMessage(auth.error)}`);
+  return { apiKey: auth.apiKey, headers: auth.headers };
 }
 
 function buildRunConfig(proxyUrl: string | undefined, model: Model<string> | undefined): RunCommand["config"] {
@@ -144,8 +165,7 @@ function buildRunConfig(proxyUrl: string | undefined, model: Model<string> | und
 }
 
 function useExplicitVillaniConfig(): boolean {
-  if (String(process.env.VILLANI_USE_PI_MODEL ?? "").toLowerCase() === "false") return true;
-  return false;
+  return String(process.env.VILLANI_USE_PI_MODEL ?? "").toLowerCase() === "false";
 }
 
 function uiOutput(ui: ExtensionUIContext): PiLikeOutput {
@@ -155,6 +175,13 @@ function uiOutput(ui: ExtensionUIContext): PiLikeOutput {
     error: (message: string) => ui.notify(message, "error"),
     markdown: (message: string) => ui.notify(message, "info"),
   };
+}
+
+function sanitizeErrorMessage(message: string): string {
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/api[_-]?key[=:]\s*[^\s,;]+/gi, "api_key=[redacted]")
+    .slice(0, 500);
 }
 
 export function __getActiveRunForTests(): ActiveVillaniRun | undefined {

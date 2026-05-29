@@ -31,6 +31,8 @@ export type PiCompleteFunction = (model: Model<string>, context: Context, option
 
 export interface PiModelProxyOptions {
   model: Model<string>;
+  apiKey?: string;
+  headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
   completeFn?: PiCompleteFunction;
@@ -44,12 +46,21 @@ export class PiModelProxy {
 
   async start(): Promise<string> {
     if (this.url) return this.url;
+    if (this.options.signal?.aborted) throw new Error("Pi model proxy startup aborted");
     this.server = createServer((req, res) => {
       void this.handle(req, res);
     });
     await new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        this.server?.close();
+        reject(abortError());
+      };
+      this.options.signal?.addEventListener("abort", abort, { once: true });
       this.server?.once("error", reject);
-      this.server?.listen(0, "127.0.0.1", () => resolve());
+      this.server?.listen(0, "127.0.0.1", () => {
+        this.options.signal?.removeEventListener("abort", abort);
+        resolve();
+      });
     });
     const address = this.server.address() as AddressInfo;
     this.url = `http://127.0.0.1:${address.port}`;
@@ -69,27 +80,48 @@ export class PiModelProxy {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       if (req.method !== "POST" || !req.url?.startsWith("/v1/chat/completions")) {
-        writeJson(res, 404, { error: { message: "Pi Villani proxy only supports POST /v1/chat/completions" } });
+        writeJson(res, 404, { error: { message: "Pi Villani proxy only supports POST /v1/chat/completions", type: "not_found" } });
         return;
       }
+      if (this.options.signal?.aborted) throw abortError();
       const payload = JSON.parse(await readBody(req)) as OpenAIChatCompletionRequest;
       const context = openAIChatToPiContext(payload);
-      const completeFn = this.options.completeFn ?? complete;
-      const assistant = await completeFn(this.options.model, context, {
-        maxTokens: payload.max_tokens,
-        temperature: payload.temperature,
-        signal: this.options.signal,
-        timeoutMs: this.options.timeoutMs,
-      });
+      const assistant = await this.complete(context, payload);
+      if (this.options.signal?.aborted || assistant.stopReason === "aborted") throw abortError();
+      if (assistant.stopReason === "error") {
+        throw new UpstreamModelError(assistant.errorMessage ?? "Pi model request failed");
+      }
       if (payload.stream) {
         writeOpenAIStream(res, assistant);
       } else {
         writeJson(res, 200, piAssistantToOpenAIResponse(assistant));
       }
     } catch (error) {
-      writeJson(res, 500, { error: { message: error instanceof Error ? error.message : String(error) } });
+      writeProxyError(res, error);
     }
   }
+
+  private complete(context: Context, payload: OpenAIChatCompletionRequest): Promise<AssistantMessage> {
+    const completeFn = this.options.completeFn ?? complete;
+    return completeFn(this.options.model, context, {
+      apiKey: this.options.apiKey,
+      headers: this.options.headers,
+      maxTokens: payload.max_tokens,
+      temperature: payload.temperature,
+      signal: this.options.signal,
+      timeoutMs: this.options.timeoutMs,
+    });
+  }
+}
+
+class UpstreamModelError extends Error {
+  readonly status = 502;
+  readonly type = "upstream_error";
+}
+
+class AbortRequestError extends Error {
+  readonly status = 499;
+  readonly type = "aborted";
 }
 
 export function openAIChatToPiContext(request: OpenAIChatCompletionRequest): Context {
@@ -152,6 +184,10 @@ export function openAIChatToPiContext(request: OpenAIChatCompletionRequest): Con
 }
 
 export function piAssistantToOpenAIResponse(message: AssistantMessage): Record<string, unknown> {
+  if (message.stopReason === "error") {
+    throw new UpstreamModelError(message.errorMessage ?? "Pi model request failed");
+  }
+  if (message.stopReason === "aborted") throw abortError();
   const text = message.content
     .filter((block) => block.type === "text")
     .map((block) => block.text)
@@ -248,4 +284,29 @@ async function readBody(req: IncomingMessage): Promise<string> {
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+function writeProxyError(res: ServerResponse, error: unknown): void {
+  const err = error as { status?: number; type?: string; message?: string; name?: string };
+  const aborted = err.type === "aborted" || err.name === "AbortError";
+  const status = aborted ? 499 : err.status ?? 502;
+  const type = aborted ? "aborted" : err.type ?? "upstream_error";
+  const prefix = aborted ? "Pi model request was aborted" : "Villani model request failed through Pi";
+  writeJson(res, status, {
+    error: {
+      message: `${prefix}: ${sanitizeErrorMessage(err.message ?? String(error))}`,
+      type,
+    },
+  });
+}
+
+function abortError(): AbortRequestError {
+  return new AbortRequestError("request aborted");
+}
+
+function sanitizeErrorMessage(message: string): string {
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/api[_-]?key[=:]\s*[^\s,;]+/gi, "api_key=[redacted]")
+    .slice(0, 500);
 }

@@ -58,14 +58,14 @@ Default behavior:
 - `VILLANI_COMMAND` defaults to `villani-code`.
 - `VILLANI_MODE` defaults to `runner`, which maps to normal `Runner.run(task)` execution.
 - `VILLANI_MODE=villani` maps to the repository's autonomous `Runner.run_villani_mode()` path.
-- Pi model reuse is enabled by default. The extension starts a temporary local proxy and passes that proxy URL to Villani as an OpenAI-compatible `base_url`.
-- No Pi provider credentials or API keys are passed to the Villani subprocess in the Pi-model path.
+- Pi model reuse is enabled by default. The extension resolves Pi-managed credentials and provider headers with `ctx.modelRegistry.getApiKeyAndHeaders(model)`, starts a temporary local proxy, and passes that proxy URL to Villani as an OpenAI-compatible `base_url`.
+- Upstream Pi API keys/OAuth/provider headers remain inside the Node extension/proxy and are passed only to Pi AI requests, never to the Villani subprocess.
 
 Optional environment variables:
 
 | Variable | Meaning |
 | --- | --- |
-| `VILLANI_COMMAND` | Override the Villani executable. Defaults to `villani-code`. |
+| `VILLANI_COMMAND` | Override the Villani executable path/name. Defaults to `villani-code`. This is a single executable path, not a shell command. |
 | `VILLANI_MODE` | `runner` or `villani`. Defaults to `runner`. |
 | `VILLANI_USE_PI_MODEL` | Set to `false` to disable Pi-backed model reuse and use explicit Villani provider config. |
 | `VILLANI_PROVIDER` | Explicit fallback provider (`openai` or `anthropic`) when `VILLANI_USE_PI_MODEL=false`. |
@@ -88,7 +88,7 @@ Windows PowerShell example:
 
 ```powershell
 $env:VILLANI_USE_PI_MODEL = "false"
-$env:VILLANI_COMMAND = "villani-code"
+$env:VILLANI_COMMAND = "C:\Program Files\Python\Scripts\villani-code.exe"
 $env:VILLANI_PROVIDER = "openai"
 $env:VILLANI_MODEL = "your-model"
 $env:VILLANI_BASE_URL = "http://127.0.0.1:1234"
@@ -127,7 +127,7 @@ Transcript: .villani_code/runs/...
 
 ## Limitations
 
-- `/villani-abort` sends a bridge abort request and then force-kills the subprocess after a short timeout if the runner does not stop. In-flight model/tool calls may not be interruptible until the current Villani operation returns.
+- `/villani-abort` cancels startup and in-flight Pi model requests immediately via a per-run `AbortController`, sends a bridge abort request if the bridge exists, and force-kills the subprocess after a short timeout if the Python runner does not stop. Already-running Python child commands may not be interruptible until the current Villani operation returns.
 - The Pi proxy implements Villani's current OpenAI-compatible `/v1/chat/completions` path. It does not implement `/v1/messages` because the bridge points Villani at the proxy with `provider=openai`.
 - Streaming is compatibility streaming: the proxy calls Pi via `complete()` and emits the final response as one OpenAI SSE chunk plus `[DONE]`, not token-by-token streaming.
 - Non-git repositories use lower-confidence changed-file reporting based on Villani mutation events only.
@@ -137,6 +137,8 @@ Transcript: .villani_code/runs/...
 - **`villani-code` not found:** install Villani Code in the environment Pi uses, or set `VILLANI_COMMAND` to the full executable path.
 - **Python environment mismatch:** run `villani-code bridge --stdio` in the same shell environment used to start Pi.
 - **No Pi model available:** select/configure a Pi model, or set `VILLANI_USE_PI_MODEL=false` and provide explicit Villani provider variables.
+- **Pi auth resolution fails:** confirm the selected Pi model is logged in/configured; auth errors are sanitized before display.
 - **Bridge readiness timeout:** run `printf '{"type":"ping","id":"manual-test"}\n' | villani-code bridge --stdio` and confirm it prints `ready` then `pong`.
 - **Proxy startup failure:** ensure no local security tool blocks binding to `127.0.0.1` on random ports.
+- **Proxy upstream error:** the proxy returns a sanitized HTTP error to Villani instead of a fake empty completion; check Pi model/auth configuration.
 - **Smoke test:** from this checkout, run `cd integrations/pi-villani && npm install && npm test`, then `printf '{"type":"ping","id":"manual-test"}\n' | villani-code bridge --stdio`.

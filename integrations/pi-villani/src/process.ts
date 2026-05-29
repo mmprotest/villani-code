@@ -9,9 +9,10 @@ export interface BridgeProcessOptions {
   cwd: string;
   readyTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
-interface CommandSpec {
+export interface CommandSpec {
   executable: string;
   args: string[];
   display: string;
@@ -33,7 +34,8 @@ export class VillaniBridgeProcess {
 
   constructor(options: BridgeProcessOptions & { spec?: CommandSpec }) {
     const spec = options.spec ?? commandToSpec(options.command ?? DEFAULT_VILLANI_COMMAND);
-    this.child = spawn(spec.executable, [...spec.args, "bridge", "--stdio"], {
+    const args = [...spec.args, "bridge", "--stdio"];
+    this.child = spawn(spec.executable, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
       shell: false,
@@ -80,6 +82,13 @@ export class VillaniBridgeProcess {
       });
     });
 
+    const onAbort = () => {
+      this.rejectStartup(new Error("Villani bridge startup aborted."));
+      this.kill();
+    };
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
+
     const timeoutMs = options.readyTimeoutMs ?? 15_000;
     const timer = setTimeout(() => {
       if (!this.startupSettled) {
@@ -87,7 +96,13 @@ export class VillaniBridgeProcess {
         this.kill();
       }
     }, timeoutMs);
-    this.readyPromise.finally(() => clearTimeout(timer)).catch(() => clearTimeout(timer));
+    this.readyPromise.finally(() => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    }).catch(() => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    });
   }
 
   onEvent(listener: (event: BridgeEvent) => void): void {
@@ -192,13 +207,8 @@ export async function startVillaniBridgeProcess(options: BridgeProcessOptions): 
 
 export function commandToSpec(command: string): CommandSpec {
   const trimmed = command.trim();
-  if (!trimmed) return { executable: DEFAULT_VILLANI_COMMAND, args: [], display: DEFAULT_VILLANI_COMMAND };
-  if (trimmed.startsWith("python -m ")) {
-    const [, , moduleName, ...rest] = trimmed.split(/\s+/);
-    return { executable: "python", args: ["-m", moduleName, ...rest], display: trimmed };
-  }
-  const parts = trimmed.split(/\s+/);
-  return { executable: parts[0], args: parts.slice(1), display: trimmed };
+  const executable = trimmed || DEFAULT_VILLANI_COMMAND;
+  return { executable, args: [], display: executable };
 }
 
 function formatSpawnError(error: NodeJS.ErrnoException, display: string): Error {

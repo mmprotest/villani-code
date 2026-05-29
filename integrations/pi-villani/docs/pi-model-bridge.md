@@ -1,6 +1,6 @@
 # Pi-backed model bridge
 
-The Pi extension reuses Pi's active model by default through a temporary localhost OpenAI-compatible proxy. This avoids asking users to configure provider/model/base URL/API key twice.
+The Pi extension reuses Pi's active model by default through a temporary localhost OpenAI-compatible proxy. It resolves Pi-managed API keys and provider headers with `ctx.modelRegistry.getApiKeyAndHeaders(model)` and passes them only into Pi AI calls inside the Node process. This avoids asking users to configure provider/model/base URL/API key twice and avoids exposing upstream credentials to the Python child.
 
 ```text
 Villani Runner OpenAIClient
@@ -35,7 +35,7 @@ The proxy implements exactly that path. It translates:
 - The proxy binds to `127.0.0.1` only.
 - The OS chooses a random available port.
 - The proxy is stopped on success, failure, abort and subprocess startup failure.
-- The Python child receives no Pi provider credentials.
+- The Python child receives no Pi provider credentials: only the localhost proxy URL and neutral model id are sent through the bridge.
 
 ## Configuration precedence
 
@@ -45,4 +45,4 @@ The proxy implements exactly that path. It translates:
 
 ## Streaming limitation
 
-The current proxy uses `@earendil-works/pi-ai` `complete()` and emits the completed assistant response as a single OpenAI-compatible SSE chunk when Villani asks for streaming. This exercises Villani's streaming client path but does not provide token-by-token streaming. True token streaming can be added later by translating Pi `stream()` events to OpenAI SSE chunks.
+The current proxy uses `@earendil-works/pi-ai` `complete()` and emits the completed assistant response as a single OpenAI-compatible SSE chunk when Villani asks for streaming. This exercises Villani's streaming client path but does not provide token-by-token streaming. If Pi returns `stopReason: "error"`, throws a provider/auth failure, or the per-run abort signal fires, the proxy returns an HTTP error instead of `[DONE]` or an empty successful completion. True token streaming can be added later by translating Pi `stream()` events to OpenAI SSE chunks.
