@@ -54,7 +54,7 @@ export function renderFinalSummary(event: Extract<BridgeEvent, { type: "run_comp
   const preexisting = "preexisting_dirty_files" in event && event.preexisting_dirty_files?.length ? event.preexisting_dirty_files : [];
   const changedFiles = changed.length ? changed.map((file) => `- ${file}`).join("\n") : "None reported";
   const preexistingFiles = preexisting.length ? preexisting.map((file) => `- ${file}`).join("\n") : "";
-  const verification = "verification_passed" in event ? String(event.verification_passed) : "not reported";
+  const verification = formatVerificationStatus("verification_passed" in event ? event.verification_passed : undefined);
   const status = event.type === "run_completed" ? "completed" : event.type === "run_aborted" ? "aborted" : "failed";
   markdown([
     `### Villani ${status}`,
@@ -65,8 +65,14 @@ export function renderFinalSummary(event: Extract<BridgeEvent, { type: "run_comp
     `**Changed by Villani**\n${changedFiles}`,
     preexistingFiles ? `\n**Pre-existing workspace changes excluded from attribution**\n${preexistingFiles}` : "",
     "",
-    `**Verification passed:** ${verification}`,
+    `**Verification:** ${verification}`,
     `**Transcript:** ${event.transcript_path ?? "not reported"}`,
     "error" in event && event.error ? `**Error:** ${event.error}` : "",
   ].filter(Boolean).join("\n"));
+}
+
+export function formatVerificationStatus(value: boolean | null | undefined): "passed" | "failed" | "not reported" {
+  if (value === true) return "passed";
+  if (value === false) return "failed";
+  return "not reported";
 }
