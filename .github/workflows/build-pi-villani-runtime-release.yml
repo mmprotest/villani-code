@@ -64,7 +64,12 @@ jobs:
         run: tar -czf "$ASSET" -C dist/runtime villani-code
       - name: Generate checksum
         shell: bash
-        run: sha256sum "$ASSET" > "$ASSET.sha256"
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          else
+            shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-runtime
