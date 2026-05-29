@@ -29,7 +29,7 @@ jobs:
             extension: tar.gz
             executable: dist/runtime/villani-code/villani-code
           - platform: darwin-x64
-            os: macos-13
+            os: macos-15-intel
             extension: tar.gz
             executable: dist/runtime/villani-code/villani-code
           - platform: linux-x64
