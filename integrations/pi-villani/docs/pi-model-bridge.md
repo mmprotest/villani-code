@@ -1,36 +1,48 @@
 # Pi-backed model bridge
 
-Milestone 2 adds a temporary localhost proxy owned by the Pi extension so Villani can reuse Pi's currently configured model without receiving user provider credentials.
+The Pi extension reuses Pi's active model by default through a temporary localhost OpenAI-compatible proxy. This avoids asking users to configure provider/model/base URL/API key twice.
 
 ```text
-Villani Runner
+Villani Runner OpenAIClient
   -> http://127.0.0.1:<random-port>/v1/chat/completions
   -> pi-villani local proxy
   -> @earendil-works/pi-ai complete()
   -> user's configured Pi provider/model/auth
 ```
 
-## Current implementation
+## Villani API surface implemented
 
-- The proxy starts only for one `/villani` command and is stopped in the command cleanup path.
-- It binds to `127.0.0.1` on a random available port.
-- The extension passes `provider: "openai"`, the temporary `base_url`, and the active Pi model id to Villani.
-- No `VILLANI_API_KEY` is passed when the proxy path is used.
-- The proxy implements the minimal `/v1/chat/completions` surface Villani uses through `OpenAIClient`:
-  - `messages`
-  - `tools` / function tool definitions
-  - `max_tokens`
-  - `temperature`
-  - `stream`
-- The proxy translates OpenAI chat messages/tool calls/tool results into Pi `Context`/`Tool` shapes, calls `complete()`, and translates the Pi assistant message back into an OpenAI-compatible response.
-- Streaming is compatibility streaming: Pi is called via `complete()` first, then the final assistant message is emitted as a single SSE chunk. This preserves Villani's streaming client path without claiming token-by-token streaming.
+Villani's `OpenAIClient` calls:
 
-## Fallback behavior
+- `POST /v1/chat/completions`
+- payload fields: `model`, `messages`, `max_tokens`, `stream`, optional `tools`, optional `stream_options`
+- OpenAI function tool calls and tool-result messages
+- non-streaming JSON responses
+- SSE streaming responses using `data: ...` lines followed by `data: [DONE]`
 
-If any explicit Villani model environment variable is set (`VILLANI_PROVIDER`, `VILLANI_MODEL`, `VILLANI_BASE_URL`, or `VILLANI_API_KEY`), the extension skips the Pi proxy and uses the explicit configuration exactly as before. This keeps local OpenAI-compatible servers and other custom Villani provider setups working.
+The proxy implements exactly that path. It translates:
 
-## Future improvements
+- OpenAI `system` messages into Pi `systemPrompt`
+- OpenAI user messages into Pi user messages
+- OpenAI assistant tool calls into Pi `toolCall` content
+- OpenAI tool messages into Pi `toolResult` messages
+- OpenAI function tool definitions into Pi `Tool` definitions
+- Pi text/tool-call assistant content back into OpenAI `message.content` and `message.tool_calls`
 
-- Switch from `complete()` to true Pi token/event streaming if the active Pi provider exposes a stable stream suitable for OpenAI SSE translation.
-- Add broader compatibility for `/v1/messages` only if Villani needs Anthropic-compatible direct proxying in a future client path.
-- Surface proxy diagnostics in Pi's UI without logging request bodies or credentials.
+## Runtime behavior
+
+- One proxy is started per active `/villani` run.
+- The proxy binds to `127.0.0.1` only.
+- The OS chooses a random available port.
+- The proxy is stopped on success, failure, abort and subprocess startup failure.
+- The Python child receives no Pi provider credentials.
+
+## Configuration precedence
+
+1. Default: use Pi's active model through the local proxy.
+2. If `VILLANI_USE_PI_MODEL=false`, skip the proxy and use explicit `VILLANI_PROVIDER`, `VILLANI_MODEL`, `VILLANI_BASE_URL` and optional `VILLANI_API_KEY`.
+3. If Pi has no active model and explicit fallback is not enabled, `/villani` fails with a configuration message rather than guessing.
+
+## Streaming limitation
+
+The current proxy uses `@earendil-works/pi-ai` `complete()` and emits the completed assistant response as a single OpenAI-compatible SSE chunk when Villani asks for streaming. This exercises Villani's streaming client path but does not provide token-by-token streaming. True token streaming can be added later by translating Pi `stream()` events to OpenAI SSE chunks.

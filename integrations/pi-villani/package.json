@@ -1,24 +1,44 @@
 {
   "name": "pi-villani",
   "version": "0.1.0",
-  "private": true,
   "description": "Pi extension bridge for running Villani Code as a delegated coding runner.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/modelProxy.test.js"
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.77.0",
+    "@earendil-works/pi-coding-agent": "^0.77.0",
     "@types/node": "^20.11.30",
     "typescript": "^5.4.0"
   },
   "engines": {
     "node": ">=22.19.0"
   },
-  "dependencies": {
-    "@earendil-works/pi-ai": "^0.77.0"
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "villani-code"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "!dist/*.test.js",
+    "!dist/*.test.d.ts",
+    "README.md",
+    "docs"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
-  "type": "module"
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
 }

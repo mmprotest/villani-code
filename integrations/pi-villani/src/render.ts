@@ -50,15 +50,20 @@ export function renderEvent(event: BridgeEvent, output: PiLikeOutput = console):
 
 export function renderFinalSummary(event: Extract<BridgeEvent, { type: "run_completed" | "run_failed" | "run_aborted" }>, output: PiLikeOutput = console): void {
   const markdown = output.markdown ?? output.info ?? output.log ?? console.log;
-  const changedFiles = "changed_files" in event && event.changed_files.length ? event.changed_files.map((file) => `- ${file}`).join("\n") : "None reported";
+  const changed = "changed_files" in event && event.changed_files?.length ? event.changed_files : [];
+  const preexisting = "preexisting_dirty_files" in event && event.preexisting_dirty_files?.length ? event.preexisting_dirty_files : [];
+  const changedFiles = changed.length ? changed.map((file) => `- ${file}`).join("\n") : "None reported";
+  const preexistingFiles = preexisting.length ? preexisting.map((file) => `- ${file}`).join("\n") : "";
   const verification = "verification_passed" in event ? String(event.verification_passed) : "not reported";
   const status = event.type === "run_completed" ? "completed" : event.type === "run_aborted" ? "aborted" : "failed";
   markdown([
     `### Villani ${status}`,
     "",
+    "**Summary:**",
     event.summary || "No summary reported.",
     "",
-    `**Changed files**\n${changedFiles}`,
+    `**Changed by Villani**\n${changedFiles}`,
+    preexistingFiles ? `\n**Pre-existing workspace changes excluded from attribution**\n${preexistingFiles}` : "",
     "",
     `**Verification passed:** ${verification}`,
     `**Transcript:** ${event.transcript_path ?? "not reported"}`,

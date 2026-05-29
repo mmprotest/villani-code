@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -133,7 +134,10 @@ class PiBridge:
     def _run_worker(self, active: ActiveRun) -> None:
         command = active.command
         repo = str(Path(command.repo).resolve())
-        before = git_changed_files(Path(repo))
+        repo_path = Path(repo)
+        before_dirty = git_changed_files(repo_path)
+        before_dirty_hashes = hash_files(repo_path, before_dirty)
+        touched_files: set[str] = set()
         transcript_path: str | None = None
         verification_passed: bool | None = None
         latest_summary = ""
@@ -154,6 +158,9 @@ class PiBridge:
                 for mapped in map_runner_event(command.id, event):
                     if mapped.get("type") == "verification_finished":
                         verification_passed = bool(mapped.get("passed"))
+                    if mapped.get("type") == "workspace_changed":
+                        for changed_path in mapped.get("files", []):
+                            touched_files.add(str(changed_path).replace("\\", "/"))
                     self._events.put(mapped)
                 if event.get("type") == "validation_completed":
                     verification_passed = bool(event.get("passed"))
@@ -166,8 +173,7 @@ class PiBridge:
                 return
             result = run_existing_runner(runner, command)
             transcript_path = normalize_transcript_path(result)
-            changed = git_changed_files(Path(repo))
-            changed_files = sorted(changed or before)
+            changed_files, preexisting_dirty_files = attributed_changed_files(repo_path, before_dirty, before_dirty_hashes, touched_files)
             if active.abort_requested.is_set():
                 self._events.put(
                     {
@@ -175,6 +181,8 @@ class PiBridge:
                         "id": command.id,
                         "success": False,
                         "summary": "Aborted by caller after runner stopped",
+                        "changed_files": changed_files,
+                        "preexisting_dirty_files": preexisting_dirty_files,
                         "transcript_path": transcript_path,
                     }
                 )
@@ -186,6 +194,7 @@ class PiBridge:
                     "id": command.id,
                     "success": True,
                     "changed_files": changed_files,
+                    "preexisting_dirty_files": preexisting_dirty_files,
                     "verification_passed": verification_passed,
                     "summary": summary,
                     "transcript_path": transcript_path,
@@ -199,6 +208,8 @@ class PiBridge:
                     "success": False,
                     "error": str(exc),
                     "summary": "Villani bridge run failed.",
+                    "changed_files": attributed_changed_files(Path(repo), before_dirty, before_dirty_hashes, touched_files)[0],
+                    "preexisting_dirty_files": before_dirty,
                     "transcript_path": transcript_path,
                 }
             )
@@ -239,6 +250,7 @@ def build_default_runner(command: RunCommand, event_callback: Callable[[dict[str
         provider=provider,  # type: ignore[arg-type]
         api_key=command.config.api_key or os.environ.get("VILLANI_API_KEY"),
         villani_mode=command.mode == "villani",
+        villani_objective=command.task if command.mode == "villani" else None,
     )
     runner.event_callback = event_callback
     return runner
@@ -254,8 +266,59 @@ def run_existing_runner(runner: Any, command: RunCommand) -> dict[str, Any]:
             max_no_edit_turns=VILLANI_TASK_BUDGET.max_no_edit_turns,
             max_reconsecutive_recon_turns=VILLANI_TASK_BUDGET.max_reconsecutive_recon_turns,
         )
-    result = runner.run(command.task, execution_budget=budget) if budget is not None else runner.run(command.task)
+    if command.mode == "villani":
+        result = runner.run_villani_mode()
+    else:
+        result = runner.run(command.task, execution_budget=budget) if budget is not None else runner.run(command.task)
     return result if isinstance(result, dict) else {"response": result}
+
+
+def hash_files(repo: Path, files: list[str]) -> dict[str, str | None]:
+    return {path: hash_file(repo / path) for path in files}
+
+
+def hash_file(path: Path) -> str | None:
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def attributed_changed_files(
+    repo: Path,
+    before_dirty: list[str],
+    before_dirty_hashes: dict[str, str | None],
+    touched_files: set[str],
+) -> tuple[list[str], list[str]]:
+    if not is_git_repo(repo):
+        return sorted(path for path in touched_files if (repo / path).exists()), sorted(before_dirty)
+    after_dirty = set(git_changed_files(repo))
+    before_dirty_set = set(before_dirty)
+    changed = set(after_dirty - before_dirty_set)
+    for path in before_dirty_set & after_dirty:
+        if hash_file(repo / path) != before_dirty_hashes.get(path):
+            changed.add(path)
+    for path in touched_files:
+        normalized = path.replace("\\", "/").lstrip("./")
+        if normalized in after_dirty:
+            previous_hash = before_dirty_hashes.get(normalized)
+            if normalized not in before_dirty_set or hash_file(repo / normalized) != previous_hash:
+                changed.add(normalized)
+    return sorted(changed), sorted(before_dirty_set)
+
+
+def is_git_repo(repo: Path) -> bool:
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo, text=True, capture_output=True, timeout=10, check=False)
+    except Exception:
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
 def git_changed_files(repo: Path) -> list[str]:

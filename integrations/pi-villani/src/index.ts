@@ -1,106 +1,130 @@
 import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { BridgeEvent, RunCommand, VillaniMode } from "./protocol.js";
-import { VillaniBridgeProcess } from "./process.js";
+import { startVillaniBridgeProcess, VillaniBridgeProcess } from "./process.js";
 import { PiModelProxy } from "./modelProxy.js";
 import { PiLikeOutput, renderEvent } from "./render.js";
 
-interface PiUI {
-  notify?: (message: string, level?: "info" | "warn" | "error") => void;
-  setStatus?: (key: string, message: string) => void;
-  setWidget?: (key: string, lines: string[]) => void;
+interface ActiveVillaniRun {
+  id: string;
+  repo: string;
+  bridge: VillaniBridgeProcess;
+  proxy?: PiModelProxy;
+  done: Promise<void>;
+  resolveDone: () => void;
 }
 
-interface PiLikeCommandContext {
-  cwd?: string;
-  model?: Model<string>;
-  signal?: AbortSignal;
-  ui?: PiUI;
-  workspace?: { cwd?: string; rootPath?: string; folders?: Array<{ path?: string; uri?: { fsPath?: string } }> };
-}
+let activeRun: ActiveVillaniRun | undefined;
 
-interface PiLikeAPI {
-  registerCommand?: (
-    name: string,
-    options: { description: string; handler: (args?: string, ctx?: PiLikeCommandContext) => unknown } | ((args?: unknown, ctx?: PiLikeCommandContext) => unknown),
-  ) => { dispose?: () => void } | void;
-}
-
-interface LegacyPiLikeContext extends PiLikeCommandContext {
-  commands?: { registerCommand?: PiLikeAPI["registerCommand"] };
-  output?: PiLikeOutput;
-  subscriptions?: Array<{ dispose?: () => void }>;
-}
-
-export default function villaniPiExtension(pi: PiLikeAPI): void {
-  activate(pi as LegacyPiLikeContext);
-}
-
-export function activate(context: LegacyPiLikeContext | PiLikeAPI): void {
-  const registrar = ("commands" in context ? context.commands?.registerCommand : undefined) ?? (context as PiLikeAPI).registerCommand;
-  if (!registrar) {
-    throw new Error("Pi command registration API was not found; update src/index.ts for the installed Pi SDK.");
-  }
-  const disposable = registrar("villani", {
-    description: "Delegate a coding task to Villani Code",
-    handler: async (args?: string, commandContext?: PiLikeCommandContext) => runVillaniCommand({ ...(context as LegacyPiLikeContext), ...commandContext }, args),
+export default function villaniPiExtension(pi: ExtensionAPI): void {
+  pi.registerCommand("villani", {
+    description: "Delegate a repository coding task to Villani Code",
+    handler: async (args: string, ctx: ExtensionCommandContext) => runVillaniCommand(args, ctx),
   });
-  if (disposable && "subscriptions" in context && context.subscriptions) context.subscriptions.push(disposable);
+  pi.registerCommand("villani-abort", {
+    description: "Abort the active Villani Code run",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => abortVillaniRun(ctx),
+  });
 }
 
-export function deactivate(): void {
-  // Nothing persistent to clean up; per-run bridge/proxy processes are stopped in finally blocks.
-}
+export async function runVillaniCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const task = args.trim();
+  const output = uiOutput(ctx.ui);
+  if (!task) {
+    output.warn?.("Usage: /villani <task>");
+    return;
+  }
+  if (activeRun) {
+    output.warn?.(`Villani is already running in ${activeRun.repo}. Use /villani-abort to stop it before starting another run.`);
+    return;
+  }
 
-export async function runVillaniCommand(context: LegacyPiLikeContext, args?: unknown): Promise<void> {
-  const task = extractTask(args);
-  const output = context.output ?? uiOutput(context.ui) ?? console;
-  if (!task) throw new Error("Usage: /villani <task>");
-  const repo = resolveWorkspace(context);
+  const repo = ctx.cwd || process.cwd();
   const runId = randomUUID();
-  const explicitConfig = hasExplicitVillaniModelConfig();
-  const proxy = !explicitConfig && context.model ? new PiModelProxy({ model: context.model, signal: context.signal }) : undefined;
-  const proxyUrl = proxy ? await proxy.start() : undefined;
-  const bridge = new VillaniBridgeProcess({ command: process.env.VILLANI_COMMAND || "villani", cwd: repo });
+  const explicitConfig = useExplicitVillaniConfig();
+  const model = ctx.model as Model<string> | undefined;
+  if (!explicitConfig && !model) {
+    output.error?.("No active Pi model is available for Villani. Select/configure a Pi model, or set VILLANI_USE_PI_MODEL=false with VILLANI_PROVIDER, VILLANI_MODEL, and VILLANI_BASE_URL.");
+    return;
+  }
+
+  const proxy = !explicitConfig && model ? new PiModelProxy({ model, signal: ctx.signal }) : undefined;
+  let bridge: VillaniBridgeProcess | undefined;
   let finished = false;
   let resolveFinal!: () => void;
   const finalEvent = new Promise<void>((resolve) => { resolveFinal = resolve; });
+  let resolveDone!: () => void;
+  const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+
   try {
+    const proxyUrl = proxy ? await proxy.start() : undefined;
+    bridge = await startVillaniBridgeProcess({ command: process.env.VILLANI_COMMAND, cwd: repo });
+    activeRun = { id: runId, repo, bridge, proxy, done, resolveDone };
     bridge.onEvent((event: BridgeEvent) => {
       renderEvent(event, output);
       if (event.type === "run_completed" || event.type === "run_failed" || event.type === "run_aborted") {
         finished = true;
         resolveFinal();
       }
+      if (event.type === "error") {
+        output.error?.(`Villani bridge error: ${event.error}`);
+      }
     });
-    if (context.signal) {
-      context.signal.addEventListener("abort", () => {
-        try { bridge.abort(runId); } catch { /* ignore cancellation races */ }
-      }, { once: true });
-    }
-    await bridge.waitUntilReady();
+    ctx.signal?.addEventListener("abort", () => {
+      void abortActiveRun("Pi command cancellation requested");
+    }, { once: true });
+
     const command: RunCommand = {
       type: "run",
       id: runId,
       task,
       repo,
       mode: (process.env.VILLANI_MODE as VillaniMode | undefined) || "runner",
-      config: buildRunConfig(proxyUrl, context.model),
+      config: buildRunConfig(proxyUrl, model),
     };
     bridge.send(command);
     await Promise.race([
       finalEvent,
       bridge.waitForExit().then((code) => {
-        if (!finished) throw new Error(`Villani bridge exited before final event with code ${code}. stderr: ${bridge.stderr()}`);
+        if (!finished) throw new Error(`Villani bridge exited before a final event with code ${code}. ${bridge?.stderr() ?? ""}`.trim());
       }),
     ]);
+  } catch (error) {
+    output.error?.(error instanceof Error ? error.message : String(error));
   } finally {
-    if (!finished) {
-      try { bridge.abort(runId); } catch { /* ignore cleanup send errors */ }
+    if (!finished && bridge) {
+      try { bridge.abort(runId); } catch { /* ignore cleanup races */ }
     }
-    bridge.kill();
+    bridge?.kill();
     await proxy?.stop();
+    if (activeRun?.id === runId) activeRun = undefined;
+    resolveDone();
   }
+}
+
+export async function abortVillaniRun(ctx: ExtensionCommandContext): Promise<void> {
+  const output = uiOutput(ctx.ui);
+  if (!activeRun) {
+    output.info?.("No active Villani run to abort.");
+    return;
+  }
+  output.warn?.("Aborting active Villani run…");
+  await abortActiveRun("Aborted by /villani-abort");
+}
+
+async function abortActiveRun(_reason: string): Promise<void> {
+  const run = activeRun;
+  if (!run) return;
+  try {
+    run.bridge.abort(run.id);
+  } catch {
+    run.bridge.kill();
+  }
+  await Promise.race([
+    run.done,
+    new Promise<void>((resolve) => setTimeout(resolve, 5_000)).then(() => run.bridge.kill()),
+  ]);
 }
 
 function buildRunConfig(proxyUrl: string | undefined, model: Model<string> | undefined): RunCommand["config"] {
@@ -119,28 +143,20 @@ function buildRunConfig(proxyUrl: string | undefined, model: Model<string> | und
   };
 }
 
-function hasExplicitVillaniModelConfig(): boolean {
-  return Boolean(process.env.VILLANI_PROVIDER || process.env.VILLANI_MODEL || process.env.VILLANI_BASE_URL || process.env.VILLANI_API_KEY);
+function useExplicitVillaniConfig(): boolean {
+  if (String(process.env.VILLANI_USE_PI_MODEL ?? "").toLowerCase() === "false") return true;
+  return false;
 }
 
-function uiOutput(ui: PiUI | undefined): PiLikeOutput | undefined {
-  if (!ui) return undefined;
+function uiOutput(ui: ExtensionUIContext): PiLikeOutput {
   return {
-    info: (message: string) => ui.notify?.(message, "info") ?? ui.setStatus?.("villani", message),
-    warn: (message: string) => ui.notify?.(message, "warn") ?? ui.setStatus?.("villani", message),
-    error: (message: string) => ui.notify?.(message, "error") ?? ui.setStatus?.("villani", message),
-    markdown: (message: string) => ui.setWidget?.("villani", message.split("\n")) ?? ui.notify?.(message, "info"),
+    info: (message: string) => ui.notify(message, "info"),
+    warn: (message: string) => ui.notify(message, "warning"),
+    error: (message: string) => ui.notify(message, "error"),
+    markdown: (message: string) => ui.notify(message, "info"),
   };
 }
 
-function extractTask(args: unknown): string {
-  if (typeof args === "string") return args.trim();
-  if (args && typeof args === "object" && "text" in args) return String((args as { text?: unknown }).text ?? "").trim();
-  if (Array.isArray(args)) return args.join(" ").trim();
-  return "";
-}
-
-function resolveWorkspace(context: LegacyPiLikeContext): string {
-  const workspace = context.workspace;
-  return context.cwd || workspace?.cwd || workspace?.rootPath || workspace?.folders?.[0]?.path || workspace?.folders?.[0]?.uri?.fsPath || process.cwd();
+export function __getActiveRunForTests(): ActiveVillaniRun | undefined {
+  return activeRun;
 }

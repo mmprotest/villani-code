@@ -95,3 +95,47 @@ test("proxy serves minimal OpenAI chat completions without credentials", async (
     await proxy.stop();
   }
 });
+
+
+test("proxy serves Villani-compatible streaming chat completions", async () => {
+  const model = {
+    id: "pi-test",
+    name: "Pi Test",
+    api: "openai-completions",
+    provider: "pi",
+    baseUrl: "pi://current",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 4096,
+  } as Model<string>;
+  const proxy = new PiModelProxy({
+    model,
+    completeFn: async () => ({
+      role: "assistant",
+      api: "openai-completions",
+      provider: "pi",
+      model: "pi-test",
+      content: [{ type: "text", text: "streamed final" }],
+      usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: 1700000000000,
+    }),
+  });
+  const url = await proxy.start();
+  try {
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "pi-test", stream: true, messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(response.headers.get("content-type")?.startsWith("text/event-stream"), true);
+    const body = await response.text();
+    assert.match(body, /data: /);
+    assert.match(body, /streamed final/);
+    assert.match(body, /\[DONE\]/);
+  } finally {
+    await proxy.stop();
+  }
+});

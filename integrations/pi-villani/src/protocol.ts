@@ -47,9 +47,9 @@ export type BridgeEvent =
   | { type: "verification_finished"; id: string; command: string; passed: boolean; summary: string }
   | { type: "governor_redirect"; id: string; message: string }
   | { type: "abort_requested"; id: string }
-  | { type: "run_completed"; id: string; success: true; changed_files: string[]; verification_passed: boolean | null; summary: string; transcript_path?: string | null }
-  | { type: "run_failed"; id: string; success: false; error: string; summary: string; transcript_path?: string | null }
-  | { type: "run_aborted"; id: string; success: false; summary: string; transcript_path?: string | null }
+  | { type: "run_completed"; id: string; success: true; changed_files: string[]; preexisting_dirty_files?: string[]; verification_passed: boolean | null; summary: string; transcript_path?: string | null }
+  | { type: "run_failed"; id: string; success: false; error: string; summary: string; changed_files?: string[]; preexisting_dirty_files?: string[]; transcript_path?: string | null }
+  | { type: "run_aborted"; id: string; success: false; summary: string; changed_files?: string[]; preexisting_dirty_files?: string[]; transcript_path?: string | null }
   | { type: "error"; id?: string; error: string };
 
 export function commandToLine(command: BridgeCommand): string {
