@@ -23,7 +23,10 @@ interface ActiveVillaniRun {
 
 export type ApprovalPrompter = (request: Extract<BridgeEvent, { type: "approval_required" }>, ctx: ExtensionCommandContext, signal: AbortSignal) => Promise<boolean>;
 
+type BridgeStarter = typeof startVillaniBridgeProcess;
+
 let approvalPrompter: ApprovalPrompter = askUserForApproval;
+let bridgeStarter: BridgeStarter = startVillaniBridgeProcess;
 
 let activeRun: ActiveVillaniRun | undefined;
 
@@ -87,7 +90,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     });
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during runtime setup.");
 
-    run.bridge = await startVillaniBridgeProcess({ command: executable.executable, cwd: repo, signal: abortController.signal });
+    run.bridge = await bridgeStarter({ command: executable.executable, cwd: repo, signal: abortController.signal });
     run.phase = "running";
     run.bridge.onEvent((event: BridgeEvent) => {
       if (abortController.signal.aborted && event.type === "run_completed") return;
@@ -214,6 +217,12 @@ export function __setApprovalPrompterForTests(prompter: ApprovalPrompter): () =>
   const previous = approvalPrompter;
   approvalPrompter = prompter;
   return () => { approvalPrompter = previous; };
+}
+
+export function __setBridgeStarterForTests(starter: BridgeStarter): () => void {
+  const previous = bridgeStarter;
+  bridgeStarter = starter;
+  return () => { bridgeStarter = previous; };
 }
 
 async function resolveModelAuth(ctx: ExtensionCommandContext, model: Model<string>): Promise<{ apiKey?: string; headers?: Record<string, string> }> {

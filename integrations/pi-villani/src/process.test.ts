@@ -5,17 +5,15 @@ import { join } from "node:path";
 import test from "node:test";
 import { commandToSpec, DEFAULT_VILLANI_COMMAND, VillaniBridgeProcess } from "./process.js";
 
-async function mockBridge(script: string): Promise<string> {
+async function mockBridgeSpec(script: string) {
   const dir = await mkdtemp(join(tmpdir(), "villani-bridge-"));
-  const executable = join(dir, process.platform === "win32" ? "bridge.cmd" : "bridge");
-  const path = join(dir, "bridge.mjs");
-  await writeFile(path, script, "utf8");
-  if (process.platform === "win32") {
-    await writeFile(executable, `@echo off\n"${process.execPath}" "${path}" %*\n`, "utf8");
-  } else {
-    await writeFile(executable, `#!/usr/bin/env sh\nexec "${process.execPath}" "${path}" "$@"\n`, { encoding: "utf8", mode: 0o755 });
-  }
-  return executable;
+  const modulePath = join(dir, "bridge.mjs");
+  await writeFile(modulePath, script, "utf8");
+  return {
+    executable: process.execPath,
+    args: [modulePath],
+    display: process.execPath,
+  };
 }
 
 test("default command is villani-code", () => {
@@ -34,27 +32,27 @@ test("reports missing executable without unhandled process error", async () => {
 });
 
 test("rejects when bridge exits before ready", async () => {
-  const command = await mockBridge("process.stderr.write('bad startup'); process.exit(7);\n");
-  const bridge = new VillaniBridgeProcess({ command, cwd: process.cwd(), readyTimeoutMs: 1000 });
+  const spec = await mockBridgeSpec("process.stderr.write('bad startup'); process.exit(7);\n");
+  const bridge = new VillaniBridgeProcess({ spec, cwd: process.cwd(), readyTimeoutMs: 1000 });
   await assert.rejects(bridge.waitUntilReady(), /exited before ready.*bad startup/);
 });
 
 test("rejects malformed bridge output", async () => {
-  const command = await mockBridge("process.stdout.write('not json\\n'); setTimeout(() => {}, 1000);\n");
-  const bridge = new VillaniBridgeProcess({ command, cwd: process.cwd(), readyTimeoutMs: 1000 });
+  const spec = await mockBridgeSpec("process.stdout.write('not json\\n'); setTimeout(() => {}, 1000);\n");
+  const bridge = new VillaniBridgeProcess({ spec, cwd: process.cwd(), readyTimeoutMs: 1000 });
   await assert.rejects(bridge.waitUntilReady(), /Malformed bridge JSONL output/);
 });
 
 test("processes successful ready handshake", async () => {
-  const command = await mockBridge("process.stdout.write('{\"type\":\"ready\",\"protocol_version\":1}\\n'); setTimeout(() => process.exit(0), 50);\n");
-  const bridge = new VillaniBridgeProcess({ command, cwd: process.cwd(), readyTimeoutMs: 1000 });
+  const spec = await mockBridgeSpec("process.stdout.write('{\"type\":\"ready\",\"protocol_version\":1}\\n'); setTimeout(() => process.exit(0), 50);\n");
+  const bridge = new VillaniBridgeProcess({ spec, cwd: process.cwd(), readyTimeoutMs: 1000 });
   await bridge.waitUntilReady();
   assert.equal(await bridge.waitForExit(), 0);
 });
 
 test("exit during active run is observable", async () => {
-  const command = await mockBridge("process.stdout.write('{\"type\":\"ready\",\"protocol_version\":1}\\n'); setTimeout(() => process.exit(3), 50);\n");
-  const bridge = new VillaniBridgeProcess({ command, cwd: process.cwd(), readyTimeoutMs: 1000 });
+  const spec = await mockBridgeSpec("process.stdout.write('{\"type\":\"ready\",\"protocol_version\":1}\\n'); setTimeout(() => process.exit(3), 50);\n");
+  const bridge = new VillaniBridgeProcess({ spec, cwd: process.cwd(), readyTimeoutMs: 1000 });
   await bridge.waitUntilReady();
   assert.equal(await bridge.waitForExit(), 3);
 });
