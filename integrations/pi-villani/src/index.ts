@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "
 import type { Model } from "@earendil-works/pi-ai";
 import { BridgeEvent, RunCommand, VillaniMode } from "./protocol.js";
 import { startVillaniBridgeProcess, VillaniBridgeProcess } from "./process.js";
+import { resolveVillaniExecutable } from "./runtime.js";
 import { PiModelProxy } from "./modelProxy.js";
 import { PiLikeOutput, renderEvent } from "./render.js";
 
@@ -79,7 +80,14 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     const proxyUrl = run.proxy ? await run.proxy.start() : undefined;
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
 
-    run.bridge = await startVillaniBridgeProcess({ command: process.env.VILLANI_COMMAND, cwd: repo, signal: abortController.signal });
+    const executable = await resolveVillaniExecutable({
+      overrideCommand: process.env.VILLANI_COMMAND,
+      signal: abortController.signal,
+      onProgress: (message) => output.info?.(message),
+    });
+    if (abortController.signal.aborted) throw new Error("Villani run cancelled during runtime setup.");
+
+    run.bridge = await startVillaniBridgeProcess({ command: executable.executable, cwd: repo, signal: abortController.signal });
     run.phase = "running";
     run.bridge.onEvent((event: BridgeEvent) => {
       if (abortController.signal.aborted && event.type === "run_completed") return;

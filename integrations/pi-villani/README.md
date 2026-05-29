@@ -1,63 +1,60 @@
-# Pi Villani Integration
+# Villani for Pi
 
-`pi-villani` adds Pi slash commands that delegate repository repair tasks to Villani Code. Pi remains the UI and model/auth host; Villani remains the runner that edits files and runs verification.
+Villani is a high-reliability coding runner for Pi. Pi stays the UI and model/auth host; Villani performs repository repair, edits, verification, and approval-bound operations through its existing runner.
 
-```text
-/villani Fix the failing authentication tests and run the relevant verification
-  -> Pi extension
-  -> temporary 127.0.0.1 OpenAI-compatible proxy backed by Pi's active model
-  -> villani-code bridge --stdio
-  -> existing Villani Runner
-  -> normalized progress/final events rendered in Pi
-```
-
-The extension does **not** port or duplicate Villani's runner logic in TypeScript.
-
-## Requirements
-
-- Node.js 22.19 or newer, matching the current Pi runtime packages.
-- Villani Code installed in the Python environment visible to Pi. A standard install of this repository provides the `villani-code` executable.
-- Pi with an active configured model, unless you opt into explicit Villani model configuration.
-
-## Installation
-
-Published package, once released:
+Install:
 
 ```bash
 pi install npm:pi-villani
 ```
 
-Development/local checkout:
-
-```bash
-cd integrations/pi-villani
-npm install
-npm run build
-pi install ./
-```
-
-For one-off testing without installing permanently, Pi supports loading a local package/extension for the current run:
-
-```bash
-pi -e ./integrations/pi-villani/dist/index.js
-```
-
-## Usage
+Use inside any repository:
 
 ```text
-/villani Fix the failing authentication tests and run the relevant verification
+/villani Fix the failing tests and verify the result
 /villani-abort
 ```
 
-Only one Villani run is allowed per Pi extension instance at a time. If a run is active, a second `/villani` command is rejected with a message telling you to wait or run `/villani-abort`.
+On first use, the extension automatically downloads a platform-specific standalone Villani runtime from GitHub Releases, verifies its SHA-256 checksum, extracts it into a private user cache, and launches the bundled `bridge --stdio` runtime. No separate Python, pip, virtual environment, or `villani-code` installation is required for normal use.
 
-When Villani's existing permission policy classifies an operation as requiring approval, Pi asks before the operation executes. Approvals are per operation and are not remembered across runs.
+Villani uses your active Pi model through the local Pi-backed proxy and asks for approval before protected file or shell operations.
+
+## Supported platforms
+
+Runtime downloads are prepared for:
+
+- Windows x64 (`win32-x64`)
+- macOS Apple Silicon (`darwin-arm64`)
+- macOS Intel (`darwin-x64`)
+- Linux x64 (`linux-x64`)
+
+Other platforms can still use a local Villani installation through `VILLANI_COMMAND`.
+
+## Runtime cache
+
+The runtime cache is outside the repository being edited:
+
+- Windows: `%LOCALAPPDATA%\pi-villani\runtime\<version>\<platform-arch>\`
+- macOS/Linux: `~/.cache/pi-villani/runtime/<version>/<platform-arch>/`
+
+The extension verifies `checksums.txt` from the matching GitHub Release before extraction and writes a `.verified.json` marker before reusing a cached runtime.
+
+## Developer override
+
+For development or troubleshooting, set `VILLANI_COMMAND` to a single executable path/name. This skips runtime download and preserves Windows paths with spaces.
+
+PowerShell example:
+
+```powershell
+$env:VILLANI_COMMAND = "C:\path\to\villani-code\.venv\Scripts\villani-code.exe"
+pi
+```
 
 ## Defaults and configuration
 
 Default behavior:
 
-- `VILLANI_COMMAND` defaults to `villani-code`.
+- `VILLANI_COMMAND` unset means the extension downloads/reuses the verified standalone Villani runtime. Set it only for development/troubleshooting overrides.
 - `VILLANI_MODE` defaults to `runner`, which maps to normal `Runner.run(task)` execution.
 - `VILLANI_MODE=villani` maps to the repository's autonomous `Runner.run_villani_mode()` path.
 - Pi model reuse is enabled by default. The extension resolves Pi-managed credentials and provider headers with `ctx.modelRegistry.getApiKeyAndHeaders(model)`, starts a temporary local proxy, and passes that proxy URL to Villani as an OpenAI-compatible `base_url`.
@@ -67,7 +64,7 @@ Optional environment variables:
 
 | Variable | Meaning |
 | --- | --- |
-| `VILLANI_COMMAND` | Override the Villani executable path/name. Defaults to `villani-code`. This is a single executable path, not a shell command. |
+| `VILLANI_COMMAND` | Developer/troubleshooting override for the Villani executable path/name. When set, runtime download is skipped. This is a single executable path, not a shell command. |
 | `VILLANI_MODE` | `runner` or `villani`. Defaults to `runner`. |
 | `VILLANI_USE_PI_MODEL` | Set to `false` to disable Pi-backed model reuse and use explicit Villani provider config. |
 | `VILLANI_PROVIDER` | Explicit fallback provider (`openai` or `anthropic`) when `VILLANI_USE_PI_MODEL=false`. |
@@ -75,27 +72,7 @@ Optional environment variables:
 | `VILLANI_BASE_URL` | Explicit fallback model endpoint. |
 | `VILLANI_API_KEY` | Explicit fallback API key, if needed. |
 
-macOS/Linux example for explicit fallback:
-
-```bash
-export VILLANI_USE_PI_MODEL=false
-export VILLANI_COMMAND=villani-code
-export VILLANI_PROVIDER=openai
-export VILLANI_MODEL=your-model
-export VILLANI_BASE_URL=http://127.0.0.1:1234
-export VILLANI_API_KEY=dummy
-```
-
-Windows PowerShell example:
-
-```powershell
-$env:VILLANI_USE_PI_MODEL = "false"
-$env:VILLANI_COMMAND = "C:\Program Files\Python\Scripts\villani-code.exe"
-$env:VILLANI_PROVIDER = "openai"
-$env:VILLANI_MODEL = "your-model"
-$env:VILLANI_BASE_URL = "http://127.0.0.1:1234"
-$env:VILLANI_API_KEY = "dummy"
-```
+Explicit Villani provider variables are advanced fallback settings. Normal Pi users should leave them unset so Villani reuses the active Pi model.
 
 ## Final output
 
@@ -142,8 +119,9 @@ Transcript: .villani_code/runs/...
 
 ## Troubleshooting
 
-- **`villani-code` not found:** install Villani Code in the environment Pi uses, or set `VILLANI_COMMAND` to the full executable path.
-- **Python environment mismatch:** run `villani-code bridge --stdio` in the same shell environment used to start Pi.
+- **Runtime download failed:** check network access to GitHub Releases, then retry. You can set `VILLANI_COMMAND` to a local executable while troubleshooting.
+- **Runtime checksum failed:** the archive was not executed. Clear the runtime cache and retry, or report the release asset mismatch.
+- **Local override not found:** if `VILLANI_COMMAND` is set, ensure it points to the executable path in the same environment used to start Pi.
 - **No Pi model available:** select/configure a Pi model, or set `VILLANI_USE_PI_MODEL=false` and provide explicit Villani provider variables.
 - **Pi auth resolution fails:** confirm the selected Pi model is logged in/configured; auth errors are sanitized before display.
 - **Bridge readiness timeout:** run `printf '{"type":"ping","id":"manual-test"}\n' | villani-code bridge --stdio` and confirm it prints `ready` then `pong`.

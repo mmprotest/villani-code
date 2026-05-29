@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -59,6 +59,19 @@ async function mockNodeBridgeExecutable(exitAfterRun = false): Promise<string> {
     await writeFile(executable, `#!/usr/bin/env sh\nexec "${process.execPath}" "${modulePath}" "$@"\n`, { encoding: "utf8", mode: 0o755 });
   }
   return executable;
+}
+
+async function installCachedRuntimeBridge(commandExecutable: string): Promise<string> {
+  const cacheRoot = await mkdtemp(join(tmpdir(), "villani-runtime-cache-"));
+  const platformKey = `${process.platform}-${process.arch}`;
+  const runtimeDir = join(cacheRoot, "0.1.0", platformKey, "villani-code");
+  const runtimeExecutable = join(runtimeDir, process.platform === "win32" ? "villani-code.exe" : "villani-code");
+  await mkdir(runtimeDir, { recursive: true });
+  await writeFile(runtimeExecutable, process.platform === "win32"
+    ? `@echo off\n"${commandExecutable}" %*\n`
+    : `#!/usr/bin/env sh\nexec "${commandExecutable}" "$@"\n`, { encoding: "utf8", mode: 0o755 });
+  await writeFile(join(cacheRoot, "0.1.0", platformKey, ".verified.json"), JSON.stringify({ runtimeVersion: "0.1.0", assetName: platformKey.startsWith("win32") ? "villani-runtime-v0.1.0-win32-x64.zip" : `villani-runtime-v0.1.0-${platformKey}.tar.gz`, checksum: "a".repeat(64) }), "utf8");
+  return cacheRoot;
 }
 
 function createHost() {
@@ -201,6 +214,33 @@ test("abort during startup is recognized before bridge exists", async () => {
   await runPromise;
   assert.doesNotMatch(messages.join("\n"), /No active Villani run/);
   assert.match(messages.join("\n"), /cancelled/);
+});
+
+
+test("default path uses cached downloaded runtime before launching bridge", async () => {
+  const oldCommand = process.env.VILLANI_COMMAND;
+  const oldCache = process.env.VILLANI_RUNTIME_CACHE_DIR;
+  const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
+  const oldProvider = process.env.VILLANI_PROVIDER;
+  const oldModel = process.env.VILLANI_MODEL;
+  const oldBase = process.env.VILLANI_BASE_URL;
+  const bridgeExecutable = await mockNodeBridgeExecutable(true);
+  process.env.VILLANI_RUNTIME_CACHE_DIR = await installCachedRuntimeBridge(bridgeExecutable);
+  delete process.env.VILLANI_COMMAND;
+  process.env.VILLANI_USE_PI_MODEL = "false";
+  process.env.VILLANI_PROVIDER = "openai";
+  process.env.VILLANI_MODEL = "fake";
+  process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
+  try {
+    const host = createHost();
+    const messages: string[] = [];
+    villaniPiExtension(host.api);
+    await host.commands.get("villani")!("fix it", createContext(messages));
+    assert.match(messages.join("\n"), /Villani completed/);
+  } finally {
+    restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
+    setOrDelete("VILLANI_RUNTIME_CACHE_DIR", oldCache);
+  }
 });
 
 function restoreEnv(values: { oldCommand?: string; oldUsePi?: string; oldProvider?: string; oldModel?: string; oldBase?: string }): void {

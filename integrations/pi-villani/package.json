@@ -13,7 +13,8 @@
     "@earendil-works/pi-ai": "^0.77.0",
     "@earendil-works/pi-coding-agent": "^0.77.0",
     "@types/node": "^20.11.30",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "@types/adm-zip": "^0.5.7"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -40,5 +41,9 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "tar": "^7.4.3"
   }
 }
