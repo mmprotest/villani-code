@@ -1,5 +1,5 @@
 {
-  "name": "pi-villani",
+  "name": "@simonvillani/pi-villani",
   "version": "0.1.0",
   "description": "Pi extension bridge for running Villani Code as a delegated coding runner.",
   "main": "dist/index.js",
