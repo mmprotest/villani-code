@@ -72,3 +72,18 @@ def test_public_target_for_exposes_normalized_target(tmp_path: Path):
 
 def test_bash_matches_malformed_input_fails_closed():
     assert bash_matches("*", "echo \"unterminated") is False
+
+
+def test_permission_engine_allows_execution_plan_without_weakening_mutations(tmp_path: Path) -> None:
+    engine = PermissionEngine(PermissionConfig.from_strings(deny=[], ask=["ExecutionPlan(*)", "Write(*)", "Patch(*)"], allow=["BashSafe(*)"]), tmp_path)
+
+    assert engine.evaluate("ExecutionPlan", {"summary": "plan", "risk": "high"}) == Decision.ALLOW
+    assert engine.evaluate("Write", {"file_path": "a.txt"}) == Decision.ASK
+    assert engine.evaluate("Patch", {"file_path": "a.txt"}) == Decision.ASK
+    assert engine.evaluate("Bash", {"command": "pip install x"}) == Decision.ASK
+
+
+def test_execution_plan_still_respects_explicit_deny(tmp_path: Path) -> None:
+    engine = PermissionEngine(PermissionConfig.from_strings(deny=["ExecutionPlan(*)"], ask=[], allow=[]), tmp_path)
+
+    assert engine.evaluate("ExecutionPlan", {"summary": "plan"}) == Decision.DENY

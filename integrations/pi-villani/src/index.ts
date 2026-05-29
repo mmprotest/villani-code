@@ -9,6 +9,8 @@ import { PiLikeOutput, renderEvent } from "./render.js";
 
 type ActiveRunPhase = "starting" | "running" | "aborting" | "completed";
 
+const VILLANI_UI_KEY = "villani";
+
 interface ActiveVillaniRun {
   id: string;
   repo: string;
@@ -60,6 +62,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   const run: ActiveVillaniRun = { id: runId, repo, phase: "starting", abortController, pendingApprovals: new Set(), done, resolveDone };
   activeRun = run;
+  setVillaniStatus(ctx.ui, "Villani: starting");
 
   let finished = false;
   let resolveFinal!: () => void;
@@ -79,10 +82,12 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     const auth = !explicitConfig && model ? await resolveModelAuth(ctx, model) : undefined;
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
 
+    setVillaniStatus(ctx.ui, "Villani: starting model proxy");
     run.proxy = !explicitConfig && model ? new PiModelProxy({ model, apiKey: auth?.apiKey, headers: auth?.headers, signal: abortController.signal }) : undefined;
     const proxyUrl = run.proxy ? await run.proxy.start() : undefined;
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
 
+    setVillaniStatus(ctx.ui, "Villani: starting runtime");
     const executable = await resolveVillaniExecutable({
       overrideCommand: process.env.VILLANI_COMMAND,
       signal: abortController.signal,
@@ -92,6 +97,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
 
     run.bridge = await bridgeStarter({ command: executable.executable, cwd: repo, signal: abortController.signal });
     run.phase = "running";
+    setVillaniStatus(ctx.ui, "Villani: running");
     run.bridge.onEvent((event: BridgeEvent) => {
       if (abortController.signal.aborted && event.type === "run_completed") return;
       if (event.type === "approval_required") {
@@ -101,6 +107,8 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       renderEvent(event, output);
       if (event.type === "run_completed" || event.type === "run_failed" || event.type === "run_aborted") {
         finished = event.type === "run_completed";
+        showFinalRunMessage(ctx.ui, event);
+        clearVillaniUi(ctx.ui);
         resolveFinal();
       }
       if (event.type === "error") output.error?.(`Villani bridge error: ${event.error}`);
@@ -122,9 +130,16 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       }),
     ]);
   } catch (error) {
-    if (abortController.signal.aborted) output.warn?.(!run.bridge ? "Villani run cancelled during startup." : "Villani run cancelled.");
-    else output.error?.(error instanceof Error ? error.message : String(error));
+    if (abortController.signal.aborted) {
+      output.warn?.(!run.bridge ? "Villani run cancelled during startup." : "Villani run cancelled.");
+      showDurableMessage(ctx.ui, !run.bridge ? "Villani run cancelled during startup." : "Villani run cancelled.");
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      output.error?.(message);
+      showDurableMessage(ctx.ui, `Villani failed: ${message}`);
+    }
   } finally {
+    clearVillaniUi(ctx.ui);
     run.phase = "completed";
     if (!finished && run.bridge && !abortController.signal.aborted) {
       try { run.bridge.abort(runId); } catch { /* ignore cleanup races */ }
@@ -143,6 +158,7 @@ export async function abortVillaniRun(ctx: ExtensionCommandContext): Promise<voi
     return;
   }
   output.warn?.(activeRun.phase === "starting" ? "Aborting Villani run during startup…" : "Aborting active Villani run…");
+  setVillaniStatus(ctx.ui, "Villani: aborting");
   await abortActiveRun("Aborted by /villani-abort");
 }
 
@@ -173,6 +189,8 @@ async function handleApprovalRequired(
   output: PiLikeOutput,
 ): Promise<void> {
   run.pendingApprovals.add(event.request_id);
+  setVillaniStatus(ctx.ui, `Villani: awaiting approval for ${event.tool}`);
+  setVillaniWidget(ctx.ui, ["Villani is awaiting approval", event.summary]);
   let approved = false;
   try {
     approved = !run.abortController.signal.aborted && await approvalPrompter(event, ctx, run.abortController.signal);
@@ -183,12 +201,54 @@ async function handleApprovalRequired(
   const stillPending = run.pendingApprovals.delete(event.request_id);
   if (!stillPending) return;
   if (run.abortController.signal.aborted || activeRun?.id !== run.id) approved = false;
+  if (approved) {
+    setVillaniStatus(ctx.ui, "Villani: running");
+    clearVillaniWidget(ctx.ui);
+  } else {
+    setVillaniStatus(ctx.ui, `Villani: denied ${event.tool} approval`);
+    setVillaniWidget(ctx.ui, ["Villani approval denied", event.summary]);
+  }
   try {
     run.bridge?.respondToApproval(run.id, event.request_id, approved);
     output.warn?.(`${approved ? "Approved" : "Denied"} Villani ${event.tool} request: ${event.summary}`);
   } catch {
     if (!run.abortController.signal.aborted) output.warn?.(`Could not send approval response for ${event.tool}; bridge is no longer available.`);
   }
+}
+
+function setVillaniStatus(ui: ExtensionUIContext, text: string | undefined): void {
+  const setter = ui.setStatus as ((key: string, text?: string) => void) | undefined;
+  setter?.(VILLANI_UI_KEY, text);
+}
+
+function setVillaniWidget(ui: ExtensionUIContext, lines: string[] | undefined): void {
+  const setter = ui.setWidget as ((key: string, lines?: string[], placement?: string) => void) | undefined;
+  setter?.(VILLANI_UI_KEY, lines, "aboveEditor");
+}
+
+function clearVillaniWidget(ui: ExtensionUIContext): void {
+  setVillaniWidget(ui, undefined);
+}
+
+function clearVillaniUi(ui: ExtensionUIContext): void {
+  setVillaniStatus(ui, undefined);
+  clearVillaniWidget(ui);
+}
+
+function showDurableMessage(ui: ExtensionUIContext, message: string): void {
+  ui.notify?.(message);
+}
+
+function showFinalRunMessage(ui: ExtensionUIContext, event: Extract<BridgeEvent, { type: "run_completed" | "run_failed" | "run_aborted" }>): void {
+  if (event.type === "run_completed") {
+    showDurableMessage(ui, event.summary || "Villani completed.");
+    return;
+  }
+  if (event.type === "run_aborted") {
+    showDurableMessage(ui, event.summary || "Villani aborted.");
+    return;
+  }
+  showDurableMessage(ui, event.summary || event.error || "Villani failed.");
 }
 
 async function askUserForApproval(request: Extract<BridgeEvent, { type: "approval_required" }>, ctx: ExtensionCommandContext, signal: AbortSignal): Promise<boolean> {
