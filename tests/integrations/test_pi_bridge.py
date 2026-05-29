@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from villani_code.integrations.pi_bridge import PiBridge, map_runner_event, summarize_approval_request
+from villani_code.state import Runner
+from villani_code import state_runtime
 
 
 class DummyRunner:
@@ -31,6 +33,49 @@ class DummyRunner:
 
 def collect_json_lines(output: io.StringIO) -> list[dict[str, Any]]:
     return [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+
+
+def seed_planning_repo(repo: Path) -> None:
+    (repo / "villani_code").mkdir(parents=True, exist_ok=True)
+    (repo / "villani_code" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+
+
+class PlanningClient:
+    def create_message(self, _payload: Any, stream: bool) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+
+def test_bridge_planning_does_not_emit_execution_plan_approval(tmp_path: Path) -> None:
+    seed_planning_repo(tmp_path)
+
+    class PlanningRunner(Runner):
+        def run(self, instruction: str, **_kwargs: Any) -> dict[str, Any]:
+            state_runtime.ensure_project_memory_and_plan(self, instruction)
+            return {
+                "response": {"content": [{"type": "text", "text": "planned"}]},
+                "execution": {"final_text": "planned"},
+                "transcript_path": None,
+            }
+
+    def factory(_command: Any, event_callback: Any, approval_callback: Any) -> PlanningRunner:
+        runner = PlanningRunner(client=PlanningClient(), repo=tmp_path, model="m", stream=False)
+        runner.event_callback = event_callback
+        runner.approval_callback = approval_callback
+        return runner
+
+    stdout = io.StringIO()
+    bridge = PiBridge(stdout=stdout, runner_factory=factory)
+    bridge._handle_command({"type": "run", "id": "run-plan", "task": "delete files and rewrite history", "repo": str(tmp_path)})
+    deadline = time.time() + 2
+    while bridge._active and time.time() < deadline:
+        time.sleep(0.01)
+    bridge._drain_events()
+
+    events = collect_json_lines(stdout)
+    assert any(event.get("type") == "phase" and event.get("phase") == "planning_started" for event in events)
+    assert not any(event.get("type") == "approval_required" and event.get("tool") == "ExecutionPlan" for event in events)
+    assert events[-1]["type"] == "run_completed"
 
 
 def test_stdio_ping_emits_ready_and_pong() -> None:

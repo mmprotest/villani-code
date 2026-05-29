@@ -61,6 +61,8 @@ class PermissionEngine:
         for rule in self.config.deny:
             if self._matches(rule, tool, target):
                 return PolicyDecision(Decision.DENY, f"Matched deny rule: {rule.tool}({rule.pattern})")
+        if tool == "ExecutionPlan":
+            return PolicyDecision(Decision.ALLOW, "ExecutionPlan is an internal read-only planning operation")
         for rule in self.config.ask:
             if self._matches(rule, tool, target):
                 return PolicyDecision(Decision.ASK, f"Matched ask rule: {rule.tool}({rule.pattern})")

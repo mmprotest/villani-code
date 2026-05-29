@@ -39,19 +39,25 @@ def test_villani_high_risk_plan_auto_approved(monkeypatch: pytest.MonkeyPatch, t
     assert "plan_approval_required" not in event_types
 
 
-def test_non_villani_high_risk_plan_rejection_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_execution_plan_allowed_without_approval_callback(tmp_path: Path) -> None:
     _seed_repo(tmp_path)
     runner = Runner(client=DummyClient(), repo=tmp_path, model="m", stream=False, villani_mode=False)
-    asked = {"count": 0}
+    events: list[dict] = []
+    runner.event_callback = events.append
 
-    def reject(_name: str, _payload: dict) -> bool:
-        asked["count"] += 1
-        return False
+    def fail_if_called(_name: str, _payload: dict) -> bool:
+        raise AssertionError("ExecutionPlan must be allowed by policy without prompting")
 
-    runner.approval_callback = reject
-    with pytest.raises(RuntimeError, match="Execution plan rejected"):
-        state_runtime.ensure_project_memory_and_plan(runner, "delete files and rewrite history")
-    assert asked["count"] == 1
+    runner.approval_callback = fail_if_called
+
+    state_runtime.ensure_project_memory_and_plan(runner, "delete files and rewrite history")
+
+    event_types = [e.get("type") for e in events]
+    assert "plan_auto_approved" in event_types
+    assert "plan_approval_required" not in event_types
+    policy_events = [e for e in events if e.get("type") == "policy_decision" and e.get("name") == "ExecutionPlan"]
+    assert policy_events
+    assert policy_events[-1]["decision"] == "allow"
 
 
 class _RetrieverHit:

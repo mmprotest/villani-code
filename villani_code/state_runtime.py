@@ -14,6 +14,7 @@ from typing import Any
 from villani_code.autonomy import VerificationStatus
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
+from villani_code.permissions import Decision
 from villani_code.planning import TaskMode, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
@@ -1311,8 +1312,27 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         update_session_state(runner.repo, session)
         return
 
+    approval_payload = {"summary": plan.to_human_text(), "risk": plan.risk_level.value}
+    policy = runner.permissions.evaluate_with_reason(
+        "ExecutionPlan",
+        approval_payload,
+        bypass=runner.bypass_permissions,
+        auto_accept_edits=runner.auto_accept_edits,
+    )
+    runner._emit_policy_event("ExecutionPlan", approval_payload, policy.decision, policy.reason)
+    if policy.decision == Decision.ALLOW:
+        runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
+        update_session_state(runner.repo, session)
+        return
+    if policy.decision == Decision.DENY:
+        runner.event_callback({"type": "plan_rejected"})
+        session.outcome_status = "rejected"
+        session.next_step_hints = ["Revise plan scope or lower risk before retrying"]
+        update_session_state(runner.repo, session)
+        raise RuntimeError("Execution plan denied by permission policy.")
+
     runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
-    approved = runner.approval_callback("ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value})
+    approved = runner.approval_callback("ExecutionPlan", approval_payload)
     if not approved:
         runner.event_callback({"type": "plan_rejected"})
         session.outcome_status = "rejected"

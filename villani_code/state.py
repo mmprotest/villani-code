@@ -538,6 +538,7 @@ class Runner:
                     "GitCheckout(*)",
                     "GitCommit(*)",
                     "SubmitPlan(*)",
+                    "ExecutionPlan(*)",
                 ],
             ),
             repo=self.repo,

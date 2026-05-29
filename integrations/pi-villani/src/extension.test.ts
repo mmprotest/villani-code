@@ -138,7 +138,8 @@ function createContext(messages: string[], options: { model?: Model<string>; aut
     ui: {
       notify: (message: string) => messages.push(message),
       confirm: async (title: string, message: string) => { messages.push(`confirm:${title}:${message}`); return false; },
-      setStatus: (_key: string, text: string | undefined) => { if (text) messages.push(text); },
+      setStatus: (_key: string, text: string | undefined) => { messages.push(text ? `status:${text}` : "status:clear"); if (text) messages.push(text); },
+      setWidget: (_key: string, lines: string[] | undefined) => { messages.push(lines ? `widget:${lines.join("|")}` : "widget:clear"); },
     },
   } as unknown as ExtensionCommandContext;
 }
@@ -276,6 +277,39 @@ test("default path uses cached downloaded runtime before launching bridge", asyn
   }
 });
 
+
+
+test("startup and final events update visible persistent UI", async () => {
+  const oldCommand = process.env.VILLANI_COMMAND;
+  const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
+  const oldProvider = process.env.VILLANI_PROVIDER;
+  const oldModel = process.env.VILLANI_MODEL;
+  const oldBase = process.env.VILLANI_BASE_URL;
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(true));
+  process.env.VILLANI_COMMAND = "mock-villani";
+  process.env.VILLANI_USE_PI_MODEL = "false";
+  process.env.VILLANI_PROVIDER = "openai";
+  process.env.VILLANI_MODEL = "fake";
+  process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
+  try {
+    const host = createHost();
+    const messages: string[] = [];
+    villaniPiExtension(host.api);
+    await host.commands.get("villani")!("fix it", createContext(messages));
+    const joined = messages.join("\n");
+    assert.match(joined, /status:Villani: starting/);
+    assert.match(joined, /status:Villani: starting model proxy/);
+    assert.match(joined, /status:Villani: starting runtime/);
+    assert.match(joined, /status:Villani: running/);
+    assert.match(joined, /status:clear/);
+    assert.match(joined, /widget:clear/);
+    assert.match(joined, /done/);
+  } finally {
+    restoreBridge();
+    restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
+  }
+});
+
 function restoreEnv(values: { oldCommand?: string; oldUsePi?: string; oldProvider?: string; oldModel?: string; oldBase?: string }): void {
   setOrDelete("VILLANI_COMMAND", values.oldCommand);
   setOrDelete("VILLANI_USE_PI_MODEL", values.oldUsePi);
@@ -297,7 +331,10 @@ test("approval event is confirmed and answered", async () => {
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
   const oldApproval = process.env.MOCK_APPROVAL;
+  let messages: string[] = [];
   const restorePrompt = __setApprovalPrompterForTests(async (request) => {
+    assert.match(messages.join("\n"), /status:Villani: awaiting approval for Write/);
+    assert.match(messages.join("\n"), /widget:Villani is awaiting approval\|Write file: safe-test.txt/);
     assert.equal(request.request_id, "approval-1");
     assert.equal(request.input.path, "safe-test.txt");
     return true;
@@ -311,10 +348,13 @@ test("approval event is confirmed and answered", async () => {
   process.env.MOCK_APPROVAL = "1";
   try {
     const host = createHost();
-    const messages: string[] = [];
+    messages = [];
     villaniPiExtension(host.api);
     await host.commands.get("villani")!("fix it", createContext(messages));
-    assert.match(messages.join("\n"), /Approved Villani Write request/);
+    const joined = messages.join("\n");
+    assert.match(joined, /status:Villani: awaiting approval for Write/);
+    assert.match(joined, /widget:Villani is awaiting approval\|Write file: safe-test.txt/);
+    assert.match(joined, /Approved Villani Write request/);
     assert.match(messages.join("\n"), /approval_resolved|Villani completed/);
   } finally {
     restorePrompt();
@@ -346,6 +386,8 @@ test("rejected approval and UI failure default to denial", async () => {
     await host.commands.get("villani")!("fix it", createContext(messages));
     restorePrompt();
     assert.match(messages.join("\n"), /Denied Villani Write request/);
+    assert.match(messages.join("\n"), /status:Villani: denied Write approval/);
+    assert.match(messages.join("\n"), /widget:Villani approval denied\|Write file: safe-test.txt/);
 
     restorePrompt = __setApprovalPrompterForTests(async () => { throw new Error("dialog missing"); });
     const host2 = createHost();
@@ -418,6 +460,7 @@ test("abort during pending approval sends denial and abort", async () => {
     unblock(true);
     await runPromise;
     assert.match(messages.join("\n"), /Villani aborted|cancelled/);
+    assert.match(messages.join("\n"), /status:clear/);
     assert.doesNotMatch(messages.join("\n"), /Approved Villani Write request/);
   } finally {
     restorePrompt();
