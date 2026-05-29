@@ -40,6 +40,7 @@ from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.context_projection import build_model_context_packet, render_model_context_packet
+from villani_code.progress_governor import ProgressGovernor, render_intervention
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
@@ -964,6 +965,12 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
+        self._governor_interventions_used = 0
+        self._last_governor_trigger = ""
+        self._last_governor_workspace_revision = -1
+        self._last_governor_verdict = None
+        self._last_reviewed_validation_signature = ""
+        self._last_verified_workspace_revision = -1
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
         if self._first_attempt_write_lock_active:
@@ -1108,6 +1115,47 @@ class Runner:
                 "transcript": transcript,
                 "execution": execution.to_dict(),
             }
+
+        def _has_fresh_passing_verification() -> bool:
+            summary = str(getattr(self, "_last_validation_summary", "")).lower()
+            return (
+                self._last_verified_workspace_revision >= workspace_revision
+                and "status=pass" in summary
+                and not bool(getattr(self, "_validation_repeated_without_new_evidence", False))
+            )
+
+        def _record_latest_validation_revision() -> None:
+            nonlocal workspace_revision
+            summary = str(getattr(self, "_last_validation_summary", "")).lower()
+            if "status=pass" in summary and not bool(getattr(self, "_validation_repeated_without_new_evidence", False)):
+                self._last_verified_workspace_revision = workspace_revision
+
+        def _tool_action_target(tool_name: str, tool_input: dict[str, Any]) -> str:
+            if tool_name in {"Read", "Write", "Patch"}:
+                return str(tool_input.get("file_path", "") or tool_input.get("path", ""))[:180]
+            if tool_name == "Bash":
+                return str(tool_input.get("command", ""))[:180]
+            return str(tool_input)[:180]
+
+        def _review_progress(trigger: str, pending_verification_text: str = "") -> tuple[str, bool]:
+            if not trigger or self._planning_read_only:
+                return "", False
+            snapshot = self._progress_governor.build_snapshot(
+                trigger=trigger,
+                turn_index=turns_used,
+                workspace_revision=workspace_revision,
+                objective=instruction,
+                intended_targets=sorted(self._intended_targets),
+                changed_files=_attributed_changed_files(),
+                consecutive_recon_turns=consecutive_recon_turns,
+                consecutive_no_edit_turns=consecutive_no_edit_turns,
+                pending_verification=pending_verification_text or self._pending_verification,
+                recent_actions=recent_actions,
+            )
+            verdict, intervened = self._progress_governor.review(snapshot)
+            if not verdict or not intervened:
+                return "", False
+            return render_intervention(verdict), True
 
         def _budget_reason(
             completed: bool = False, model_idle: bool = False
@@ -1266,6 +1314,16 @@ class Runner:
                         reminder = "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue."
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                        continue
+                    completion_trigger = self._progress_governor.completion_trigger(
+                        code_change_oriented=request_is_code_change_oriented,
+                        meaningful_repo_edit_made=meaningful_repo_edit_made,
+                        workspace_revision=workspace_revision,
+                        fresh_passing_verification=_has_fresh_passing_verification(),
+                    )
+                    completion_intervention, completion_intervened = _review_progress(completion_trigger)
+                    if completion_intervened:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": completion_intervention}]})
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -1427,6 +1485,16 @@ class Runner:
                         }
                     )
                     continue
+                completion_trigger = self._progress_governor.completion_trigger(
+                    code_change_oriented=request_is_code_change_oriented,
+                    meaningful_repo_edit_made=meaningful_repo_edit_made,
+                    workspace_revision=workspace_revision,
+                    fresh_passing_verification=_has_fresh_passing_verification(),
+                )
+                completion_intervention, completion_intervened = _review_progress(completion_trigger)
+                if completion_intervened:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": completion_intervention}]})
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
@@ -1494,6 +1562,15 @@ class Runner:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
                         self._files_read.add(str(tool_input.get("file_path", "")))
+
+                recent_actions.append(
+                    {
+                        "tool": tool_name,
+                        "target": _tool_action_target(tool_name, tool_input),
+                        "outcome": "error" if result.get("is_error") else "success",
+                    }
+                )
+                recent_actions[:] = recent_actions[-8:]
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
                     self._pending_verification = self._run_post_edit_verification(
@@ -1601,6 +1678,10 @@ class Runner:
             edited_this_turn = attributed != previous_attributed or revision_changed_this_turn
             previous_attributed = attributed
             if edited_this_turn:
+                workspace_revision += 1
+                if any(not _is_generated_or_runtime_artifact(target) for target in attributed):
+                    meaningful_repo_edit_made = True
+                    prose_edit_intent_recovery_attempts = 0
                 consecutive_no_edit_turns = 0
                 self._patch_effect_check_pending = True
                 self._patch_effect_check_attempts = 0
@@ -1620,10 +1701,28 @@ class Runner:
             else:
                 consecutive_recon_turns = 0
 
+            _record_latest_validation_revision()
+            governor_trigger = self._progress_governor.choose_trigger(
+                turn_index=turns_used,
+                workspace_revision=workspace_revision,
+                consecutive_recon_turns=consecutive_recon_turns,
+                edited_this_turn=edited_this_turn,
+                changed_files=_attributed_changed_files(),
+                intended_targets=sorted(self._intended_targets),
+            )
+            governor_intervention, governor_intervened = _review_progress(governor_trigger)
+
             reason = _budget_reason()
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
             next_user_content = copy.deepcopy(tool_results)
+            if governor_intervention and next_user_content:
+                existing = str(next_user_content[-1].get("content", ""))
+                next_user_content[-1]["content"] = (
+                    f"{existing}\n\n{governor_intervention}"
+                    if existing
+                    else governor_intervention
+                )
             if self._pending_verification and next_user_content:
                 existing = str(next_user_content[-1].get("content", ""))
                 next_user_content[-1]["content"] = (
