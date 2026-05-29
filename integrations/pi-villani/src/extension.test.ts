@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
-import villaniPiExtension, { __setApprovalPrompterForTests } from "./index.js";
+import villaniPiExtension, { __setApprovalPrompterForTests, __setBridgeStarterForTests } from "./index.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { VillaniBridgeProcess, type BridgeProcessOptions } from "./process.js";
+import { resolveRuntimeAsset, VILLANI_RUNTIME_VERSION } from "./runtimeConfig.js";
 
-async function mockNodeBridgeExecutable(exitAfterRun = false): Promise<string> {
+async function mockNodeBridgeModule(exitAfterRun = false): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "villani-extension-"));
-  const executable = join(dir, process.platform === "win32" ? "villani-mock.cmd" : "villani-mock");
   const modulePath = join(dir, "bridge.mjs");
   await writeFile(modulePath, `
     process.stdout.write('{"type":"ready","protocol_version":1}\\n');
@@ -53,25 +54,47 @@ async function mockNodeBridgeExecutable(exitAfterRun = false): Promise<string> {
       }
     });
   `, "utf8");
-  if (process.platform === "win32") {
-    await writeFile(executable, `@echo off\n"${process.execPath}" "${modulePath}" %*\n`, "utf8");
-  } else {
-    await writeFile(executable, `#!/usr/bin/env sh\nexec "${process.execPath}" "${modulePath}" "$@"\n`, { encoding: "utf8", mode: 0o755 });
-  }
-  return executable;
+  return modulePath;
 }
 
-async function installCachedRuntimeBridge(commandExecutable: string): Promise<string> {
+function installMockBridgeStarter(modulePath: string, calls: BridgeProcessOptions[] = []): () => void {
+  return __setBridgeStarterForTests(async (options) => {
+    calls.push(options);
+    const bridge = new VillaniBridgeProcess({
+      spec: {
+        executable: process.execPath,
+        args: [modulePath],
+        display: process.execPath,
+      },
+      cwd: options.cwd,
+      env: options.env,
+      signal: options.signal,
+      readyTimeoutMs: options.readyTimeoutMs ?? 1000,
+    });
+    await bridge.waitUntilReady();
+    return bridge;
+  });
+}
+
+async function installCachedRuntimeBridge(): Promise<{ cacheRoot: string; executable: string }> {
   const cacheRoot = await mkdtemp(join(tmpdir(), "villani-runtime-cache-"));
-  const platformKey = `${process.platform}-${process.arch}`;
-  const runtimeDir = join(cacheRoot, "0.1.0", platformKey, "villani-code");
-  const runtimeExecutable = join(runtimeDir, process.platform === "win32" ? "villani-code.exe" : "villani-code");
+  const asset = resolveRuntimeAsset();
+  const finalDir = join(cacheRoot, VILLANI_RUNTIME_VERSION, asset.platformKey);
+  const runtimeExecutable = join(finalDir, asset.executableRelativePath);
+  const runtimeDir = join(finalDir, "villani-code");
   await mkdir(runtimeDir, { recursive: true });
-  await writeFile(runtimeExecutable, process.platform === "win32"
-    ? `@echo off\n"${commandExecutable}" %*\n`
-    : `#!/usr/bin/env sh\nexec "${commandExecutable}" "$@"\n`, { encoding: "utf8", mode: 0o755 });
-  await writeFile(join(cacheRoot, "0.1.0", platformKey, ".verified.json"), JSON.stringify({ runtimeVersion: "0.1.0", assetName: platformKey.startsWith("win32") ? "villani-runtime-v0.1.0-win32-x64.zip" : `villani-runtime-v0.1.0-${platformKey}.tar.gz`, checksum: "a".repeat(64) }), "utf8");
-  return cacheRoot;
+  await writeFile(runtimeExecutable, "test placeholder; not executed\n", "utf8");
+  if (process.platform !== "win32") await chmod(runtimeExecutable, 0o755);
+  await writeFile(join(finalDir, ".verified.json"), JSON.stringify({ runtimeVersion: VILLANI_RUNTIME_VERSION, assetName: asset.assetName, checksum: "a".repeat(64) }), "utf8");
+  return { cacheRoot, executable: runtimeExecutable };
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting for test condition.");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 function createHost() {
@@ -141,7 +164,8 @@ test("prevents overlapping runs and aborts active bridge run", async () => {
   const oldProvider = process.env.VILLANI_PROVIDER;
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(false);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
@@ -152,13 +176,14 @@ test("prevents overlapping runs and aborts active bridge run", async () => {
     villaniPiExtension(host.api);
     const ctx = createContext(messages);
     const runPromise = host.commands.get("villani")!("fix it", ctx);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitForCondition(() => messages.some((message) => /Villani started/.test(message)));
     await host.commands.get("villani")!("second", ctx);
     assert.match(messages.join("\n"), /already running/);
     await host.commands.get("villani-abort")!("", ctx);
     await runPromise;
     assert.match(messages.join("\n"), /Villani aborted/);
   } finally {
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
   }
 });
@@ -166,7 +191,8 @@ test("prevents overlapping runs and aborts active bridge run", async () => {
 test("Pi model path resolves model auth", async () => {
   const oldCommand = process.env.VILLANI_COMMAND;
   const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(true);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(true));
+  process.env.VILLANI_COMMAND = "mock-villani";
   delete process.env.VILLANI_USE_PI_MODEL;
   try {
     const host = createHost();
@@ -176,6 +202,7 @@ test("Pi model path resolves model auth", async () => {
     assert.equal(messages.includes("auth:pi-test"), true);
     assert.match(messages.join("\n"), /Villani completed/);
   } finally {
+    restoreBridge();
     setOrDelete("VILLANI_COMMAND", oldCommand);
     setOrDelete("VILLANI_USE_PI_MODEL", oldUsePi);
   }
@@ -187,7 +214,8 @@ test("explicit Villani config does not resolve Pi credentials", async () => {
   const oldProvider = process.env.VILLANI_PROVIDER;
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(true);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(true));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
@@ -199,6 +227,7 @@ test("explicit Villani config does not resolve Pi credentials", async () => {
     await host.commands.get("villani")!("fix it", createContext(messages, { model: fakeModel() }));
     assert.equal(messages.some((line) => line.startsWith("auth:")), false);
   } finally {
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
   }
 });
@@ -224,8 +253,10 @@ test("default path uses cached downloaded runtime before launching bridge", asyn
   const oldProvider = process.env.VILLANI_PROVIDER;
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
-  const bridgeExecutable = await mockNodeBridgeExecutable(true);
-  process.env.VILLANI_RUNTIME_CACHE_DIR = await installCachedRuntimeBridge(bridgeExecutable);
+  const bridgeCalls: BridgeProcessOptions[] = [];
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(true), bridgeCalls);
+  const cachedRuntime = await installCachedRuntimeBridge();
+  process.env.VILLANI_RUNTIME_CACHE_DIR = cachedRuntime.cacheRoot;
   delete process.env.VILLANI_COMMAND;
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
@@ -237,7 +268,9 @@ test("default path uses cached downloaded runtime before launching bridge", asyn
     villaniPiExtension(host.api);
     await host.commands.get("villani")!("fix it", createContext(messages));
     assert.match(messages.join("\n"), /Villani completed/);
+    assert.equal(bridgeCalls[0]?.command, cachedRuntime.executable);
   } finally {
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("VILLANI_RUNTIME_CACHE_DIR", oldCache);
   }
@@ -269,7 +302,8 @@ test("approval event is confirmed and answered", async () => {
     assert.equal(request.input.path, "safe-test.txt");
     return true;
   });
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(false);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
@@ -284,6 +318,7 @@ test("approval event is confirmed and answered", async () => {
     assert.match(messages.join("\n"), /approval_resolved|Villani completed/);
   } finally {
     restorePrompt();
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
   }
@@ -296,14 +331,15 @@ test("rejected approval and UI failure default to denial", async () => {
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
   const oldApproval = process.env.MOCK_APPROVAL;
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(false);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
   process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
   process.env.MOCK_APPROVAL = "1";
+  let restorePrompt = __setApprovalPrompterForTests(async () => false);
   try {
-    let restorePrompt = __setApprovalPrompterForTests(async () => false);
     const host = createHost();
     const messages: string[] = [];
     villaniPiExtension(host.api);
@@ -316,10 +352,11 @@ test("rejected approval and UI failure default to denial", async () => {
     const messages2: string[] = [];
     villaniPiExtension(host2.api);
     await host2.commands.get("villani")!("fix it", createContext(messages2));
-    restorePrompt();
     assert.match(messages2.join("\n"), /Approval UI unavailable/);
     assert.match(messages2.join("\n"), /Denied Villani Write request/);
   } finally {
+    restorePrompt();
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
   }
@@ -332,7 +369,8 @@ test("approval prompt content includes path or command", async () => {
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
   const oldApproval = process.env.MOCK_APPROVAL;
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(false);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
@@ -347,6 +385,7 @@ test("approval prompt content includes path or command", async () => {
     assert.match(messages.join("\n"), /pip install package-name/);
     assert.doesNotMatch(messages.join("\n"), /pi-secret|pi-token/);
   } finally {
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
   }
@@ -361,7 +400,8 @@ test("abort during pending approval sends denial and abort", async () => {
   const oldApproval = process.env.MOCK_APPROVAL;
   let unblock!: (value: boolean) => void;
   const restorePrompt = __setApprovalPrompterForTests(async () => new Promise<boolean>((resolve) => { unblock = resolve; }));
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(false);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
@@ -373,7 +413,7 @@ test("abort during pending approval sends denial and abort", async () => {
     villaniPiExtension(host.api);
     const ctx = createContext(messages);
     const runPromise = host.commands.get("villani")!("fix it", ctx);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitForCondition(() => typeof unblock === "function");
     await host.commands.get("villani-abort")!("", ctx);
     unblock(true);
     await runPromise;
@@ -381,6 +421,7 @@ test("abort during pending approval sends denial and abort", async () => {
     assert.doesNotMatch(messages.join("\n"), /Approved Villani Write request/);
   } finally {
     restorePrompt();
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
   }
@@ -398,7 +439,8 @@ test("multiple sequential approvals keep request ids distinct", async () => {
     seen.push(request.request_id);
     return request.request_id === "approval-1";
   });
-  process.env.VILLANI_COMMAND = await mockNodeBridgeExecutable(false);
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
   process.env.VILLANI_PROVIDER = "openai";
   process.env.VILLANI_MODEL = "fake";
@@ -414,6 +456,7 @@ test("multiple sequential approvals keep request ids distinct", async () => {
     assert.match(messages.join("\n"), /Denied Villani Patch request/);
   } finally {
     restorePrompt();
+    restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
   }
