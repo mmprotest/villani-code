@@ -15,9 +15,14 @@ interface ActiveVillaniRun {
   abortController: AbortController;
   bridge?: VillaniBridgeProcess;
   proxy?: PiModelProxy;
+  pendingApprovals: Set<string>;
   done: Promise<void>;
   resolveDone: () => void;
 }
+
+export type ApprovalPrompter = (request: Extract<BridgeEvent, { type: "approval_required" }>, ctx: ExtensionCommandContext, signal: AbortSignal) => Promise<boolean>;
+
+let approvalPrompter: ApprovalPrompter = askUserForApproval;
 
 let activeRun: ActiveVillaniRun | undefined;
 
@@ -49,7 +54,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
   const abortController = new AbortController();
   let resolveDone!: () => void;
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
-  const run: ActiveVillaniRun = { id: runId, repo, phase: "starting", abortController, done, resolveDone };
+  const run: ActiveVillaniRun = { id: runId, repo, phase: "starting", abortController, pendingApprovals: new Set(), done, resolveDone };
   activeRun = run;
 
   let finished = false;
@@ -78,6 +83,10 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     run.phase = "running";
     run.bridge.onEvent((event: BridgeEvent) => {
       if (abortController.signal.aborted && event.type === "run_completed") return;
+      if (event.type === "approval_required") {
+        void handleApprovalRequired(run, event, ctx, output);
+        return;
+      }
       renderEvent(event, output);
       if (event.type === "run_completed" || event.type === "run_failed" || event.type === "run_aborted") {
         finished = event.type === "run_completed";
@@ -131,6 +140,10 @@ async function abortActiveRun(_reason: string): Promise<void> {
   if (!run) return;
   run.phase = "aborting";
   run.abortController.abort();
+  for (const requestId of Array.from(run.pendingApprovals)) {
+    try { run.bridge?.respondToApproval(run.id, requestId, false); } catch { /* bridge may already be closed */ }
+    run.pendingApprovals.delete(requestId);
+  }
   try {
     run.bridge?.abort(run.id);
   } catch {
@@ -140,6 +153,59 @@ async function abortActiveRun(_reason: string): Promise<void> {
     run.done,
     new Promise<void>((resolve) => setTimeout(resolve, 5_000)).then(() => run.bridge?.kill()),
   ]);
+}
+
+async function handleApprovalRequired(
+  run: ActiveVillaniRun,
+  event: Extract<BridgeEvent, { type: "approval_required" }>,
+  ctx: ExtensionCommandContext,
+  output: PiLikeOutput,
+): Promise<void> {
+  run.pendingApprovals.add(event.request_id);
+  let approved = false;
+  try {
+    approved = !run.abortController.signal.aborted && await approvalPrompter(event, ctx, run.abortController.signal);
+  } catch {
+    approved = false;
+    output.warn?.(`Approval UI unavailable; denied ${event.tool} request.`);
+  }
+  const stillPending = run.pendingApprovals.delete(event.request_id);
+  if (!stillPending) return;
+  if (run.abortController.signal.aborted || activeRun?.id !== run.id) approved = false;
+  try {
+    run.bridge?.respondToApproval(run.id, event.request_id, approved);
+    output.warn?.(`${approved ? "Approved" : "Denied"} Villani ${event.tool} request: ${event.summary}`);
+  } catch {
+    if (!run.abortController.signal.aborted) output.warn?.(`Could not send approval response for ${event.tool}; bridge is no longer available.`);
+  }
+}
+
+async function askUserForApproval(request: Extract<BridgeEvent, { type: "approval_required" }>, ctx: ExtensionCommandContext, signal: AbortSignal): Promise<boolean> {
+  if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") return false;
+  return ctx.ui.confirm(approvalTitle(request), approvalMessage(request), { signal });
+}
+
+function approvalTitle(request: Extract<BridgeEvent, { type: "approval_required" }>): string {
+  if (request.tool === "Write") return "Villani wants to write a file";
+  if (request.tool === "Patch") return "Villani wants to apply a patch";
+  if (request.tool === "Bash") return "Villani wants to run a shell command";
+  return `Villani wants approval for ${request.tool}`;
+}
+
+function approvalMessage(request: Extract<BridgeEvent, { type: "approval_required" }>): string {
+  const path = typeof request.input.path === "string" ? request.input.path : undefined;
+  const command = typeof request.input.command === "string" ? request.input.command : undefined;
+  const lines = [request.summary, ""];
+  if (path) lines.push(`File: ${path}`, "");
+  if (command) lines.push("Command:", command, "");
+  lines.push("Allow this operation?");
+  return lines.join("\n");
+}
+
+export function __setApprovalPrompterForTests(prompter: ApprovalPrompter): () => void {
+  const previous = approvalPrompter;
+  approvalPrompter = prompter;
+  return () => { approvalPrompter = previous; };
 }
 
 async function resolveModelAuth(ctx: ExtensionCommandContext, model: Model<string>): Promise<{ apiKey?: string; headers?: Record<string, string> }> {

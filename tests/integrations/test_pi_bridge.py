@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from villani_code.integrations.pi_bridge import PiBridge, map_runner_event
+from villani_code.integrations.pi_bridge import PiBridge, map_runner_event, summarize_approval_request
 
 
 class DummyRunner:
@@ -279,3 +279,171 @@ def test_mode_runner_calls_run_and_villani_calls_run_villani(tmp_path: Path) -> 
     villani_runner = EditingRunner(tmp_path, {})
     run_bridge_command(tmp_path, villani_runner, mode="villani")
     assert villani_runner.villani_calls == 1
+
+
+class ApprovalRunner(DummyRunner):
+    def __init__(self, repo: Path, tool: str, payload: dict[str, Any]) -> None:
+        super().__init__()
+        self.repo = repo
+        self.tool = tool
+        self.payload = payload
+        self.approval_callback = lambda _name, _input: False
+        self.executed = threading.Event()
+        self.denied = threading.Event()
+
+    def run(self, instruction: str, **_kwargs: Any) -> dict[str, Any]:
+        approved = self.approval_callback(self.tool, self.payload)
+        self.event_callback({"type": "approval_resolved", "name": self.tool, "input": self.payload, "approved": approved})
+        if not approved:
+            self.denied.set()
+            return {"response": {"content": [{"type": "text", "text": "Denied."}]}, "execution": {"final_text": "Denied."}}
+        if self.tool == "Bash":
+            marker = self.repo / "bash-ran.txt"
+            marker.write_text(str(self.payload.get("command", "")), encoding="utf-8")
+        else:
+            path = self.payload.get("path") or self.payload.get("file_path")
+            if path:
+                target = self.repo / str(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(str(self.payload.get("content", "approved")), encoding="utf-8")
+                self.event_callback({"type": "tool_finished", "name": self.tool, "input": self.payload, "is_error": False})
+        self.executed.set()
+        return self.result
+
+
+def start_approval_bridge(repo: Path, runner: ApprovalRunner) -> tuple[PiBridge, io.StringIO]:
+    stdout = io.StringIO()
+
+    def factory(_command: Any, event_callback: Any) -> ApprovalRunner:
+        runner.event_callback = event_callback
+        return runner
+
+    bridge = PiBridge(stdout=stdout, runner_factory=factory)
+    bridge._handle_command({"type": "run", "id": "run-approval", "task": "Fix", "repo": str(repo), "mode": "runner"})
+    return bridge, stdout
+
+
+def wait_for_event(bridge: PiBridge, output: io.StringIO, event_type: str, timeout: float = 2) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        bridge._drain_events()
+        events = collect_json_lines(output)
+        for event in events:
+            if event.get("type") == event_type:
+                return event
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {event_type}; saw {collect_json_lines(output)}")
+
+
+def finish_bridge(bridge: PiBridge, timeout: float = 2) -> None:
+    deadline = time.time() + timeout
+    while bridge._active and time.time() < deadline:
+        time.sleep(0.01)
+    bridge._drain_events()
+
+
+def test_approval_required_write_blocks_until_approved(tmp_path: Path) -> None:
+    runner = ApprovalRunner(tmp_path, "Write", {"path": "src/foo.py", "content": "approved"})
+    bridge, stdout = start_approval_bridge(tmp_path, runner)
+
+    approval = wait_for_event(bridge, stdout, "approval_required")
+    assert approval["id"] == "run-approval"
+    assert approval["tool"] == "Write"
+    assert approval["input"] == {"path": "src/foo.py", "content_chars": 8}
+    assert "src/foo.py" in approval["summary"]
+    assert not (tmp_path / "src/foo.py").exists()
+
+    bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": approval["request_id"], "approved": True})
+    finish_bridge(bridge)
+
+    assert runner.executed.is_set()
+    assert (tmp_path / "src/foo.py").read_text(encoding="utf-8") == "approved"
+    events = collect_json_lines(stdout)
+    assert any(event["type"] == "approval_resolved" and event["approved"] is True for event in events)
+    assert events[-1]["type"] == "run_completed"
+    assert events[-1]["changed_files"] == ["src/foo.py"]
+
+
+def test_rejected_write_is_blocked(tmp_path: Path) -> None:
+    runner = ApprovalRunner(tmp_path, "Write", {"path": "blocked.txt", "content": "nope"})
+    bridge, stdout = start_approval_bridge(tmp_path, runner)
+
+    approval = wait_for_event(bridge, stdout, "approval_required")
+    bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": approval["request_id"], "approved": False})
+    finish_bridge(bridge)
+
+    assert runner.denied.is_set()
+    assert not runner.executed.is_set()
+    assert not (tmp_path / "blocked.txt").exists()
+    events = collect_json_lines(stdout)
+    assert any(event["type"] == "approval_resolved" and event["approved"] is False for event in events)
+    assert events[-1]["changed_files"] == []
+
+
+def test_bash_approval_shows_command_and_blocks_execution(tmp_path: Path) -> None:
+    command = "pip install package-name"
+    runner = ApprovalRunner(tmp_path, "Bash", {"command": command})
+    bridge, stdout = start_approval_bridge(tmp_path, runner)
+
+    approval = wait_for_event(bridge, stdout, "approval_required")
+    assert approval["tool"] == "Bash"
+    assert approval["input"] == {"command": command}
+    assert command in approval["summary"]
+    assert not (tmp_path / "bash-ran.txt").exists()
+
+    bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": approval["request_id"], "approved": True})
+    finish_bridge(bridge)
+
+    assert runner.executed.is_set()
+    assert (tmp_path / "bash-ran.txt").read_text(encoding="utf-8") == command
+
+
+def test_abort_while_approval_pending_denies_and_aborts(tmp_path: Path) -> None:
+    runner = ApprovalRunner(tmp_path, "Write", {"path": "abort.txt", "content": "no"})
+    bridge, stdout = start_approval_bridge(tmp_path, runner)
+
+    wait_for_event(bridge, stdout, "approval_required")
+    bridge._handle_command({"type": "abort", "id": "run-approval"})
+    finish_bridge(bridge)
+
+    assert runner.denied.is_set()
+    assert not runner.executed.is_set()
+    assert not (tmp_path / "abort.txt").exists()
+    events = collect_json_lines(stdout)
+    assert any(event["type"] == "abort_requested" for event in events)
+    assert events[-1]["type"] == "run_aborted"
+
+
+def test_unknown_duplicate_and_malformed_approval_responses_are_safe(tmp_path: Path) -> None:
+    runner = ApprovalRunner(tmp_path, "Write", {"path": "once.txt", "content": "once"})
+    bridge, stdout = start_approval_bridge(tmp_path, runner)
+    approval = wait_for_event(bridge, stdout, "approval_required")
+
+    bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": "missing", "approved": True})
+    assert collect_json_lines(stdout)[-1]["type"] == "error"
+
+    bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": approval["request_id"], "approved": True})
+    bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": approval["request_id"], "approved": False})
+    finish_bridge(bridge)
+
+    assert (tmp_path / "once.txt").read_text(encoding="utf-8") == "once"
+    events = collect_json_lines(stdout)
+    assert sum(1 for event in events if event.get("type") == "approval_resolved" and event.get("request_id") == approval["request_id"]) == 1
+    assert any(event["type"] == "error" and "Unknown approval request" in event["error"] for event in events)
+
+    try:
+        bridge._handle_command({"type": "approval_response", "id": "run-approval", "request_id": "x", "approved": "yes"})
+    except ValueError as exc:
+        bridge.emit({"type": "error", "error": str(exc)})
+    assert "requires boolean approved" in collect_json_lines(stdout)[-1]["error"]
+
+
+def test_approval_request_summary_is_bounded() -> None:
+    summary, safe_input = summarize_approval_request("Write", {"path": "a.py", "content": "x" * 5000})
+    assert summary == "Write file: a.py"
+    assert safe_input == {"path": "a.py", "content_chars": 5000}
+
+    bash_summary, bash_input = summarize_approval_request("Bash", {"command": "x" * 3000})
+    assert len(bash_input["command"]) == 2000
+    assert bash_input["command"].endswith("…")
+    assert bash_summary.startswith("Run command: ")

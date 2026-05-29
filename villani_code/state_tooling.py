@@ -515,7 +515,7 @@ def execute_tool_with_policy(
                     "decision_source": "auto_approve_flag",
                 }
             )
-        elif runner.villani_mode:
+        elif runner.villani_mode and not getattr(runner, "force_interactive_approvals", False):
             runner.event_callback(
                 {
                     "type": "approval_auto_resolved",

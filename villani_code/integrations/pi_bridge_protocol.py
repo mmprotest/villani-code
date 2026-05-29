@@ -41,6 +41,13 @@ class AbortCommand:
     id: str
 
 
+@dataclass(slots=True)
+class ApprovalResponseCommand:
+    id: str
+    request_id: str
+    approved: bool
+
+
 def to_json_line(event: dict[str, Any]) -> str:
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
@@ -54,6 +61,18 @@ def parse_json_line(line: str) -> dict[str, Any]:
 
 def _optional_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def parse_approval_response_command(payload: dict[str, Any]) -> ApprovalResponseCommand:
+    run_id = str(payload.get("id") or "").strip()
+    request_id = str(payload.get("request_id") or "").strip()
+    if not run_id:
+        raise ValueError("approval_response command requires id")
+    if not request_id:
+        raise ValueError("approval_response command requires request_id")
+    if not isinstance(payload.get("approved"), bool):
+        raise ValueError("approval_response command requires boolean approved")
+    return ApprovalResponseCommand(id=run_id, request_id=request_id, approved=bool(payload["approved"]))
 
 
 def parse_run_command(payload: dict[str, Any]) -> RunCommand:

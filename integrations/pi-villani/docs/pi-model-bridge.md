@@ -46,3 +46,8 @@ The proxy implements exactly that path. It translates:
 ## Streaming limitation
 
 The current proxy uses `@earendil-works/pi-ai` `complete()` and emits the completed assistant response as a single OpenAI-compatible SSE chunk when Villani asks for streaming. This exercises Villani's streaming client path but does not provide token-by-token streaming. If Pi returns `stopReason: "error"`, throws a provider/auth failure, or the per-run abort signal fires, the proxy returns an HTTP error instead of `[DONE]` or an empty successful completion. True token streaming can be added later by translating Pi `stream()` events to OpenAI SSE chunks.
+
+
+## Permission boundary
+
+The model proxy is separate from tool approval. Pi-managed model credentials stay inside the proxy, while tool permissions are enforced by Villani's Python runner and bridged back to Pi with `approval_required` / `approval_response` JSONL messages. The proxy never grants file or shell permissions, and approval prompts never include provider API keys or OAuth headers.

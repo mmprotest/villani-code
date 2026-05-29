@@ -7,6 +7,8 @@ import sys
 import threading
 import traceback
 import hashlib
+import inspect
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -14,13 +16,23 @@ from typing import Any, Callable, TextIO
 from villani_code.execution import ExecutionBudget, VILLANI_TASK_BUDGET
 from villani_code.integrations.pi_bridge_protocol import (
     RunCommand,
+    parse_approval_response_command,
     parse_json_line,
     parse_run_command,
     ready_event,
     to_json_line,
 )
 
-RunnerFactory = Callable[[RunCommand, Callable[[dict[str, Any]], None]], Any]
+RunnerFactory = Callable[..., Any]
+
+
+@dataclass(slots=True)
+class PendingApproval:
+    run_id: str
+    request_id: str
+    tool: str
+    ready: threading.Event = field(default_factory=threading.Event)
+    approved: bool | None = None
 
 
 @dataclass(slots=True)
@@ -28,6 +40,7 @@ class ActiveRun:
     command: RunCommand
     abort_requested: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
+    pending_approvals: dict[str, PendingApproval] = field(default_factory=dict)
 
 
 class PiBridge:
@@ -45,6 +58,7 @@ class PiBridge:
         self.runner_factory = runner_factory or build_default_runner
         self._events: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._active: dict[str, ActiveRun] = {}
+        self._pending_approvals: dict[str, PendingApproval] = {}
         self._lock = threading.Lock()
 
     def emit(self, event: dict[str, Any]) -> None:
@@ -109,6 +123,10 @@ class PiBridge:
             run_id = str(command.get("id") or "")
             self._abort_run(run_id)
             return
+        if command_type == "approval_response":
+            self._handle_approval_response(parse_approval_response_command(command))
+            self._drain_events()
+            return
         raise ValueError(f"Unknown bridge command type: {command_type or '<missing>'}")
 
     def _start_run(self, command: RunCommand) -> None:
@@ -128,8 +146,40 @@ class PiBridge:
             self.emit({"type": "error", "id": run_id, "error": "No active run with that id"})
             return
         active.abort_requested.set()
+        self._deny_pending_approvals(active)
         # Best-effort only: the existing Runner has no general cooperative cancellation hook yet.
         self.emit({"type": "abort_requested", "id": run_id})
+
+    def _handle_approval_response(self, response: Any) -> None:
+        with self._lock:
+            pending = self._pending_approvals.get(response.request_id)
+            active = self._active.get(response.id)
+            if pending is None or active is None or pending.run_id != response.id:
+                self.emit({"type": "error", "id": response.id, "error": f"Unknown approval request: {response.request_id}"})
+                return
+            # Remove first so duplicate responses cannot change the decision.
+            self._pending_approvals.pop(response.request_id, None)
+            active.pending_approvals.pop(response.request_id, None)
+            pending.approved = bool(response.approved)
+            pending.ready.set()
+        self._events.put(
+            {
+                "type": "approval_resolved",
+                "id": response.id,
+                "request_id": response.request_id,
+                "tool": pending.tool,
+                "approved": bool(response.approved),
+            }
+        )
+
+    def _deny_pending_approvals(self, active: ActiveRun) -> None:
+        with self._lock:
+            pending_items = list(active.pending_approvals.values())
+            for pending in pending_items:
+                self._pending_approvals.pop(pending.request_id, None)
+                active.pending_approvals.pop(pending.request_id, None)
+                pending.approved = False
+                pending.ready.set()
 
     def _run_worker(self, active: ActiveRun) -> None:
         command = active.command
@@ -167,7 +217,8 @@ class PiBridge:
                 if event.get("type") in {"tool_result", "tool_finished"}:
                     latest_summary = summarize_tool_event(event) or latest_summary
 
-            runner = self.runner_factory(command, on_runner_event)
+            approval_callback = self._approval_callback(active)
+            runner = self._create_runner(command, on_runner_event, approval_callback)
             if active.abort_requested.is_set():
                 self._events.put({"type": "run_aborted", "id": command.id, "success": False, "summary": "Aborted by caller"})
                 return
@@ -216,11 +267,97 @@ class PiBridge:
             self.stderr.write(traceback.format_exc())
             self.stderr.flush()
         finally:
+            self._deny_pending_approvals(active)
             with self._lock:
                 self._active.pop(command.id, None)
 
+    def _create_runner(
+        self,
+        command: RunCommand,
+        event_callback: Callable[[dict[str, Any]], None],
+        approval_callback: Callable[[str, dict[str, Any]], bool],
+    ) -> Any:
+        try:
+            signature = inspect.signature(self.runner_factory)
+            parameters = list(signature.parameters.values())
+            accepts_varargs = any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters)
+            positional = [
+                parameter
+                for parameter in parameters
+                if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+            ]
+            if accepts_varargs or len(positional) >= 3:
+                return self.runner_factory(command, event_callback, approval_callback)
+        except (TypeError, ValueError):
+            # Some callables do not expose an inspectable signature; fall back to the legacy two-argument shape.
+            pass
+        runner = self.runner_factory(command, event_callback)
+        runner.approval_callback = approval_callback
+        return runner
 
-def build_default_runner(command: RunCommand, event_callback: Callable[[dict[str, Any]], None]) -> Any:
+    def _approval_callback(self, active: ActiveRun) -> Callable[[str, dict[str, Any]], bool]:
+        def approve(tool_name: str, tool_input: dict[str, Any]) -> bool:
+            if active.abort_requested.is_set():
+                return False
+            request_id = uuid.uuid4().hex
+            summary, safe_input = summarize_approval_request(tool_name, tool_input)
+            pending = PendingApproval(run_id=active.command.id, request_id=request_id, tool=str(tool_name))
+            with self._lock:
+                if active.abort_requested.is_set() or active.command.id not in self._active:
+                    return False
+                active.pending_approvals[request_id] = pending
+                self._pending_approvals[request_id] = pending
+            self._events.put(
+                {
+                    "type": "approval_required",
+                    "id": active.command.id,
+                    "request_id": request_id,
+                    "tool": str(tool_name),
+                    "summary": summary,
+                    "input": safe_input,
+                }
+            )
+            while not pending.ready.wait(timeout=0.05):
+                if active.abort_requested.is_set():
+                    with self._lock:
+                        self._pending_approvals.pop(request_id, None)
+                        active.pending_approvals.pop(request_id, None)
+                    return False
+            return pending.approved is True and not active.abort_requested.is_set()
+
+        return approve
+
+
+def summarize_approval_request(tool_name: str, tool_input: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    tool = str(tool_name or "tool")
+    safe_input: dict[str, Any] = {}
+    path = tool_input.get("path") or tool_input.get("file_path")
+    command = tool_input.get("command")
+    if tool in {"Write", "Patch"}:
+        if path is not None:
+            safe_input["path"] = cap_text(str(path).replace("\\", "/"), 500)
+        content = tool_input.get("content")
+        if isinstance(content, str):
+            safe_input["content_chars"] = len(content)
+        action = "Write file" if tool == "Write" else "Apply patch to"
+        target = safe_input.get("path") or "unknown path"
+        return f"{action}: {target}", safe_input
+    if tool == "Bash":
+        safe_input["command"] = cap_text(str(command or ""), 2000)
+        return f"Run command: {safe_input['command']}", safe_input
+    for key in ("path", "file_path", "command"):
+        if key in tool_input and tool_input[key] is not None:
+            safe_input[key if key != "file_path" else "path"] = cap_text(str(tool_input[key]), 1000)
+    return f"Approve {tool} operation", safe_input
+
+
+def cap_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
+def build_default_runner(command: RunCommand, event_callback: Callable[[dict[str, Any]], None], approval_callback: Callable[[str, dict[str, Any]], bool]) -> Any:
     from villani_code.cli import _build_runner
 
     provider = command.config.provider or os.environ.get("VILLANI_PROVIDER") or "anthropic"
@@ -253,6 +390,10 @@ def build_default_runner(command: RunCommand, event_callback: Callable[[dict[str
         villani_objective=command.task if command.mode == "villani" else None,
     )
     runner.event_callback = event_callback
+    runner.approval_callback = approval_callback
+    # Villani mode normally auto-approves ASK decisions. The Pi bridge must preserve the
+    # permission boundary and ask Pi instead of silently approving.
+    runner.force_interactive_approvals = True
     return runner
 
 

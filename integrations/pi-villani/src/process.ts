@@ -1,6 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { AbortCommand, BridgeCommand, BridgeEvent, commandToLine } from "./protocol.js";
+import { AbortCommand, ApprovalResponseCommand, BridgeCommand, BridgeEvent, commandToLine } from "./protocol.js";
 
 export const DEFAULT_VILLANI_COMMAND = "villani-code";
 
@@ -126,6 +126,11 @@ export class VillaniBridgeProcess {
 
   abort(runId: string): void {
     const command: AbortCommand = { type: "abort", id: runId };
+    this.send(command);
+  }
+
+  respondToApproval(runId: string, requestId: string, approved: boolean): void {
+    const command: ApprovalResponseCommand = { type: "approval_response", id: runId, request_id: requestId, approved };
     this.send(command);
   }
 
