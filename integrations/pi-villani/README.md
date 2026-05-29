@@ -17,6 +17,8 @@ The extension does **not** reimplement Villani's runner logic and does not requi
 
 ## Local installation from this checkout
 
+Requires Node.js 22.19 or newer, matching the current `@earendil-works/pi-ai` runtime.
+
 ```bash
 cd integrations/pi-villani
 npm install
@@ -43,9 +45,9 @@ export VILLANI_COMMAND="python -m villani_code.cli"
 
 ## Configuration
 
-The first milestone uses explicit Villani model configuration. Pi-backed model reuse is not implemented yet.
+By default, the extension reuses Pi's currently configured model through a temporary local proxy. You do not need to set `VILLANI_PROVIDER`, `VILLANI_MODEL`, `VILLANI_BASE_URL`, or `VILLANI_API_KEY` for the normal Pi-backed path.
 
-Supported environment variables:
+Optional fallback environment variables:
 
 ```bash
 export VILLANI_COMMAND="villani"
@@ -56,7 +58,9 @@ export VILLANI_BASE_URL="http://127.0.0.1:1234"
 export VILLANI_API_KEY="dummy"
 ```
 
-`VILLANI_PROVIDER`, `VILLANI_MODEL`, `VILLANI_BASE_URL`, and `VILLANI_API_KEY` are sent to the bridge only when set. Villani's own defaults and validation remain the source of truth.
+If any of `VILLANI_PROVIDER`, `VILLANI_MODEL`, `VILLANI_BASE_URL`, or `VILLANI_API_KEY` is set, the extension skips the Pi model proxy and sends the explicit config to Villani. This preserves local server/custom provider workflows.
+
+When no explicit model config is set, the extension starts a temporary `127.0.0.1:<random-port>` OpenAI-compatible proxy for one `/villani` run, passes that `base_url` to Villani, and forwards requests to Pi's configured model via `@earendil-works/pi-ai`. No user provider credentials are exposed to the Villani subprocess in this mode.
 
 ## Usage
 
@@ -78,17 +82,18 @@ The final Pi summary includes:
 
 - The extension does not bypass Villani permissions or sandboxing.
 - The extension launches a subprocess with `shell: false` for Windows-friendly argument handling.
+- The Pi model proxy binds only to `127.0.0.1` and lives only for the current `/villani` run.
 - The bridge emits operational telemetry only; it does not stream hidden reasoning, model prompts, or transcript contents.
 
 ## Limitations
 
 - Cancellation is best-effort. The bridge sends `abort` and marks the run as aborted only after the current Villani runner call stops; the core runner does not yet expose a universal cooperative cancellation token.
 - Pi SDK typings are not vendored in this repository. The extension uses a small `PiLikeContext` shim so the bridge/process/rendering code stays compile-safe and the real Pi API adapter can remain small.
-- Pi model/auth reuse is deferred. See `docs/pi-model-bridge.md` for the intended design.
+- Pi model/auth reuse currently supports Villani's OpenAI-compatible `/v1/chat/completions` path. Streaming is represented as one final SSE chunk rather than token-by-token streaming. See `docs/pi-model-bridge.md`.
 
 ## Troubleshooting
 
 - **No ready event / timeout:** confirm `VILLANI_COMMAND` is on `PATH` and supports `bridge --stdio`.
-- **Missing model/base URL:** set `VILLANI_MODEL` and `VILLANI_BASE_URL`, or configure Villani defaults if supported by your installation.
+- **Missing model/base URL:** normally Pi's active model supplies this through the proxy. If your Pi command context does not expose `ctx.model`, set `VILLANI_MODEL` and `VILLANI_BASE_URL` to use the explicit fallback.
 - **Unexpected text on stdout:** stdout must be JSONL protocol only. Send debug logs to stderr.
 - **Windows paths:** pass normal workspace paths; the bridge normalizes changed-file paths to forward slashes in events.

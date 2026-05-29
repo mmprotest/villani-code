@@ -1,4 +1,4 @@
-import { BridgeEvent } from "./protocol";
+import { BridgeEvent } from "./protocol.js";
 
 export interface PiLikeOutput {
   info?: (message: string) => void;

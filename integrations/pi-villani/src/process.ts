@@ -1,6 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { AbortCommand, BridgeCommand, BridgeEvent, commandToLine } from "./protocol";
+import { AbortCommand, BridgeCommand, BridgeEvent, commandToLine } from "./protocol.js";
 
 export interface BridgeProcessOptions {
   command: string;
