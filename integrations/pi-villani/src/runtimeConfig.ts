@@ -1,4 +1,4 @@
-export const VILLANI_RUNTIME_VERSION = "0.1.2";
+export const VILLANI_RUNTIME_VERSION = "0.1.3";
 export const VILLANI_RUNTIME_REPOSITORY = "mmprotest/villani-code";
 export const VILLANI_RUNTIME_TAG = `pi-villani-runtime-v${VILLANI_RUNTIME_VERSION}`;
 
