@@ -6,7 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -598,13 +598,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
-        self._progress_governor = ProgressGovernor(self)
-        self._governor_interventions_used = 0
-        self._last_governor_trigger = ""
-        self._last_governor_workspace_revision = -1
-        self._last_governor_verdict = None
-        self._last_reviewed_validation_signature = ""
-        self._last_verified_workspace_revision = -1
+        self.workspace_revision = 0
         if self.small_model:
             self._init_small_model_support()
 
@@ -1043,8 +1037,7 @@ class Runner:
                 }
             )
         previous_attributed = set()
-        workspace_revision = 0
-        recent_actions: list[dict[str, Any]] = []
+        previous_workspace_revision = int(getattr(self, "workspace_revision", 0))
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
@@ -1680,7 +1673,9 @@ class Runner:
                 self._last_failed_tool_sig = sig
 
             attributed = set(_attributed_changed_files())
-            edited_this_turn = attributed != previous_attributed
+            revision_changed_this_turn = int(getattr(self, "workspace_revision", 0)) != previous_workspace_revision
+            previous_workspace_revision = int(getattr(self, "workspace_revision", 0))
+            edited_this_turn = attributed != previous_attributed or revision_changed_this_turn
             previous_attributed = attributed
             if edited_this_turn:
                 workspace_revision += 1
@@ -1745,23 +1740,7 @@ class Runner:
     def _is_mutating_tool_call(
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> bool:
-        if tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}:
-            return True
-        if tool_name == "Bash":
-            command = str(tool_input.get("command", "")).strip().lower()
-            readonly_prefixes = (
-                "git status",
-                "git diff",
-                "git log",
-                "ls",
-                "cat",
-                "rg ",
-                "grep ",
-                "find ",
-                "pwd",
-            )
-            return not command.startswith(readonly_prefixes)
-        return False
+        return tool_name in {"Write", "Patch", "GitCheckout", "GitCommit"}
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if "turn_index" not in event and isinstance(self._current_turn_index, int):
