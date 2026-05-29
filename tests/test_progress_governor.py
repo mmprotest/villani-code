@@ -76,6 +76,11 @@ def test_native_initialisation(tmp_path: Path) -> None:
     r = Runner(client=SequencedClient([]), repo=tmp_path, model="m", stream=False)
     assert isinstance(r._progress_governor, ProgressGovernor)
     assert r._governor_interventions_used == 0
+    assert r._last_governor_trigger == ""
+    assert r._last_governor_workspace_revision == -1
+    assert r._last_governor_verdict is None
+    assert r._last_reviewed_validation_signature == ""
+    assert r._last_verified_workspace_revision == -1
 
 
 def test_no_premature_call_first_inspection(tmp_path: Path) -> None:
@@ -83,6 +88,13 @@ def test_no_premature_call_first_inspection(tmp_path: Path) -> None:
     client = SequencedClient([assistant_tool("Read", "t1", {"file_path": "README.md"}), assistant_text("done")])
     runner(tmp_path, client, events).run("Explain the repo")
     assert not any(e.get("type") == "progress_governor_started" for e in events)
+
+
+def test_bash_tool_result_does_not_crash_on_recent_actions(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    client = SequencedClient([assistant_tool("Bash", "t1", {"command": "printf ok"}), assistant_text("done")])
+    result = runner(tmp_path, client, events).run("Run a harmless command")
+    assert result["response"]["content"][0]["text"] == "done"
 
 
 def test_recon_wandering_high_confidence_injected_in_tool_result(tmp_path: Path) -> None:
@@ -144,6 +156,31 @@ def test_completion_verification_trigger_continues_instead_of_accepting(tmp_path
     result = runner(tmp_path, client, events).run("Implement the requested change")
     assert any("<progress_governor>" in str(m.get("content")) for m in result["messages"])
     assert len([p for p in client.payloads if p.get("tools") is None]) >= 1
+
+
+def test_repeated_run_resets_progress_governor_state(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    client = SequencedClient([
+        assistant_tool("Read", "t1", {"file_path": "README.md"}),
+        assistant_tool("Read", "t2", {"file_path": "README.md"}),
+        assistant_tool("Read", "t3", {"file_path": "README.md"}),
+        verdict(),
+        assistant_text("done"),
+    ])
+    r = runner(tmp_path, client, events)
+    r.run("Explain the repo")
+    assert r._governor_interventions_used == 1
+    assert r._last_governor_verdict is not None
+
+    client.responses = [assistant_text("done again")]
+    r.run("Explain the repo again")
+
+    assert r._governor_interventions_used == 0
+    assert r._last_governor_trigger == ""
+    assert r._last_governor_workspace_revision == -1
+    assert r._last_governor_verdict is None
+    assert r._last_reviewed_validation_signature == ""
+    assert r._last_verified_workspace_revision == -1
 
 
 def test_verified_completion_does_not_interfere(tmp_path: Path) -> None:
