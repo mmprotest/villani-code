@@ -599,8 +599,18 @@ class Runner:
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
         self.workspace_revision = 0
+        self._progress_governor = ProgressGovernor(self)
+        self._reset_progress_governor_run_state()
         if self.small_model:
             self._init_small_model_support()
+
+    def _reset_progress_governor_run_state(self) -> None:
+        self._governor_interventions_used = 0
+        self._last_governor_trigger = ""
+        self._last_governor_workspace_revision = -1
+        self._last_governor_verdict = None
+        self._last_reviewed_validation_signature = ""
+        self._last_verified_workspace_revision = -1
 
     @property
     def event_callback(self) -> Callable[[dict[str, Any]], None]:
@@ -965,12 +975,8 @@ class Runner:
         self._last_validation_artifact_signature = ""
         self._last_emitted_validation_fingerprint = ""
         self._scope_expansion_used = False
-        self._governor_interventions_used = 0
-        self._last_governor_trigger = ""
-        self._last_governor_workspace_revision = -1
-        self._last_governor_verdict = None
-        self._last_reviewed_validation_signature = ""
-        self._last_verified_workspace_revision = -1
+        self.workspace_revision = 0
+        self._reset_progress_governor_run_state()
         self._first_attempt_write_lock_active = bool(required_initial_read)
         self._first_attempt_locked_target = required_initial_read
         if self._first_attempt_write_lock_active:
@@ -1038,6 +1044,8 @@ class Runner:
             )
         previous_attributed = set()
         previous_workspace_revision = int(getattr(self, "workspace_revision", 0))
+        workspace_revision = 0
+        recent_actions: list[dict[str, Any]] = []
 
         def _attributed_changed_files() -> list[str]:
             current = set(self._git_changed_files())
