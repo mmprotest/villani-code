@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import queue
 import subprocess
@@ -82,11 +83,24 @@ class PiBridge:
 
         def read_stdin() -> None:
             try:
+                try:
+                    fd = self.stdin.fileno()
+                except (AttributeError, io.UnsupportedOperation):
+                    for raw_line in self.stdin:
+                        commands.put(raw_line)
+                    return
+
+                buffer = b""
                 while True:
-                    raw_line = self.stdin.readline()
-                    if raw_line == "":
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
                         break
-                    commands.put(raw_line)
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        raw_line, buffer = buffer.split(b"\n", 1)
+                        commands.put(raw_line.decode("utf-8", errors="replace") + "\n")
+                if buffer.strip():
+                    commands.put(buffer.decode("utf-8", errors="replace"))
             finally:
                 commands.put(None)
 
@@ -426,6 +440,9 @@ def build_default_runner(command: RunCommand, event_callback: Callable[[dict[str
         villani_mode=command.mode == "villani",
         villani_objective=command.task if command.mode == "villani" else None,
     )
+    # The bridge owns stdout as a JSONL protocol channel. Never print streamed
+    # model text directly to stdout, or it corrupts the event stream.
+    runner.print_stream = False
     runner.event_callback = event_callback
     runner.approval_callback = approval_callback
     # Villani mode normally auto-approves ASK decisions. The Pi bridge must preserve the
@@ -493,7 +510,7 @@ def attributed_changed_files(
 
 def is_git_repo(repo: Path) -> bool:
     try:
-        proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo, text=True, capture_output=True, timeout=10, check=False)
+        proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=repo, text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=10, check=False)
     except Exception:
         return False
     return proc.returncode == 0 and proc.stdout.strip() == "true"
@@ -506,6 +523,7 @@ def git_changed_files(repo: Path) -> list[str]:
             cwd=repo,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             timeout=10,
             check=False,
         )

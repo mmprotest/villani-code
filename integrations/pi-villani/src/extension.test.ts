@@ -103,12 +103,22 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 3000): Pro
 
 function createHost() {
   const commands = new Map<string, (args: string, ctx: ExtensionCommandContext) => Promise<void>>();
+  const sentMessages: Array<{ content?: unknown }> = [];
   const api = {
     registerCommand(name: string, options: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }) {
       commands.set(name, options.handler);
     },
-  } as ExtensionAPI;
-  return { api, commands };
+    sendMessage(message: { content?: unknown }) {
+      sentMessages.push(message);
+    },
+  } as unknown as ExtensionAPI;
+  return { api, commands, sentMessages };
+}
+
+function sentMessageText(host: ReturnType<typeof createHost>): string {
+  return host.sentMessages
+    .map((message) => typeof message.content === "string" ? message.content : String(message.content ?? ""))
+    .join("\n");
 }
 
 function fakeModel(): Model<string> {
@@ -211,7 +221,7 @@ test("prevents overlapping runs and aborts active bridge run", async () => {
     assert.match(messages.join("\n"), /already running/);
     await host.commands.get("villani-abort")!("", ctx);
     await runPromise;
-    assert.match(messages.join("\n"), /Villani aborted/);
+    assert.match(sentMessageText(host), /Villani aborted/);
   } finally {
     restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
@@ -230,7 +240,7 @@ test("Pi model path resolves model auth", async () => {
     villaniPiExtension(host.api);
     await host.commands.get("villani")!("fix it", createContext(messages, { model: fakeModel() }));
     assert.equal(messages.includes("auth:pi-test"), true);
-    assert.match(messages.join("\n"), /Villani completed/);
+    assert.match(sentMessageText(host), /Villani completed/);
   } finally {
     restoreBridge();
     setOrDelete("VILLANI_COMMAND", oldCommand);
@@ -297,7 +307,7 @@ test("default path uses cached downloaded runtime before launching bridge", asyn
     const messages: string[] = [];
     villaniPiExtension(host.api);
     await host.commands.get("villani")!("fix it", createContext(messages));
-    assert.match(messages.join("\n"), /Villani completed/);
+    assert.match(sentMessageText(host), /Villani completed/);
     assert.equal(bridgeCalls[0]?.command, cachedRuntime.executable);
   } finally {
     restoreBridge();
@@ -332,7 +342,7 @@ test("startup and final events update visible persistent UI", async () => {
     assert.match(joined, /status:Villani: running/);
     assert.match(joined, /status:clear/);
     assert.match(joined, /widget:clear/);
-    assert.match(joined, /done/);
+    assert.match(sentMessageText(host), /done/);
   } finally {
     restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
@@ -385,9 +395,9 @@ test("approval event is confirmed and answered", async () => {
     assert.match(joined, /widget:Villani is awaiting approval\|Write file: safe-test.txt:placement:aboveEditor/);
     assert.match(joined, /confirm:Villani wants to write a file/);
     assert.match(joined, /File: safe-test.txt/);
-    assert.match(joined, /Approved Villani Write request/);
+    assert.doesNotMatch(joined, /Approved Villani Write request/);
     assertOneApprovalResponse(messages, true);
-    assert.match(messages.join("\n"), /Villani completed/);
+    assert.match(sentMessageText(host), /Villani completed/);
   } finally {
     restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
@@ -605,7 +615,7 @@ test("multiple sequential approvals keep request ids distinct", async () => {
     villaniPiExtension(host.api);
     await host.commands.get("villani")!("fix it", createContext(messages));
     assert.deepEqual(seen, ["approval-1", "approval-2"]);
-    assert.match(messages.join("\n"), /Approved Villani Write request/);
+    assert.doesNotMatch(messages.join("\n"), /Approved Villani Write request/);
     assert.match(messages.join("\n"), /Denied Villani Patch request/);
     assertOneApprovalResponse(messages, true, "approval-1");
     assertOneApprovalResponse(messages, false, "approval-2");

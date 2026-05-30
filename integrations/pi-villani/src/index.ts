@@ -35,7 +35,7 @@ let activeRun: ActiveVillaniRun | undefined;
 export default function villaniPiExtension(pi: ExtensionAPI): void {
   pi.registerCommand("villani", {
     description: "Delegate a repository coding task to Villani Code",
-    handler: async (args: string, ctx: ExtensionCommandContext) => runVillaniCommand(args, ctx),
+    handler: async (args: string, ctx: ExtensionCommandContext) => runVillaniCommand(args, ctx, pi),
   });
   pi.registerCommand("villani-abort", {
     description: "Abort the active Villani Code run",
@@ -47,7 +47,7 @@ export default function villaniPiExtension(pi: ExtensionAPI): void {
   });
 }
 
-export async function runVillaniCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+export async function runVillaniCommand(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
   const task = args.trim();
   const output = uiOutput(ctx.ui);
   if (!task) {
@@ -70,6 +70,8 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
   setVillaniStatus(ctx.ui, "Villani: starting");
 
   let finished = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let heartbeatSequence = 0;
   let resolveFinal!: () => void;
   const finalEvent = new Promise<void>((resolve) => { resolveFinal = resolve; });
   ctx.signal?.addEventListener("abort", () => {
@@ -116,7 +118,9 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     run.phase = "running";
     setVillaniStatus(ctx.ui, "Villani: running");
     run.bridge.onEvent((event: BridgeEvent) => {
-      debug(output, `bridge event ${summarizeBridgeEvent(event)}`);
+      if (event.type !== "pong") {
+        debug(output, `bridge event ${summarizeBridgeEvent(event)}`);
+      }
       if (abortController.signal.aborted && event.type === "run_completed") return;
       if (event.type === "approval_required") {
         debug(output, `approval_required emitted id=${event.id} request_id=${event.request_id} tool=${event.tool}`);
@@ -126,13 +130,16 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
         });
         return;
       }
-      renderEvent(event, output);
       if (event.type === "run_completed" || event.type === "run_failed" || event.type === "run_aborted") {
         finished = event.type === "run_completed";
-        showFinalRunMessage(ctx.ui, event);
+        showFinalRunMessage(pi, event);
         clearVillaniUi(ctx.ui);
         resolveFinal();
+        return;
       }
+
+      renderEvent(event, output);
+
       if (event.type === "error") output.error?.(`Villani bridge error: ${event.error}`);
     });
 
@@ -146,6 +153,17 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     };
     debug(output, `sending run command id=${runId} mode=${command.mode}`);
     run.bridge.send(command);
+
+    heartbeat = setInterval(() => {
+      if (!run.bridge || run.phase !== "running" || abortController.signal.aborted) return;
+      heartbeatSequence += 1;
+      try {
+        run.bridge.send({ type: "ping", id: `${runId}-heartbeat-${heartbeatSequence}` });
+      } catch {
+        // Normal during shutdown or bridge exit.
+      }
+    }, 250);
+
     await Promise.race([
       finalEvent,
       run.bridge.waitForExit().then((code) => {
@@ -163,6 +181,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       showDurableMessage(ctx.ui, `Villani failed: ${message}`);
     }
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     clearVillaniUi(ctx.ui);
     run.phase = "completed";
     if (!finished && run.bridge && !abortController.signal.aborted) {
@@ -248,7 +267,11 @@ async function handleApprovalRequired(
     safeSetVillaniStatus(ctx.ui, `Villani: denied ${event.tool} approval`, output);
     safeSetVillaniWidget(ctx.ui, ["Villani approval denied", event.summary], output);
   }
-  safeWarn(output, `${approved ? "Approved" : "Denied"} Villani ${event.tool} request: ${event.summary}`);
+  if (approved) {
+    debug(output, `approved ${event.tool} request: ${event.summary}`);
+  } else {
+    safeWarn(output, `Denied Villani ${event.tool} request: ${event.summary}`);
+  }
 }
 
 function denyApprovalIfPending(
@@ -300,6 +323,7 @@ function safeWarn(output: PiLikeOutput, message: string): void {
 }
 
 function debug(output: PiLikeOutput, message: string): void {
+  if (process.env.VILLANI_PI_DEBUG !== "1") return;
   safeInfo(output, `Villani debug: ${message}`);
 }
 
@@ -369,16 +393,52 @@ function showDurableMessage(ui: ExtensionUIContext, message: string): void {
   ui.notify?.(message);
 }
 
-function showFinalRunMessage(ui: ExtensionUIContext, event: Extract<BridgeEvent, { type: "run_completed" | "run_failed" | "run_aborted" }>): void {
-  if (event.type === "run_completed") {
-    showDurableMessage(ui, event.summary || "Villani completed.");
-    return;
-  }
-  if (event.type === "run_aborted") {
-    showDurableMessage(ui, event.summary || "Villani aborted.");
-    return;
-  }
-  showDurableMessage(ui, event.summary || event.error || "Villani failed.");
+function showFinalRunMessage(
+  pi: ExtensionAPI,
+  event: Extract<BridgeEvent, { type: "run_completed" | "run_failed" | "run_aborted" }>,
+): void {
+  const status =
+    event.type === "run_completed"
+      ? "Villani completed"
+      : event.type === "run_aborted"
+        ? "Villani aborted"
+        : "Villani failed";
+
+  const summary =
+    event.summary ||
+    ("error" in event ? event.error : undefined) ||
+    status;
+
+  const changedFiles =
+    "changed_files" in event && Array.isArray(event.changed_files)
+      ? event.changed_files.filter(isUserFacingChangedFile)
+      : [];
+
+  const changedFilesSection =
+    changedFiles.length > 0
+      ? `\n\nChanged files:\n${changedFiles.map((file) => `- ${file}`).join("\n")}`
+      : "";
+
+  pi.sendMessage({
+    customType: "villani-result",
+    content: `${status}\n\n${summary}${changedFilesSection}`,
+    display: true,
+    details: event,
+  });
+}
+
+function isUserFacingChangedFile(file: string): boolean {
+  const normalized = file.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+
+  return (
+    normalized !== ".villani" &&
+    !normalized.startsWith(".villani/") &&
+    normalized !== ".villani_code" &&
+    !normalized.startsWith(".villani_code/") &&
+    !segments.includes("__pycache__") &&
+    !normalized.endsWith(".pyc")
+  );
 }
 
 async function askUserForApproval(request: Extract<BridgeEvent, { type: "approval_required" }>, ctx: ExtensionCommandContext, signal: AbortSignal): Promise<boolean> {

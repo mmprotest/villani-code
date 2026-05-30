@@ -50,7 +50,7 @@ class ApprovalResponseCommand:
 
 
 def to_json_line(event: dict[str, Any]) -> str:
-    return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    return json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n"
 
 
 def parse_json_line(line: str) -> dict[str, Any]:

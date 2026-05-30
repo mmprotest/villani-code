@@ -608,7 +608,7 @@ def truncate_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, An
 
 
 def git_changed_files(repo: Any) -> list[str]:
-    proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True)
+    proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
@@ -711,7 +711,7 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
         }
 
     cmd = [sys.executable, "-m", "py_compile", *checked_files]
-    proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     stdout = proc.stdout.strip()
     stderr = proc.stderr.strip()
     if proc.returncode != 0:
@@ -770,7 +770,7 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
         }
 
     collect_cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q"]
-    collect_proc = subprocess.run(collect_cmd, cwd=runner.repo, capture_output=True, text=True)
+    collect_proc = subprocess.run(collect_cmd, cwd=runner.repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     collect_stdout = collect_proc.stdout.strip()
     collect_stderr = collect_proc.stderr.strip()
     telemetry["collection_sanity_ran"] = True
@@ -989,7 +989,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         lines.append("next: inspect locked file, produce one bounded patch, or stop")
     cmd_results: list[dict[str, Any]] = []
     for cmd in commands:
-        proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
+        proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         stderr_lines = "\n".join([ln for ln in proc.stderr.splitlines() if ln][:5])
         stdout = proc.stdout[:1500]
         cmd_results.append(
