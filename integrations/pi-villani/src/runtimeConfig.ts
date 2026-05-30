@@ -1,4 +1,4 @@
-export const VILLANI_RUNTIME_VERSION = "0.1.4";
+﻿export const VILLANI_RUNTIME_VERSION = "0.1.0";
 export const VILLANI_RUNTIME_REPOSITORY = "mmprotest/villani-code";
 export const VILLANI_RUNTIME_TAG = `pi-villani-runtime-v${VILLANI_RUNTIME_VERSION}`;
 
@@ -35,3 +35,4 @@ export function resolveRuntimeAsset(platform: NodeJS.Platform = process.platform
 function isSupportedRuntimePlatform(key: string): key is RuntimePlatformKey {
   return key === "win32-x64" || key === "darwin-arm64" || key === "darwin-x64" || key === "linux-x64";
 }
+
