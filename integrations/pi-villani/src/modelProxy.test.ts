@@ -79,6 +79,57 @@ test("translates Pi assistant tool calls to OpenAI response", () => {
   assert.deepEqual(response.usage, { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 });
 });
 
+test("preserves already-serialized Pi tool arguments without double encoding", () => {
+  const message: AssistantMessage = {
+    role: "assistant",
+    api: "openai-completions",
+    provider: "pi",
+    model: "m",
+    content: [
+      { type: "toolCall", id: "call-string", name: "Write", arguments: '{"path":"calculator.py","content":"hello"}' as any },
+    ],
+    usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 7, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: 1700000000000,
+  };
+
+  const response = piAssistantToOpenAIResponse(message);
+  const choice = (response.choices as Array<any>)[0];
+
+  assert.equal(
+    choice.message.tool_calls[0].function.arguments,
+    '{"path":"calculator.py","content":"hello"}',
+  );
+});
+
+test("unwraps double-serialized Pi tool arguments for Villani", () => {
+  const message: AssistantMessage = {
+    role: "assistant",
+    api: "openai-completions",
+    provider: "pi",
+    model: "m",
+    content: [
+      {
+        type: "toolCall",
+        id: "call-double-string",
+        name: "Write",
+        arguments: '"{\\"path\\":\\"calculator.py\\",\\"content\\":\\"hello\\"}"' as any,
+      },
+    ],
+    usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 7, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: 1700000000000,
+  };
+
+  const response = piAssistantToOpenAIResponse(message);
+  const choice = (response.choices as Array<any>)[0];
+
+  assert.equal(
+    choice.message.tool_calls[0].function.arguments,
+    '{"path":"calculator.py","content":"hello"}',
+  );
+});
+
 test("proxy passes Pi auth options into completion call", async () => {
   let seenOptions: any;
   const proxy = new PiModelProxy({

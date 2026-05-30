@@ -405,9 +405,9 @@ function showFinalRunMessage(
         : "Villani failed";
 
   const summary =
-    event.summary ||
-    ("error" in event ? event.error : undefined) ||
-    status;
+    event.type === "run_failed"
+      ? event.error || event.summary || status
+      : event.summary || status;
 
   const changedFiles =
     "changed_files" in event && Array.isArray(event.changed_files)

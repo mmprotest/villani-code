@@ -197,7 +197,7 @@ export function piAssistantToOpenAIResponse(message: AssistantMessage): Record<s
     .map((block, index) => ({
       id: block.id || `call_${index}`,
       type: "function",
-      function: { name: block.name, arguments: JSON.stringify(block.arguments ?? {}) },
+      function: { name: block.name, arguments: serializeToolArguments(block.arguments) },
     }));
   return {
     id: message.responseId ?? `pi-villani-${message.timestamp}`,
@@ -238,6 +238,29 @@ function writeOpenAIStream(res: ServerResponse, message: AssistantMessage): void
   })}\n\n`);
   res.write("data: [DONE]\n\n");
   res.end();
+}
+
+function serializeToolArguments(value: unknown): string {
+  let current = value;
+
+  // Pi providers may return:
+  //   { path: "file.py" }
+  //   '{"path":"file.py"}'
+  //   '"{\\"path\\":\\"file.py\\"}"'
+  // Decode up to two string layers, then emit one valid OpenAI arguments JSON object.
+  for (let depth = 0; depth < 2 && typeof current === "string"; depth += 1) {
+    try {
+      current = JSON.parse(current);
+    } catch {
+      return JSON.stringify({});
+    }
+  }
+
+  if (current && typeof current === "object" && !Array.isArray(current)) {
+    return JSON.stringify(current);
+  }
+
+  return JSON.stringify({});
 }
 
 function toOpenAIFinishReason(reason: AssistantMessage["stopReason"]): string {

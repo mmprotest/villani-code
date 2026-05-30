@@ -1,6 +1,6 @@
 {
   "name": "@mmprotest/pi-villani",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension bridge for running Villani Code as a delegated coding runner.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
