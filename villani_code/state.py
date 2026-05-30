@@ -538,6 +538,7 @@ class Runner:
                     "GitCheckout(*)",
                     "GitCommit(*)",
                     "SubmitPlan(*)",
+                    "ExecutionPlan(*)",
                 ],
             ),
             repo=self.repo,
@@ -1171,8 +1172,10 @@ class Runner:
                 if self._debug_recorder is not None:
                     self._debug_recorder.record_model_request_failed(str(exc))
                     self._debug_recorder.record_turn_finish(turns_used + 1, "model_request_failed")
+                self.event_callback({"type": "model_request_failed", "model": self.model, "error": str(exc)})
                 raise
 
+            self.event_callback({"type": "model_request_completed", "model": self.model, "stop_reason": response.get("stop_reason")})
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
             if self._debug_recorder is not None:

@@ -14,6 +14,7 @@ from typing import Any
 from villani_code.autonomy import VerificationStatus
 from villani_code.indexing import DEFAULT_IGNORE, RepoIndex
 from villani_code.live_display import apply_live_display_delta
+from villani_code.permissions import Decision
 from villani_code.planning import TaskMode, generate_execution_plan
 from villani_code.project_memory import SessionState, ensure_project_memory, load_repo_map, update_session_state
 from villani_code.context_governance import ContextCompactor, ContextInclusionReason, ContextExclusionReason
@@ -607,7 +608,7 @@ def truncate_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, An
 
 
 def git_changed_files(repo: Any) -> list[str]:
-    proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True)
+    proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
@@ -710,7 +711,7 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
         }
 
     cmd = [sys.executable, "-m", "py_compile", *checked_files]
-    proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     stdout = proc.stdout.strip()
     stderr = proc.stderr.strip()
     if proc.returncode != 0:
@@ -769,7 +770,7 @@ def _run_patch_sanity_check(runner: Any) -> dict[str, Any]:
         }
 
     collect_cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q"]
-    collect_proc = subprocess.run(collect_cmd, cwd=runner.repo, capture_output=True, text=True)
+    collect_proc = subprocess.run(collect_cmd, cwd=runner.repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     collect_stdout = collect_proc.stdout.strip()
     collect_stderr = collect_proc.stderr.strip()
     telemetry["collection_sanity_ran"] = True
@@ -988,7 +989,7 @@ def run_verification(runner: Any, trigger: str = "edit") -> str:
         lines.append("next: inspect locked file, produce one bounded patch, or stop")
     cmd_results: list[dict[str, Any]] = []
     for cmd in commands:
-        proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True)
+        proc = subprocess.run(cmd, cwd=runner.repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         stderr_lines = "\n".join([ln for ln in proc.stderr.splitlines() if ln][:5])
         stdout = proc.stdout[:1500]
         cmd_results.append(
@@ -1311,8 +1312,27 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         update_session_state(runner.repo, session)
         return
 
+    approval_payload = {"summary": plan.to_human_text(), "risk": plan.risk_level.value}
+    policy = runner.permissions.evaluate_with_reason(
+        "ExecutionPlan",
+        approval_payload,
+        bypass=runner.bypass_permissions,
+        auto_accept_edits=runner.auto_accept_edits,
+    )
+    runner._emit_policy_event("ExecutionPlan", approval_payload, policy.decision, policy.reason)
+    if policy.decision == Decision.ALLOW:
+        runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
+        update_session_state(runner.repo, session)
+        return
+    if policy.decision == Decision.DENY:
+        runner.event_callback({"type": "plan_rejected"})
+        session.outcome_status = "rejected"
+        session.next_step_hints = ["Revise plan scope or lower risk before retrying"]
+        update_session_state(runner.repo, session)
+        raise RuntimeError("Execution plan denied by permission policy.")
+
     runner.event_callback({"type": "plan_approval_required", "risk": plan.risk_level.value})
-    approved = runner.approval_callback("ExecutionPlan", {"summary": plan.to_human_text(), "risk": plan.risk_level.value})
+    approved = runner.approval_callback("ExecutionPlan", approval_payload)
     if not approved:
         runner.event_callback({"type": "plan_rejected"})
         session.outcome_status = "rejected"

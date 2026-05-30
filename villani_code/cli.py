@@ -328,6 +328,17 @@ def context_cmd(
         console.print(f"- {item.source_id} excluded={item.excluded_reason.value if item.excluded_reason else '-'} why={item.why}")
 
 
+@app.command()
+def bridge(
+    stdio: bool = typer.Option(False, "--stdio", help="Run the JSONL stdio bridge for external integrations."),
+) -> None:
+    if not stdio:
+        raise typer.BadParameter("Only --stdio is supported for the bridge command")
+    from villani_code.integrations.pi_bridge import main_stdio
+
+    main_stdio()
+
+
 @app.command("checkpoint")
 def checkpoint_cmd(
     task_summary: str = typer.Argument("manual checkpoint"),
