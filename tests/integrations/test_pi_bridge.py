@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import queue
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -77,6 +80,83 @@ def test_bridge_planning_does_not_emit_execution_plan_approval(tmp_path: Path) -
     assert not any(event.get("type") == "approval_required" and event.get("tool") == "ExecutionPlan" for event in events)
     assert events[-1]["type"] == "run_completed"
 
+
+
+def read_json_line_with_timeout(stdout: Any, timeout: float = 5) -> dict[str, Any]:
+    lines: queue.Queue[str | BaseException] = queue.Queue()
+
+    def read_line() -> None:
+        try:
+            lines.put(stdout.readline())
+        except BaseException as exc:  # noqa: BLE001
+            lines.put(exc)
+
+    thread = threading.Thread(target=read_line, daemon=True)
+    thread.start()
+    try:
+        line = lines.get(timeout=timeout)
+    except queue.Empty as exc:
+        raise AssertionError(f"timed out waiting for bridge output after {timeout} seconds") from exc
+    if isinstance(line, BaseException):
+        raise line
+    assert line, "bridge stdout closed before expected event"
+    return json.loads(line)
+
+
+def start_cli_bridge_process() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-u", "-m", "villani_code.cli", "bridge", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+
+def stop_cli_bridge_process(proc: subprocess.Popen[str]) -> None:
+    if proc.stdin is not None and not proc.stdin.closed:
+        proc.stdin.close()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_cli_bridge_persistent_stdin_ping_responds_before_stdin_closes() -> None:
+    proc = start_cli_bridge_process()
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    try:
+        assert read_json_line_with_timeout(proc.stdout) == {"type": "ready", "protocol_version": 1}
+        proc.stdin.write('{"type":"ping","id":"persistent-ping"}\n')
+        proc.stdin.flush()
+        assert read_json_line_with_timeout(proc.stdout) == {"type": "pong", "id": "persistent-ping"}
+        assert proc.poll() is None
+    finally:
+        stop_cli_bridge_process(proc)
+
+
+def test_cli_bridge_persistent_stdin_accepts_multiple_commands_before_close() -> None:
+    proc = start_cli_bridge_process()
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    try:
+        assert read_json_line_with_timeout(proc.stdout) == {"type": "ready", "protocol_version": 1}
+        proc.stdin.write('{"type":"ping","id":"persistent-ping-1"}\n')
+        proc.stdin.flush()
+        assert read_json_line_with_timeout(proc.stdout) == {"type": "pong", "id": "persistent-ping-1"}
+        proc.stdin.write('{"type":"ping","id":"persistent-ping-2"}\n')
+        proc.stdin.flush()
+        assert read_json_line_with_timeout(proc.stdout) == {"type": "pong", "id": "persistent-ping-2"}
+        assert proc.poll() is None
+    finally:
+        stop_cli_bridge_process(proc)
 
 def test_stdio_ping_emits_ready_and_pong() -> None:
     stdin = io.StringIO('{"type":"ping","id":"abc"}\n')

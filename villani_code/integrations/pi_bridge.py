@@ -82,7 +82,10 @@ class PiBridge:
 
         def read_stdin() -> None:
             try:
-                for raw_line in self.stdin:
+                while True:
+                    raw_line = self.stdin.readline()
+                    if raw_line == "":
+                        break
                     commands.put(raw_line)
             finally:
                 commands.put(None)
