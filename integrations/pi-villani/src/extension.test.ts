@@ -16,6 +16,7 @@ async function mockNodeBridgeModule(exitAfterRun = false): Promise<string> {
     process.stdout.write('{"type":"ready","protocol_version":1}\\n');
     process.stdin.setEncoding('utf8');
     let buffer = '';
+    const approvalResponses = new Map();
     process.stdin.on('data', chunk => {
       buffer += chunk;
       for (;;) {
@@ -41,6 +42,9 @@ async function mockNodeBridgeModule(exitAfterRun = false): Promise<string> {
           if (${JSON.stringify(exitAfterRun)}) { process.stdout.write(JSON.stringify({type:'run_completed', id:msg.id, success:true, changed_files:[], preexisting_dirty_files:[], verification_passed:null, summary:'done', transcript_path:null}) + '\\n'); setTimeout(() => process.exit(0), 10); }
         }
         if (msg.type === 'approval_response') {
+          const count = (approvalResponses.get(msg.request_id) || 0) + 1;
+          approvalResponses.set(msg.request_id, count);
+          process.stdout.write(JSON.stringify({type:'phase', id:msg.id, phase:'test', message:'approval_response:' + msg.request_id + ':' + msg.approved + ':count:' + count}) + '\\n');
           process.stdout.write(JSON.stringify({type:'approval_resolved', id:msg.id, request_id:msg.request_id, tool: msg.request_id === 'approval-2' ? 'Patch' : 'Write', approved:msg.approved}) + '\\n');
           if (process.env.MOCK_APPROVAL === '2' && msg.request_id === 'approval-1') {
             process.stdout.write(JSON.stringify({type:'approval_required', id:msg.id, request_id:'approval-2', tool:'Patch', summary:'Apply patch to: two.txt', input:{path:'two.txt'}}) + '\\n');
@@ -122,7 +126,7 @@ function fakeModel(): Model<string> {
   } as Model<string>;
 }
 
-function createContext(messages: string[], options: { model?: Model<string>; authDelayMs?: number; signal?: AbortSignal } = {}): ExtensionCommandContext {
+function createContext(messages: string[], options: { model?: Model<string>; authDelayMs?: number; signal?: AbortSignal; throwStatusMatching?: RegExp; throwWidgetMatching?: RegExp; confirmResult?: boolean; confirmError?: Error } = {}): ExtensionCommandContext {
   return {
     cwd: process.cwd(),
     model: options.model,
@@ -137,9 +141,22 @@ function createContext(messages: string[], options: { model?: Model<string>; aut
     hasUI: true,
     ui: {
       notify: (message: string) => messages.push(message),
-      confirm: async (title: string, message: string) => { messages.push(`confirm:${title}:${message}`); return false; },
-      setStatus: (_key: string, text: string | undefined) => { messages.push(text ? `status:${text}` : "status:clear"); if (text) messages.push(text); },
-      setWidget: (_key: string, lines: string[] | undefined) => { messages.push(lines ? `widget:${lines.join("|")}` : "widget:clear"); },
+      confirm: async (title: string, message: string) => {
+        messages.push(`confirm:${title}:${message}`);
+        if (options.confirmError) throw options.confirmError;
+        return options.confirmResult ?? false;
+      },
+      setStatus: (_key: string, text: string | undefined) => {
+        const rendered = text ? `status:${text}` : "status:clear";
+        if (text && options.throwStatusMatching?.test(text)) throw new Error("status failed");
+        messages.push(rendered);
+        if (text) messages.push(text);
+      },
+      setWidget: (_key: string, lines: string[] | undefined, widgetOptions?: { placement?: string }) => {
+        const rendered = lines ? `widget:${lines.join("|")}:placement:${widgetOptions?.placement ?? "none"}` : "widget:clear";
+        if (lines && options.throwWidgetMatching?.test(lines.join("\n"))) throw new Error("widget failed");
+        messages.push(rendered);
+      },
     },
   } as unknown as ExtensionCommandContext;
 }
@@ -324,6 +341,14 @@ function setOrDelete(name: string, value: string | undefined): void {
 }
 
 
+function approvalResponseLines(messages: string[], requestId = "approval-1"): string[] {
+  return messages.filter((message) => message.includes(`approval_response:${requestId}:`));
+}
+
+function assertOneApprovalResponse(messages: string[], approved: boolean, requestId = "approval-1"): void {
+  assert.deepEqual(approvalResponseLines(messages, requestId), [`Villani: approval_response:${requestId}:${approved}:count:1`]);
+}
+
 test("approval event is confirmed and answered", async () => {
   const oldCommand = process.env.VILLANI_COMMAND;
   const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
@@ -331,14 +356,6 @@ test("approval event is confirmed and answered", async () => {
   const oldModel = process.env.VILLANI_MODEL;
   const oldBase = process.env.VILLANI_BASE_URL;
   const oldApproval = process.env.MOCK_APPROVAL;
-  let messages: string[] = [];
-  const restorePrompt = __setApprovalPrompterForTests(async (request) => {
-    assert.match(messages.join("\n"), /status:Villani: awaiting approval for Write/);
-    assert.match(messages.join("\n"), /widget:Villani is awaiting approval\|Write file: safe-test.txt/);
-    assert.equal(request.request_id, "approval-1");
-    assert.equal(request.input.path, "safe-test.txt");
-    return true;
-  });
   const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
   process.env.VILLANI_COMMAND = "mock-villani";
   process.env.VILLANI_USE_PI_MODEL = "false";
@@ -348,23 +365,25 @@ test("approval event is confirmed and answered", async () => {
   process.env.MOCK_APPROVAL = "1";
   try {
     const host = createHost();
-    messages = [];
+    const messages: string[] = [];
     villaniPiExtension(host.api);
-    await host.commands.get("villani")!("fix it", createContext(messages));
+    await host.commands.get("villani")!("fix it", createContext(messages, { confirmResult: true }));
     const joined = messages.join("\n");
     assert.match(joined, /status:Villani: awaiting approval for Write/);
-    assert.match(joined, /widget:Villani is awaiting approval\|Write file: safe-test.txt/);
+    assert.match(joined, /widget:Villani is awaiting approval\|Write file: safe-test.txt:placement:aboveEditor/);
+    assert.match(joined, /confirm:Villani wants to write a file/);
+    assert.match(joined, /File: safe-test.txt/);
     assert.match(joined, /Approved Villani Write request/);
-    assert.match(messages.join("\n"), /approval_resolved|Villani completed/);
+    assertOneApprovalResponse(messages, true);
+    assert.match(messages.join("\n"), /Villani completed/);
   } finally {
-    restorePrompt();
     restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
   }
 });
 
-test("rejected approval and UI failure default to denial", async () => {
+test("approval confirmation denial sends one denial response", async () => {
   const oldCommand = process.env.VILLANI_COMMAND;
   const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
   const oldProvider = process.env.VILLANI_PROVIDER;
@@ -378,26 +397,103 @@ test("rejected approval and UI failure default to denial", async () => {
   process.env.VILLANI_MODEL = "fake";
   process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
   process.env.MOCK_APPROVAL = "1";
-  let restorePrompt = __setApprovalPrompterForTests(async () => false);
   try {
     const host = createHost();
     const messages: string[] = [];
     villaniPiExtension(host.api);
-    await host.commands.get("villani")!("fix it", createContext(messages));
-    restorePrompt();
+    await host.commands.get("villani")!("fix it", createContext(messages, { confirmResult: false }));
+    assert.match(messages.join("\n"), /confirm:Villani wants to write a file/);
     assert.match(messages.join("\n"), /Denied Villani Write request/);
     assert.match(messages.join("\n"), /status:Villani: denied Write approval/);
-    assert.match(messages.join("\n"), /widget:Villani approval denied\|Write file: safe-test.txt/);
-
-    restorePrompt = __setApprovalPrompterForTests(async () => { throw new Error("dialog missing"); });
-    const host2 = createHost();
-    const messages2: string[] = [];
-    villaniPiExtension(host2.api);
-    await host2.commands.get("villani")!("fix it", createContext(messages2));
-    assert.match(messages2.join("\n"), /Approval UI unavailable/);
-    assert.match(messages2.join("\n"), /Denied Villani Write request/);
+    assert.match(messages.join("\n"), /widget:Villani approval denied\|Write file: safe-test.txt:placement:aboveEditor/);
+    assertOneApprovalResponse(messages, false);
   } finally {
-    restorePrompt();
+    restoreBridge();
+    restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
+    setOrDelete("MOCK_APPROVAL", oldApproval);
+  }
+});
+
+test("approval status rendering failure sends one denial response", async () => {
+  const oldCommand = process.env.VILLANI_COMMAND;
+  const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
+  const oldProvider = process.env.VILLANI_PROVIDER;
+  const oldModel = process.env.VILLANI_MODEL;
+  const oldBase = process.env.VILLANI_BASE_URL;
+  const oldApproval = process.env.MOCK_APPROVAL;
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
+  process.env.VILLANI_USE_PI_MODEL = "false";
+  process.env.VILLANI_PROVIDER = "openai";
+  process.env.VILLANI_MODEL = "fake";
+  process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
+  process.env.MOCK_APPROVAL = "1";
+  try {
+    const host = createHost();
+    const messages: string[] = [];
+    villaniPiExtension(host.api);
+    await host.commands.get("villani")!("fix it", createContext(messages, { throwStatusMatching: /awaiting approval/, confirmError: new Error("confirmation should not open after status failure") }));
+    assert.match(messages.join("\n"), /Approval UI failed; denied Write request. status failed/);
+    assertOneApprovalResponse(messages, false);
+  } finally {
+    restoreBridge();
+    restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
+    setOrDelete("MOCK_APPROVAL", oldApproval);
+  }
+});
+
+test("approval widget rendering failure sends one denial response", async () => {
+  const oldCommand = process.env.VILLANI_COMMAND;
+  const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
+  const oldProvider = process.env.VILLANI_PROVIDER;
+  const oldModel = process.env.VILLANI_MODEL;
+  const oldBase = process.env.VILLANI_BASE_URL;
+  const oldApproval = process.env.MOCK_APPROVAL;
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
+  process.env.VILLANI_USE_PI_MODEL = "false";
+  process.env.VILLANI_PROVIDER = "openai";
+  process.env.VILLANI_MODEL = "fake";
+  process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
+  process.env.MOCK_APPROVAL = "1";
+  try {
+    const host = createHost();
+    const messages: string[] = [];
+    villaniPiExtension(host.api);
+    await host.commands.get("villani")!("fix it", createContext(messages, { throwWidgetMatching: /awaiting approval/, confirmError: new Error("confirmation should not open after widget failure") }));
+    assert.match(messages.join("\n"), /Approval UI failed; denied Write request. widget failed/);
+    assertOneApprovalResponse(messages, false);
+  } finally {
+    restoreBridge();
+    restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
+    setOrDelete("MOCK_APPROVAL", oldApproval);
+  }
+});
+
+test("approval confirmation failure sends one denial response", async () => {
+  const oldCommand = process.env.VILLANI_COMMAND;
+  const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
+  const oldProvider = process.env.VILLANI_PROVIDER;
+  const oldModel = process.env.VILLANI_MODEL;
+  const oldBase = process.env.VILLANI_BASE_URL;
+  const oldApproval = process.env.MOCK_APPROVAL;
+  const restoreBridge = installMockBridgeStarter(await mockNodeBridgeModule(false));
+  process.env.VILLANI_COMMAND = "mock-villani";
+  process.env.VILLANI_USE_PI_MODEL = "false";
+  process.env.VILLANI_PROVIDER = "openai";
+  process.env.VILLANI_MODEL = "fake";
+  process.env.VILLANI_BASE_URL = "http://127.0.0.1:9";
+  process.env.MOCK_APPROVAL = "1";
+  try {
+    const host = createHost();
+    const messages: string[] = [];
+    villaniPiExtension(host.api);
+    await host.commands.get("villani")!("fix it", createContext(messages, { confirmError: new Error("dialog missing") }));
+    assert.match(messages.join("\n"), /confirm:Villani wants to write a file/);
+    assert.match(messages.join("\n"), /Approval UI failed; denied Write request. dialog missing/);
+    assert.match(messages.join("\n"), /Denied Villani Write request/);
+    assertOneApprovalResponse(messages, false);
+  } finally {
     restoreBridge();
     restoreEnv({ oldCommand, oldUsePi, oldProvider, oldModel, oldBase });
     setOrDelete("MOCK_APPROVAL", oldApproval);
@@ -459,7 +555,9 @@ test("abort during pending approval sends denial and abort", async () => {
     await host.commands.get("villani-abort")!("", ctx);
     unblock(true);
     await runPromise;
-    assert.match(messages.join("\n"), /Villani aborted|cancelled/);
+    const responses = approvalResponseLines(messages);
+    assert.ok(responses.length <= 1, `expected at most one approval response, got ${responses.join(", ")}`);
+    if (responses.length === 1) assert.deepEqual(responses, ["Villani: approval_response:approval-1:false:count:1"]);
     assert.match(messages.join("\n"), /status:clear/);
     assert.doesNotMatch(messages.join("\n"), /Approved Villani Write request/);
   } finally {
@@ -497,6 +595,8 @@ test("multiple sequential approvals keep request ids distinct", async () => {
     assert.deepEqual(seen, ["approval-1", "approval-2"]);
     assert.match(messages.join("\n"), /Approved Villani Write request/);
     assert.match(messages.join("\n"), /Denied Villani Patch request/);
+    assertOneApprovalResponse(messages, true, "approval-1");
+    assertOneApprovalResponse(messages, false, "approval-2");
   } finally {
     restorePrompt();
     restoreBridge();

@@ -94,6 +94,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       onProgress: (message) => output.info?.(message),
     });
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during runtime setup.");
+    reportRuntimeSource(executable, output);
 
     run.bridge = await bridgeStarter({ command: executable.executable, cwd: repo, signal: abortController.signal });
     run.phase = "running";
@@ -101,7 +102,10 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     run.bridge.onEvent((event: BridgeEvent) => {
       if (abortController.signal.aborted && event.type === "run_completed") return;
       if (event.type === "approval_required") {
-        void handleApprovalRequired(run, event, ctx, output);
+        void handleApprovalRequired(run, event, ctx, output).catch((error: unknown) => {
+          safeWarn(output, `Approval handler failed unexpectedly; denied ${event.tool} request. ${formatUnknownError(error)}`);
+          denyApprovalIfPending(run, event, output);
+        });
         return;
       }
       renderEvent(event, output);
@@ -189,31 +193,99 @@ async function handleApprovalRequired(
   output: PiLikeOutput,
 ): Promise<void> {
   run.pendingApprovals.add(event.request_id);
-  setVillaniStatus(ctx.ui, `Villani: awaiting approval for ${event.tool}`);
-  setVillaniWidget(ctx.ui, ["Villani is awaiting approval", event.summary]);
   let approved = false;
+
   try {
+    setVillaniStatus(ctx.ui, `Villani: awaiting approval for ${event.tool}`);
+    setVillaniWidget(ctx.ui, ["Villani is awaiting approval", event.summary]);
     approved = !run.abortController.signal.aborted && await approvalPrompter(event, ctx, run.abortController.signal);
-  } catch {
+  } catch (error) {
     approved = false;
-    output.warn?.(`Approval UI unavailable; denied ${event.tool} request.`);
+    safeWarn(output, `Approval UI failed; denied ${event.tool} request. ${formatUnknownError(error)}`);
   }
-  const stillPending = run.pendingApprovals.delete(event.request_id);
-  if (!stillPending) return;
+
   if (run.abortController.signal.aborted || activeRun?.id !== run.id) approved = false;
+  if (!sendApprovalResponseIfPending(run, event, approved, output)) return;
+
   if (approved) {
-    setVillaniStatus(ctx.ui, "Villani: running");
-    clearVillaniWidget(ctx.ui);
+    safeSetVillaniStatus(ctx.ui, "Villani: running", output);
+    safeSetVillaniWidget(ctx.ui, undefined, output);
   } else {
-    setVillaniStatus(ctx.ui, `Villani: denied ${event.tool} approval`);
-    setVillaniWidget(ctx.ui, ["Villani approval denied", event.summary]);
+    safeSetVillaniStatus(ctx.ui, `Villani: denied ${event.tool} approval`, output);
+    safeSetVillaniWidget(ctx.ui, ["Villani approval denied", event.summary], output);
   }
+  safeWarn(output, `${approved ? "Approved" : "Denied"} Villani ${event.tool} request: ${event.summary}`);
+}
+
+function denyApprovalIfPending(
+  run: ActiveVillaniRun,
+  event: Extract<BridgeEvent, { type: "approval_required" }>,
+  output: PiLikeOutput,
+): void {
+  sendApprovalResponseIfPending(run, event, false, output);
+}
+
+function sendApprovalResponseIfPending(
+  run: ActiveVillaniRun,
+  event: Extract<BridgeEvent, { type: "approval_required" }>,
+  approved: boolean,
+  output: PiLikeOutput,
+): boolean {
+  const stillPending = run.pendingApprovals.delete(event.request_id);
+  if (!stillPending) return false;
   try {
     run.bridge?.respondToApproval(run.id, event.request_id, approved);
-    output.warn?.(`${approved ? "Approved" : "Denied"} Villani ${event.tool} request: ${event.summary}`);
   } catch {
-    if (!run.abortController.signal.aborted) output.warn?.(`Could not send approval response for ${event.tool}; bridge is no longer available.`);
+    if (!run.abortController.signal.aborted) safeWarn(output, `Could not send approval response for ${event.tool}; bridge is no longer available.`);
   }
+  return true;
+}
+
+function safeSetVillaniStatus(ui: ExtensionUIContext, text: string | undefined, output: PiLikeOutput): void {
+  try {
+    setVillaniStatus(ui, text);
+  } catch (error) {
+    safeWarn(output, `Could not update Villani status UI. ${formatUnknownError(error)}`);
+  }
+}
+
+function safeSetVillaniWidget(ui: ExtensionUIContext, lines: string[] | undefined, output: PiLikeOutput): void {
+  try {
+    setVillaniWidget(ui, lines);
+  } catch (error) {
+    safeWarn(output, `Could not update Villani widget UI. ${formatUnknownError(error)}`);
+  }
+}
+
+function safeWarn(output: PiLikeOutput, message: string): void {
+  try {
+    output.warn?.(message);
+  } catch {
+    // Ignore notification failures so approval responses are never blocked by warning UI.
+  }
+}
+
+function safeInfo(output: PiLikeOutput, message: string): void {
+  try {
+    output.info?.(message);
+  } catch {
+    // Ignore diagnostics failures; they must not affect runtime startup.
+  }
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (error === undefined || error === null) return "";
+  return String(error);
+}
+
+function reportRuntimeSource(executable: Awaited<ReturnType<typeof resolveVillaniExecutable>>, output: PiLikeOutput): void {
+  const version = executable.version ? ` v${executable.version}` : "";
+  if (executable.source === "override") {
+    safeInfo(output, `Villani runtime: using VILLANI_COMMAND override (${executable.executable}).`);
+    return;
+  }
+  safeInfo(output, `Villani runtime: using ${executable.source}${version} at ${executable.executable}.`);
 }
 
 function setVillaniStatus(ui: ExtensionUIContext, text: string | undefined): void {
@@ -222,8 +294,8 @@ function setVillaniStatus(ui: ExtensionUIContext, text: string | undefined): voi
 }
 
 function setVillaniWidget(ui: ExtensionUIContext, lines: string[] | undefined): void {
-  const setter = ui.setWidget as ((key: string, lines?: string[], placement?: string) => void) | undefined;
-  setter?.(VILLANI_UI_KEY, lines, "aboveEditor");
+  const setter = ui.setWidget as ((key: string, lines?: string[], options?: { placement?: "aboveEditor" }) => void) | undefined;
+  setter?.(VILLANI_UI_KEY, lines, { placement: "aboveEditor" });
 }
 
 function clearVillaniWidget(ui: ExtensionUIContext): void {
