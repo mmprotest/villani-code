@@ -5,7 +5,7 @@ Villani is a high-reliability coding runner for Pi. Pi stays the UI and model/au
 Install:
 
 ```bash
-pi install npm:@simonvillani/pi-villani
+pi install npm:@mmprotest/pi-villani
 ```
 
 Use inside any repository:
