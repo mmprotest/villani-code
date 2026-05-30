@@ -10,6 +10,8 @@ export interface BridgeProcessOptions {
   readyTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  onDiagnostic?: (message: string) => void;
+  onStderr?: (text: string) => void;
 }
 
 export interface CommandSpec {
@@ -31,10 +33,13 @@ export class VillaniBridgeProcess {
   private startupSettled = false;
   private startupReject?: (error: Error) => void;
   private startupResolve?: () => void;
+  private onDiagnostic?: (message: string) => void;
 
   constructor(options: BridgeProcessOptions & { spec?: CommandSpec }) {
+    this.onDiagnostic = options.onDiagnostic;
     const spec = options.spec ?? commandToSpec(options.command ?? DEFAULT_VILLANI_COMMAND);
     const args = [...spec.args, "bridge", "--stdio"];
+    options.onDiagnostic?.(`launch command=${spec.display} args=${JSON.stringify(args)} cwd=${options.cwd}`);
     this.child = spawn(spec.executable, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
@@ -55,11 +60,14 @@ export class VillaniBridgeProcess {
 
     this.child.on("error", (error: NodeJS.ErrnoException) => {
       this.closed = true;
+      options.onDiagnostic?.(`child process error: ${error.message}`);
       this.rejectStartup(formatSpawnError(error, spec.display));
     });
 
     this.child.stderr.on("data", (chunk: Buffer) => {
-      this.stderrChunks.push(chunk.toString("utf8"));
+      const text = chunk.toString("utf8");
+      this.stderrChunks.push(text);
+      options.onStderr?.(text);
       if (this.stderrChunks.length > 20) this.stderrChunks.shift();
     });
 
@@ -75,6 +83,7 @@ export class VillaniBridgeProcess {
     this.exitPromise = new Promise((resolve) => {
       this.child.on("exit", (code, signal) => {
         this.closed = true;
+        options.onDiagnostic?.(`child process exit code=${code ?? "null"} signal=${signal ?? "null"}`);
         if (!this.startupSettled) {
           this.rejectStartup(new Error(`Villani bridge exited before ready (code ${code ?? "null"}, signal ${signal ?? "null"}).${this.stderrSuffix()}`));
         }
@@ -121,7 +130,13 @@ export class VillaniBridgeProcess {
     if (this.closed || !this.child.stdin.writable) {
       throw new Error(`Villani bridge is not writable.${this.stderrSuffix()}`);
     }
-    this.child.stdin.write(commandToLine(command));
+    try {
+      const ok = this.child.stdin.write(commandToLine(command));
+      if (!ok) this.onDiagnostic?.(`stdin write returned false for command=${command.type}`);
+    } catch (error) {
+      this.onDiagnostic?.(`stdin write failure for command=${command.type}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Villani bridge write failed: ${error instanceof Error ? error.message : String(error)}${this.stderrSuffix()}`);
+    }
   }
 
   abort(runId: string): void {
@@ -163,6 +178,7 @@ export class VillaniBridgeProcess {
   }
 
   private failProtocol(message: string): void {
+    this.onDiagnostic?.(`protocol parse error: ${message}`);
     const event: BridgeEvent = { type: "error", error: message };
     this.listeners.forEach((listener) => listener(event));
     this.rejectStartup(new Error(`${message}${this.stderrSuffix()}`));

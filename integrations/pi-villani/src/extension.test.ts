@@ -161,11 +161,23 @@ function createContext(messages: string[], options: { model?: Model<string>; aut
   } as unknown as ExtensionCommandContext;
 }
 
-test("extension registers /villani and /villani-abort", () => {
+test("extension registers /villani, /villani-abort, and /villani-confirm-test", () => {
   const host = createHost();
   villaniPiExtension(host.api);
   assert.equal(host.commands.has("villani"), true);
   assert.equal(host.commands.has("villani-abort"), true);
+  assert.equal(host.commands.has("villani-confirm-test"), true);
+});
+
+
+test("/villani-confirm-test uses ctx.ui.confirm", async () => {
+  const host = createHost();
+  const messages: string[] = [];
+  villaniPiExtension(host.api);
+  await host.commands.get("villani-confirm-test")!("", createContext(messages, { confirmResult: true }));
+  const joined = messages.join("\n");
+  assert.match(joined, /confirm:Villani confirmation smoke test/);
+  assert.match(joined, /Villani confirm smoke test: approved/);
 });
 
 test("/villani-abort reports no active run", async () => {

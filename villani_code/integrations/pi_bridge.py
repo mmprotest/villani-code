@@ -62,8 +62,19 @@ class PiBridge:
         self._lock = threading.Lock()
 
     def emit(self, event: dict[str, Any]) -> None:
-        self.stdout.write(to_json_line(event))
-        self.stdout.flush()
+        try:
+            self.stdout.write(to_json_line(event))
+            self.stdout.flush()
+        except Exception as exc:  # noqa: BLE001
+            self.stderr.write(f"PiBridge response-write failure: {exc}\n")
+            self.stderr.flush()
+            raise
+
+    def _debug(self, message: str, run_id: str | None = None) -> None:
+        event: dict[str, Any] = {"type": "bridge_diagnostic", "message": cap_text(redact_text(message), 500)}
+        if run_id:
+            event["id"] = run_id
+        self._events.put(event)
 
     def run_stdio(self) -> None:
         self.emit(ready_event())
@@ -202,6 +213,13 @@ class PiBridge:
                     "mode": command.mode,
                 }
             )
+            self._debug(f"run worker started mode={command.mode} repo={repo} task_chars={len(command.task)}", command.id)
+            cfg = command.config
+            provider = cfg.provider or os.environ.get("VILLANI_PROVIDER") or "anthropic"
+            model = cfg.model or os.environ.get("VILLANI_MODEL") or "<unset>"
+            base_url = cfg.base_url or os.environ.get("VILLANI_BASE_URL") or "<unset>"
+            source = "pi-proxy" if cfg.pi_model_proxy else "direct-config"
+            self._debug(f"model configuration source={source} provider={provider} model={model} base_url={redact_url(base_url)}", command.id)
 
             def on_runner_event(event: dict[str, Any]) -> None:
                 nonlocal verification_passed, latest_summary
@@ -218,11 +236,14 @@ class PiBridge:
                     latest_summary = summarize_tool_event(event) or latest_summary
 
             approval_callback = self._approval_callback(active)
+            self._debug("creating runner", command.id)
             runner = self._create_runner(command, on_runner_event, approval_callback)
+            self._debug("runner created; entering execution", command.id)
             if active.abort_requested.is_set():
                 self._events.put({"type": "run_aborted", "id": command.id, "success": False, "summary": "Aborted by caller"})
                 return
             result = run_existing_runner(runner, command)
+            self._debug("runner returned result", command.id)
             transcript_path = normalize_transcript_path(result)
             changed_files, preexisting_dirty_files = attributed_changed_files(repo_path, before_dirty, before_dirty_hashes, touched_files)
             if active.abort_requested.is_set():
@@ -252,6 +273,7 @@ class PiBridge:
                 }
             )
         except Exception as exc:  # noqa: BLE001
+            self._debug(f"exception: {exc}", command.id)
             self._events.put(
                 {
                     "type": "run_failed",
@@ -307,6 +329,7 @@ class PiBridge:
                     return False
                 active.pending_approvals[request_id] = pending
                 self._pending_approvals[request_id] = pending
+            self._debug(f"approval_required emitted request_id={request_id} tool={tool_name} summary={summary}", active.command.id)
             self._events.put(
                 {
                     "type": "approval_required",
@@ -326,6 +349,17 @@ class PiBridge:
             return pending.approved is True and not active.abort_requested.is_set()
 
         return approve
+
+
+def redact_text(value: str) -> str:
+    api_key = os.environ.get("VILLANI_API_KEY")
+    if api_key:
+        value = value.replace(api_key, "[redacted]")
+    return value
+
+
+def redact_url(value: str) -> str:
+    return redact_text(value.split("?", 1)[0])
 
 
 def summarize_approval_request(tool_name: str, tool_input: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -489,12 +523,26 @@ def git_changed_files(repo: Path) -> list[str]:
 
 def map_runner_event(run_id: str, event: dict[str, Any]) -> list[dict[str, Any]]:
     etype = str(event.get("type") or "")
-    if etype in {"diagnosis_attempted", "diagnosis_generated", "planning_started", "model_request_started", "repair_attempt_started"}:
+    if etype in {"diagnosis_attempted", "diagnosis_generated", "planning_started", "repair_attempt_started"}:
         return [{"type": "phase", "id": run_id, "phase": etype, "message": humanize_event_type(etype)}]
+    if etype == "model_request_started":
+        return [
+            {"type": "phase", "id": run_id, "phase": etype, "message": humanize_event_type(etype)},
+            {"type": "bridge_diagnostic", "id": run_id, "message": f"model request begins model={event.get('model') or '<unknown>'}"},
+        ]
+    if etype == "model_request_completed":
+        return [{"type": "bridge_diagnostic", "id": run_id, "message": f"model response received model={event.get('model') or '<unknown>'} stop_reason={event.get('stop_reason') or '<unknown>'}"}]
+    if etype == "model_request_failed":
+        return [{"type": "bridge_diagnostic", "id": run_id, "message": f"model request failed model={event.get('model') or '<unknown>'} error={cap_text(redact_text(str(event.get('error') or '')), 200)}"}]
+    if etype == "approval_required":
+        return [{"type": "bridge_diagnostic", "id": run_id, "message": f"runner requested approval tool={event.get('name') or '<unknown>'}"}]
     if etype == "tool_started":
         tool = str(event.get("name") or "tool")
         tool_input = event.get("input") if isinstance(event.get("input"), dict) else {}
-        return [{"type": "tool_started", "id": run_id, "tool": tool, "path": tool_input.get("path"), "command": tool_input.get("command")}]
+        return [
+            {"type": "bridge_diagnostic", "id": run_id, "message": f"tool call requested tool={tool} path={tool_input.get('path') or tool_input.get('file_path') or ''} command_chars={len(str(tool_input.get('command') or ''))}"},
+            {"type": "tool_started", "id": run_id, "tool": tool, "path": tool_input.get("path"), "command": tool_input.get("command")},
+        ]
     if etype == "tool_finished":
         tool = str(event.get("name") or "tool")
         ok = not bool(event.get("is_error"))

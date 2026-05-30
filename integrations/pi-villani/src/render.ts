@@ -19,6 +19,9 @@ export function renderEvent(event: BridgeEvent, output: PiLikeOutput = console):
     case "phase":
       write(`Villani: ${event.message}`);
       break;
+    case "bridge_diagnostic":
+      write(`Villani debug: ${event.message}`);
+      break;
     case "tool_started":
       write(`Tool started: ${event.tool}${event.path ? ` ${event.path}` : ""}${event.command ? ` ${event.command}` : ""}`);
       break;

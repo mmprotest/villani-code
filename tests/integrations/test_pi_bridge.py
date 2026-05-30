@@ -144,7 +144,10 @@ def test_run_command_constructs_runner_and_completes(tmp_path: Path) -> None:
 
     events = collect_json_lines(stdout)
     assert seen["command"].limits.max_turns == 3
-    assert [event["type"] for event in events][:2] == ["run_started", "phase"]
+    assert events[0]["type"] == "run_started"
+    assert any(event["type"] == "phase" and event.get("phase") == "diagnosis_attempted" for event in events)
+    assert any(event["type"] == "bridge_diagnostic" and "model configuration" in event.get("message", "") for event in events)
+    assert any(event["type"] == "bridge_diagnostic" and "tool call requested" in event.get("message", "") for event in events)
     assert any(event["type"] == "verification_finished" and event["passed"] for event in events)
     assert events[-1]["type"] == "run_completed"
     assert events[-1]["transcript_path"] == ".villani_code/runs/run/transcript.json"
