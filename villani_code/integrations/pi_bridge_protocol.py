@@ -14,6 +14,7 @@ class BridgeConfig:
     model: str | None = None
     base_url: str | None = None
     api_key: str | None = None
+    pi_model_proxy: bool = False
 
 
 @dataclass(slots=True)
@@ -101,6 +102,7 @@ def parse_run_command(payload: dict[str, Any]) -> RunCommand:
             model=str(config_payload["model"]) if config_payload.get("model") else None,
             base_url=str(config_payload["base_url"]) if config_payload.get("base_url") else None,
             api_key=str(config_payload["api_key"]) if config_payload.get("api_key") else None,
+            pi_model_proxy=bool(config_payload.get("pi_model_proxy")),
         ),
         limits=BridgeLimits(max_turns=int(max_turns) if max_turns is not None else None),
     )

@@ -7,6 +7,7 @@ export interface BridgeConfig {
   model?: string;
   base_url?: string;
   api_key?: string;
+  pi_model_proxy?: boolean;
 }
 
 export interface BridgeLimits {
@@ -47,6 +48,7 @@ export type BridgeEvent =
   | { type: "pong"; id: string }
   | { type: "run_started"; id: string; run_id: string; task: string; repo: string; mode: VillaniMode }
   | { type: "phase"; id: string; phase: string; message: string }
+  | { type: "bridge_diagnostic"; id?: string; message: string }
   | { type: "tool_started"; id: string; tool: string; path?: string | null; command?: string | null }
   | { type: "tool_finished"; id: string; tool: string; ok: boolean; summary: string }
   | { type: "workspace_changed"; id: string; files: string[] }

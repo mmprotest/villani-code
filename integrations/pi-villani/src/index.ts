@@ -41,6 +41,10 @@ export default function villaniPiExtension(pi: ExtensionAPI): void {
     description: "Abort the active Villani Code run",
     handler: async (_args: string, ctx: ExtensionCommandContext) => abortVillaniRun(ctx),
   });
+  pi.registerCommand("villani-confirm-test", {
+    description: "Development smoke test for the Pi confirmation UI",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => runConfirmSmokeTest(ctx),
+  });
 }
 
 export async function runVillaniCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -62,6 +66,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   const run: ActiveVillaniRun = { id: runId, repo, phase: "starting", abortController, pendingApprovals: new Set(), done, resolveDone };
   activeRun = run;
+  debug(output, `run starting id=${runId} repo=${repo} task_chars=${task.length}`);
   setVillaniStatus(ctx.ui, "Villani: starting");
 
   let finished = false;
@@ -74,6 +79,9 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
   try {
     const explicitConfig = useExplicitVillaniConfig();
     const model = ctx.model as Model<string> | undefined;
+    debug(output, explicitConfig
+      ? `model configuration mode=direct provider=${process.env.VILLANI_PROVIDER ?? "<unset>"} model=${process.env.VILLANI_MODEL ?? "<unset>"} base_url=${redactUrl(process.env.VILLANI_BASE_URL) ?? "<unset>"}`
+      : `model configuration mode=pi-proxy model=${model?.id ?? "<none>"}`);
     if (!explicitConfig && !model) {
       throw new Error("Villani could not start: no active Pi model is selected. Select a model in Pi, or set VILLANI_USE_PI_MODEL=false and configure Villani explicitly.");
     }
@@ -85,6 +93,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     setVillaniStatus(ctx.ui, "Villani: starting model proxy");
     run.proxy = !explicitConfig && model ? new PiModelProxy({ model, apiKey: auth?.apiKey, headers: auth?.headers, signal: abortController.signal }) : undefined;
     const proxyUrl = run.proxy ? await run.proxy.start() : undefined;
+    if (proxyUrl) debug(output, `Pi model proxy listening at ${redactUrl(proxyUrl)}`);
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during startup.");
 
     setVillaniStatus(ctx.ui, "Villani: starting runtime");
@@ -96,12 +105,21 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     if (abortController.signal.aborted) throw new Error("Villani run cancelled during runtime setup.");
     reportRuntimeSource(executable, output);
 
-    run.bridge = await bridgeStarter({ command: executable.executable, cwd: repo, signal: abortController.signal });
+    debug(output, `runtime executable resolved path=${executable.executable}`);
+    run.bridge = await bridgeStarter({
+      command: executable.executable,
+      cwd: repo,
+      signal: abortController.signal,
+      onDiagnostic: (message) => debug(output, `bridge process: ${message}`),
+      onStderr: (text) => debug(output, `bridge stderr: ${trimDiagnostic(text)}`),
+    });
     run.phase = "running";
     setVillaniStatus(ctx.ui, "Villani: running");
     run.bridge.onEvent((event: BridgeEvent) => {
+      debug(output, `bridge event ${summarizeBridgeEvent(event)}`);
       if (abortController.signal.aborted && event.type === "run_completed") return;
       if (event.type === "approval_required") {
+        debug(output, `approval_required emitted id=${event.id} request_id=${event.request_id} tool=${event.tool}`);
         void handleApprovalRequired(run, event, ctx, output).catch((error: unknown) => {
           safeWarn(output, `Approval handler failed unexpectedly; denied ${event.tool} request. ${formatUnknownError(error)}`);
           denyApprovalIfPending(run, event, output);
@@ -126,6 +144,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       mode: (process.env.VILLANI_MODE as VillaniMode | undefined) || "runner",
       config: buildRunConfig(proxyUrl, model),
     };
+    debug(output, `sending run command id=${runId} mode=${command.mode}`);
     run.bridge.send(command);
     await Promise.race([
       finalEvent,
@@ -139,6 +158,7 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
       showDurableMessage(ctx.ui, !run.bridge ? "Villani run cancelled during startup." : "Villani run cancelled.");
     } else {
       const message = error instanceof Error ? error.message : String(error);
+      debug(output, `exception: ${sanitizeErrorMessage(message)}`);
       output.error?.(message);
       showDurableMessage(ctx.ui, `Villani failed: ${message}`);
     }
@@ -152,6 +172,20 @@ export async function runVillaniCommand(args: string, ctx: ExtensionCommandConte
     await run.proxy?.stop();
     if (activeRun?.id === runId) activeRun = undefined;
     resolveDone();
+  }
+}
+
+export async function runConfirmSmokeTest(ctx: ExtensionCommandContext): Promise<void> {
+  const output = uiOutput(ctx.ui);
+  try {
+    if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") {
+      output.warn?.("Villani confirm smoke test: ctx.ui.confirm is not available.");
+      return;
+    }
+    const approved = await ctx.ui.confirm("Villani confirmation smoke test", "Approve this test dialog? No Villani runner will be started.", { signal: ctx.signal });
+    output.info?.(`Villani confirm smoke test: ${approved ? "approved" : "denied"}.`);
+  } catch (error) {
+    output.error?.(`Villani confirm smoke test failed: ${formatUnknownError(error)}`);
   }
 }
 
@@ -265,6 +299,10 @@ function safeWarn(output: PiLikeOutput, message: string): void {
   }
 }
 
+function debug(output: PiLikeOutput, message: string): void {
+  safeInfo(output, `Villani debug: ${message}`);
+}
+
 function safeInfo(output: PiLikeOutput, message: string): void {
   try {
     output.info?.(message);
@@ -277,6 +315,26 @@ function formatUnknownError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (error === undefined || error === null) return "";
   return String(error);
+}
+
+function summarizeBridgeEvent(event: BridgeEvent): string {
+  const id = "id" in event && typeof event.id === "string" ? event.id : "<none>";
+  const runId = "run_id" in event && typeof event.run_id === "string" ? event.run_id : id;
+  const parts = [`type=${event.type}`, `id=${id}`, `run_id=${runId}`];
+  if (event.type === "phase") parts.push(`phase=${event.phase}`);
+  if (event.type === "tool_started" || event.type === "tool_finished") parts.push(`tool=${event.tool}`);
+  if (event.type === "approval_required" || event.type === "approval_resolved") parts.push(`request_id=${event.request_id}`, `tool=${event.tool}`);
+  if (event.type === "error") parts.push(`error=${sanitizeErrorMessage(event.error)}`);
+  return parts.join(" ");
+}
+
+function trimDiagnostic(text: string): string {
+  return sanitizeErrorMessage(text.replace(/\s+/g, " ").trim()).slice(0, 500);
+}
+
+function redactUrl(value: string | undefined): string | undefined {
+  if (!value) return value;
+  return value.replace(/(api[_-]?key=)[^&]+/gi, "$1[redacted]").replace(/:\/\/[^/@]+@/, "://[redacted]@");
 }
 
 function reportRuntimeSource(executable: Awaited<ReturnType<typeof resolveVillaniExecutable>>, output: PiLikeOutput): void {
@@ -369,6 +427,7 @@ function buildRunConfig(proxyUrl: string | undefined, model: Model<string> | und
       provider: "openai",
       model: model?.id ?? "pi-current-model",
       base_url: proxyUrl,
+      pi_model_proxy: true,
     };
   }
   return {
@@ -393,10 +452,12 @@ function uiOutput(ui: ExtensionUIContext): PiLikeOutput {
 }
 
 function sanitizeErrorMessage(message: string): string {
-  return message
+  const apiKey = process.env.VILLANI_API_KEY;
+  let sanitized = message
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
-    .replace(/api[_-]?key[=:]\s*[^\s,;]+/gi, "api_key=[redacted]")
-    .slice(0, 500);
+    .replace(/api[_-]?key[=:]\s*[^\s,;]+/gi, "api_key=[redacted]");
+  if (apiKey) sanitized = sanitized.split(apiKey).join("[redacted]");
+  return sanitized.slice(0, 500);
 }
 
 export function __getActiveRunForTests(): ActiveVillaniRun | undefined {
