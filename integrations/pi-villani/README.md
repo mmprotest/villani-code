@@ -1,131 +1,409 @@
 # Villani for Pi
 
-Villani is a high-reliability coding runner for Pi. Pi stays the UI and model/auth host; Villani performs repository repair, edits, verification, and approval-bound operations through its existing runner.
+Villani is a coding runner extension for [Pi](https://github.com/earendil-works/pi). It runs repository tasks from inside Pi, asks for approval before protected edits or shell commands, and reports the final result in the Pi interface.
 
-Install:
+## Install in one command
 
 ```bash
 pi install npm:@mmprotest/pi-villani
 ```
 
-Use inside any repository:
+That is the full Villani installation step.
+
+On first use, the extension automatically downloads the standalone Villani runtime for your platform, verifies its SHA-256 checksum, and caches it locally. You do **not** need to clone the Villani repository, install Python, create a virtual environment, or configure a separate Villani executable.
+
+## Requirements
+
+You need:
+
+- [Pi](https://github.com/earendil-works/pi) installed.
+- A model configured and working in Pi.
+- A Git repository to run Villani against.
+- A supported platform:
+  - Windows x64
+  - macOS Apple Silicon
+  - macOS Intel
+  - Linux x64
+
+## Confirm installation
+
+```bash
+pi list
+```
+
+You should see:
+
+```text
+npm:@mmprotest/pi-villani
+```
+
+If you see more than one Villani package or a local Villani extension path as well as the npm package, remove the duplicate. A duplicate load can cause Pi to expose the command as `/villani:1` rather than `/villani`.
+
+## Use Villani
+
+Open a terminal in any Git repository and start Pi:
+
+```bash
+cd /path/to/your/repository
+pi
+```
+
+In Pi, run a coding task with `/villani`:
 
 ```text
 /villani Fix the failing tests and verify the result
+```
+
+Other examples:
+
+```text
+/villani Add input validation to the parser and add tests
+/villani Find the cause of the failing test, make the smallest fix, and run pytest
+/villani Add a new endpoint, update tests, and verify the suite
+```
+
+To stop a current run:
+
+```text
 /villani-abort
 ```
 
-On first use, the extension automatically downloads a platform-specific standalone Villani runtime from GitHub Releases, verifies its SHA-256 checksum, extracts it into a private user cache, and launches the bundled `bridge --stdio` runtime. No separate Python, pip, virtual environment, or `villani-code` installation is required for normal use.
+## What happens during a run
 
-Villani uses your active Pi model through the local Pi-backed proxy and asks for approval before protected file or shell operations.
+Villani uses the model currently selected in Pi. It can inspect the repository, propose edits, apply patches, and run verification commands.
 
-## Supported platforms
+When Villani requests a protected operation, Pi shows an approval prompt. Typical approvals include:
 
-Runtime downloads are prepared for:
+- Writing or modifying a file.
+- Applying a patch.
+- Running a shell command such as a test suite.
 
-- Windows x64 (`win32-x64`)
-- macOS Apple Silicon (`darwin-arm64`)
-- macOS Intel (`darwin-x64`)
-- Linux x64 (`linux-x64`)
+Review each request before approving it. Villani runs with your normal user permissions inside the current repository.
 
-Other platforms can still use a local Villani installation through `VILLANI_COMMAND`.
+At the end of a successful run, Pi displays a final Villani result with the task summary and files changed by Villani.
 
-## Runtime cache
+## Using LM Studio
 
-The runtime cache is outside the repository being edited:
+Villani uses Pi's active model, so LM Studio must be configured in Pi first.
 
-- Windows: `%LOCALAPPDATA%\pi-villani\runtime\<version>\<platform-arch>\`
-- macOS/Linux: `~/.cache/pi-villani/runtime/<version>/<platform-arch>/`
+### 1. Start the LM Studio server
 
-The extension verifies `checksums.txt` from the matching GitHub Release before extraction and writes a `.verified.json` marker before reusing a cached runtime.
+In LM Studio:
 
-## Developer override
+1. Load a coding-capable model.
+2. Start the local server.
+3. Note the model identifier exposed by the server.
 
-For development or troubleshooting, set `VILLANI_COMMAND` to a single executable path/name. This skips runtime download and preserves Windows paths with spaces.
+A tested example model identifier is:
 
-PowerShell example:
+```text
+villanis/models/qwen3.5-9b-q8_0.gguf
+```
+
+The common LM Studio OpenAI-compatible server endpoint is:
+
+```text
+http://127.0.0.1:1234/v1
+```
+
+### 2. Configure the model in Pi
+
+Create or edit:
+
+- Windows: `%USERPROFILE%\.pi\agent\models.json`
+- macOS/Linux: `~/.pi/agent/models.json`
+
+Example configuration:
+
+```json
+{
+  "providers": {
+    "lmstudio": {
+      "baseUrl": "http://127.0.0.1:1234/v1",
+      "api": "openai-completions",
+      "apiKey": "dummy",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "villanis/models/qwen3.5-9b-q8_0.gguf",
+          "name": "Qwen 3.5 9B Q8 Local",
+          "input": ["text"],
+          "reasoning": false,
+          "contextWindow": 100000,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}
+```
+
+Replace the model `id` and `name` with the model you loaded in LM Studio.
+
+### 3. Launch Pi using the LM Studio model
+
+```bash
+pi --provider lmstudio --model "villanis/models/qwen3.5-9b-q8_0.gguf"
+```
+
+Then run:
+
+```text
+/villani Fix the failing tests and verify the result
+```
+
+### PowerShell setup for the tested LM Studio model
+
+Windows users can create the Pi model configuration with this command:
+
+```powershell
+$model = "villanis/models/qwen3.5-9b-q8_0.gguf"
+$piDir = Join-Path $HOME ".pi\agent"
+$modelsFile = Join-Path $piDir "models.json"
+
+New-Item -ItemType Directory -Force -Path $piDir | Out-Null
+
+$config = @{
+    providers = @{
+        lmstudio = @{
+            baseUrl = "http://127.0.0.1:1234/v1"
+            api = "openai-completions"
+            apiKey = "dummy"
+            compat = @{
+                supportsDeveloperRole = $false
+                supportsReasoningEffort = $false
+            }
+            models = @(
+                @{
+                    id = $model
+                    name = "Qwen 3.5 9B Q8 Local"
+                    input = @("text")
+                    reasoning = $false
+                    contextWindow = 100000
+                    maxTokens = 16384
+                }
+            )
+        }
+    }
+} | ConvertTo-Json -Depth 10
+
+[System.IO.File]::WriteAllText(
+    $modelsFile,
+    $config,
+    [System.Text.UTF8Encoding]::new($false)
+)
+
+pi --provider lmstudio --model $model
+```
+
+## Using another Pi model provider
+
+Villani does not require LM Studio. It reuses the model selected in Pi, including supported cloud providers or other OpenAI-compatible local servers configured in Pi.
+
+Once a normal Pi prompt works with your chosen model, use Villani in the same session:
+
+```text
+/villani Implement the requested change and run the relevant tests
+```
+
+## Runtime download and cache
+
+On the first Villani run, the extension downloads the runtime for your operating system from the Villani GitHub release assets and verifies it before execution.
+
+Runtime cache locations:
+
+| Platform | Cache location |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\pi-villani\runtime\` |
+| macOS/Linux | `~/.cache/pi-villani/runtime/` |
+
+To force a clean runtime download on Windows:
+
+```powershell
+Remove-Item "$env:LOCALAPPDATA\pi-villani\runtime" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+To force a clean runtime download on macOS or Linux:
+
+```bash
+rm -rf ~/.cache/pi-villani/runtime
+```
+
+## Update Villani
+
+Install the latest published package update:
+
+```bash
+pi update npm:@mmprotest/pi-villani
+```
+
+You can also remove and reinstall the package:
+
+```bash
+pi remove npm:@mmprotest/pi-villani
+pi install npm:@mmprotest/pi-villani
+```
+
+## Uninstall Villani
+
+```bash
+pi remove npm:@mmprotest/pi-villani
+```
+
+Optional: delete the downloaded runtime cache.
+
+Windows PowerShell:
+
+```powershell
+Remove-Item "$env:LOCALAPPDATA\pi-villani" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+macOS/Linux:
+
+```bash
+rm -rf ~/.cache/pi-villani
+```
+
+## Troubleshooting
+
+### `/villani` is missing
+
+Check that Pi installed the extension:
+
+```bash
+pi list
+```
+
+You should see `npm:@mmprotest/pi-villani`.
+
+Reinstall if required:
+
+```bash
+pi remove npm:@mmprotest/pi-villani
+pi install npm:@mmprotest/pi-villani
+```
+
+### Pi shows `/villani:1`
+
+Pi has loaded Villani more than once, usually because both a local development path and the npm package are installed.
+
+```bash
+pi list
+```
+
+Remove every old or local Villani entry, then install only the public package:
+
+```bash
+pi install npm:@mmprotest/pi-villani
+```
+
+### The model works in LM Studio but not in Pi
+
+First test the model with a normal Pi prompt:
+
+```bash
+pi --provider lmstudio --model "your-model-id"
+```
+
+Then ask:
+
+```text
+Reply with exactly: hello
+```
+
+If the normal Pi prompt fails, fix the Pi or LM Studio model configuration before testing Villani.
+
+Check:
+
+- The LM Studio server is running.
+- The `baseUrl` includes `/v1`.
+- The model ID exactly matches the model shown by LM Studio.
+- `models.json` is valid JSON saved as UTF-8.
+
+### Runtime download fails
+
+Check access to GitHub Releases and retry. To remove a partially cached runtime, clear the runtime cache using the commands above and launch Villani again.
+
+### Checksum verification fails
+
+Villani will not execute a runtime archive that does not match its published checksum. Clear the cache and retry. If the error persists, report the runtime asset or checksum mismatch.
+
+### Approval prompt does not appear
+
+Run Pi interactively in a terminal. Approval-required operations are denied when no usable Pi confirmation UI is available.
+
+### A run needs to be stopped
+
+Use:
+
+```text
+/villani-abort
+```
+
+### Debugging output
+
+For troubleshooting only, enable extension diagnostics before launching Pi.
+
+Windows PowerShell:
+
+```powershell
+$env:VILLANI_PI_DEBUG = "1"
+pi
+```
+
+macOS/Linux:
+
+```bash
+VILLANI_PI_DEBUG=1 pi
+```
+
+Turn debug output off after troubleshooting.
+
+Windows PowerShell:
+
+```powershell
+Remove-Item Env:VILLANI_PI_DEBUG -ErrorAction SilentlyContinue
+```
+
+macOS/Linux:
+
+```bash
+unset VILLANI_PI_DEBUG
+```
+
+## Advanced development override
+
+Normal users do not need this.
+
+Developers can bypass automatic runtime download and point the extension at a local Villani executable using `VILLANI_COMMAND`:
+
+Windows PowerShell:
 
 ```powershell
 $env:VILLANI_COMMAND = "C:\path\to\villani-code\.venv\Scripts\villani-code.exe"
 pi
 ```
 
-## Defaults and configuration
+macOS/Linux:
 
-Default behavior:
-
-- `VILLANI_COMMAND` unset means the extension downloads/reuses the verified standalone Villani runtime. Set it only for development/troubleshooting overrides.
-- `VILLANI_MODE` defaults to `runner`, which maps to normal `Runner.run(task)` execution.
-- `VILLANI_MODE=villani` maps to the repository's autonomous `Runner.run_villani_mode()` path.
-- Pi model reuse is enabled by default. The extension resolves Pi-managed credentials and provider headers with `ctx.modelRegistry.getApiKeyAndHeaders(model)`, starts a temporary local proxy, and passes that proxy URL to Villani as an OpenAI-compatible `base_url`.
-- Upstream Pi API keys/OAuth/provider headers remain inside the Node extension/proxy and are passed only to Pi AI requests, never to the Villani subprocess.
-
-Optional environment variables:
-
-| Variable | Meaning |
-| --- | --- |
-| `VILLANI_COMMAND` | Developer/troubleshooting override for the Villani executable path/name. When set, runtime download is skipped. This is a single executable path, not a shell command. |
-| `VILLANI_MODE` | `runner` or `villani`. Defaults to `runner`. |
-| `VILLANI_USE_PI_MODEL` | Set to `false` to disable Pi-backed model reuse and use explicit Villani provider config. |
-| `VILLANI_PROVIDER` | Explicit fallback provider (`openai` or `anthropic`) when `VILLANI_USE_PI_MODEL=false`. |
-| `VILLANI_MODEL` | Explicit fallback model. |
-| `VILLANI_BASE_URL` | Explicit fallback model endpoint. |
-| `VILLANI_API_KEY` | Explicit fallback API key, if needed. |
-
-Explicit Villani provider variables are advanced fallback settings. Normal Pi users should leave them unset so Villani reuses the active Pi model.
-
-## Final output
-
-Pi renders operational progress only: start, phases, tool/file activity, verification, governor redirects, failure and abort status. It does not render Villani prompts, hidden reasoning, raw JSON or full transcripts.
-
-Final output separates attribution:
-
-```text
-Villani completed
-
-Summary:
-Fixed failing auth tests.
-
-Changed by Villani:
-- src/auth.py
-
-Pre-existing workspace changes excluded from attribution:
-- notes.txt
-
-Verification passed: true
-Transcript: .villani_code/runs/...
+```bash
+VILLANI_COMMAND="/path/to/villani-code/.venv/bin/villani-code" pi
 ```
 
-## Safety and approvals
+## Security notes
 
-- Villani operates in the current repository and may edit files and run verification commands through its normal permission/sandbox path.
-- The Pi bridge honours Villani's existing permission classifier: `ALLOW` operations run automatically, `ASK` operations prompt through Pi before execution, and `DENY` operations do not execute.
-- The default Pi integration does not silently approve file writes, patches, or shell commands that Villani classifies as requiring approval.
-- Approval prompts show concise operation context: write/patch requests show the affected path, and Bash requests show the command being requested. Large file contents and patches are not dumped into the prompt.
-- Rejecting an approval returns a normal denied-tool result to Villani; Villani may continue or fail according to its existing runner behavior.
-- `/villani-abort` cancels a run even while an approval decision is pending; pending approvals are resolved as denied.
-- Pre-existing dirty files are reported separately from files changed by Villani.
-- The Pi model proxy binds only to `127.0.0.1`, uses a random available port, and exists only for the active `/villani` run.
-- Pi credentials stay in Pi; the Python child receives only a localhost proxy URL in the default path. Model credentials are unrelated to tool approvals and are never shown in approval prompts.
-- Pi packages execute with normal user permissions. Review source before installing third-party packages.
+- Pi packages execute code with your normal user permissions.
+- Villani can read and modify files in the repository where it is run.
+- Review approval prompts before allowing edits or commands.
+- The downloaded standalone runtime is verified using the published SHA-256 checksum before it is executed.
+- In normal operation, Villani uses the active Pi model through a temporary local proxy bound to `127.0.0.1`.
 
-## Limitations
+## Reference links
 
-- `/villani-abort` cancels startup, pending approval prompts, and in-flight Pi model requests immediately via a per-run `AbortController`, sends a bridge abort request if the bridge exists, and force-kills the subprocess after a short timeout if the Python runner does not stop. Already-running Python child commands may not be interruptible until the current Villani operation returns.
-- Non-interactive Pi contexts without a usable confirmation UI deny approval-required operations by default rather than auto-approving them.
-- The Pi proxy implements Villani's current OpenAI-compatible `/v1/chat/completions` path. It does not implement `/v1/messages` because the bridge points Villani at the proxy with `provider=openai`.
-- Streaming is compatibility streaming: the proxy calls Pi via `complete()` and emits the final response as one OpenAI SSE chunk plus `[DONE]`, not token-by-token streaming.
-- Non-git repositories use lower-confidence changed-file reporting based on Villani mutation events only.
-
-## Troubleshooting
-
-- **Runtime download failed:** check network access to GitHub Releases, then retry. You can set `VILLANI_COMMAND` to a local executable while troubleshooting.
-- **Runtime checksum failed:** the archive was not executed. Clear the runtime cache and retry, or report the release asset mismatch.
-- **Local override not found:** if `VILLANI_COMMAND` is set, ensure it points to the executable path in the same environment used to start Pi.
-- **No Pi model available:** select/configure a Pi model, or set `VILLANI_USE_PI_MODEL=false` and provide explicit Villani provider variables.
-- **Pi auth resolution fails:** confirm the selected Pi model is logged in/configured; auth errors are sanitized before display.
-- **Bridge readiness timeout:** run `printf '{"type":"ping","id":"manual-test"}\n' | villani-code bridge --stdio` and confirm it prints `ready` then `pong`.
-- **Proxy startup failure:** ensure no local security tool blocks binding to `127.0.0.1` on random ports.
-- **Proxy upstream error:** the proxy returns a sanitized HTTP error to Villani instead of a fake empty completion; check Pi model/auth configuration.
-- **Approval prompt unavailable:** in headless/non-interactive contexts, approval-required operations are denied for safety. Run Pi interactively or provide an explicit test approval handler.
-- **Smoke test:** from this checkout, run `cd integrations/pi-villani && npm install && npm test`, then `printf '{"type":"ping","id":"manual-test"}\n' | villani-code bridge --stdio`.
+- Pi package installation documentation: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md>
+- Pi custom model configuration documentation: <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md>
+- Villani Code repository: <https://github.com/mmprotest/villani-code>
+- Villani Pi npm package: <https://www.npmjs.com/package/@mmprotest/pi-villani>
