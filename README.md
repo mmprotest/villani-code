@@ -1,149 +1,154 @@
 # Villani Code
 
-**A local 9B coding agent just passed 92 verified Terminal-Bench attempts.**
+**A terminal-first coding agent runtime built to make small local models complete real repository work.**
 
-Villani Code is the local-first terminal agent runtime pushing compact models into real software engineering work.
+Villani Code runs coding tasks inside a repository, gives the model tools to inspect files, modify code and execute verification, and keeps the work oriented toward a passing result.
 
-Running **Qwen3.5-9B** across the complete **Terminal-Bench 2.0** suite, Villani delivered:
+It is designed for local and constrained backends, where the runtime has to do more than pass messages to a powerful hosted model. Villani focuses the agent on the loop that matters:
 
-| Metric | Result |
-|---|---:|
-| Tasks evaluated | 89 |
-| Clean scored attempts | 445 |
-| Verifier-accepted completions | **92** |
-| Full-suite success rate | **20.67%** |
-| Tasks successfully breached | **31** |
-| Tasks conquered on every attempt | **8** |
+1. inspect the repository and task;
+2. identify the smallest useful change;
+3. edit or run commands;
+4. verify the result;
+5. recover when verification fails.
 
+Use Villani directly from the command line, or run it inside [Pi](https://github.com/earendil-works/pi) through the `@mmprotest/pi-villani` extension.
 
-## Villani enters the leaderboard at #126
+## Benchmark results
 
-At **20.67%**, Villani Code + Qwen3.5-9B slots into **#126** on the current Terminal-Bench 2.0 leaderboard, above **Gemini CLI + Gemini 2.5 Pro** and **Bash Agent + TermiGen-32B**.
+Using **Qwen3.5-9B** across the full **Terminal-Bench 2.0** task suite, Villani Code achieved **92 verified completions from 445 clean attempts**, a **20.67%** score.
 
-The public **little-coder + Qwen3.5-9B** entry scores **9.2%**. Villani reaches **20.67%** using the same 9B model class: **2.25x the score**.
+That score would place **Villani Code + Qwen3.5-9B at #126** on the current Terminal-Bench 2.0 leaderboard, above **Gemini CLI + Gemini 2.5 Pro** and **Bash Agent + TermiGen-32B**. The published **little-coder + Qwen3.5-9B** entry scores **9.2%**. Villani scores **2.25x higher with the same model class**.
 
 ![Villani Code projected Terminal-Bench 2.0 leaderboard position](docs/assets/villani_terminal_bench_2_leaderboard_position.png)
 
-| Position | Agent | Model | Score |
-|---:|---|---|---:|
-| #124 | Mini-SWE-Agent | GPT-5-Mini | 22.2% |
-| #125 | spoox-o-m | GPT-5-Nano | 21.8% |
-| **#126** | **Villani Code** | **Qwen3.5-9B** | **20.67%** |
-| #126 before insertion | Gemini CLI | Gemini 2.5 Pro | 19.6% |
-| #127 before insertion | Bash Agent | TermiGen-32B | 19.3% |
-| #140 before insertion | little-coder | Qwen3.5-9B | 9.2% |
+[Read the full technical report](docs/Villani_Code_9B_Terminal_Bench_Technical_Report_Leaderboard.pdf)
 
-*Official leaderboard entries sourced from Terminal-Bench 2.0 on 1 June 2026. Villani's position is calculated by inserting its 92/445 full-suite score into the published ranking.*
+## Install Villani Code
 
-This is accepted work on hard terminal tasks from a local 9B model. Small local coding agents are already real. With the right runtime, they can navigate repositories, change code, operate terminal environments and land verified outcomes.
+### Requirements
 
-## Eight tasks conquered on every attempt
+- Python 3.11 or later
+- A Git repository to work in
+- An OpenAI-compatible model endpoint
 
-Villani solved each of these tasks **5/5**:
+### Install
 
-- `cobol-modernization`
-- `fix-git`
-- `git-leak-recovery`
-- `merge-diff-arc-agi-task`
-- `modernize-scientific-stack`
-- `openssl-selfsigned-cert`
-- `portfolio-optimization`
-- `prove-plus-comm`
-
-Ten more tasks were solved on a majority of attempts, extending the verified success frontier across repository repair, modernization, configuration, log handling and terminal-driven implementation work.
-
-## What Villani Code is
-
-Villani Code is a terminal-first runtime built to make compact local models finish real software engineering work.
-
-Its standard is simple: **the task counts when the verifier accepts it.**
-
-The runtime drives a model through the execution loop that real coding work demands:
-
-1. inspect the repository and environment;
-2. collect evidence using terminal commands;
-3. make targeted code or configuration changes;
-4. run verification;
-5. recover from failure;
-6. preserve traces for the next improvement cycle.
-
-## Why this matters
-
-A 9B local model does not have spare intelligence to waste on drift, redundant tool calls, weak recovery loops or performative transcripts.
-
-That makes Villani's result decisive: compact models can already complete verified terminal work when the runtime keeps them focused on execution.
-
-The full-suite evaluation delivered:
-
-- **92** accepted completions;
-- **31** tasks successfully breached;
-- **18** tasks solved on a majority of attempts;
-- **8** tasks solved every time.
-
-The remaining unbeaten tasks define the next engineering campaign. Better recovery, tighter verification and stronger control over long-horizon execution will expand the frontier.
-
-## Technical report
-
-Read the complete report, including the full 89-task outcome map:
-
-[`docs/Villani_Code_9B_Terminal_Bench_Technical_Report_Leaderboard.pdf`](docs/Villani_Code_9B_Terminal_Bench_Technical_Report_Leaderboard.pdf)
-
-## Benchmark protocol
-
-| Item | Value |
-|---|---|
-| Benchmark | Terminal-Bench 2.0 |
-| Backend model | Qwen3.5-9B |
-| Agent runtime | Villani Code |
-| Tasks | 89 |
-| Attempts per task | 5 |
-| Acceptance criterion | Benchmark verifier pass |
-| Clean result | **92/445 accepted completions (20.67%)** |
-
-A duplicated extra five-attempt `qemu-startup` record was removed from the archive to preserve the fixed five-attempt protocol.
-
-## Installation
-
-Install with TUI support:
+Clone the repository and install Villani:
 
 ```bash
+git clone https://github.com/mmprotest/villani-code.git
+cd villani-code
 pip install .[tui]
 ```
 
-Headless CLI only:
+For headless CLI use only:
 
 ```bash
 pip install .
 ```
 
-Development dependencies:
+For development:
 
 ```bash
 pip install .[dev]
 ```
 
-## Usage
+### Run against a local model
 
-Interactive session:
-
-```bash
-villani-code interactive --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
-```
-
-One-shot task:
+Start an OpenAI-compatible local server, then point Villani at it:
 
 ```bash
-villani-code run "Add retry handling to API client and update tests." --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
+villani-code interactive \
+  --base-url http://127.0.0.1:1234 \
+  --model your-model-id \
+  --repo /path/to/repository
 ```
 
-Autonomous pass:
+Run a single task:
 
 ```bash
-villani-code --villani-mode --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
+villani-code run "Fix the failing tests and verify the result." \
+  --base-url http://127.0.0.1:1234 \
+  --model your-model-id \
+  --repo /path/to/repository
 ```
 
-## The mission
+## Install Villani in Pi
 
-**Make compact local coding agents finish real work.**
+Villani is available as a Pi extension. It runs repository tasks from inside Pi, uses the model selected in Pi, requests approval before protected edits or shell commands, and reports the final result in the Pi interface.
 
-Villani Code is building the runtime that gets them there.
+### Requirements
+
+- [Pi](https://github.com/earendil-works/pi) installed
+- A model configured and working in Pi
+- A Git repository
+- Windows x64, macOS Apple Silicon, macOS Intel, or Linux x64
+
+### Install the extension
+
+```bash
+pi install npm:@mmprotest/pi-villani
+```
+
+On first use, the extension downloads the Villani runtime for your platform, verifies its SHA-256 checksum, and caches it locally. You do not need to clone this repository or install Python to use Villani from Pi.
+
+Confirm that Pi loaded the extension:
+
+```bash
+pi list
+```
+
+You should see:
+
+```text
+npm:@mmprotest/pi-villani
+```
+
+### Run Villani in Pi
+
+Open a terminal in a Git repository and launch Pi:
+
+```bash
+cd /path/to/repository
+pi
+```
+
+Then invoke Villani:
+
+```text
+/villani Fix the failing tests and verify the result
+```
+
+Stop an active run with:
+
+```text
+/villani-abort
+```
+
+
+### Update or uninstall the Pi extension
+
+Update:
+
+```bash
+pi update npm:@mmprotest/pi-villani
+```
+
+Uninstall:
+
+```bash
+pi remove npm:@mmprotest/pi-villani
+```
+
+### Pi troubleshooting
+
+If `/villani` does not appear, run `pi list` and reinstall the package.
+
+If Pi shows `/villani:1`, remove duplicate local or npm extension installs, then install only:
+
+```bash
+pi install npm:@mmprotest/pi-villani
+```
+
+If a local model fails, test it with a normal Pi prompt before running Villani and confirm that the endpoint includes `/v1` and the model ID matches the configured model.
