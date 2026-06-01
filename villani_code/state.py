@@ -5,12 +5,14 @@ import ast
 import json
 import re
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
 from rich.console import Console
 
 from villani_code.autonomous import VillaniModeConfig, VillaniModeController
+from villani_code.acceptance_probe import AcceptanceProbeState, parse_bash_result
 from villani_code.autonomy import (
     FailureClassifier,
     VerificationEngine,
@@ -538,6 +540,8 @@ class Runner:
                     "GitCheckout(*)",
                     "GitCommit(*)",
                     "SubmitPlan(*)",
+                    "DefineAcceptanceProbe(*)",
+                    "MarkAcceptanceProbeNotApplicable(*)",
                     "ExecutionPlan(*)",
                 ],
             ),
@@ -598,6 +602,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._acceptance_probe = AcceptanceProbeState()
         if self.small_model:
             self._init_small_model_support()
 
@@ -944,6 +949,7 @@ class Runner:
         benchmark_mutation_denials = 0
         benchmark_denial_limit = 3
         request_is_code_change_oriented = _is_code_change_oriented_request(instruction)
+        self._acceptance_probe = AcceptanceProbeState(acceptance_probe_required=bool(request_is_code_change_oriented and self._runtime_mode == "execution" and not self._planning_read_only))
         meaningful_repo_edit_made = False
         prose_edit_intent_recovery_attempts = 0
         baseline_changed = set(self._git_changed_files())
@@ -1004,6 +1010,7 @@ class Runner:
             "success_predicate": success_predicates.get(self._task_mode, success_predicates[TaskMode.GENERAL]),
             "preferred_targets": preferred_targets[:6],
             "no_go_paths": sorted(set(no_go_paths)),
+            "acceptance_probe_required": self._acceptance_probe.acceptance_probe_required,
         }
         system = build_system_blocks(
             self.repo,
@@ -1023,6 +1030,8 @@ class Runner:
                             "text": (
                                 f"Task contract ({self._task_contract['task_mode']}): name likely target file first (prefer {preferred_text}); "
                                 f"keep scope tight; verify against: {self._task_contract['success_predicate']}; avoid speculative multi-file edits."
+                                " Define the smallest runnable acceptance probe with DefineAcceptanceProbe before or during the first bounded change when a local check is possible; "
+                                "use MarkAcceptanceProbeNotApplicable only with a concrete reason. After changes, run that probe and repair observed failures before completion."
                                 " Stop if verification repeats without new evidence."
                             ),
                         }
@@ -1053,6 +1062,52 @@ class Runner:
             ]
             return bool(meaningful)
 
+        def _probe_dict() -> dict[str, Any]:
+            return self._acceptance_probe.to_dict()
+
+        def _emit_probe_event(event_type: str, **payload: Any) -> None:
+            self.event_callback({"type": event_type, "acceptance_probe": _probe_dict(), **payload})
+
+        def _mark_probe_stale(reason: str) -> None:
+            before = self._acceptance_probe.acceptance_probe_status
+            self._acceptance_probe.mark_stale(reason)
+            if self._acceptance_probe.acceptance_probe_status != before:
+                transcript.setdefault("acceptance_probe_events", []).append(asdict(self._acceptance_probe.events[-1]))
+                _emit_probe_event("acceptance_probe_stale", reason=reason)
+
+        def _record_probe_from_result(result: dict[str, Any]) -> bool:
+            parsed = parse_bash_result(str(result.get("content", "")))
+            if parsed is None:
+                return False
+            command, exit_code, stdout, stderr = parsed
+            if not self._acceptance_probe.matches_command(command):
+                return False
+            self._acceptance_probe.record_execution(command, exit_code, stdout, stderr)
+            transcript.setdefault("acceptance_probe_events", []).append(asdict(self._acceptance_probe.events[-1]))
+            _emit_probe_event(
+                "acceptance_probe_executed",
+                command=command,
+                exit_code=exit_code,
+                status=self._acceptance_probe.acceptance_probe_status,
+            )
+            return True
+
+        def _completion_probe_blocker() -> str | None:
+            return self._acceptance_probe.completion_blocker()
+
+        def _probe_redirect_message(blocker: str) -> str:
+            state = self._acceptance_probe
+            if state.acceptance_probe_status == "failed":
+                return state.failed_probe_context()
+            commands = "\n".join(state.acceptance_probe_commands) or "<not defined>"
+            return (
+                f"Acceptance probe gate: {blocker}\n"
+                f"Current probe status: {state.acceptance_probe_status}.\n"
+                f"Probe commands:\n{commands}\n\n"
+                "Define/run the smallest executable acceptance probe, or record a not-applicable reason if no local execution check is meaningful. "
+                "Do not complete until a required probe has passed after the latest relevant mutation."
+            )
+
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
         ) -> dict[str, Any]:
@@ -1080,7 +1135,10 @@ class Runner:
                 terminated_reason=reason,
                 completed=completed,
             )
-            transcript["execution"] = execution.to_dict()
+            transcript["acceptance_probe"] = _probe_dict()
+            execution_dict = execution.to_dict()
+            execution_dict["acceptance_probe"] = _probe_dict()
+            transcript["execution"] = execution_dict
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = None
             if not self._planning_read_only:
@@ -1105,7 +1163,7 @@ class Runner:
                 "messages": messages,
                 "transcript_path": str(transcript_path) if transcript_path is not None else "",
                 "transcript": transcript,
-                "execution": execution.to_dict(),
+                "execution": execution_dict,
             }
 
         def _budget_reason(
@@ -1206,11 +1264,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1272,6 +1325,10 @@ class Runner:
                         reminder = "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue."
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                        continue
+                    blocker = _completion_probe_blocker()
+                    if blocker:
+                        messages.append({"role": "user", "content": [{"type": "text", "text": _probe_redirect_message(blocker)}]})
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -1433,9 +1490,14 @@ class Runner:
                         }
                     )
                     continue
+                blocker = _completion_probe_blocker()
+                if blocker:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": _probe_redirect_message(blocker)}]})
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                transcript["acceptance_probe"] = _probe_dict()
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
@@ -1492,22 +1554,56 @@ class Runner:
                         "transcript": transcript,
                     }
 
-                result = self._execute_tool_with_policy(
-                    tool_name, tool_input, tool_use_id, len(messages)
-                )
-                tool_calls_used += 1
+                if tool_name == "DefineAcceptanceProbe":
+                    try:
+                        self._acceptance_probe.define(
+                            [str(c) for c in tool_input.get("commands", [])],
+                            str(tool_input.get("description", "") or "") or None,
+                            bool(tool_input.get("runnable", True)),
+                        )
+                        transcript.setdefault("acceptance_probe_events", []).append(asdict(self._acceptance_probe.events[-1]))
+                        _emit_probe_event("acceptance_probe_defined")
+                        result = {"content": "Acceptance probe defined. Run it with Bash after each meaningful mutation; completion is gated on a passed, non-stale result.", "is_error": False}
+                    except Exception as exc:
+                        result = {"content": f"Invalid acceptance probe definition: {exc}", "is_error": True}
+                    tool_calls_used += 1
+                elif tool_name == "MarkAcceptanceProbeNotApplicable":
+                    try:
+                        self._acceptance_probe.mark_not_applicable(str(tool_input.get("reason", "")))
+                        transcript.setdefault("acceptance_probe_events", []).append(asdict(self._acceptance_probe.events[-1]))
+                        _emit_probe_event("acceptance_probe_not_applicable")
+                        result = {"content": "Acceptance probe marked not applicable; existing completion path may continue.", "is_error": False}
+                    except Exception as exc:
+                        result = {"content": f"Invalid acceptance probe not-applicable reason: {exc}", "is_error": True}
+                    tool_calls_used += 1
+                else:
+                    result = self._execute_tool_with_policy(
+                        tool_name, tool_input, tool_use_id, len(messages)
+                    )
+                    tool_calls_used += 1
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
                         self._files_read.add(str(tool_input.get("file_path", "")))
 
+                probe_was_run = False
+                if tool_name == "Bash" and not result.get("is_error"):
+                    probe_was_run = _record_probe_from_result(result)
+
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    _mark_probe_stale(f"{tool_name} modified workspace")
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
                     self._patch_effect_check_pending = True
                     self._patch_effect_check_attempts = 0
                 elif tool_name == "Bash":
+                    if (
+                        not probe_was_run
+                        and not result.get("is_error")
+                        and self._is_mutating_tool_call(tool_name, tool_input)
+                    ):
+                        _mark_probe_stale("mutating Bash command modified environment or artifacts")
                     self._pending_verification = self._run_verification(
                         trigger=f"{tool_name} execution"
                     )
@@ -1636,7 +1732,15 @@ class Runner:
                     else self._pending_verification
                 )
                 self._pending_verification = ""
+            probe_followup_text = ""
+            if self._acceptance_probe.acceptance_probe_status == "failed":
+                probe_followup_text = self._acceptance_probe.failed_probe_context()
+            elif self._acceptance_probe.acceptance_probe_status == "stale":
+                commands = "\n".join(self._acceptance_probe.acceptance_probe_commands)
+                probe_followup_text = "A meaningful mutation made the acceptance probe stale. Strongly prioritize rerunning the acceptance probe before further exploratory changes.\nProbe commands:\n" + commands
             messages.append({"role": "user", "content": next_user_content})
+            if probe_followup_text:
+                messages.append({"role": "user", "content": [{"type": "text", "text": probe_followup_text}]})
 
             reason = _budget_reason()
             if reason:
@@ -1814,6 +1918,7 @@ class Runner:
             if hasattr(self._mission_state, key):
                 setattr(self._mission_state, key, value)
         self._mission_state.intended_targets = sorted(self._intended_targets)
+        self._mission_state.acceptance_probe = self._acceptance_probe.to_dict()
         if self._mission_state.status == "active":
             self._mission_state.changed_files = self._git_changed_files()
         save_mission_state(self.repo, self._mission_state)

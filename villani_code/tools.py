@@ -82,6 +82,18 @@ class GitSimpleInput(BaseModel):
     args: list[str] = Field(default_factory=list)
 
 
+class DefineAcceptanceProbeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    commands: list[str]
+    description: str | None = None
+    runnable: bool = True
+
+
+class MarkAcceptanceProbeNotApplicableInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str
+
+
 class SubmitPlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     task_summary: str
@@ -109,6 +121,8 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
     "GitBranch": GitSimpleInput,
     "GitCheckout": GitSimpleInput,
     "GitCommit": GitSimpleInput,
+    "DefineAcceptanceProbe": DefineAcceptanceProbeInput,
+    "MarkAcceptanceProbeNotApplicable": MarkAcceptanceProbeNotApplicableInput,
     "SubmitPlan": SubmitPlanInput,
 }
 
@@ -173,6 +187,10 @@ def execute_tool(
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
             return _ok(_run_git(name, parsed, repo))
+        if name == "DefineAcceptanceProbe":
+            return _ok("Acceptance probe definition submitted")
+        if name == "MarkAcceptanceProbeNotApplicable":
+            return _ok("Acceptance probe marked not applicable")
         if name == "SubmitPlan":
             return _ok("Plan artifact submitted")
     except Exception as exc:
