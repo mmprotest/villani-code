@@ -50,6 +50,7 @@ from villani_code.state_execution import (
     collect_validation_artifacts,
     summarize_changes,
 )
+from villani_code.verification_debt import VerificationDebtState
 from villani_code.utils import (
     is_path_within,
     is_effectively_empty_content,
@@ -564,6 +565,7 @@ class Runner:
         )
         self._files_read: set[str] = set()
         self._pending_verification = ""
+        self._verification_debt_state = VerificationDebtState()
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
         self._current_verification_targets: set[str] = set()
@@ -948,6 +950,7 @@ class Runner:
         prose_edit_intent_recovery_attempts = 0
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
+        self._verification_debt_state = VerificationDebtState()
         self._intended_targets: set[str] = set()
         self._before_contents: dict[str, str] = {}
         self._current_verification_targets: set[str] = set()
@@ -1081,6 +1084,14 @@ class Runner:
                 completed=completed,
             )
             transcript["execution"] = execution.to_dict()
+            transcript["verification_debt"] = self._verification_debt_state.to_dict()
+            self.event_callback({
+                "type": "verification_debt_completion",
+                "verification_debt": self._verification_debt_state.verification_debt,
+                "unresolved_verification_debt": self._verification_debt_state.verification_debt >= self._verification_debt_state.threshold,
+                "last_validation_result": self._verification_debt_state.last_validation_result,
+                "completed": completed,
+            })
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = None
             if not self._planning_read_only:
@@ -1206,11 +1217,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1277,6 +1283,14 @@ class Runner:
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
+                    transcript["verification_debt"] = self._verification_debt_state.to_dict()
+                    self.event_callback({
+                        "type": "verification_debt_completion",
+                        "verification_debt": self._verification_debt_state.verification_debt,
+                        "unresolved_verification_debt": self._verification_debt_state.verification_debt >= self._verification_debt_state.threshold,
+                        "last_validation_result": self._verification_debt_state.last_validation_result,
+                        "completed": True,
+                    })
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
                     if post:
@@ -1437,6 +1451,14 @@ class Runner:
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
+                transcript["verification_debt"] = self._verification_debt_state.to_dict()
+                self.event_callback({
+                    "type": "verification_debt_completion",
+                    "verification_debt": self._verification_debt_state.verification_debt,
+                    "unresolved_verification_debt": self._verification_debt_state.verification_debt >= self._verification_debt_state.threshold,
+                    "last_validation_result": self._verification_debt_state.last_validation_result,
+                    "completed": True,
+                })
                 transcript_path = None
                 if not self._planning_read_only:
                     transcript_path = self._save_transcript_and_link(transcript)
@@ -1459,6 +1481,7 @@ class Runner:
                 }
 
             tool_results: list[dict[str, Any]] = []
+            verification_guidance: list[str] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
@@ -1496,6 +1519,9 @@ class Runner:
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
                 tool_calls_used += 1
+                debt_guidance = self._record_verification_debt_action(tool_name, tool_input, result)
+                if debt_guidance:
+                    verification_guidance.append(debt_guidance)
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
@@ -1628,6 +1654,14 @@ class Runner:
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
             next_user_content = copy.deepcopy(tool_results)
+            if verification_guidance and next_user_content:
+                existing = str(next_user_content[-1].get("content", ""))
+                guidance_text = "\n\n".join(verification_guidance)
+                next_user_content[-1]["content"] = (
+                    f"{existing}\n\n{guidance_text}"
+                    if existing
+                    else guidance_text
+                )
             if self._pending_verification and next_user_content:
                 existing = str(next_user_content[-1].get("content", ""))
                 next_user_content[-1]["content"] = (
@@ -1641,6 +1675,53 @@ class Runner:
             reason = _budget_reason()
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
+
+
+    def _record_verification_debt_action(
+        self, tool_name: str, tool_input: dict[str, Any], result: dict[str, Any]
+    ) -> str:
+        state = self._verification_debt_state
+        event = state.record_action(tool_name, tool_input, result)
+        self.event_callback({"type": "verification_action_classified", **event})
+        guidance_parts: list[str] = []
+        if event.get("validation_result") == "useful_failure":
+            guidance = state.build_failed_validation_guidance()
+            if guidance:
+                guidance_parts.append(guidance)
+                self.event_callback(
+                    {
+                        "type": "verification_validation_summary",
+                        "action": state.last_validation_action,
+                        "result": state.last_validation_result,
+                        "summary": state.last_validation_summary,
+                        "verification_debt": state.verification_debt,
+                    }
+                )
+        elif event.get("validation_result") == "useful_success":
+            self.event_callback(
+                {
+                    "type": "verification_validation_summary",
+                    "action": state.last_validation_action,
+                    "result": state.last_validation_result,
+                    "summary": state.last_validation_summary,
+                    "verification_debt": state.verification_debt,
+                }
+            )
+        if state.should_intervene():
+            intervention = state.build_validation_intervention()
+            guidance_parts.append(intervention)
+            self.event_callback(
+                {
+                    "type": "verification_debt_intervention",
+                    "verification_debt": state.verification_debt,
+                    "actions_since_validation": state.actions_since_validation,
+                    "mutations_since_validation": state.mutations_since_validation,
+                    "recent_mutations": list(state.recent_mutations[-5:]),
+                    "last_validation_result": state.last_validation_result,
+                    "intervention_count": state.validation_intervention_count,
+                }
+            )
+        return "\n\n".join(guidance_parts)
 
     def _is_mutating_tool_call(
         self, tool_name: str, tool_input: dict[str, Any]
