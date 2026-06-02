@@ -241,6 +241,14 @@ class DebugRecorder:
             "summary": str(summary or payload_data.get("content", ""))[:_RESULT_PREVIEW_LIMIT],
         }
 
+
+    def record_evidence_loop(self, payload: dict[str, Any]) -> None:
+        self._safe_append_jsonl("evidence_loop", {"ts": self._ts(), "payload": payload})
+        self._emit("evidence_loop_checkpoint", payload)
+
+    def write_evidence_loop_state(self, payload: dict[str, Any]) -> None:
+        self._safe_write_json(self.artifacts.path("evidence_loop_state.json"), payload)
+
     def record_command_start(self, command: str, cwd: str, tool_call_id: str = "", turn_index: int | None = None) -> None:
         self.record_event(
             "command_started",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import ast
+from dataclasses import asdict
 import json
 import re
 import time
@@ -20,6 +21,14 @@ from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
+from villani_code.evidence_loop import (
+    EvidenceLoopState,
+    EvidenceRecord,
+    completion_redirect,
+    evaluate_checkpoint,
+    maybe_build_intervention,
+    record_tool_result as record_evidence_tool_result,
+)
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
@@ -598,6 +607,7 @@ class Runner:
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
         self._current_turn_index: int | None = None
+        self._evidence_loop_state = EvidenceLoopState()
         if self.small_model:
             self._init_small_model_support()
 
@@ -835,13 +845,31 @@ class Runner:
                 ):
                     required_initial_read = diagnosed_target_file
         tools = tool_specs()
+        evidence_loop = EvidenceLoopState(current_goal=instruction, current_subgoal=instruction)
+        self._evidence_loop_state = evidence_loop
         transcript: dict[str, Any] = {
             "requests": [],
             "responses": [],
             "tool_invocations": [],
             "tool_results": [],
             "streamed_events_count": 0,
+            "evidence_loop": evidence_loop.to_dict(),
         }
+
+        def _record_evidence_loop_checkpoint(kind: str, payload: dict[str, Any] | None = None) -> None:
+            data = {"kind": kind, "state": evidence_loop.to_dict(), **(payload or {})}
+            transcript["evidence_loop"] = evidence_loop.to_dict()
+            self.event_callback({"type": "evidence_loop_checkpoint", "kind": kind, **(payload or {})})
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_evidence_loop(data)
+                self._debug_recorder.write_evidence_loop_state(evidence_loop.to_dict())
+
+        def _append_text_to_last_tool_result(content_blocks: list[dict[str, Any]], text: str) -> None:
+            if not content_blocks:
+                return
+            existing = str(content_blocks[-1].get("content", ""))
+            content_blocks[-1]["content"] = f"{existing}\n\n{text}" if existing else text
+
         self.event_callback(
             {
                 "type": "diagnosis_target_forced_read",
@@ -946,6 +974,7 @@ class Runner:
         request_is_code_change_oriented = _is_code_change_oriented_request(instruction)
         meaningful_repo_edit_made = False
         prose_edit_intent_recovery_attempts = 0
+        evidence_completion_rejections = 0
         baseline_changed = set(self._git_changed_files())
         self._verification_baseline_changed = set(baseline_changed)
         self._intended_targets: set[str] = set()
@@ -1081,6 +1110,8 @@ class Runner:
                 completed=completed,
             )
             transcript["execution"] = execution.to_dict()
+            transcript["evidence_loop"] = evidence_loop.to_dict()
+            _record_evidence_loop_checkpoint("finish", {"reason": reason, "completed": completed})
             transcript["final_assistant_content"] = response.get("content", [])
             transcript_path = None
             if not self._planning_read_only:
@@ -1206,11 +1237,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1273,9 +1299,18 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
+                    completion_eval = evaluate_checkpoint(evidence_loop, trigger="completion", final_text="", turn_index=turns_used)
+                    _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval)})
+                    if completion_eval.required_next_mode != "finish":
+                        evidence_completion_rejections += 1
+                        if evidence_completion_rejections > 2:
+                            return _finish_bounded(response, "unsupported_completion", False)
+                        messages.append({"role": "user", "content": [{"type": "text", "text": completion_redirect(completion_eval)}]})
+                        continue
                     reason = _budget_reason(completed=True)
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
+                    transcript["evidence_loop"] = evidence_loop.to_dict()
                     transcript["final_assistant_content"] = response.get("content", [])
                     transcript_path = self._save_transcript_and_link(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
@@ -1405,8 +1440,38 @@ class Runner:
                     self._patch_effect_check_attempts += 1
                     check_observation = self._run_patch_effect_check(response, _attributed_changed_files(), instruction)
                     if check_observation:
+                        if check_observation.startswith("Patch-effect check was inconclusive"):
+                            patch_evidence = EvidenceRecord(
+                                kind="side_evaluation",
+                                source_action=evidence_loop.last_material_action,
+                                observation=check_observation,
+                                supports=evidence_loop.current_subgoal or evidence_loop.current_goal,
+                                contradicts=None,
+                                timestamp_or_turn=turns_used,
+                            )
+                            evidence_loop.current_evidence.append(patch_evidence)
+                            evidence_loop.completion_evidence.append(patch_evidence)
+                            evidence_loop.last_observation = patch_evidence.observation
+                            evidence_loop.last_observation_supports_progress = True
+                            evidence_loop.consecutive_actions_without_observation = 0
+                            _record_evidence_loop_checkpoint("side_evaluation_observed", {"source": "patch_effect_check", "status": "inconclusive"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": check_observation}]})
                         continue
+                    if not self._patch_effect_check_pending and evidence_loop.consecutive_actions_without_observation > 0:
+                        patch_evidence = EvidenceRecord(
+                            kind="side_evaluation",
+                            source_action=evidence_loop.last_material_action,
+                            observation="Patch-effect check found the latest material change consistent with its stated intended effect.",
+                            supports=evidence_loop.current_subgoal or evidence_loop.current_goal,
+                            contradicts=None,
+                            timestamp_or_turn=turns_used,
+                        )
+                        evidence_loop.current_evidence.append(patch_evidence)
+                        evidence_loop.completion_evidence.append(patch_evidence)
+                        evidence_loop.last_observation = patch_evidence.observation
+                        evidence_loop.last_observation_supports_progress = True
+                        evidence_loop.consecutive_actions_without_observation = 0
+                        _record_evidence_loop_checkpoint("side_evaluation_observed", {"source": "patch_effect_check"})
                 assistant_text = "\n".join(
                     str(block.get("text", ""))
                     for block in response.get("content", [])
@@ -1433,9 +1498,18 @@ class Runner:
                         }
                     )
                     continue
+                completion_eval = evaluate_checkpoint(evidence_loop, trigger="completion", final_text=assistant_text, turn_index=turns_used)
+                _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval)})
+                if completion_eval.required_next_mode != "finish":
+                    evidence_completion_rejections += 1
+                    if evidence_completion_rejections > 2:
+                        return _finish_bounded(response, "unsupported_completion", False)
+                    messages.append({"role": "user", "content": [{"type": "text", "text": completion_redirect(completion_eval)}]})
+                    continue
                 reason = _budget_reason(completed=True)
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+                transcript["evidence_loop"] = evidence_loop.to_dict()
                 transcript["final_assistant_content"] = response.get("content", [])
                 transcript_path = None
                 if not self._planning_read_only:
@@ -1459,6 +1533,7 @@ class Runner:
                 }
 
             tool_results: list[dict[str, Any]] = []
+            evidence_redirects: list[str] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
@@ -1583,10 +1658,30 @@ class Runner:
                         "is_error": result["is_error"],
                     }
                 )
+                evidence_redirects.extend(
+                    record_evidence_tool_result(
+                        evidence_loop,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        result=result,
+                        turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
+                    )
+                )
+                _record_evidence_loop_checkpoint("tool_result_observed", {"tool_name": tool_name, "tool_use_id": tool_use_id})
 
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
+
+            trajectory_redirect = maybe_build_intervention(
+                evidence_loop,
+                turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
+            )
+            if trajectory_redirect:
+                evidence_redirects.append(trajectory_redirect)
+            if evidence_redirects and tool_results:
+                _append_text_to_last_tool_result(tool_results, "\n\n".join(_dedupe_preserve(evidence_redirects)))
+                _record_evidence_loop_checkpoint("intervention", {"messages": _dedupe_preserve(evidence_redirects)})
 
             if tool_results and any(
                 not r.get("is_error")

@@ -32,6 +32,7 @@ DEBUG_JSONL_FILES = {
     "validations": "validations.jsonl",
     "model_requests": "model_requests.jsonl",
     "model_responses": "model_responses.jsonl",
+    "evidence_loop": "evidence_loop.jsonl",
 }
 
 
