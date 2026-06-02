@@ -23,10 +23,11 @@ from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
 from villani_code.evidence_loop import (
     EvidenceLoopState,
-    EvidenceRecord,
-    completion_redirect,
-    evaluate_checkpoint,
-    maybe_build_intervention,
+    build_intervention_message,
+    completion_is_allowed,
+    invoke_semantic_evaluator,
+    record_intervention,
+    record_observation as record_evidence_observation,
     record_tool_result as record_evidence_tool_result,
 )
 from villani_code.hooks import HookRunner
@@ -1299,13 +1300,16 @@ class Runner:
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                         continue
-                    completion_eval = evaluate_checkpoint(evidence_loop, trigger="completion", final_text="", turn_index=turns_used)
-                    _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval)})
-                    if completion_eval.required_next_mode != "finish":
+                    evidence_loop.completion_attempts.append({"turn": turns_used, "final_text": ""})
+                    completion_eval = invoke_semantic_evaluator(self.client, self.model, evidence_loop, trigger="completion", attempted_completion="")
+                    _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval), "allowed": completion_is_allowed(completion_eval)})
+                    if not completion_is_allowed(completion_eval):
                         evidence_completion_rejections += 1
                         if evidence_completion_rejections > 2:
                             return _finish_bounded(response, "unsupported_completion", False)
-                        messages.append({"role": "user", "content": [{"type": "text", "text": completion_redirect(completion_eval)}]})
+                        redirect = build_intervention_message(completion_eval, trigger="completion", state=evidence_loop)
+                        record_intervention(evidence_loop, turn_id=turns_used, kind="completion_rejected", message=redirect, evaluation=completion_eval)
+                        messages.append({"role": "user", "content": [{"type": "text", "text": redirect}]})
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -1440,38 +1444,25 @@ class Runner:
                     self._patch_effect_check_attempts += 1
                     check_observation = self._run_patch_effect_check(response, _attributed_changed_files(), instruction)
                     if check_observation:
-                        if check_observation.startswith("Patch-effect check was inconclusive"):
-                            patch_evidence = EvidenceRecord(
-                                kind="side_evaluation",
-                                source_action=evidence_loop.last_material_action,
-                                observation=check_observation,
-                                supports=evidence_loop.current_subgoal or evidence_loop.current_goal,
-                                contradicts=None,
-                                timestamp_or_turn=turns_used,
-                            )
-                            evidence_loop.current_evidence.append(patch_evidence)
-                            evidence_loop.completion_evidence.append(patch_evidence)
-                            evidence_loop.last_observation = patch_evidence.observation
-                            evidence_loop.last_observation_supports_progress = True
-                            evidence_loop.consecutive_actions_without_observation = 0
-                            _record_evidence_loop_checkpoint("side_evaluation_observed", {"source": "patch_effect_check", "status": "inconclusive"})
+                        record_evidence_observation(
+                            evidence_loop,
+                            source="patch_effect_check",
+                            observation_summary=check_observation,
+                            turn_index=turns_used,
+                            operational_error="Patch-effect check was inconclusive." if check_observation.startswith("Patch-effect check was inconclusive") else None,
+                        )
+                        _record_evidence_loop_checkpoint("side_observation_recorded", {"source": "patch_effect_check"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": check_observation}]})
                         continue
-                    if not self._patch_effect_check_pending and evidence_loop.consecutive_actions_without_observation > 0:
-                        patch_evidence = EvidenceRecord(
-                            kind="side_evaluation",
-                            source_action=evidence_loop.last_material_action,
-                            observation="Patch-effect check found the latest material change consistent with its stated intended effect.",
-                            supports=evidence_loop.current_subgoal or evidence_loop.current_goal,
-                            contradicts=None,
-                            timestamp_or_turn=turns_used,
+                    if not self._patch_effect_check_pending:
+                        record_evidence_observation(
+                            evidence_loop,
+                            source="patch_effect_check",
+                            observation_summary="Patch-effect check found the latest material change consistent with its stated intended effect.",
+                            turn_index=turns_used,
                         )
-                        evidence_loop.current_evidence.append(patch_evidence)
-                        evidence_loop.completion_evidence.append(patch_evidence)
-                        evidence_loop.last_observation = patch_evidence.observation
-                        evidence_loop.last_observation_supports_progress = True
-                        evidence_loop.consecutive_actions_without_observation = 0
-                        _record_evidence_loop_checkpoint("side_evaluation_observed", {"source": "patch_effect_check"})
+                        evidence_loop.consecutive_material_actions_without_evaluation = 0
+                        _record_evidence_loop_checkpoint("side_observation_recorded", {"source": "patch_effect_check"})
                 assistant_text = "\n".join(
                     str(block.get("text", ""))
                     for block in response.get("content", [])
@@ -1498,13 +1489,16 @@ class Runner:
                         }
                     )
                     continue
-                completion_eval = evaluate_checkpoint(evidence_loop, trigger="completion", final_text=assistant_text, turn_index=turns_used)
-                _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval)})
-                if completion_eval.required_next_mode != "finish":
+                evidence_loop.completion_attempts.append({"turn": turns_used, "final_text": assistant_text})
+                completion_eval = invoke_semantic_evaluator(self.client, self.model, evidence_loop, trigger="completion", attempted_completion=assistant_text)
+                _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval), "allowed": completion_is_allowed(completion_eval)})
+                if not completion_is_allowed(completion_eval):
                     evidence_completion_rejections += 1
                     if evidence_completion_rejections > 2:
                         return _finish_bounded(response, "unsupported_completion", False)
-                    messages.append({"role": "user", "content": [{"type": "text", "text": completion_redirect(completion_eval)}]})
+                    redirect = build_intervention_message(completion_eval, trigger="completion", state=evidence_loop)
+                    record_intervention(evidence_loop, turn_id=turns_used, kind="completion_rejected", message=redirect, evaluation=completion_eval)
+                    messages.append({"role": "user", "content": [{"type": "text", "text": redirect}]})
                     continue
                 reason = _budget_reason(completed=True)
                 if reason:
@@ -1658,14 +1652,13 @@ class Runner:
                         "is_error": result["is_error"],
                     }
                 )
-                evidence_redirects.extend(
-                    record_evidence_tool_result(
-                        evidence_loop,
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        result=result,
-                        turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
-                    )
+                record_evidence_tool_result(
+                    evidence_loop,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    result=result,
+                    turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
+                    tool_use_id=tool_use_id,
                 )
                 _record_evidence_loop_checkpoint("tool_result_observed", {"tool_name": tool_name, "tool_use_id": tool_use_id})
 
@@ -1673,12 +1666,26 @@ class Runner:
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
 
-            trajectory_redirect = maybe_build_intervention(
-                evidence_loop,
-                turn_index=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
-            )
-            if trajectory_redirect:
-                evidence_redirects.append(trajectory_redirect)
+            trajectory_trigger = ""
+            if any(r.get("is_error") for r in tool_results):
+                trajectory_trigger = "failure"
+            elif evidence_loop.repeated_failure_or_stall_count > 0 or evidence_loop.repeated_action_count >= 3:
+                trajectory_trigger = "stall"
+            elif evidence_loop.consecutive_material_actions_without_evaluation >= 2:
+                trajectory_trigger = "trajectory"
+            if trajectory_trigger:
+                trajectory_eval = invoke_semantic_evaluator(self.client, self.model, evidence_loop, trigger=trajectory_trigger)
+                _record_evidence_loop_checkpoint("trajectory_evaluation", {"trigger": trajectory_trigger, "evaluation": asdict(trajectory_eval)})
+                if trajectory_eval.required_next_mode in {"observe_result", "repair_from_failure", "replan", "gather_completion_evidence"} or trajectory_eval.status in {"unverified", "stalled", "blocked"}:
+                    trajectory_redirect = build_intervention_message(trajectory_eval, trigger=trajectory_trigger, state=evidence_loop)
+                    record_intervention(
+                        evidence_loop,
+                        turn_id=self._current_turn_index if isinstance(self._current_turn_index, int) else turns_used,
+                        kind=trajectory_eval.required_next_mode,
+                        message=trajectory_redirect,
+                        evaluation=trajectory_eval,
+                    )
+                    evidence_redirects.append(trajectory_redirect)
             if evidence_redirects and tool_results:
                 _append_text_to_last_tool_result(tool_results, "\n\n".join(_dedupe_preserve(evidence_redirects)))
                 _record_evidence_loop_checkpoint("intervention", {"messages": _dedupe_preserve(evidence_redirects)})
