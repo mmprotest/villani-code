@@ -1302,8 +1302,8 @@ class Runner:
                         continue
                     evidence_loop.completion_attempts.append({"turn": turns_used, "final_text": ""})
                     completion_eval = invoke_semantic_evaluator(self.client, self.model, evidence_loop, trigger="completion", attempted_completion="")
-                    _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval), "allowed": completion_is_allowed(completion_eval)})
-                    if not completion_is_allowed(completion_eval):
+                    _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval), "allowed": completion_is_allowed(completion_eval, evidence_loop)})
+                    if not completion_is_allowed(completion_eval, evidence_loop):
                         evidence_completion_rejections += 1
                         if evidence_completion_rejections > 2:
                             return _finish_bounded(response, "unsupported_completion", False)
@@ -1491,8 +1491,8 @@ class Runner:
                     continue
                 evidence_loop.completion_attempts.append({"turn": turns_used, "final_text": assistant_text})
                 completion_eval = invoke_semantic_evaluator(self.client, self.model, evidence_loop, trigger="completion", attempted_completion=assistant_text)
-                _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval), "allowed": completion_is_allowed(completion_eval)})
-                if not completion_is_allowed(completion_eval):
+                _record_evidence_loop_checkpoint("completion_evaluation", {"evaluation": asdict(completion_eval), "allowed": completion_is_allowed(completion_eval, evidence_loop)})
+                if not completion_is_allowed(completion_eval, evidence_loop):
                     evidence_completion_rejections += 1
                     if evidence_completion_rejections > 2:
                         return _finish_bounded(response, "unsupported_completion", False)

@@ -18,12 +18,14 @@ from villani_code.evidence_loop import (
 from villani_code.state import Runner
 
 
-def _json_eval(status: str, mode: str, support: list[str] | None = None, missing: list[str] | None = None, **extra: Any) -> dict[str, Any]:
+def _json_eval(status: str, mode: str, support: list[str] | None = None, missing: list[str] | None = None, supporting_ids: list[str] | None = None, contradicting_ids: list[str] | None = None, **extra: Any) -> dict[str, Any]:
     payload = {
         "status": status,
         "goal_alignment_summary": extra.pop("goal_alignment_summary", "semantic assessment"),
         "supporting_evidence": support or [],
         "contradicting_evidence": extra.pop("contradicting_evidence", []),
+        "supporting_observation_ids": supporting_ids or [],
+        "contradicting_observation_ids": contradicting_ids or [],
         "missing_evidence": missing or [],
         "active_blocker": extra.pop("active_blocker", None),
         "unsupported_claims": extra.pop("unsupported_claims", []),
@@ -49,6 +51,13 @@ class EvalClient:
         return response
 
 
+def _observation_ids_from_evaluator_payload(payload: dict[str, Any]) -> list[str]:
+    text = payload["messages"][0]["content"][0]["text"]
+    marker = "Evaluation context JSON:\n"
+    context = json.loads(text.split(marker, 1)[1])
+    return [item["observation_id"] for item in context["recent_observations_neutral"]]
+
+
 def test_successful_operational_action_is_neutral_not_completion_evidence() -> None:
     state = EvidenceLoopState(current_goal="achieve requested outcome")
     record_tool_result(state, tool_name="Write", tool_input={"file_path": "neutral", "content": "x"}, result={"content": "operation succeeded", "is_error": False}, turn_index=1)
@@ -68,7 +77,7 @@ def test_successful_irrelevant_observation_is_neutral_until_evaluator_approves()
 
     assert state.raw_observation_count == 1
     assert state.completion_supporting_evidence == []
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_inconclusive_observation_is_never_positive_evidence() -> None:
@@ -80,7 +89,7 @@ def test_inconclusive_observation_is_never_positive_evidence() -> None:
 
     assert state.completion_supporting_evidence == []
     assert state.active_blocker is None or "inconclusive" in state.unresolved_uncertainties[-1]
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_completion_with_no_semantic_support_is_rejected_after_actions() -> None:
@@ -96,7 +105,7 @@ def test_completion_with_no_semantic_support_is_rejected_after_actions() -> None
     )
 
     assert state.completion_status == "unsupported"
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_zero_material_action_completion_is_still_evaluated_and_rejected() -> None:
@@ -112,7 +121,7 @@ def test_zero_material_action_completion_is_still_evaluated_and_rejected() -> No
 
     assert state.raw_action_count == 0
     assert state.completion_status == "unsupported"
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_completion_allowed_only_with_ready_finish_and_nonempty_support() -> None:
@@ -120,14 +129,14 @@ def test_completion_allowed_only_with_ready_finish_and_nonempty_support() -> Non
     record_observation(state, source="generic-observation", observation_summary="relevant observed outcome", turn_index=1)
 
     evaluation = invoke_semantic_evaluator(
-        EvalClient(_json_eval("ready_to_finish", "finish", support=["The observed outcome directly supports the final claim."])),
+        EvalClient(_json_eval("ready_to_finish", "finish", support=["The observed outcome directly supports the final claim."], supporting_ids=[state.recent_observations[-1].observation_id])),
         "m",
         state,
         trigger="completion",
         attempted_completion="Completed based on observed outcome.",
     )
 
-    assert completion_is_allowed(evaluation)
+    assert completion_is_allowed(evaluation, state)
     assert state.completion_status == "supported"
     assert state.completion_supporting_evidence == ["The observed outcome directly supports the final claim."]
 
@@ -136,8 +145,62 @@ def test_ready_finish_without_support_is_rejected() -> None:
     state = EvidenceLoopState(current_goal="complete outcome")
     evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("ready_to_finish", "finish", support=[])), "m", state, trigger="completion", attempted_completion="Done")
 
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
     assert state.completion_status == "unsupported"
+
+
+def test_free_text_support_without_observation_ids_is_rejected() -> None:
+    state = EvidenceLoopState(current_goal="complete outcome")
+    record_observation(state, source="generic-observation", observation_summary="relevant raw observation", turn_index=1)
+
+    evaluation = invoke_semantic_evaluator(
+        EvalClient(_json_eval("ready_to_finish", "finish", support=["Free-text support only."])),
+        "m",
+        state,
+        trigger="completion",
+        attempted_completion="Done",
+    )
+
+    assert not completion_is_allowed(evaluation, state)
+    assert state.completion_status == "unsupported"
+    assert "valid recorded supporting observation IDs" in state.completion_missing_evidence[-1]
+
+
+def test_unknown_supporting_observation_id_is_rejected_and_recorded() -> None:
+    state = EvidenceLoopState(current_goal="complete outcome")
+    record_observation(state, source="generic-observation", observation_summary="relevant raw observation", turn_index=1)
+
+    evaluation = invoke_semantic_evaluator(
+        EvalClient(_json_eval("ready_to_finish", "finish", support=["Cites an unknown observation."], supporting_ids=["obs-missing"])),
+        "m",
+        state,
+        trigger="completion",
+        attempted_completion="Done",
+    )
+
+    assert not completion_is_allowed(evaluation, state)
+    assert state.completion_status == "unsupported"
+    assert any("unknown observation_id" in item["error"] for item in state.evaluator_failures)
+    assert state.evaluator_failures[-1]["invalid_observation_ids"] == ["obs-missing"]
+
+
+def test_valid_observation_id_is_preserved_in_telemetry() -> None:
+    state = EvidenceLoopState(current_goal="complete outcome")
+    record_observation(state, source="generic-observation", observation_summary="relevant raw observation", turn_index=1)
+    observation_id = state.recent_observations[-1].observation_id
+
+    evaluation = invoke_semantic_evaluator(
+        EvalClient(_json_eval("ready_to_finish", "finish", support=["Cites valid observation."], supporting_ids=[observation_id])),
+        "m",
+        state,
+        trigger="completion",
+        attempted_completion="Done",
+    )
+
+    telemetry = state.to_dict()
+    assert completion_is_allowed(evaluation, state)
+    assert telemetry["recent_observations"][-1]["observation_id"] == observation_id
+    assert telemetry["evaluator_outputs"][-1]["evaluation"]["supporting_observation_ids"] == [observation_id]
 
 
 def test_malformed_evaluator_output_defaults_conservatively() -> None:
@@ -149,7 +212,7 @@ def test_malformed_evaluator_output_defaults_conservatively() -> None:
     assert evaluation.status == "unverified"
     assert evaluation.required_next_mode == "gather_completion_evidence"
     assert state.evaluator_failures
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_evaluator_failure_defaults_conservatively() -> None:
@@ -160,14 +223,14 @@ def test_evaluator_failure_defaults_conservatively() -> None:
     assert evaluation.status == "unverified"
     assert "timeout" in evaluation.reason
     assert state.evaluator_failures
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_raw_records_are_distinct_from_evaluator_approved_support() -> None:
     state = EvidenceLoopState(current_goal="complete outcome")
     record_tool_result(state, tool_name="GenericTool", tool_input={"name": "raw"}, result={"content": "raw observation", "is_error": False}, turn_index=1)
     evaluation = invoke_semantic_evaluator(
-        EvalClient(_json_eval("ready_to_finish", "finish", support=["Semantic evaluator selected this relevant observation."])),
+        EvalClient(_json_eval("ready_to_finish", "finish", support=["Semantic evaluator selected this relevant observation."], supporting_ids=[state.recent_observations[-1].observation_id])),
         "m",
         state,
         trigger="completion",
@@ -176,7 +239,7 @@ def test_raw_records_are_distinct_from_evaluator_approved_support() -> None:
 
     assert state.recent_observations[-1].observation_summary == "raw observation"
     assert state.completion_supporting_evidence != [state.recent_observations[-1].observation_summary]
-    assert completion_is_allowed(evaluation)
+    assert completion_is_allowed(evaluation, state)
 
 
 def test_intervention_uses_evaluator_required_mode_not_tool_or_command_pattern() -> None:
@@ -212,7 +275,7 @@ def test_adversarial_mutation_then_unrelated_success_still_rejected() -> None:
 
     evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("unverified", "gather_completion_evidence", missing=["Unrelated success does not support the requested outcome."])), "m", state, trigger="completion", attempted_completion="Done")
 
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
     assert state.completion_supporting_evidence == []
 
 
@@ -223,7 +286,7 @@ def test_adversarial_changed_artifact_then_unrelated_observation_rejected() -> N
 
     evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("unverified", "gather_completion_evidence", missing=["Observation was about an unrelated artifact."])), "m", state, trigger="completion", attempted_completion="Done")
 
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_adversarial_inconclusive_then_completion_rejected() -> None:
@@ -232,7 +295,7 @@ def test_adversarial_inconclusive_then_completion_rejected() -> None:
 
     evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("unverified", "gather_completion_evidence", missing=["The observation is inconclusive."])), "m", state, trigger="completion", attempted_completion="Confirmed")
 
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_adversarial_no_mutation_unsupported_conclusion_rejected() -> None:
@@ -240,7 +303,7 @@ def test_adversarial_no_mutation_unsupported_conclusion_rejected() -> None:
 
     evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("unverified", "gather_completion_evidence", missing=["No supporting evidence for the conclusion."])), "m", state, trigger="completion", attempted_completion="Unsupported conclusion")
 
-    assert not completion_is_allowed(evaluation)
+    assert not completion_is_allowed(evaluation, state)
 
 
 def test_adversarial_partial_despite_multiple_successful_tools_rejected() -> None:
@@ -250,17 +313,17 @@ def test_adversarial_partial_despite_multiple_successful_tools_rejected() -> Non
 
     evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("progressing", "gather_completion_evidence", support=["Some generic activity occurred."], missing=["Still missing evidence for the requested outcome."])), "m", state, trigger="completion", attempted_completion="Done")
 
-    assert not completion_is_allowed(evaluation)
-    assert state.completion_status == "partial"
+    assert not completion_is_allowed(evaluation, state)
+    assert state.completion_status == "unsupported"
 
 
 def test_adversarial_supported_relevant_observation_allowed() -> None:
     state = EvidenceLoopState(current_goal="specific outcome")
     record_observation(state, source="generic-observation", observation_summary="semantically relevant observed outcome", turn_index=1)
 
-    evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("ready_to_finish", "finish", support=["Semantically relevant observed outcome supports the final claim."])), "m", state, trigger="completion", attempted_completion="Done")
+    evaluation = invoke_semantic_evaluator(EvalClient(_json_eval("ready_to_finish", "finish", support=["Semantically relevant observed outcome supports the final claim."], supporting_ids=[state.recent_observations[-1].observation_id])), "m", state, trigger="completion", attempted_completion="Done")
 
-    assert completion_is_allowed(evaluation)
+    assert completion_is_allowed(evaluation, state)
 
 
 class EvidenceAwareRunnerClient:
@@ -276,7 +339,8 @@ class EvidenceAwareRunnerClient:
             self.eval_calls += 1
             if self.eval_calls == 1:
                 return _json_eval("unverified", "gather_completion_evidence", missing=["Need an observation tied to the requested outcome."], unsupported_claims=["The final claim is not yet evidenced."])
-            return _json_eval("ready_to_finish", "finish", support=["The later observation semantically supports the requested outcome."])
+            ids = _observation_ids_from_evaluator_payload(payload)
+            return _json_eval("ready_to_finish", "finish", support=["The later observation semantically supports the requested outcome."], supporting_ids=[ids[-1]])
         self.main_calls += 1
         if self.main_calls == 1:
             return {"role": "assistant", "content": [{"type": "tool_use", "id": "work", "name": "Write", "input": {"file_path": "artifact.txt", "content": "result"}}]}
@@ -317,7 +381,8 @@ class StalledRunnerClient:
             self.eval_calls += 1
             if self.eval_calls == 1:
                 return _json_eval("unverified", "observe_result", missing=["No demonstrated consequence of the repeated work."])
-            return _json_eval("ready_to_finish", "finish", support=["Observation after redirect supports the narrowed final claim."])
+            ids = _observation_ids_from_evaluator_payload(payload)
+            return _json_eval("ready_to_finish", "finish", support=["Observation after redirect supports the narrowed final claim."], supporting_ids=[ids[-1]])
         self.main_calls += 1
         if self.main_calls in {1, 2}:
             return {"role": "assistant", "content": [{"type": "tool_use", "id": f"work-{self.main_calls}", "name": "Write", "input": {"file_path": f"artifact-{self.main_calls}.txt", "content": "x"}}]}

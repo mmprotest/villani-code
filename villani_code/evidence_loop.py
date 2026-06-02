@@ -33,6 +33,7 @@ class ActionRecord:
 
 @dataclass(slots=True)
 class ObservationRecord:
+    observation_id: str
     turn_id: int
     source: str
     observation_summary: str
@@ -47,6 +48,8 @@ class EvidenceEvaluation:
     goal_alignment_summary: str
     supporting_evidence: list[str] = field(default_factory=list)
     contradicting_evidence: list[str] = field(default_factory=list)
+    supporting_observation_ids: list[str] = field(default_factory=list)
+    contradicting_observation_ids: list[str] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
     active_blocker: str | None = None
     unsupported_claims: list[str] = field(default_factory=list)
@@ -83,6 +86,7 @@ class EvidenceLoopState:
     completion_attempts: list[dict[str, Any]] = field(default_factory=list)
     raw_action_count: int = 0
     raw_observation_count: int = 0
+    next_observation_seq: int = 1
     repeated_action_signature: str | None = None
     repeated_action_count: int = 0
 
@@ -96,6 +100,16 @@ _MATERIAL_TOOL_NAMES = {"Write", "Patch", "GitCheckout", "GitCommit", "SubmitPla
 
 def is_material_tool_event(tool_name: str) -> bool:
     return tool_name in _MATERIAL_TOOL_NAMES
+
+
+def allocate_observation_id(state: EvidenceLoopState) -> str:
+    observation_id = f"obs-{state.next_observation_seq}"
+    state.next_observation_seq += 1
+    return observation_id
+
+
+def recorded_observation_ids(state: EvidenceLoopState) -> set[str]:
+    return {item.observation_id for item in state.recent_observations}
 
 
 def summarize_action(tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -148,6 +162,7 @@ def record_tool_result(
     state.raw_action_count += 1
 
     observation = ObservationRecord(
+        observation_id=allocate_observation_id(state),
         turn_id=turn_index,
         source=tool_name,
         observation_summary=result_summary,
@@ -188,6 +203,7 @@ def record_observation(
 
     summary = summarize_result({"content": observation_summary, "is_error": bool(operational_error)})
     observation = ObservationRecord(
+        observation_id=allocate_observation_id(state),
         turn_id=turn_index,
         source=source,
         observation_summary=summary,
@@ -232,6 +248,8 @@ def parse_evaluation_payload(raw_text: str) -> EvidenceEvaluation:
         goal_alignment_summary=str(data.get("goal_alignment_summary", data.get("goal_alignment", ""))).strip(),
         supporting_evidence=str_list("supporting_evidence"),
         contradicting_evidence=str_list("contradicting_evidence"),
+        supporting_observation_ids=str_list("supporting_observation_ids"),
+        contradicting_observation_ids=str_list("contradicting_observation_ids"),
         missing_evidence=str_list("missing_evidence"),
         active_blocker=str(data["active_blocker"]).strip() if data.get("active_blocker") is not None else None,
         unsupported_claims=str_list("unsupported_claims"),
@@ -270,7 +288,10 @@ def build_evaluator_prompt(
         "treated as positive support. For completion, return ready_to_finish/finish only when the available observations "
         "semantically support the final claim or a clearly stated limitation.\n\n"
         "Return exactly one JSON object with keys: status, goal_alignment_summary, supporting_evidence, "
-        "contradicting_evidence, missing_evidence, active_blocker, unsupported_claims, required_next_mode, reason.\n"
+        "contradicting_evidence, supporting_observation_ids, contradicting_observation_ids, missing_evidence, "
+        "active_blocker, unsupported_claims, required_next_mode, reason. supporting_observation_ids and "
+        "contradicting_observation_ids must cite observation_id values from recent_observations_neutral. Free-text "
+        "supporting_evidence without valid supporting_observation_ids cannot approve completion.\n"
         "Allowed status values: progressing, unverified, stalled, blocked, ready_to_finish.\n"
         "Allowed required_next_mode values: continue, observe_result, repair_from_failure, replan, "
         "gather_completion_evidence, finish.\n\n"
@@ -345,29 +366,58 @@ def invoke_semantic_evaluator(
         return evaluation
 
 
+def invalid_observation_references(state: EvidenceLoopState, evaluation: EvidenceEvaluation) -> list[str]:
+    known = recorded_observation_ids(state)
+    referenced = list(evaluation.supporting_observation_ids) + list(evaluation.contradicting_observation_ids)
+    return [item for item in referenced if item not in known]
+
+
+def evaluation_has_valid_supporting_observations(state: EvidenceLoopState, evaluation: EvidenceEvaluation) -> bool:
+    known = recorded_observation_ids(state)
+    return bool(evaluation.supporting_observation_ids) and all(item in known for item in evaluation.supporting_observation_ids)
+
+
 def apply_evaluation(state: EvidenceLoopState, evaluation: EvidenceEvaluation, *, trigger: str) -> None:
     state.active_blocker = evaluation.active_blocker
+    invalid_refs = invalid_observation_references(state, evaluation)
+    if invalid_refs:
+        issue = {"trigger": trigger, "error": "evaluator referenced unknown observation_id", "invalid_observation_ids": invalid_refs}
+        state.evaluator_failures.append(issue)
+        state.unresolved_uncertainties.append(
+            "Evaluator cited observation IDs that were not present in the recorded observations: " + ", ".join(invalid_refs)
+        )
     if evaluation.missing_evidence:
         state.unresolved_uncertainties.extend(evaluation.missing_evidence)
     if trigger != "completion" and evaluation.required_next_mode in {"continue", "finish"}:
         state.consecutive_material_actions_without_evaluation = 0
     if trigger == "completion":
-        if evaluation.status == "ready_to_finish" and evaluation.required_next_mode == "finish" and evaluation.supporting_evidence:
+        valid_support = evaluation_has_valid_supporting_observations(state, evaluation)
+        if evaluation.status == "ready_to_finish" and evaluation.required_next_mode == "finish" and valid_support:
             state.completion_status = "supported"
             state.completion_supporting_evidence = list(evaluation.supporting_evidence)
             state.completion_missing_evidence = []
         elif evaluation.status in {"progressing", "unverified"}:
-            state.completion_status = "partial" if evaluation.supporting_evidence else "unsupported"
-            state.completion_supporting_evidence = list(evaluation.supporting_evidence)
+            state.completion_status = "partial" if valid_support else "unsupported"
+            state.completion_supporting_evidence = list(evaluation.supporting_evidence) if valid_support else []
             state.completion_missing_evidence = list(evaluation.missing_evidence)
         else:
             state.completion_status = "unsupported"
-            state.completion_supporting_evidence = list(evaluation.supporting_evidence)
+            state.completion_supporting_evidence = list(evaluation.supporting_evidence) if valid_support else []
             state.completion_missing_evidence = list(evaluation.missing_evidence)
+        if evaluation.status == "ready_to_finish" and evaluation.required_next_mode == "finish" and not valid_support:
+            state.completion_missing_evidence.append(
+                "Evaluator approval did not cite any valid recorded supporting observation IDs."
+            )
 
 
-def completion_is_allowed(evaluation: EvidenceEvaluation) -> bool:
-    return evaluation.status == "ready_to_finish" and evaluation.required_next_mode == "finish" and bool(evaluation.supporting_evidence)
+def completion_is_allowed(evaluation: EvidenceEvaluation, state: EvidenceLoopState | None = None) -> bool:
+    if state is None:
+        return False
+    return (
+        evaluation.status == "ready_to_finish"
+        and evaluation.required_next_mode == "finish"
+        and evaluation_has_valid_supporting_observations(state, evaluation)
+    )
 
 
 def build_intervention_message(evaluation: EvidenceEvaluation, *, trigger: str, state: EvidenceLoopState) -> str:
