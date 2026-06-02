@@ -374,7 +374,11 @@ def invalid_observation_references(state: EvidenceLoopState, evaluation: Evidenc
 
 def evaluation_has_valid_supporting_observations(state: EvidenceLoopState, evaluation: EvidenceEvaluation) -> bool:
     known = recorded_observation_ids(state)
-    return bool(evaluation.supporting_observation_ids) and all(item in known for item in evaluation.supporting_observation_ids)
+    return (
+        bool(evaluation.supporting_observation_ids)
+        and all(item in known for item in evaluation.supporting_observation_ids)
+        and all(item in known for item in evaluation.contradicting_observation_ids)
+    )
 
 
 def apply_evaluation(state: EvidenceLoopState, evaluation: EvidenceEvaluation, *, trigger: str) -> None:
@@ -406,7 +410,7 @@ def apply_evaluation(state: EvidenceLoopState, evaluation: EvidenceEvaluation, *
             state.completion_missing_evidence = list(evaluation.missing_evidence)
         if evaluation.status == "ready_to_finish" and evaluation.required_next_mode == "finish" and not valid_support:
             state.completion_missing_evidence.append(
-                "Evaluator approval did not cite any valid recorded supporting observation IDs."
+                "Evaluator approval did not cite valid recorded observation IDs for all referenced support or contradiction."
             )
 
 

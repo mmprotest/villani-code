@@ -163,7 +163,7 @@ def test_free_text_support_without_observation_ids_is_rejected() -> None:
 
     assert not completion_is_allowed(evaluation, state)
     assert state.completion_status == "unsupported"
-    assert "valid recorded supporting observation IDs" in state.completion_missing_evidence[-1]
+    assert "valid recorded observation IDs" in state.completion_missing_evidence[-1]
 
 
 def test_unknown_supporting_observation_id_is_rejected_and_recorded() -> None:
@@ -182,6 +182,50 @@ def test_unknown_supporting_observation_id_is_rejected_and_recorded() -> None:
     assert state.completion_status == "unsupported"
     assert any("unknown observation_id" in item["error"] for item in state.evaluator_failures)
     assert state.evaluator_failures[-1]["invalid_observation_ids"] == ["obs-missing"]
+
+
+def test_unknown_contradicting_observation_id_rejects_completion_and_is_recorded() -> None:
+    state = EvidenceLoopState(current_goal="complete outcome")
+    record_observation(state, source="generic-observation", observation_summary="relevant raw observation", turn_index=1)
+    observation_id = state.recent_observations[-1].observation_id
+
+    evaluation = invoke_semantic_evaluator(
+        EvalClient(
+            _json_eval(
+                "ready_to_finish",
+                "finish",
+                support=["Valid support is cited, but an invalid contradiction id is also cited."],
+                supporting_ids=[observation_id],
+                contradicting_ids=["obs-missing-contradiction"],
+            )
+        ),
+        "m",
+        state,
+        trigger="completion",
+        attempted_completion="Done",
+    )
+
+    assert not completion_is_allowed(evaluation, state)
+    assert state.completion_status == "unsupported"
+    assert state.completion_supporting_evidence == []
+    assert state.evaluator_failures[-1]["invalid_observation_ids"] == ["obs-missing-contradiction"]
+
+
+def test_valid_supporting_observation_id_without_invalid_references_still_allows_completion() -> None:
+    state = EvidenceLoopState(current_goal="complete outcome")
+    record_observation(state, source="generic-observation", observation_summary="supporting raw observation", turn_index=1)
+    observation_id = state.recent_observations[-1].observation_id
+
+    evaluation = invoke_semantic_evaluator(
+        EvalClient(_json_eval("ready_to_finish", "finish", support=["Valid support is cited."], supporting_ids=[observation_id])),
+        "m",
+        state,
+        trigger="completion",
+        attempted_completion="Done",
+    )
+
+    assert completion_is_allowed(evaluation, state)
+    assert state.completion_status == "supported"
 
 
 def test_valid_observation_id_is_preserved_in_telemetry() -> None:
