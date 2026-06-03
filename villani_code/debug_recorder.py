@@ -502,7 +502,28 @@ class DebugRecorder:
         self._safe(write_full_transcript, self.artifacts.run_dir, run_id=self.run_id, instruction=self._objective, terminal=terminal)
         self._safe(write_trajectory, self.artifacts.run_dir, run_id=self.run_id, mission_id=mission_id or None, agent_version=None, model=self._model or None, provider=self._provider or None, terminal=terminal)
 
+    def record_terminal_exception_if_not_already_recorded(self, exc: BaseException) -> None:
+        if self._terminal:
+            return
+        self.record_model_request_failed(str(exc), elapsed_seconds=0.0, exception_type=type(exc).__name__) if self._pending_model_request_ids else None
+
+    def write_final_or_partial_artifacts_if_possible(self, *, outcome: str, exception: BaseException | None = None, total_turns: int = 0, mission_id: str = "") -> None:
+        if self._terminal:
+            return
+        status = "exception" if exception is not None or outcome == "exception" else outcome
+        reason = "runner_exception" if exception is not None else outcome
+        self.write_final_summary(
+            status=status,
+            termination_reason=reason,
+            total_turns=total_turns,
+            mission_id=mission_id,
+            exception_type=type(exception).__name__ if exception is not None else None,
+            exception_message=str(exception) if exception is not None else None,
+        )
+
     def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "", exception_type: str | None = None, exception_message: str | None = None) -> Path:
+        if self._terminal:
+            return self.artifacts.path("final_summary.json")
         if status == "completed":
             self._emit("run_completed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
         elif status in {"failed", "exception", "timed_out", "interrupted"}:

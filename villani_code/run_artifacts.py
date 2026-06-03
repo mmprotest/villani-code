@@ -19,11 +19,31 @@ REQUIRED_RUN_ARTIFACTS = [
     "run_meta.json",
 ]
 
-_SECRET_KEY_RE = re.compile(r"(api[_-]?key|authorization|bearer|token|secret|password|credential)", re.I)
-_SECRET_VALUE_RE = re.compile(
-    r"(?i)(sk-[A-Za-z0-9_\-]{12,}|xox[baprs]-[A-Za-z0-9_\-]{10,}|Bearer\s+[A-Za-z0-9._\-]{10,}|api[_-]?key\s*[=:]\s*[^\s]+)"
+_SECRET_KEY_RE = re.compile(
+    r"(api[_-]?key|apikey|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer|password|passwd|secret|private[_-]?key|client[_-]?secret)",
+    re.I,
 )
-
+_TOKEN_USAGE_KEYS = {
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "tokens_input",
+    "tokens_output",
+    "tokens_total",
+    "total_prompt_tokens",
+    "total_completion_tokens",
+}
+_SECRET_VALUE_RE = re.compile(
+    r"(-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----)"
+    r"|(Bearer\s+[A-Za-z0-9._~+\-/=]{10,})"
+    r"|(sk-[A-Za-z0-9_\-]{12,}|xox[baprs]-[A-Za-z0-9_\-]{10,})"
+    r"|((?:authorization)\s*[:=]\s*Bearer\s+[A-Za-z0-9._~+\-/=]{10,})"
+    r"|((?:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|refresh[_-]?token|password|passwd|secret|private[_-]?key|client[_-]?secret)\s*[:=]\s*['\"]?[^\s'\",;}]+)"
+    r"|(^\s*(?:export\s+)?[A-Z0-9_]*(?:API_KEY|APIKEY|AUTH_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|PASSWORD|PASSWD|SECRET|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*\s*=\s*[^\r\n]+)",
+    re.I | re.S | re.M,
+)
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -38,7 +58,7 @@ def sanitize_payload(value: Any) -> Any:
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = str(k)
-            if _SECRET_KEY_RE.search(key) and key not in {"input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens", "tokens_input", "tokens_output", "tokens_total", "total_prompt_tokens", "total_completion_tokens"}:
+            if _SECRET_KEY_RE.search(key) and key not in _TOKEN_USAGE_KEYS:
                 out[key] = "[REDACTED_SECRET]"
             else:
                 out[key] = sanitize_payload(v)
@@ -78,14 +98,22 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 
 def usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-    exact = [e for e in events if e.get("event_type") in {"model_response", "model_request_completed"} and e.get("usage_quality") == "exact"]
-    if not exact:
+    # Run totals are exact only when every completed model response in this run
+    # carries provider-returned exact usage. Failed requests (model_exception) did
+    # not produce completed responses and therefore do not contribute fake usage.
+    completed = [e for e in events if e.get("event_type") in {"model_response", "model_request_completed"}]
+    if not completed:
         return {"input_tokens": None, "output_tokens": None, "total_tokens": None, "quality": "unavailable"}
     sums = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    for event in exact:
-        sums["input_tokens"] += int(event.get("input_tokens") or event.get("tokens_input") or 0)
-        sums["output_tokens"] += int(event.get("output_tokens") or event.get("tokens_output") or 0)
-        sums["total_tokens"] += int(event.get("total_tokens") or event.get("tokens_total") or 0)
+    for event in completed:
+        input_tokens = event.get("input_tokens", event.get("tokens_input"))
+        output_tokens = event.get("output_tokens", event.get("tokens_output"))
+        total_tokens = event.get("total_tokens", event.get("tokens_total"))
+        if event.get("usage_quality") != "exact" or input_tokens is None or output_tokens is None or total_tokens is None:
+            return {"input_tokens": None, "output_tokens": None, "total_tokens": None, "quality": "unavailable"}
+        sums["input_tokens"] += int(input_tokens)
+        sums["output_tokens"] += int(output_tokens)
+        sums["total_tokens"] += int(total_tokens)
     return {**sums, "quality": "exact"}
 
 
@@ -166,6 +194,28 @@ def _assistant_message_from_response(row: dict[str, Any]) -> str:
     return _content_to_text(content)
 
 
+
+def _response_content_blocks(row: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    content = payload.get("content") if isinstance(payload, dict) else []
+    return [item for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+
+
+def _tool_calls_from_response(row: dict[str, Any]) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for block in _response_content_blocks(row):
+        if block.get("type") != "tool_use":
+            continue
+        call_id = str(block.get("id") or block.get("tool_call_id") or "")
+        calls.append(
+            {
+                "tool_call_id": call_id,
+                "function_name": str(block.get("name") or block.get("function_name") or ""),
+                "arguments": block.get("input") if isinstance(block.get("input"), dict) else {},
+            }
+        )
+    return calls
+
 def _tool_result_content(payload: dict[str, Any]) -> str:
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
     if "content" in result:
@@ -206,9 +256,13 @@ def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agen
     steps: list[dict[str, Any]] = []
     pending_tool_calls: dict[str, dict[str, Any]] = {}
     pending_observations: dict[str, list[dict[str, Any]]] = {}
+    tool_call_steps: dict[str, dict[str, Any]] = {}
 
     def next_step_id() -> int:
         return len(steps) + 1
+
+    def attach_observation(step: dict[str, Any], observation: dict[str, Any]) -> None:
+        step.setdefault("observation", {}).setdefault("results", []).append(observation)
 
     for event in events:
         if not isinstance(event, dict):
@@ -231,6 +285,15 @@ def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agen
             }
             if event.get("ts") is not None:
                 step["timestamp"] = event.get("ts")
+            tool_calls = _tool_calls_from_response(row)
+            if tool_calls:
+                step["tool_calls"] = tool_calls
+                for call in tool_calls:
+                    call_id = str(call.get("tool_call_id") or "")
+                    if call_id:
+                        tool_call_steps[call_id] = step
+                        for observation in pending_observations.pop(call_id, []):
+                            attach_observation(step, observation)
             if row.get("usage_quality") == "exact":
                 metrics: dict[str, int] = {}
                 if row.get("input_tokens") is not None:
@@ -250,6 +313,8 @@ def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agen
             continue
         if kind == "tool_invocation":
             call_id = str(payload.get("tool_call_id") or "")
+            if call_id in tool_call_steps:
+                continue
             pending_tool_calls[call_id] = {
                 "ts": event.get("ts"),
                 "tool_call_id": call_id,
@@ -259,7 +324,12 @@ def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agen
             continue
         if kind == "tool_observation":
             call_id = str(payload.get("tool_call_id") or "")
-            pending_observations.setdefault(call_id, []).append({"source_call_id": call_id, "content": _tool_result_content(payload)})
+            observation = {"tool_call_id": call_id, "source_call_id": call_id, "content": _tool_result_content(payload)}
+            origin_step = tool_call_steps.get(call_id)
+            if origin_step is not None:
+                attach_observation(origin_step, observation)
+                continue
+            pending_observations.setdefault(call_id, []).append(observation)
             call = pending_tool_calls.pop(call_id, None)
             if call is None:
                 continue
@@ -287,6 +357,8 @@ def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agen
             continue
 
     for call_id, call in pending_tool_calls.items():
+        if call_id in tool_call_steps:
+            continue
         step = {
             "step_id": next_step_id(),
             "source": "agent",
