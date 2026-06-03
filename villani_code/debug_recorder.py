@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import traceback
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -106,26 +107,44 @@ class DebugRecorder:
         self.record_event("turn_finished", f"Turn {turn_index} finished", {"turn_index": turn_index, "stop_reason": stop_reason}, turn_index=turn_index)
         self._current_turn_index = None
 
-    def record_model_request(self, payload: dict[str, Any]) -> None:
+    def record_model_request(self, payload: dict[str, Any]) -> str:
         data = payload if self.config.capture_model_io else {"model": payload.get("model"), "message_count": len(payload.get("messages", []))}
         self._model_request_seq += 1
         request_id = f"mr-{self._model_request_seq}"
         self._pending_model_request_ids.append(request_id)
+        data = {**data, "request_id": request_id, "provider": self._provider}
         self._safe_append_jsonl("model_requests", {"ts": self._ts(), "payload": data})
         self._emit(
             "model_request_started",
-            {"request_id": request_id, "model": payload.get("model"), "message_count": len(payload.get("messages", []))},
+            {"request_id": request_id, "model": payload.get("model"), "provider": self._provider, "message_count": len(payload.get("messages", []))},
         )
+        return request_id
 
-    def record_model_response(self, payload: dict[str, Any]) -> None:
+    def record_model_response(self, payload: dict[str, Any], *, elapsed_seconds: float | None = None, request_id: str | None = None) -> None:
         data = payload if self.config.capture_model_io else {"stop_reason": payload.get("stop_reason"), "content_blocks": len(payload.get("content", []))}
-        self._safe_append_jsonl("model_responses", {"ts": self._ts(), "payload": data})
-        request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
+        resolved_request_id = request_id or (self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else "")
+        if request_id and request_id in self._pending_model_request_ids:
+            self._pending_model_request_ids.remove(request_id)
         usage = normalize_token_usage(payload)
+        response_record = {
+            **data,
+            "request_id": resolved_request_id,
+            "model": payload.get("model") or self._model,
+            "provider": self._provider,
+            "elapsed_seconds": elapsed_seconds,
+            "tokens_input": usage.get("tokens_input"),
+            "tokens_output": usage.get("tokens_output"),
+            "tokens_total": usage.get("tokens_total"),
+            "stop_reason": payload.get("stop_reason"),
+        }
+        self._safe_append_jsonl("model_responses", {"ts": self._ts(), "payload": response_record})
         self._emit(
             "model_request_completed",
             {
-                "request_id": request_id,
+                "request_id": resolved_request_id,
+                "model": response_record.get("model"),
+                "provider": self._provider,
+                "elapsed_seconds": elapsed_seconds,
                 "stop_reason": payload.get("stop_reason"),
                 "tokens_input": usage.get("tokens_input"),
                 "tokens_output": usage.get("tokens_output"),
@@ -133,16 +152,23 @@ class DebugRecorder:
             },
         )
 
-    def record_model_request_failed(self, error: str) -> None:
-        request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
-        self._emit(
-            "model_request_failed",
-            {
-                "request_id": request_id,
-                "error_type": "model_request_error",
-                "error": {"message": str(error)},
-            },
-        )
+    def record_model_request_failed(self, error: str, *, elapsed_seconds: float | None = None, error_type: str | None = None, request_id: str | None = None) -> None:
+        resolved_request_id = request_id or (self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else "")
+        if request_id and request_id in self._pending_model_request_ids:
+            self._pending_model_request_ids.remove(request_id)
+        payload = {
+            "request_id": resolved_request_id,
+            "model": self._model,
+            "provider": self._provider,
+            "elapsed_seconds": elapsed_seconds,
+            "error_type": error_type or "model_request_error",
+            "error_message": str(error),
+        }
+        self._safe_append_jsonl("model_responses", {"ts": self._ts(), "payload": payload})
+        self._emit("model_request_failed", {**payload, "error": {"message": str(error)}})
+
+    def write_full_transcript(self, transcript: dict[str, Any]) -> None:
+        self._safe_write_json(self.artifacts.path("full_transcript.json"), transcript)
 
     def record_tool_call(self, name: str, args: dict[str, Any], tool_use_id: str = "", turn_index: int | None = None) -> None:
         data = args if self.config.capture_full_tool_payloads else {k: args[k] for k in ("file_path", "command") if k in args}

@@ -259,6 +259,15 @@ class BenchmarkRunResult(BaseModel):
     tokens_output: int | None = None
     total_tokens: int | None = None
     estimated_cost: float | None = None
+    local_inference_elapsed_seconds: float | None = None
+    agent_process_elapsed_seconds: float | None = None
+    total_attempt_duration_seconds: float | None = None
+    verified_outcome: str | None = None
+    termination_reason: str | None = None
+    exception_type: str | None = None
+    telemetry_artifact_path: str | None = None
+    transcript_artifact_path: str | None = None
+    trajectory_artifact_path: str | None = None
     number_of_turns: int | None = None
     tool_calls_total: int | None = None
     file_reads: int | None = None

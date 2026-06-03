@@ -145,6 +145,8 @@ class AgentRunner(ABC):
         started = time.monotonic()
         launch_prompt = self.render_launch_prompt(prompt)
         command = self.build_command(repo_path, launch_prompt, model, base_url, api_key, provider, benchmark_config_json=benchmark_config_json)
+        if debug_dir is not None and self.name == "villani":
+            command.extend(["--debug", "trace", "--debug-dir", str(debug_dir)])
         command = self._resolve_subprocess_command(command)
         env = self.build_env(base_url=base_url, api_key=api_key)
         events = [AdapterEvent(type="command_started", timestamp=time.monotonic(), payload={"command": " ".join(command)})]

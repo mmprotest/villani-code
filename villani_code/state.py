@@ -836,11 +836,14 @@ class Runner:
                     required_initial_read = diagnosed_target_file
         tools = tool_specs()
         transcript: dict[str, Any] = {
+            "instruction": instruction,
+            "mission_id": self._mission_id,
             "requests": [],
             "responses": [],
             "tool_invocations": [],
             "tool_results": [],
             "streamed_events_count": 0,
+            "terminal_state": {},
         }
         self.event_callback(
             {
@@ -916,6 +919,8 @@ class Runner:
                 {"name": "Read", "input": forced_input, "id": forced_tool_use_id}
             )
             transcript["tool_results"].append(forced_result)
+            if self._debug_recorder is not None:
+                self._debug_recorder.write_full_transcript(transcript)
             messages.append({"role": "assistant", "content": [forced_tool_use]})
             messages.append(
                 {
@@ -1151,12 +1156,15 @@ class Runner:
                 payload["thinking"] = self.thinking
             payload = merge_extra_json(payload, self.extra_json)
             transcript["requests"].append(payload)
+            request_id = ""
             if self._debug_recorder is not None:
                 self._debug_recorder.record_turn_start(turns_used + 1, {"message_count": len(turn_messages)})
-                self._debug_recorder.record_model_request(payload)
+                request_id = self._debug_recorder.record_model_request(payload)
                 self._debug_recorder.write_working_context(json.dumps(turn_messages, indent=2, ensure_ascii=False) + "\n")
+                self._debug_recorder.write_full_transcript(transcript)
             self.event_callback({"type": "model_request_started", "model": self.model})
 
+            model_started = time.monotonic()
             try:
                 raw = self.client.create_message(payload, stream=self.stream)
                 if self.stream:
@@ -1169,18 +1177,23 @@ class Runner:
                 else:
                     response = raw
             except Exception as exc:
+                elapsed = time.monotonic() - model_started
+                transcript["terminal_state"] = {"exception_type": exc.__class__.__name__, "exception_message": str(exc), "turn_index": turns_used + 1}
                 if self._debug_recorder is not None:
-                    self._debug_recorder.record_model_request_failed(str(exc))
+                    self._debug_recorder.record_model_request_failed(str(exc), elapsed_seconds=elapsed, error_type=exc.__class__.__name__, request_id=request_id)
                     self._debug_recorder.record_turn_finish(turns_used + 1, "model_request_failed")
+                    self._debug_recorder.write_full_transcript(transcript)
                 self.event_callback({"type": "model_request_failed", "model": self.model, "error": str(exc)})
                 raise
 
+            model_elapsed = time.monotonic() - model_started
             self.event_callback({"type": "model_request_completed", "model": self.model, "stop_reason": response.get("stop_reason")})
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
             if self._debug_recorder is not None:
-                self._debug_recorder.record_model_response(response)
+                self._debug_recorder.record_model_response(response, elapsed_seconds=model_elapsed, request_id=request_id)
                 self._debug_recorder.record_turn_finish(turns_used + 1, str(response.get("stop_reason", "")))
+                self._debug_recorder.write_full_transcript(transcript)
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}
             )
@@ -1206,11 +1219,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1277,7 +1285,10 @@ class Runner:
                     if reason:
                         return _finish_bounded(response, reason, reason == "completed")
                     transcript["final_assistant_content"] = response.get("content", [])
+                    transcript["terminal_state"] = {"done_reason": "completed", "turns_used": turns_used}
                     transcript_path = self._save_transcript_and_link(transcript)
+                    if self._debug_recorder is not None:
+                        self._debug_recorder.write_full_transcript(transcript)
                     post = self._run_post_execution_validation(_change_summary()[2])
                     if post:
                         response.setdefault("content", []).append({"type": "text", "text": post})
@@ -1437,10 +1448,13 @@ class Runner:
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
                 transcript["final_assistant_content"] = response.get("content", [])
+                transcript["terminal_state"] = {"done_reason": "completed", "turns_used": turns_used}
                 transcript_path = None
                 if not self._planning_read_only:
                     transcript_path = self._save_transcript_and_link(transcript)
                     self._save_session_snapshot(messages)
+                if self._debug_recorder is not None:
+                    self._debug_recorder.write_full_transcript(transcript)
                 self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
                 if self._event_recorder is not None:
                     self._event_recorder.write_digest()
@@ -1575,6 +1589,13 @@ class Runner:
                     {"name": tool_name, "input": tool_input, "id": tool_use_id}
                 )
                 transcript["tool_results"].append(result)
+                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    target = str(tool_input.get("file_path") or tool_input.get("path") or "")
+                    if target and not _is_generated_or_runtime_artifact(target):
+                        meaningful_repo_edit_made = True
+                        prose_edit_intent_recovery_attempts = 0
+                if self._debug_recorder is not None:
+                    self._debug_recorder.write_full_transcript(transcript)
                 tool_results.append(
                     {
                         "type": "tool_result",

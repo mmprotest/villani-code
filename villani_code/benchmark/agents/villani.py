@@ -4,6 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from villani_code.benchmark.adapters.base import AdapterEvent, AdapterRunResult
 from villani_code.benchmark.agents.base import AgentRunner
@@ -77,9 +78,9 @@ class VillaniAgentRunner(AgentRunner):
             benchmark_config_json=benchmark_config_json,
             debug_dir=debug_dir,
         )
-        events_file = repo_path / ".villani_code" / "runtime_events.jsonl"
+        events_file = self._runtime_events_file_for_current_mission(repo_path)
         events: list[AdapterEvent] = []
-        if events_file.exists():
+        if events_file is not None and events_file.exists():
             for raw in events_file.read_text(encoding="utf-8").splitlines():
                 if not raw.strip():
                     continue
@@ -87,12 +88,33 @@ class VillaniAgentRunner(AgentRunner):
                 runtime_type = str(payload.get("type") or "").strip()
                 if not runtime_type:
                     runtime_type = str(payload.get("event") or "").strip()
+                if not runtime_type and isinstance(payload.get("payload"), dict):
+                    runtime_type = str(payload["payload"].get("type") or payload["payload"].get("event") or "").strip()
                 if not runtime_type:
                     runtime_type = "runtime_event"
-                events.append(AdapterEvent(type=runtime_type, timestamp=float(payload.get("ts", time.time())), payload=payload))
+                ts_value = payload.get("ts", time.time())
+                try:
+                    ts_float = float(ts_value)
+                except (TypeError, ValueError):
+                    ts_float = time.time()
+                events.append(AdapterEvent(type=runtime_type, timestamp=ts_float, payload=payload))
         return AdapterRunResult(
             **base.model_dump(exclude={"events", "telemetry_quality", "telemetry_field_quality_map"}),
             events=base.events + events,
             telemetry_quality=TelemetryQuality.EXACT if events else TelemetryQuality.INFERRED,
             telemetry_field_quality_map=self._field_quality(),
         )
+
+    @staticmethod
+    def _runtime_events_file_for_current_mission(repo_path: Path) -> Path | None:
+        current = repo_path / ".villani_code" / "missions" / "current.json"
+        if current.exists():
+            try:
+                payload: dict[str, Any] = json.loads(current.read_text(encoding="utf-8"))
+                mission_id = str(payload.get("mission_id") or "").strip()
+            except Exception:  # noqa: BLE001
+                mission_id = ""
+            if mission_id:
+                return repo_path / ".villani_code" / "missions" / mission_id / "runtime_events.jsonl"
+        legacy = repo_path / ".villani_code" / "runtime_events.jsonl"
+        return legacy if legacy.exists() else None

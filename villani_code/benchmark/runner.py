@@ -33,6 +33,7 @@ from villani_code.benchmark.prompt_contract import benchmark_contract_from_task,
 from villani_code.benchmark.reporting import render_summary_table, summarize, write_markdown_report, write_results
 from villani_code.benchmark.runtime_config import benchmark_runtime_config_from_task
 from villani_code.benchmark.task_loader import load_tasks
+from villani_code.benchmark.telemetry import finalize_attempt_artifacts
 from villani_code.benchmark.verifier import run_commands
 from villani_code.benchmark.workspace import WorkspaceManager
 
@@ -518,6 +519,12 @@ class BenchmarkRunner:
         denied_summary_detail = ""
         prompt_artifact_path: str | None = None
         contract_artifact_path: str | None = None
+        task_debug_dir = self.output_dir / "agent_debug" / f"{task.id}__r{repeat_index}"
+        termination_reason: str | None = None
+        exception_type: str | None = None
+        exception_message: str | None = None
+        agent_process_elapsed_seconds: float | None = None
+        telemetry_payload: dict[str, object] = {}
 
         with self.workspace.create(task.task_dir / "repo") as workspace_repo:
             ensure_git_repo(workspace_repo)
@@ -555,7 +562,6 @@ class BenchmarkRunner:
             try:
                 self._log("starting agent process...")
                 benchmark_prompt = render_benchmark_prompt(task, workspace_repo)
-                task_debug_dir = self.output_dir / "agent_debug" / f"{task.id}__r{repeat_index}"
                 task_debug_dir.mkdir(parents=True, exist_ok=True)
                 contract_artifact = task_debug_dir / "rendered_prompt.txt"
                 contract_artifact.write_text(benchmark_prompt, encoding="utf-8")
@@ -604,6 +610,7 @@ class BenchmarkRunner:
                 telemetry_quality = execution.telemetry_quality
                 field_quality_map = execution.telemetry_field_quality_map
                 agent_exit_code = execution.exit_code
+                agent_process_elapsed_seconds = execution.runtime_seconds
                 agent_stderr_preview = self._stderr_snippet(execution.stderr, max_len=400) if execution.stderr else None
                 self._log(
                     f"agent exit_code={execution.exit_code} runtime={execution.runtime_seconds:.1f}s, running verification..."
@@ -724,6 +731,8 @@ class BenchmarkRunner:
                             )
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
+                exception_type = exc.__class__.__name__
+                exception_message = str(exc)
                 failure_reason = FailureReason.BENCHMARK_ERROR
                 self._log(f"benchmark harness error: {self._stderr_snippet(error, max_len=300)}")
 
@@ -813,6 +822,30 @@ class BenchmarkRunner:
             )
             manifest.telemetry_quality = telemetry_quality
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+
+            verified_outcome = "timed_out" if timeout else ("exception" if exception_type or (error and failure_reason in {FailureReason.AGENT_CRASH, FailureReason.BENCHMARK_ERROR}) else ("passed" if success else "failed"))
+            if timeout and termination_reason is None:
+                termination_reason = "agent_timeout"
+            elif error and termination_reason is None:
+                termination_reason = str(failure_reason.value if failure_reason else "exception")
+            telemetry_payload = finalize_attempt_artifacts(
+                attempt_dir=task_debug_dir,
+                repo=workspace_repo,
+                task_id=task.id,
+                repeat_index=repeat_index,
+                model=model,
+                provider=provider or ("openai" if base_url else None),
+                agent_version=adapter.version,
+                agent_process_elapsed_seconds=agent_process_elapsed_seconds,
+                total_attempt_duration_seconds=time.monotonic() - started,
+                verified_outcome=verified_outcome,
+                visible_pass=visible_pass,
+                hidden_pass=hidden_pass,
+                timed_out=timeout,
+                termination_reason=termination_reason,
+                exception_type=exception_type,
+                exception_message=exception_message,
+            )
 
             hidden_checks = task.hidden_verification
             hidden_failed = any("hidden" in c for c in verifications[-len(hidden_checks) :]) if hidden_checks else False
@@ -913,10 +946,19 @@ class BenchmarkRunner:
                 lines_deleted=lines_deleted,
                 num_shell_commands=num_shell_commands,
                 num_failed_commands=num_failed_commands,
-                tokens_input=None,
-                tokens_output=None,
-                total_tokens=None,
+                tokens_input=(telemetry_payload.get("usage") or {}).get("input_tokens") if isinstance(telemetry_payload.get("usage"), dict) else None,
+                tokens_output=(telemetry_payload.get("usage") or {}).get("output_tokens") if isinstance(telemetry_payload.get("usage"), dict) else None,
+                total_tokens=(telemetry_payload.get("usage") or {}).get("total_tokens") if isinstance(telemetry_payload.get("usage"), dict) else None,
                 estimated_cost=None,
+                local_inference_elapsed_seconds=(telemetry_payload.get("timing") or {}).get("local_inference_elapsed_seconds") if isinstance(telemetry_payload.get("timing"), dict) else None,
+                agent_process_elapsed_seconds=(telemetry_payload.get("timing") or {}).get("agent_process_elapsed_seconds") if isinstance(telemetry_payload.get("timing"), dict) else None,
+                total_attempt_duration_seconds=(telemetry_payload.get("timing") or {}).get("total_attempt_duration_seconds") if isinstance(telemetry_payload.get("timing"), dict) else None,
+                verified_outcome=str((telemetry_payload.get("outcome") or {}).get("verified_outcome")) if isinstance(telemetry_payload.get("outcome"), dict) else None,
+                termination_reason=(telemetry_payload.get("termination") or {}).get("reason") if isinstance(telemetry_payload.get("termination"), dict) else None,
+                exception_type=(telemetry_payload.get("termination") or {}).get("exception_type") if isinstance(telemetry_payload.get("termination"), dict) else None,
+                telemetry_artifact_path=str(task_debug_dir / "telemetry.json"),
+                transcript_artifact_path=str(task_debug_dir / "full_transcript.json"),
+                trajectory_artifact_path=str(task_debug_dir / "trajectory.json"),
                 number_of_turns=number_of_turns,
                 tool_calls_total=tool_calls_total,
                 file_reads=file_reads,
