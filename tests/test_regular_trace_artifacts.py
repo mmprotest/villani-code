@@ -160,16 +160,38 @@ def test_atif_root_fields_ordered_steps_and_token_metrics(tmp_path: Path) -> Non
     assert atif["agent"]["name"] == "villani-code"
     assert atif["agent"]["model_name"] == "model-a"
     assert atif["agent"]["extra"] == {"provider": "provider-a", "mode": "regular"}
-    assert [step["type"] for step in atif["steps"]] == ["system", "user", "agent"]
+    assert "steps" in atif
+    assert [step["step_id"] for step in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
+    assert [step["source"] for step in atif["steps"]] == ["system", "user", "agent"]
+    for step in atif["steps"]:
+        assert step["source"] in {"system", "user", "agent"}
+        assert step["message"] is not None
+        assert "type" not in step
+        assert "role" not in step
     agent_step = atif["steps"][-1]
-    assert agent_step["metrics"]["input_tokens"] == 11
-    assert agent_step["metrics"]["output_tokens"] == 7
-    assert agent_step["model_calls"][0]["metrics"]["total_tokens"] == 18
-    assert atif["final_metrics"]["model_calls"] == 1
-    assert atif["final_metrics"]["input_tokens"] == 11
-    assert atif["final_metrics"]["output_tokens"] == 7
+    assert agent_step["llm_call_count"] == 1
+    assert agent_step["metrics"]["prompt_tokens"] == 11
+    assert agent_step["metrics"]["completion_tokens"] == 7
+    assert "input_tokens" not in agent_step["metrics"]
+    assert "output_tokens" not in agent_step["metrics"]
+    assert "total_tokens" not in agent_step["metrics"]
+    assert atif["final_metrics"]["total_prompt_tokens"] == 11
+    assert atif["final_metrics"]["total_completion_tokens"] == 7
+    assert atif["final_metrics"]["total_steps"] == len(atif["steps"])
+    assert "input_tokens" not in atif["final_metrics"]
+    assert "output_tokens" not in atif["final_metrics"]
+    assert "prompt_tokens" not in atif["final_metrics"]
+    assert "completion_tokens" not in atif["final_metrics"]
+    assert "total_tokens" not in atif["final_metrics"]
     assert atif["extra"]["status"] == "completed"
     assert atif["extra"]["transcript_artifact"] == "transcript.full.json"
+
+    full = json.loads(_artifact_paths(debug_root)[0].read_text(encoding="utf-8"))
+    assert full["model"] == "model-a"
+    assert full["provider"] == "provider-a"
+    assert full["responses"][0]["usage"]["input_tokens"] == 11
+    assert full["responses"][0]["usage"]["output_tokens"] == 7
+    assert full["responses"][0]["usage"]["total_tokens"] == 18
 
 
 def test_tool_calls_and_results_are_linked_by_call_id_without_duplicate_cumulative_steps(tmp_path: Path) -> None:
@@ -190,12 +212,22 @@ def test_tool_calls_and_results_are_linked_by_call_id_without_duplicate_cumulati
     _run_regular(tmp_path, debug_root, client=client)
 
     atif = json.loads(_artifact_paths(debug_root)[1].read_text(encoding="utf-8"))
-    agent_steps = [step for step in atif["steps"] if step["type"] == "agent"]
+    assert [step["step_id"] for step in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
+    assert all("type" not in step and "role" not in step for step in atif["steps"])
+    agent_steps = [step for step in atif["steps"] if step["source"] == "agent"]
     assert len(agent_steps) == 2
-    assert len([step for step in atif["steps"] if step["type"] == "user"]) == 1
-    assert agent_steps[0]["tool_calls"] == [{"id": "tool-1", "name": "Read", "arguments": {"file_path": "pyproject.toml"}}]
-    assert agent_steps[0]["observations"][0]["tool_call_id"] == "tool-1"
-    assert "[project]" in agent_steps[0]["observations"][0]["result"]["content"]
+    assert len([step for step in atif["steps"] if step["source"] == "user"]) == 1
+    assert all(step["llm_call_count"] == 1 for step in agent_steps)
+    assert agent_steps[0]["tool_calls"] == [
+        {"tool_call_id": "tool-1", "function_name": "Read", "arguments": {"file_path": "pyproject.toml"}}
+    ]
+    assert "id" not in agent_steps[0]["tool_calls"][0]
+    assert "name" not in agent_steps[0]["tool_calls"][0]
+    results = agent_steps[0]["observation"]["results"]
+    assert results[0]["source_call_id"] == "tool-1"
+    assert "[project]" in results[0]["content"]
+    assert "result" not in results[0]
+    assert "observations" not in agent_steps[0]
 
 
 def test_redaction_applies_to_both_new_artifacts(tmp_path: Path) -> None:
@@ -214,6 +246,9 @@ def test_redaction_applies_to_both_new_artifacts(tmp_path: Path) -> None:
 
     full_text = _artifact_paths(debug_root)[0].read_text(encoding="utf-8")
     atif_text = _artifact_paths(debug_root)[1].read_text(encoding="utf-8")
+    atif = json.loads(atif_text)
+    first_agent_step = next(step for step in atif["steps"] if step["source"] == "agent")
+    assert first_agent_step["message"] == ""
     assert "[REDACTED_TOOL_RESULT_CONTENT]" in full_text
     assert "[project]" not in full_text
     assert "[REDACTED_TOOL_RESULT_CONTENT]" in atif_text
