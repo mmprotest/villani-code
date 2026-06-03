@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 from villani_code.trace_summary import normalize_token_usage
@@ -62,11 +63,12 @@ def _tool_calls_from_content(content: Any) -> list[dict[str, Any]]:
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
+        arguments = block.get("input", {})
         calls.append(
             {
-                "id": block.get("id"),
-                "name": block.get("name"),
-                "arguments": _deepcopy_jsonable(block.get("input", {})),
+                "tool_call_id": block.get("id"),
+                "function_name": block.get("name"),
+                "arguments": _deepcopy_jsonable(arguments) if isinstance(arguments, dict) else {},
             }
         )
     return calls
@@ -95,15 +97,24 @@ def _tool_results_with_call_ids(transcript: dict[str, Any]) -> list[Any]:
     return enriched
 
 
-def _observations_for_tool_calls(tool_call_ids: set[str], tool_results: list[Any], redact: bool) -> list[dict[str, Any]]:
-    observations: list[dict[str, Any]] = []
+def _atif_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _observation_for_tool_calls(tool_call_ids: set[str], tool_results: list[Any], redact: bool) -> dict[str, Any] | None:
+    results: list[dict[str, Any]] = []
     for result in tool_results:
         call_id = _tool_result_call_id(result)
         if call_id is None or call_id not in tool_call_ids:
             continue
         payload = _redact_tool_result_value(_deepcopy_jsonable(result)) if redact else _deepcopy_jsonable(result)
-        observations.append({"tool_call_id": call_id, "result": payload})
-    return observations
+        content = payload.get("content") if isinstance(payload, dict) and "content" in payload else payload
+        results.append({"source_call_id": call_id, "content": _atif_content(content)})
+    if not results:
+        return None
+    return {"results": results}
 
 
 def _is_tool_result_only_message(message: dict[str, Any]) -> bool:
@@ -171,17 +182,20 @@ def build_atif_trajectory(
 
     previous_request_messages: list[dict[str, Any]] = []
     system_emitted = False
-    total_input = 0
-    total_output = 0
-    saw_input = False
-    saw_output = False
-    model_calls = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    saw_prompt_tokens = False
+    saw_completion_tokens = False
+
+    def append_step(step: dict[str, Any]) -> None:
+        step["step_id"] = len(steps) + 1
+        steps.append(step)
 
     for idx, response in enumerate(responses):
         request = requests[idx] if idx < len(requests) and isinstance(requests[idx], dict) else {}
         system_prompt = request.get("system")
         if not system_emitted and system_prompt:
-            steps.append({"type": "system", "role": "system", "content": system_prompt})
+            append_step({"source": "system", "message": str(system_prompt)})
             system_emitted = True
 
         current_messages = request.get("messages", []) if isinstance(request.get("messages"), list) else []
@@ -189,12 +203,12 @@ def build_atif_trajectory(
             if not isinstance(message, dict) or _is_tool_result_only_message(message):
                 continue
             role = str(message.get("role", "user"))
+            if role == "assistant":
+                continue
+            source = role if role in {"system", "user"} else "user"
             content = _redact_messages([message], redact)[0].get("content") if redact else _deepcopy_jsonable(message.get("content"))
-            step: dict[str, Any] = {"type": role, "role": role, "content": content}
             text = _content_text(content)
-            if text is not None:
-                step["message"] = text
-            steps.append(step)
+            append_step({"source": source, "message": text if text is not None else _atif_content(content)})
         previous_request_messages = _deepcopy_jsonable(current_messages)
 
         response_content = response.get("content", []) if isinstance(response, dict) else []
@@ -202,44 +216,35 @@ def build_atif_trajectory(
         usage = normalize_token_usage(response if isinstance(response, dict) else {})
         metrics: dict[str, Any] = {}
         if usage.get("tokens_input") is not None:
-            metrics["input_tokens"] = usage.get("tokens_input")
             metrics["prompt_tokens"] = usage.get("tokens_input")
-            total_input += int(usage["tokens_input"] or 0)
-            saw_input = True
+            total_prompt_tokens += int(usage["tokens_input"] or 0)
+            saw_prompt_tokens = True
         if usage.get("tokens_output") is not None:
-            metrics["output_tokens"] = usage.get("tokens_output")
             metrics["completion_tokens"] = usage.get("tokens_output")
-            total_output += int(usage["tokens_output"] or 0)
-            saw_output = True
-        if usage.get("tokens_total") is not None:
-            metrics["total_tokens"] = usage.get("tokens_total")
+            total_completion_tokens += int(usage["tokens_output"] or 0)
+            saw_completion_tokens = True
 
-        model_call: dict[str, Any] = {"model_name": response.get("model", model) if isinstance(response, dict) else model}
-        if metrics:
-            model_call["metrics"] = dict(metrics)
         agent_step: dict[str, Any] = {
-            "type": "agent",
-            "role": "assistant",
-            "message": _content_text(response_content),
-            "content": _deepcopy_jsonable(response_content),
-            "tool_calls": tool_calls,
-            "observations": _observations_for_tool_calls({str(call.get("id")) for call in tool_calls if call.get("id") is not None}, tool_results, redact),
-            "model_calls": [model_call],
+            "source": "agent",
+            "message": _content_text(response_content) or "",
+            "llm_call_count": 1,
         }
         if metrics:
             agent_step["metrics"] = metrics
-        steps.append(agent_step)
-        model_calls += 1
+        if tool_calls:
+            agent_step["tool_calls"] = tool_calls
+            observation = _observation_for_tool_calls(
+                {str(call.get("tool_call_id")) for call in tool_calls if call.get("tool_call_id") is not None}, tool_results, redact
+            )
+            if observation is not None:
+                agent_step["observation"] = observation
+        append_step(agent_step)
 
-    final_metrics: dict[str, Any] = {"model_calls": model_calls}
-    if saw_input:
-        final_metrics["input_tokens"] = total_input
-        final_metrics["prompt_tokens"] = total_input
-    if saw_output:
-        final_metrics["output_tokens"] = total_output
-        final_metrics["completion_tokens"] = total_output
-    if saw_input or saw_output:
-        final_metrics["total_tokens"] = (total_input if saw_input else 0) + (total_output if saw_output else 0)
+    final_metrics: dict[str, Any] = {"total_steps": len(steps)}
+    if saw_prompt_tokens:
+        final_metrics["total_prompt_tokens"] = total_prompt_tokens
+    if saw_completion_tokens:
+        final_metrics["total_completion_tokens"] = total_completion_tokens
 
     return {
         "schema_version": "ATIF-v1.7",
