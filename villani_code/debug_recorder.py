@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import json
 import traceback
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_jsonl, append_text, create_debug_run_artifacts, write_json
+from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_text, create_debug_run_artifacts
+from villani_code.run_artifacts import append_jsonl, sanitize_payload, sanitize_text, write_full_transcript, write_json, write_trajectory, usage_from_events, utc_now
 from villani_code.debug_mode import DebugConfig
 from villani_code.trace_summary import (
     EventLogger,
@@ -31,8 +33,14 @@ class DebugRecorder:
         self._model = model
         self._provider = provider
         self._changed_files: set[str] = set()
+        self._started_at = utc_now()
+        self._attempt_started = time.perf_counter()
+        self._finished_at: str | None = None
+        self._total_model_elapsed = 0.0
+        self._terminal: dict[str, Any] = {}
         self._last_failed_command: str = ""
         self._last_failed_validation: str = ""
+        self._last_validation_summary: str = ""
         self.artifacts = create_debug_run_artifacts(run_id=run_id, debug_root=config.debug_root)
         self._jsonl_paths = {k: self.artifacts.path(v) for k, v in DEBUG_JSONL_FILES.items()}
         self._event_logger = EventLogger(run_id=run_id, events_path=self._jsonl_paths["events"])
@@ -82,7 +90,7 @@ class DebugRecorder:
 
     def _emit(self, event_type: str, payload: dict[str, Any], turn_index: int | None = None) -> None:
         resolved_turn = self._current_turn_index if turn_index is None else turn_index
-        self._safe(self._event_logger.emit, event_type, payload, resolved_turn)
+        self._safe(self._event_logger.emit, event_type, sanitize_payload(payload), resolved_turn)
 
     def record_event(
         self,
@@ -107,40 +115,76 @@ class DebugRecorder:
         self._current_turn_index = None
 
     def record_model_request(self, payload: dict[str, Any]) -> None:
-        data = payload if self.config.capture_model_io else {"model": payload.get("model"), "message_count": len(payload.get("messages", []))}
+        data = sanitize_payload(payload if self.config.capture_model_io else {"model": payload.get("model"), "message_count": len(payload.get("messages", []))})
         self._model_request_seq += 1
         request_id = f"mr-{self._model_request_seq}"
         self._pending_model_request_ids.append(request_id)
-        self._safe_append_jsonl("model_requests", {"ts": self._ts(), "payload": data})
+        self._safe_append_jsonl("model_requests", {"ts": self._ts(), "event_type": "model_request", "request_id": request_id, "model_identifier": payload.get("model") or self._model, "provider": self._provider, "payload": data})
         self._emit(
             "model_request_started",
             {"request_id": request_id, "model": payload.get("model"), "message_count": len(payload.get("messages", []))},
         )
 
-    def record_model_response(self, payload: dict[str, Any]) -> None:
-        data = payload if self.config.capture_model_io else {"stop_reason": payload.get("stop_reason"), "content_blocks": len(payload.get("content", []))}
-        self._safe_append_jsonl("model_responses", {"ts": self._ts(), "payload": data})
+    def record_model_response(self, payload: dict[str, Any], elapsed_seconds: float | None = None) -> None:
+        data = sanitize_payload(payload if self.config.capture_model_io else {"stop_reason": payload.get("stop_reason"), "content_blocks": len(payload.get("content", []))})
         request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
         usage = normalize_token_usage(payload)
+        has_usage = any(usage.get(k) is not None for k in ("tokens_input", "tokens_output", "tokens_total"))
+        elapsed = float(elapsed_seconds or 0.0)
+        self._total_model_elapsed += elapsed
+        row = {
+            "ts": self._ts(),
+            "event_type": "model_response",
+            "request_id": request_id,
+            "model_identifier": payload.get("model") or self._model,
+            "provider": self._provider,
+            "elapsed_seconds": elapsed,
+            "input_tokens": usage.get("tokens_input") if has_usage else None,
+            "output_tokens": usage.get("tokens_output") if has_usage else None,
+            "total_tokens": usage.get("tokens_total") if has_usage else None,
+            "usage_quality": "exact" if has_usage else "unavailable",
+            "payload": data,
+        }
+        self._safe_append_jsonl("model_responses", row)
         self._emit(
             "model_request_completed",
             {
                 "request_id": request_id,
                 "stop_reason": payload.get("stop_reason"),
-                "tokens_input": usage.get("tokens_input"),
-                "tokens_output": usage.get("tokens_output"),
-                "tokens_total": usage.get("tokens_total"),
+                "elapsed_seconds": elapsed,
+                "tokens_input": row["input_tokens"],
+                "tokens_output": row["output_tokens"],
+                "tokens_total": row["total_tokens"],
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "total_tokens": row["total_tokens"],
+                "usage_quality": row["usage_quality"],
             },
         )
 
-    def record_model_request_failed(self, error: str) -> None:
+    def record_model_request_failed(self, error: str, elapsed_seconds: float | None = None, exception_type: str = "Exception") -> None:
         request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
+        elapsed = float(elapsed_seconds or 0.0)
+        self._total_model_elapsed += elapsed
+        message = sanitize_text(str(error))
+        row = {
+            "ts": self._ts(),
+            "event_type": "model_exception",
+            "request_id": request_id,
+            "model_identifier": self._model,
+            "provider": self._provider,
+            "elapsed_seconds": elapsed,
+            "exception_type": exception_type,
+            "exception_message": message,
+        }
+        self._safe_append_jsonl("model_responses", row)
         self._emit(
             "model_request_failed",
             {
                 "request_id": request_id,
-                "error_type": "model_request_error",
-                "error": {"message": str(error)},
+                "elapsed_seconds": elapsed,
+                "error_type": exception_type,
+                "error": {"message": message},
             },
         )
 
@@ -351,6 +395,7 @@ class DebugRecorder:
         row = {"ts": self._ts(), "state": "finished", "kind": kind, "exit_code": exit_code, "summary": summary}
         self._safe_append_jsonl("validations", row)
         self.record_event("validation_finished", f"Validation finished: {kind}", row)
+        self._last_validation_summary = summary or kind
         if exit_code != 0:
             self._last_failed_validation = summary or kind
 
@@ -381,11 +426,87 @@ class DebugRecorder:
     def write_working_context(self, text: str) -> None:
         self._safe(append_text, self.artifacts.path("working_context.txt"), text)
 
-    def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
+    def _verified_outcome(self, status: str, termination_reason: str) -> str:
+        reason = termination_reason or ""
+        if reason in {"max_seconds"} or status == "timed_out":
+            return "timed_out"
+        if status == "exception":
+            return "exception"
+        if status in {"failed", "interrupted"}:
+            return "failed" if reason not in {"max_turns", "max_tool_calls", "recon_loop", "no_edits", "model_idle"} else "unverified"
+        if self._last_failed_validation:
+            return "failed"
+        if status == "completed":
+            return "passed" if self._last_validation_summary else "unverified"
+        return "unverified"
+
+    def _write_required_artifacts(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "", exception_type: str | None = None, exception_message: str | None = None) -> None:
+        self._finished_at = utc_now()
+        outcome = self._verified_outcome(status, termination_reason)
+        terminal = {
+            "status": status,
+            "termination_reason": termination_reason,
+            "total_turns": total_turns,
+            "verified_outcome": outcome,
+            "exception_type": exception_type,
+            "exception_message": sanitize_text(exception_message or "") if exception_message else None,
+        }
+        self._terminal = terminal
+        model_events = []
+        try:
+            from villani_code.run_artifacts import read_jsonl
+            model_events = read_jsonl(self.artifacts.path("model_responses.jsonl"))
+        except Exception:
+            model_events = []
+        usage = usage_from_events(model_events)
+        telemetry = {
+            "schema_version": "villani.telemetry.v1",
+            "run_id": self.run_id,
+            "mission_id": mission_id or None,
+            "agent": {"name": "villani-code", "version": None},
+            "model": {"identifier": self._model or None, "provider": self._provider or None},
+            "usage": usage,
+            "timing": {
+                "local_inference_elapsed_seconds": self._total_model_elapsed,
+                "total_attempt_duration_seconds": max(0.0, time.perf_counter() - self._attempt_started),
+            },
+            "outcome": {"verified_outcome": outcome},
+            "termination": {
+                "timed_out": outcome == "timed_out",
+                "reason": termination_reason or None,
+                "exception_type": exception_type,
+                "exception_message": sanitize_text(exception_message or "") if exception_message else None,
+            },
+            "artifacts": {
+                "full_transcript": "full_transcript.json",
+                "atif_trajectory": "trajectory.json",
+                "runtime_events": "runtime_events.jsonl",
+                "model_requests": "model_requests.jsonl",
+                "model_responses": "model_responses.jsonl",
+                "run_meta": "run_meta.json",
+            },
+        }
+        run_meta = {
+            "schema_version": "villani.run_meta.v1",
+            "run_id": self.run_id,
+            "mission_id": mission_id or None,
+            "started_at": self._started_at,
+            "finished_at": self._finished_at,
+            "model_identifier": self._model or None,
+            "provider": self._provider or None,
+            "runner_version": None,
+            "artifact_files": ["telemetry.json", "full_transcript.json", "trajectory.json", "runtime_events.jsonl", "model_requests.jsonl", "model_responses.jsonl"],
+        }
+        self._safe_write_json(self.artifacts.path("telemetry.json"), telemetry)
+        self._safe_write_json(self.artifacts.path("run_meta.json"), run_meta)
+        self._safe(write_full_transcript, self.artifacts.run_dir, run_id=self.run_id, instruction=self._objective, terminal=terminal)
+        self._safe(write_trajectory, self.artifacts.run_dir, run_id=self.run_id, mission_id=mission_id or None, agent_version=None, model=self._model or None, provider=self._provider or None, terminal=terminal)
+
+    def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "", exception_type: str | None = None, exception_message: str | None = None) -> Path:
         if status == "completed":
             self._emit("run_completed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
-        elif status == "failed":
-            self._emit("run_failed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})
+        elif status in {"failed", "exception", "timed_out", "interrupted"}:
+            self._emit("run_failed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns, "exception_type": exception_type, "exception_message": sanitize_text(exception_message or "") if exception_message else None})
 
         self._safe(write_tool_calls_from_events, self.artifacts.run_dir)
         summary_path = self._safe(write_summary_from_events, self.artifacts.run_dir, status_override=status)
@@ -400,6 +521,7 @@ class DebugRecorder:
             summary_payload["last_failed_validation"] = self._last_failed_validation
             final_path = self.artifacts.path("final_summary.json")
             self._safe(write_json, final_path, summary_payload)
+            self._write_required_artifacts(status=status, termination_reason=termination_reason, total_turns=total_turns, mission_id=mission_id, exception_type=exception_type, exception_message=exception_message)
             return final_path
 
         fallback = {
@@ -412,6 +534,7 @@ class DebugRecorder:
         }
         path = self.artifacts.path("final_summary.json")
         self._safe_write_json(path, fallback)
+        self._write_required_artifacts(status=status, termination_reason=termination_reason, total_turns=total_turns, mission_id=mission_id, exception_type=exception_type, exception_message=exception_message)
         return path
 
     def on_runner_event(self, event: dict[str, Any]) -> None:
