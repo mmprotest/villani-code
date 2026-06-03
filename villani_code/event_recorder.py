@@ -14,8 +14,10 @@ class RuntimeEventRecorder:
     def __init__(self, mission_dir: Path):
         self.mission_dir = mission_dir
         self.events_path = mission_dir / "runtime_events.jsonl"
+        self.root_events_path = mission_dir.parent.parent / "runtime_events.jsonl" if mission_dir.parent.name == "missions" else mission_dir / "runtime_events.jsonl"
         self._events: list[dict[str, Any]] = []
         ensure_dir(mission_dir)
+        ensure_dir(self.root_events_path.parent)
 
     def record(self, event: dict[str, Any]) -> None:
         mapped = RuntimeEvent.from_runner_event(event)
@@ -29,8 +31,12 @@ class RuntimeEventRecorder:
             "payload": event,
         }
         self._events.append(row)
+        line = json.dumps(row, ensure_ascii=False) + "\n"
         with self.events_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.write(line)
+        if self.root_events_path != self.events_path:
+            with self.root_events_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
 
     def build_digest(self) -> dict[str, Any]:
         grouped: Counter[str] = Counter()

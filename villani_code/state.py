@@ -1157,6 +1157,7 @@ class Runner:
                 self._debug_recorder.write_working_context(json.dumps(turn_messages, indent=2, ensure_ascii=False) + "\n")
             self.event_callback({"type": "model_request_started", "model": self.model})
 
+            model_started = time.perf_counter()
             try:
                 raw = self.client.create_message(payload, stream=self.stream)
                 if self.stream:
@@ -1168,10 +1169,13 @@ class Runner:
                     response = assemble_anthropic_stream(events)
                 else:
                     response = raw
+                model_elapsed = time.perf_counter() - model_started
             except Exception as exc:
+                model_elapsed = time.perf_counter() - model_started
                 if self._debug_recorder is not None:
-                    self._debug_recorder.record_model_request_failed(str(exc))
+                    self._debug_recorder.record_model_request_failed(str(exc), elapsed_seconds=model_elapsed, exception_type=type(exc).__name__)
                     self._debug_recorder.record_turn_finish(turns_used + 1, "model_request_failed")
+                    self._debug_recorder.write_final_summary(status="exception", termination_reason="model_exception", total_turns=turns_used, mission_id=self._mission_id, exception_type=type(exc).__name__, exception_message=str(exc))
                 self.event_callback({"type": "model_request_failed", "model": self.model, "error": str(exc)})
                 raise
 
@@ -1179,7 +1183,7 @@ class Runner:
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
             if self._debug_recorder is not None:
-                self._debug_recorder.record_model_response(response)
+                self._debug_recorder.record_model_response(response, elapsed_seconds=model_elapsed)
                 self._debug_recorder.record_turn_finish(turns_used + 1, str(response.get("stop_reason", "")))
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}
@@ -1795,16 +1799,16 @@ class Runner:
             self._mission_id = self._mission_state.mission_id
             self._mission_dir = get_mission_dir(self.repo, self._mission_id)
             self._event_recorder = RuntimeEventRecorder(self._mission_dir)
-            if self._debug_config.enabled:
-                self._debug_recorder = DebugRecorder(
-                    config=self._debug_config,
-                    run_id=self._mission_id,
-                    objective=instruction,
-                    repo=self.repo,
-                    mode=mode,
-                    model=self.model,
-                    provider=self.provider,
-                )
+            recorder_config = self._debug_config if self._debug_config.enabled else DebugConfig(mode=DebugMode.TRACE, debug_root=self._mission_dir.parent)
+            self._debug_recorder = DebugRecorder(
+                config=recorder_config,
+                run_id=self._mission_id,
+                objective=instruction,
+                repo=self.repo,
+                mode=mode,
+                model=self.model,
+                provider=self.provider,
+            )
         self._update_mission_state(objective=instruction, mode=mode, status="active")
 
     def _update_mission_state(self, **fields: Any) -> None:
@@ -1856,13 +1860,25 @@ class Runner:
     ) -> dict[str, Any]:
         from villani_code import state_tooling
 
-        return state_tooling.execute_tool_with_policy(
-            self,
-            tool_name,
-            tool_input,
-            tool_use_id,
-            message_count,
-        )
+        try:
+            return state_tooling.execute_tool_with_policy(
+                self,
+                tool_name,
+                tool_input,
+                tool_use_id,
+                message_count,
+            )
+        except Exception as exc:
+            if self._debug_recorder is not None:
+                self._debug_recorder.write_final_summary(
+                    status="exception",
+                    termination_reason="tool_exception",
+                    total_turns=self._current_turn_index or 0,
+                    mission_id=self._mission_id,
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
+                )
+            raise
 
     def _build_tool_result_event_payload(
         self, tool_name: str, tool_use_id: str, result: dict[str, Any]
