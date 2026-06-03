@@ -114,7 +114,7 @@ class DebugRecorder:
         self.record_event("turn_finished", f"Turn {turn_index} finished", {"turn_index": turn_index, "stop_reason": stop_reason}, turn_index=turn_index)
         self._current_turn_index = None
 
-    def record_model_request(self, payload: dict[str, Any]) -> None:
+    def record_model_request(self, payload: dict[str, Any]) -> str:
         data = sanitize_payload(payload if self.config.capture_model_io else {"model": payload.get("model"), "message_count": len(payload.get("messages", []))})
         self._model_request_seq += 1
         request_id = f"mr-{self._model_request_seq}"
@@ -124,12 +124,19 @@ class DebugRecorder:
             "model_request_started",
             {"request_id": request_id, "model": payload.get("model"), "message_count": len(payload.get("messages", []))},
         )
+        return request_id
 
-    def record_model_response(self, payload: dict[str, Any], elapsed_seconds: float | None = None) -> None:
+    def record_model_response(self, payload: dict[str, Any], elapsed_seconds: float | None = None, request_id: str | None = None) -> None:
         data = sanitize_payload(payload if self.config.capture_model_io else {"stop_reason": payload.get("stop_reason"), "content_blocks": len(payload.get("content", []))})
-        request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
+        if request_id:
+            try:
+                self._pending_model_request_ids.remove(request_id)
+            except ValueError:
+                pass
+        else:
+            request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
         usage = normalize_token_usage(payload)
-        has_usage = any(usage.get(k) is not None for k in ("tokens_input", "tokens_output", "tokens_total"))
+        has_usage = all(usage.get(k) is not None for k in ("tokens_input", "tokens_output", "tokens_total"))
         elapsed = float(elapsed_seconds or 0.0)
         self._total_model_elapsed += elapsed
         row = {
@@ -162,8 +169,14 @@ class DebugRecorder:
             },
         )
 
-    def record_model_request_failed(self, error: str, elapsed_seconds: float | None = None, exception_type: str = "Exception") -> None:
-        request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
+    def record_model_request_failed(self, error: str, elapsed_seconds: float | None = None, exception_type: str = "Exception", request_id: str | None = None) -> None:
+        if request_id:
+            try:
+                self._pending_model_request_ids.remove(request_id)
+            except ValueError:
+                pass
+        else:
+            request_id = self._pending_model_request_ids.pop(0) if self._pending_model_request_ids else ""
         elapsed = float(elapsed_seconds or 0.0)
         self._total_model_elapsed += elapsed
         message = sanitize_text(str(error))

@@ -1153,27 +1153,23 @@ class Runner:
             transcript["requests"].append(payload)
             if self._debug_recorder is not None:
                 self._debug_recorder.record_turn_start(turns_used + 1, {"message_count": len(turn_messages)})
-                self._debug_recorder.record_model_request(payload)
                 self._debug_recorder.write_working_context(json.dumps(turn_messages, indent=2, ensure_ascii=False) + "\n")
             self.event_callback({"type": "model_request_started", "model": self.model})
 
-            model_started = time.perf_counter()
-            try:
-                raw = self.client.create_message(payload, stream=self.stream)
+            def _consume_main_model_call(raw: Any) -> dict[str, Any]:
                 if self.stream:
                     events = []
                     for event in raw:
                         events.append(event)
                         self._render_stream_event(event)
                     transcript["streamed_events_count"] += len(events)
-                    response = assemble_anthropic_stream(events)
-                else:
-                    response = raw
-                model_elapsed = time.perf_counter() - model_started
+                    return assemble_anthropic_stream(events)
+                return raw
+
+            try:
+                response = self._recorded_model_call(payload, stream=self.stream, consume_response=_consume_main_model_call)
             except Exception as exc:
-                model_elapsed = time.perf_counter() - model_started
                 if self._debug_recorder is not None:
-                    self._debug_recorder.record_model_request_failed(str(exc), elapsed_seconds=model_elapsed, exception_type=type(exc).__name__)
                     self._debug_recorder.record_turn_finish(turns_used + 1, "model_request_failed")
                     self._debug_recorder.write_final_summary(status="exception", termination_reason="model_exception", total_turns=turns_used, mission_id=self._mission_id, exception_type=type(exc).__name__, exception_message=str(exc))
                 self.event_callback({"type": "model_request_failed", "model": self.model, "error": str(exc)})
@@ -1183,7 +1179,6 @@ class Runner:
             response["content"] = normalize_content_blocks(response.get("content"))
             transcript["responses"].append(response)
             if self._debug_recorder is not None:
-                self._debug_recorder.record_model_response(response, elapsed_seconds=model_elapsed)
                 self._debug_recorder.record_turn_finish(turns_used + 1, str(response.get("stop_reason", "")))
             messages.append(
                 {"role": "assistant", "content": response.get("content", [])}
@@ -1501,6 +1496,10 @@ class Runner:
                         self._files_read.add(str(tool_input.get("file_path", "")))
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    targets = self._extract_tool_targets(tool_name, tool_input)
+                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
+                        meaningful_repo_edit_made = True
+                        prose_edit_intent_recovery_attempts = 0
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
@@ -1641,6 +1640,29 @@ class Runner:
             if reason:
                 return _finish_bounded(response, reason, reason == "completed")
 
+    def _extract_tool_targets(self, tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+        if tool_name == "Write":
+            value = str(tool_input.get("file_path", "")).strip()
+            return [value] if value else []
+        if tool_name == "Patch":
+            paths: list[str] = []
+            for key in ("file_path", "path"):
+                value = str(tool_input.get(key, "")).strip()
+                if value:
+                    paths.append(value)
+            for key in ("patches", "files"):
+                raw = tool_input.get(key)
+                if isinstance(raw, list):
+                    for item in raw:
+                        if isinstance(item, dict):
+                            value = str(item.get("file_path") or item.get("path") or "").strip()
+                            if value:
+                                paths.append(value)
+                        elif isinstance(item, str) and item.strip():
+                            paths.append(item.strip())
+            return _dedupe_preserve(paths)
+        return []
+
     def _is_mutating_tool_call(
         self, tool_name: str, tool_input: dict[str, Any]
     ) -> bool:
@@ -1724,7 +1746,7 @@ class Runner:
             }
         )
         critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
-        critic_raw = self.client.create_message(critic_payload, stream=False)
+        critic_raw = self._recorded_model_call(critic_payload, stream=False)
         critic_text = "\n".join(str(b.get("text", "")) for b in critic_raw.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
         stripped = critic_text.lstrip()
         if syntax_result.startswith("syntax_error"):
@@ -1845,6 +1867,35 @@ class Runner:
         path = save_transcript(self.repo, transcript, redact=self.redact)
         self._update_mission_state(last_transcript_path=str(path))
         return path
+
+    def _recorded_model_call(
+        self,
+        payload: dict[str, Any],
+        *,
+        stream: bool,
+        consume_response: Callable[[Any], Any] | None = None,
+    ) -> Any:
+        request_id = ""
+        if self._debug_recorder is not None:
+            request_id = self._debug_recorder.record_model_request(payload)
+        started = time.perf_counter()
+        try:
+            raw = self.client.create_message(payload, stream=stream)
+            response = consume_response(raw) if consume_response is not None else raw
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_model_request_failed(
+                    str(exc),
+                    elapsed_seconds=elapsed,
+                    exception_type=type(exc).__name__,
+                    request_id=request_id or None,
+                )
+            raise
+        elapsed = time.perf_counter() - started
+        if self._debug_recorder is not None and isinstance(response, dict):
+            self._debug_recorder.record_model_response(response, elapsed_seconds=elapsed, request_id=request_id or None)
+        return response
 
     def _execute_tool_with_policy(
         self,

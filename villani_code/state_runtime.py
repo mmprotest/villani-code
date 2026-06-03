@@ -340,7 +340,10 @@ def run_pre_edit_diagnosis(
         "stream": False,
     }
     try:
-        response = runner.client.create_message(payload, stream=False)
+        if hasattr(runner, "_recorded_model_call"):
+            response = runner._recorded_model_call(payload, stream=False)
+        else:
+            response = runner.client.create_message(payload, stream=False)
     except Exception as exc:  # pragma: no cover - defensive path
         runner.event_callback({"type": "diagnosis_failed", "reason": f"call_error:{exc.__class__.__name__}"})
         return None

@@ -38,7 +38,7 @@ def sanitize_payload(value: Any) -> Any:
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = str(k)
-            if _SECRET_KEY_RE.search(key) and key not in {"input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens", "tokens_input", "tokens_output", "tokens_total"}:
+            if _SECRET_KEY_RE.search(key) and key not in {"input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens", "tokens_input", "tokens_output", "tokens_total", "total_prompt_tokens", "total_completion_tokens"}:
                 out[key] = "[REDACTED_SECRET]"
             else:
                 out[key] = sanitize_payload(v)
@@ -77,15 +77,34 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         fh.write(json.dumps(sanitize_payload(payload), ensure_ascii=False) + "\n")
 
 
+def _known_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-    exact = [e for e in events if e.get("event_type") in {"model_response", "model_request_completed"} and e.get("usage_quality") == "exact"]
-    if not exact:
+    completed = [e for e in events if e.get("event_type") in {"model_response", "model_request_completed"}]
+    if not completed:
         return {"input_tokens": None, "output_tokens": None, "total_tokens": None, "quality": "unavailable"}
     sums = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    for event in exact:
-        sums["input_tokens"] += int(event.get("input_tokens") or event.get("tokens_input") or 0)
-        sums["output_tokens"] += int(event.get("output_tokens") or event.get("tokens_output") or 0)
-        sums["total_tokens"] += int(event.get("total_tokens") or event.get("tokens_total") or 0)
+    for event in completed:
+        input_tokens = _known_int(event.get("input_tokens") if event.get("input_tokens") is not None else event.get("tokens_input"))
+        output_tokens = _known_int(event.get("output_tokens") if event.get("output_tokens") is not None else event.get("tokens_output"))
+        total_tokens = _known_int(event.get("total_tokens") if event.get("total_tokens") is not None else event.get("tokens_total"))
+        if input_tokens is None or output_tokens is None:
+            return {"input_tokens": None, "output_tokens": None, "total_tokens": None, "quality": "unavailable"}
+        if total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+        sums["input_tokens"] += input_tokens
+        sums["output_tokens"] += output_tokens
+        sums["total_tokens"] += total_tokens
     return {**sums, "quality": "exact"}
 
 
@@ -139,39 +158,81 @@ def write_full_transcript(run_dir: Path, *, run_id: str, instruction: str, termi
     return path
 
 
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict):
+        return _message_text(content.get("content"))
+    return ""
+
+
 def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agent_version: str | None, model: str | None, provider: str | None, terminal: dict[str, Any] | None = None) -> Path:
     transcript_path = run_dir / "full_transcript.json"
     transcript = json.loads(transcript_path.read_text(encoding="utf-8")) if transcript_path.exists() else {"events": []}
     model_events = read_jsonl(run_dir / "model_responses.jsonl")
     usage = usage_from_events([r for r in model_events if isinstance(r, dict)])
     steps: list[dict[str, Any]] = []
-    for idx, event in enumerate(transcript.get("events", []), start=1):
+    next_step = 1
+    for event in transcript.get("events", []):
         kind = event.get("type")
-        payload = event.get("payload", {})
-        step: dict[str, Any] = {"index": idx, "type": kind, "timestamp": event.get("ts")}
+        payload = event.get("payload", {}) if isinstance(event.get("payload", {}), dict) else {}
+        step: dict[str, Any] | None = None
         if kind == "user_instruction":
-            step["role"] = "user"
-            step["content"] = event.get("content", "")
+            step = {"source": "user", "message": str(event.get("content", ""))}
         elif kind == "assistant_response":
-            step["role"] = "assistant"
-            step["content"] = payload.get("response") or payload.get("content") or payload
-            metrics = {k: payload.get(k) for k in ("input_tokens", "output_tokens", "total_tokens") if payload.get(k) is not None}
-            if metrics:
-                step["metrics"] = metrics
+            response_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+            step = {"source": "agent", "message": _message_text(response_payload.get("content")), "model_name": payload.get("model_identifier") or model}
+            prompt_tokens = _known_int(payload.get("input_tokens"))
+            completion_tokens = _known_int(payload.get("output_tokens"))
+            if prompt_tokens is not None and completion_tokens is not None:
+                step["metrics"] = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
         elif kind == "tool_invocation":
-            step["tool_calls"] = [{"id": payload.get("tool_call_id"), "name": payload.get("tool_name"), "arguments": payload.get("args", {})}]
+            step = {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": payload.get("tool_call_id"),
+                        "function_name": payload.get("tool_name"),
+                        "arguments": payload.get("args", {}),
+                    }
+                ],
+            }
         elif kind == "tool_observation":
-            step["observations"] = [{"tool_call_id": payload.get("tool_call_id"), "status": payload.get("status"), "content": payload.get("result") or payload.get("summary")}]
-        else:
-            step["extra"] = payload
+            step = {
+                "source": "environment",
+                "observation": {
+                    "source_call_id": payload.get("tool_call_id"),
+                    "results": payload.get("result") if payload.get("result") is not None else payload.get("summary"),
+                },
+            }
+        elif kind == "model_exception":
+            step = {"source": "agent", "message": "", "model_name": payload.get("model_identifier") or model, "extra": {"exception_type": payload.get("exception_type"), "exception_message": payload.get("exception_message")}}
+        elif kind == "terminal_state":
+            step = {"source": "system", "message": str(payload.get("termination_reason") or payload.get("status") or "terminal"), "extra": payload}
+        if step is None:
+            continue
+        step["step_id"] = f"step-{next_step}"
+        if event.get("ts") is not None:
+            step["timestamp"] = event.get("ts")
         steps.append(step)
+        next_step += 1
     trajectory = {
         "schema_version": "ATIF-v1.7",
         "session_id": mission_id or run_id,
-        "agent": {"name": "villani-code", "version": agent_version, "model": model, "provider": provider},
+        "agent": {"name": "villani-code", "version": agent_version, "model_name": model, "extra": {"provider": provider}},
         "steps": steps,
-        "metrics": {"usage": usage},
-        "final_metadata": terminal or {},
+        "final_metrics": {
+            "total_prompt_tokens": usage["input_tokens"],
+            "total_completion_tokens": usage["output_tokens"],
+            "total_steps": len(steps),
+        },
+        "extra": {**(terminal or {}), "usage_quality": usage["quality"], "total_tokens": usage["total_tokens"]},
     }
     path = run_dir / "trajectory.json"
     write_json(path, trajectory)
