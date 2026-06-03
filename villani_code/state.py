@@ -43,6 +43,7 @@ from villani_code.context_projection import build_model_context_packet, render_m
 from villani_code.event_recorder import RuntimeEventRecorder
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
+from villani_code.run_artifacts import canonical_artifact_dir
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
 from villani_code.summarizer import summarize_mission_state
 from villani_code.state_execution import (
@@ -597,6 +598,7 @@ class Runner:
         self._mission_dir: Path | None = None
         self._mission_state: MissionState | None = None
         self._event_recorder: RuntimeEventRecorder | None = None
+        self._suppress_artifact_finalization = False
         self._current_turn_index: int | None = None
         if self.small_model:
             self._init_small_model_support()
@@ -662,6 +664,34 @@ class Runner:
                 tool_call_id=str(payload.get("tool_call_id", "") or ""),
                 turn_index=turn_index,
             )
+
+
+    def _observed_model_call(self, payload: dict[str, Any], *, stream: bool) -> Any:
+        """Call the configured native model client while recording artifacts only."""
+        if self._debug_recorder is not None:
+            self._debug_recorder.record_model_request(payload)
+        self.event_callback({"type": "model_request_started", "model": payload.get("model") or self.model})
+        started = time.perf_counter()
+        try:
+            raw = self.client.create_message(payload, stream=stream)
+            if stream:
+                events = []
+                for event in raw:
+                    events.append(event)
+                response = assemble_anthropic_stream(events)
+            else:
+                response = raw
+            elapsed = time.perf_counter() - started
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_model_request_failed(str(exc), elapsed_seconds=elapsed, exception_type=type(exc).__name__)
+            self.event_callback({"type": "model_request_failed", "model": payload.get("model") or self.model, "error": str(exc)})
+            raise
+        self.event_callback({"type": "model_request_completed", "model": payload.get("model") or self.model, "stop_reason": response.get("stop_reason") if isinstance(response, dict) else None})
+        if self._debug_recorder is not None and isinstance(response, dict):
+            self._debug_recorder.record_model_response(response, elapsed_seconds=elapsed)
+        return response
 
 
     def plan(self, instruction: str, answers: list[PlanAnswer] | None = None) -> PlanSessionResult:
@@ -736,26 +766,46 @@ class Runner:
             steering_objective=self.villani_objective,
             event_callback=self.event_callback,
         )
-        summary = controller.run()
+        previous_suppression = self._suppress_artifact_finalization
+        self._suppress_artifact_finalization = True
+        try:
+            summary = controller.run()
+        except BaseException as exc:
+            self._suppress_artifact_finalization = previous_suppression
+            self._update_mission_state(mode="autonomous", status="failed")
+            if self._event_recorder is not None:
+                self._event_recorder.write_digest()
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_terminal_exception_if_not_already_recorded(exc)
+                self._debug_recorder.write_final_or_partial_artifacts_if_possible(
+                    outcome="exception",
+                    exception=exc,
+                    total_turns=self._current_turn_index or 0,
+                    mission_id=self._mission_id,
+                )
+            raise
+        self._suppress_artifact_finalization = previous_suppression
         working = summary.get("working_memory", {}) if isinstance(summary, dict) else {}
+        done_reason = str(summary.get("done_reason", "")) if isinstance(summary, dict) else ""
+        timed_out = "budget exhausted" in done_reason.lower() or "timeout" in done_reason.lower() or "timed out" in done_reason.lower()
         self._update_mission_state(
             mode="autonomous",
-            status="completed",
+            status="timed_out" if timed_out else "completed",
             autonomous_wave=int(summary.get("waves", 0) or 0) if isinstance(summary, dict) else 0,
             autonomous_backlog_summary=[str(v) for v in summary.get("recommended_next_steps", [])[:8]] if isinstance(summary, dict) else [],
             autonomous_attempted_tasks=len(summary.get("attempted", [])) if isinstance(summary, dict) else 0,
             autonomous_satisfied_keys_summary=[str(k) for k in (working.get("satisfied_task_keys", {}) or {}).keys()][:8],
             autonomous_blockers_summary=[str(v) for v in (working.get("stop_decision_rationale", {}) or {}).values()][:8],
-            autonomous_stop_reason=str(summary.get("done_reason", "")) if isinstance(summary, dict) else "",
+            autonomous_stop_reason=done_reason,
         )
         if self._event_recorder is not None:
             self._event_recorder.write_digest()
         if self._debug_recorder is not None:
-            self._debug_recorder.record_event("subagent_finished", "Autonomous run finished", {"done_reason": summary.get("done_reason", "") if isinstance(summary, dict) else ""})
+            self._debug_recorder.record_event("subagent_finished", "Autonomous run finished", {"done_reason": done_reason})
             self._debug_recorder.write_final_summary(
-                status="completed",
-                termination_reason="completed",
-                total_turns=0,
+                status="timed_out" if timed_out else "completed",
+                termination_reason="max_seconds" if timed_out else "completed",
+                total_turns=self._current_turn_index or 0,
                 mission_id=self._mission_id,
             )
         text = VillaniModeController.format_summary(summary)
@@ -781,7 +831,7 @@ class Runner:
                 approved_plan=approved_plan,
             )
         except BaseException as exc:
-            if self._debug_recorder is not None:
+            if self._debug_recorder is not None and not self._suppress_artifact_finalization:
                 self._debug_recorder.record_terminal_exception_if_not_already_recorded(exc)
                 self._debug_recorder.write_final_or_partial_artifacts_if_possible(
                     outcome="exception",
@@ -791,7 +841,7 @@ class Runner:
                 )
             raise
         else:
-            if self._debug_recorder is not None:
+            if self._debug_recorder is not None and not self._suppress_artifact_finalization:
                 self._debug_recorder.write_final_or_partial_artifacts_if_possible(
                     outcome="completed",
                     total_turns=self._current_turn_index or 0,
@@ -1130,7 +1180,7 @@ class Runner:
             self._update_mission_state(status=mission_status, changed_files=all_changes, compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
-            if self._debug_recorder is not None:
+            if self._debug_recorder is not None and not self._suppress_artifact_finalization:
                 self._debug_recorder.write_final_summary(
                     status=mission_status,
                     termination_reason=reason,
@@ -1212,7 +1262,8 @@ class Runner:
                 if self._debug_recorder is not None:
                     self._debug_recorder.record_model_request_failed(str(exc), elapsed_seconds=model_elapsed, exception_type=type(exc).__name__)
                     self._debug_recorder.record_turn_finish(turns_used + 1, "model_request_failed")
-                    self._debug_recorder.write_final_summary(status="exception", termination_reason="model_exception", total_turns=turns_used, mission_id=self._mission_id, exception_type=type(exc).__name__, exception_message=str(exc))
+                    if not self._suppress_artifact_finalization:
+                        self._debug_recorder.write_final_summary(status="exception", termination_reason="model_exception", total_turns=turns_used, mission_id=self._mission_id, exception_type=type(exc).__name__, exception_message=str(exc))
                 self.event_callback({"type": "model_request_failed", "model": self.model, "error": str(exc)})
                 raise
 
@@ -1320,7 +1371,7 @@ class Runner:
                     self._save_session_snapshot(messages)
                     if self._event_recorder is not None:
                         self._event_recorder.write_digest()
-                    if self._debug_recorder is not None:
+                    if self._debug_recorder is not None and not self._suppress_artifact_finalization:
                         self._debug_recorder.write_final_summary(
                             status="completed",
                             termination_reason="completed",
@@ -1480,7 +1531,7 @@ class Runner:
                 self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
                 if self._event_recorder is not None:
                     self._event_recorder.write_digest()
-                if self._debug_recorder is not None:
+                if self._debug_recorder is not None and not self._suppress_artifact_finalization:
                     self._debug_recorder.write_final_summary(
                         status="completed",
                         termination_reason="completed",
@@ -1765,7 +1816,7 @@ class Runner:
             }
         )
         critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
-        critic_raw = self.client.create_message(critic_payload, stream=False)
+        critic_raw = self._observed_model_call(critic_payload, stream=False)
         critic_text = "\n".join(str(b.get("text", "")) for b in critic_raw.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
         stripped = critic_text.lstrip()
         if syntax_result.startswith("syntax_error"):
@@ -1833,9 +1884,12 @@ class Runner:
         if self._mission_state is None:
             self._mission_state = create_mission_state(self.repo, instruction, mode=mode)
             self._mission_id = self._mission_state.mission_id
-            self._mission_dir = get_mission_dir(self.repo, self._mission_id)
+            self._mission_dir = canonical_artifact_dir(self.repo, self._mission_id, self._debug_config.debug_root)
             self._event_recorder = RuntimeEventRecorder(self._mission_dir)
-            recorder_config = self._debug_config if self._debug_config.enabled else DebugConfig(mode=DebugMode.TRACE, debug_root=self._mission_dir.parent)
+            recorder_config = DebugConfig(
+                mode=self._debug_config.mode if self._debug_config.enabled else DebugMode.TRACE,
+                debug_root=self._mission_dir.parent,
+            )
             self._debug_recorder = DebugRecorder(
                 config=recorder_config,
                 run_id=self._mission_id,
@@ -1905,7 +1959,7 @@ class Runner:
                 message_count,
             )
         except Exception as exc:
-            if self._debug_recorder is not None:
+            if self._debug_recorder is not None and not self._suppress_artifact_finalization:
                 self._debug_recorder.write_final_summary(
                     status="exception",
                     termination_reason="tool_exception",

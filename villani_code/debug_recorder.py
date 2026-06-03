@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from villani_code import __version__
 from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_text, create_debug_run_artifacts
 from villani_code.run_artifacts import append_jsonl, sanitize_payload, sanitize_text, write_full_transcript, write_json, write_trajectory, usage_from_events, utc_now
 from villani_code.debug_mode import DebugConfig
@@ -463,7 +464,7 @@ class DebugRecorder:
             "schema_version": "villani.telemetry.v1",
             "run_id": self.run_id,
             "mission_id": mission_id or None,
-            "agent": {"name": "villani-code", "version": None},
+            "agent": {"name": "villani-code", "version": __version__},
             "model": {"identifier": self._model or None, "provider": self._provider or None},
             "usage": usage,
             "timing": {
@@ -494,13 +495,13 @@ class DebugRecorder:
             "finished_at": self._finished_at,
             "model_identifier": self._model or None,
             "provider": self._provider or None,
-            "runner_version": None,
+            "runner_version": __version__,
             "artifact_files": ["telemetry.json", "full_transcript.json", "trajectory.json", "runtime_events.jsonl", "model_requests.jsonl", "model_responses.jsonl"],
         }
         self._safe_write_json(self.artifacts.path("telemetry.json"), telemetry)
         self._safe_write_json(self.artifacts.path("run_meta.json"), run_meta)
         self._safe(write_full_transcript, self.artifacts.run_dir, run_id=self.run_id, instruction=self._objective, terminal=terminal)
-        self._safe(write_trajectory, self.artifacts.run_dir, run_id=self.run_id, mission_id=mission_id or None, agent_version=None, model=self._model or None, provider=self._provider or None, terminal=terminal)
+        self._safe(write_trajectory, self.artifacts.run_dir, run_id=self.run_id, mission_id=mission_id or None, agent_version=__version__, model=self._model or None, provider=self._provider or None, terminal=terminal)
 
     def record_terminal_exception_if_not_already_recorded(self, exc: BaseException) -> None:
         if self._terminal:

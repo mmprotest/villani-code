@@ -117,7 +117,12 @@ def usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {**sums, "quality": "exact"}
 
 
-def canonical_artifact_dir(repo: Path, mission_id: str | None = None) -> Path:
+def canonical_artifact_dir(repo: Path, mission_id: str | None = None, debug_root: Path | None = None) -> Path:
+    if debug_root is not None:
+        root = debug_root.expanduser().resolve()
+        if mission_id:
+            return root / mission_id
+        return root
     root = repo.resolve() / ".villani_code"
     if mission_id:
         return root / "missions" / mission_id
@@ -249,6 +254,8 @@ def _telemetry_usage(run_dir: Path) -> dict[str, Any]:
 
 
 def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agent_version: str | None, model: str | None, provider: str | None, terminal: dict[str, Any] | None = None) -> Path:
+    if not isinstance(agent_version, str) or not agent_version:
+        from villani_code import __version__ as agent_version
     transcript_path = run_dir / "full_transcript.json"
     transcript = json.loads(transcript_path.read_text(encoding="utf-8")) if transcript_path.exists() else {"events": []}
     events = transcript.get("events", []) if isinstance(transcript.get("events"), list) else []
@@ -324,7 +331,7 @@ def write_trajectory(run_dir: Path, *, run_id: str, mission_id: str | None, agen
             continue
         if kind == "tool_observation":
             call_id = str(payload.get("tool_call_id") or "")
-            observation = {"tool_call_id": call_id, "source_call_id": call_id, "content": _tool_result_content(payload)}
+            observation = {"source_call_id": call_id, "content": _tool_result_content(payload)}
             origin_step = tool_call_steps.get(call_id)
             if origin_step is not None:
                 attach_observation(origin_step, observation)
