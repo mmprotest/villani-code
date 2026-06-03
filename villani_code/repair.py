@@ -50,7 +50,8 @@ def _run_repair_prompt(runner: Any, context: RepairContext, prior_attempts: list
     from villani_code.tools import tool_specs
 
     call_messages = build_initial_messages(runner.repo, prompt)
-    raw = runner.client.create_message({"model": runner.model, "messages": call_messages, "system": build_system_blocks(runner.repo), "tools": tool_specs(), "max_tokens": runner.max_tokens, "stream": False}, stream=False)
+    payload = {"model": runner.model, "messages": call_messages, "system": build_system_blocks(runner.repo), "tools": tool_specs(), "max_tokens": runner.max_tokens, "stream": False}
+    raw = runner._observed_model_call(payload, stream=False) if hasattr(runner, "_observed_model_call") else runner.client.create_message(payload, stream=False)
     response = raw if isinstance(raw, dict) else {"content": []}
     for block in [b for b in response.get("content", []) if b.get("type") == "tool_use"]:
         runner._execute_tool_with_policy(str(block.get("name", "")), dict(block.get("input", {})), str(block.get("id", "repair-tool")), len(call_messages))
