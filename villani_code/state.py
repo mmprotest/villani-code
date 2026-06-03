@@ -771,6 +771,43 @@ class Runner:
         force_task_mode: TaskMode | None = None,
         approved_plan: PlanSessionResult | None = None,
     ) -> dict[str, Any]:
+        try:
+            result = self._run_impl(
+                instruction,
+                messages=messages,
+                execution_budget=execution_budget,
+                inject_projected_context=inject_projected_context,
+                force_task_mode=force_task_mode,
+                approved_plan=approved_plan,
+            )
+        except BaseException as exc:
+            if self._debug_recorder is not None:
+                self._debug_recorder.record_terminal_exception_if_not_already_recorded(exc)
+                self._debug_recorder.write_final_or_partial_artifacts_if_possible(
+                    outcome="exception",
+                    exception=exc,
+                    total_turns=self._current_turn_index or 0,
+                    mission_id=self._mission_id,
+                )
+            raise
+        else:
+            if self._debug_recorder is not None:
+                self._debug_recorder.write_final_or_partial_artifacts_if_possible(
+                    outcome="completed",
+                    total_turns=self._current_turn_index or 0,
+                    mission_id=self._mission_id,
+                )
+            return result
+
+    def _run_impl(
+        self,
+        instruction: str,
+        messages: list[dict[str, Any]] | None = None,
+        execution_budget: ExecutionBudget | None = None,
+        inject_projected_context: bool = False,
+        force_task_mode: TaskMode | None = None,
+        approved_plan: PlanSessionResult | None = None,
+    ) -> dict[str, Any]:
         if approved_plan is not None and not approved_plan.ready_to_execute:
             raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
@@ -1210,11 +1247,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1506,6 +1538,10 @@ class Runner:
                         self._files_read.add(str(tool_input.get("file_path", "")))
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    targets = self._extract_tool_targets(tool_name, tool_input)
+                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
+                        meaningful_repo_edit_made = True
+                        prose_edit_intent_recovery_attempts = 0
                     self._pending_verification = self._run_post_edit_verification(
                         trigger=f"{tool_name} execution"
                     )
