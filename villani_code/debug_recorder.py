@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from villani_code import __version__
+from villani_code.atif_export import build_atif_trajectory, build_full_transcript_artifact
 from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_jsonl, append_text, create_debug_run_artifacts, write_json
 from villani_code.debug_mode import DebugConfig
 from villani_code.trace_summary import (
@@ -380,6 +382,42 @@ class DebugRecorder:
 
     def write_working_context(self, text: str) -> None:
         self._safe(append_text, self.artifacts.path("working_context.txt"), text)
+
+    def write_regular_trace_artifacts(
+        self,
+        *,
+        transcript: dict[str, Any],
+        messages: list[dict[str, Any]],
+        status: str,
+        termination_reason: str | None,
+        redact: bool,
+    ) -> None:
+        def _write() -> None:
+            transcript_artifact = build_full_transcript_artifact(
+                run_id=self.run_id,
+                model=self._model,
+                provider=self._provider,
+                transcript=transcript,
+                messages=messages,
+                status=status,
+                termination_reason=termination_reason,
+                redact=redact,
+            )
+            trajectory = build_atif_trajectory(
+                run_id=self.run_id,
+                agent_version=__version__,
+                model=self._model,
+                provider=self._provider,
+                transcript=transcript,
+                messages=messages,
+                status=status,
+                termination_reason=termination_reason,
+                redact=redact,
+            )
+            write_json(self.artifacts.path("transcript.full.json"), transcript_artifact)
+            write_json(self.artifacts.path("trajectory.json"), trajectory)
+
+        self._safe(_write)
 
     def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
         if status == "completed":

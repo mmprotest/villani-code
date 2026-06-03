@@ -1100,6 +1100,12 @@ class Runner:
                     total_turns=turns_used,
                     mission_id=self._mission_id,
                 )
+            self._write_regular_trace_artifacts(
+                transcript=transcript,
+                messages=messages,
+                status=mission_status,
+                termination_reason=reason,
+            )
             return {
                 "response": response,
                 "messages": messages,
@@ -1291,6 +1297,12 @@ class Runner:
                             total_turns=turns_used,
                             mission_id=self._mission_id,
                         )
+                    self._write_regular_trace_artifacts(
+                        transcript=transcript,
+                        messages=messages,
+                        status="completed",
+                        termination_reason="completed",
+                    )
                     return {
                         "response": response,
                         "messages": messages,
@@ -1451,6 +1463,12 @@ class Runner:
                         total_turns=turns_used,
                         mission_id=self._mission_id,
                     )
+                self._write_regular_trace_artifacts(
+                    transcript=transcript,
+                    messages=messages,
+                    status="completed",
+                    termination_reason="completed",
+                )
                 return {
                     "response": response,
                     "messages": messages,
@@ -1841,6 +1859,35 @@ class Runner:
         from villani_code import state_runtime
 
         state_runtime.prepend_text_to_latest_safe_user_message(messages, rendered)
+
+    def _should_write_regular_trace_artifacts(self) -> bool:
+        return (
+            self._debug_config.mode == DebugMode.TRACE
+            and self._runtime_mode == "execution"
+            and not self._planning_read_only
+            and not self.small_model
+            and not self.villani_mode
+            and not self.benchmark_config.enabled
+            and self._debug_recorder is not None
+        )
+
+    def _write_regular_trace_artifacts(
+        self,
+        *,
+        transcript: dict[str, Any],
+        messages: list[dict[str, Any]],
+        status: str,
+        termination_reason: str | None,
+    ) -> None:
+        if not self._should_write_regular_trace_artifacts() or self._debug_recorder is None:
+            return
+        self._debug_recorder.write_regular_trace_artifacts(
+            transcript=transcript,
+            messages=messages,
+            status=status,
+            termination_reason=termination_reason,
+            redact=self.redact,
+        )
 
     def _save_transcript_and_link(self, transcript: dict[str, Any]) -> Path:
         path = save_transcript(self.repo, transcript, redact=self.redact)
