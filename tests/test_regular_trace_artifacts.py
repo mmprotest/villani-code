@@ -97,7 +97,8 @@ def test_normal_debug_writes_generic_trajectory_only(tmp_path: Path) -> None:
     assert atif["extra"]["status"] == "completed"
 
 
-def test_openai_compatible_metadata_uses_lmstudio_inference_provider(tmp_path: Path) -> None:
+def test_openai_compatible_metadata_uses_configured_inference_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VILLANI_INFERENCE_PROVIDER", "lmstudio")
     debug_root = tmp_path / "debug"
     _seed_repo(tmp_path)
     runner = Runner(

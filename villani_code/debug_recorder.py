@@ -6,6 +6,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import os
 
 from villani_code import __version__
 from villani_code.atif_export import build_atif_trajectory, build_full_transcript_artifact
@@ -28,9 +29,9 @@ def _api_compatibility(provider: str | None) -> str | None:
 
 
 def _inference_provider(provider: str | None) -> str | None:
-    normalized = (provider or "").strip().lower()
-    if normalized == "openai":
-        return "lmstudio"
+    configured = os.environ.get("VILLANI_INFERENCE_PROVIDER")
+    if configured and configured.strip():
+        return configured.strip()
     return provider
 
 

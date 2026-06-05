@@ -130,7 +130,8 @@ def test_mission_state_event_records_turn_index_when_available(tmp_path: Path) -
     assert mission_event["turn_index"] == 3
 
 
-def test_debug_metadata_separates_api_compatibility_from_inference_provider(tmp_path: Path) -> None:
+def test_debug_metadata_separates_api_compatibility_from_inference_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VILLANI_INFERENCE_PROVIDER", "lmstudio")
     recorder = DebugRecorder(build_debug_config("trace", tmp_path), "prov", "obj", tmp_path, "execution", "m", provider="openai")
     session_meta = json.loads((tmp_path / "prov" / "session_meta.json").read_text(encoding="utf-8"))
     events = [json.loads(line) for line in (tmp_path / "prov" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
