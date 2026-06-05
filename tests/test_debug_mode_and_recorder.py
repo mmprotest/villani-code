@@ -144,3 +144,14 @@ def test_debug_metadata_separates_api_compatibility_from_inference_provider(tmp_
     assert session_meta["model_metadata"] == expected_model_metadata
     assert run_started["payload"]["provider"] == "openai"
     assert run_started["payload"]["model_metadata"] == expected_model_metadata
+
+def test_openai_provider_does_not_imply_lmstudio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VILLANI_INFERENCE_PROVIDER", raising=False)
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "prov2", "obj", tmp_path, "execution", "m", provider="openai")
+    session_meta = json.loads((tmp_path / "prov2" / "session_meta.json").read_text(encoding="utf-8"))
+
+    assert session_meta["model_metadata"] == {
+        "identifier": "m",
+        "inference_provider": "openai",
+        "api_compatibility": "openai",
+    }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+import os
 
 from villani_code.trace_summary import normalize_token_usage
 from villani_code.transcripts import maybe_redact_payload
@@ -136,9 +137,9 @@ def _api_compatibility(provider: str | None) -> str | None:
 
 
 def _inference_provider(provider: str | None) -> str | None:
-    normalized = (provider or "").strip().lower()
-    if normalized == "openai":
-        return "lmstudio"
+    configured = os.environ.get("VILLANI_INFERENCE_PROVIDER")
+    if configured and configured.strip():
+        return configured.strip()
     return provider
 
 
