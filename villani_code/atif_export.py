@@ -130,6 +130,26 @@ def _new_messages_since(previous: list[dict[str, Any]], current: list[dict[str, 
     return current
 
 
+def _api_compatibility(provider: str | None) -> str | None:
+    normalized = (provider or "").strip().lower()
+    return "openai" if normalized == "openai" else None
+
+
+def _inference_provider(provider: str | None) -> str | None:
+    normalized = (provider or "").strip().lower()
+    if normalized == "openai":
+        return "lmstudio"
+    return provider
+
+
+def _model_metadata(model: str | None, provider: str | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"identifier": model, "inference_provider": _inference_provider(provider)}
+    api_compatibility = _api_compatibility(provider)
+    if api_compatibility is not None:
+        metadata["api_compatibility"] = api_compatibility
+    return metadata
+
+
 def build_full_transcript_artifact(
     *,
     run_id: str,
@@ -151,6 +171,7 @@ def build_full_transcript_artifact(
         "runtime_mode": "execution",
         "model": model,
         "provider": provider,
+        "model_metadata": _model_metadata(model, provider),
         "status": status,
         "termination_reason": termination_reason,
         "messages": _redact_messages(messages, redact),
@@ -191,8 +212,8 @@ def build_atif_trajectory(
         step["step_id"] = len(steps) + 1
         steps.append(step)
 
-    for idx, response in enumerate(responses):
-        request = requests[idx] if idx < len(requests) and isinstance(requests[idx], dict) else {}
+    def append_request_steps(request: dict[str, Any]) -> None:
+        nonlocal previous_request_messages, system_emitted
         system_prompt = request.get("system")
         if not system_emitted and system_prompt:
             append_step({"source": "system", "message": str(system_prompt)})
@@ -210,6 +231,10 @@ def build_atif_trajectory(
             text = _content_text(content)
             append_step({"source": source, "message": text if text is not None else _atif_content(content)})
         previous_request_messages = _deepcopy_jsonable(current_messages)
+
+    for idx, response in enumerate(responses):
+        request = requests[idx] if idx < len(requests) and isinstance(requests[idx], dict) else {}
+        append_request_steps(request)
 
         response_content = response.get("content", []) if isinstance(response, dict) else []
         tool_calls = _tool_calls_from_content(response_content)
@@ -240,6 +265,10 @@ def build_atif_trajectory(
                 agent_step["observation"] = observation
         append_step(agent_step)
 
+    if len(requests) > len(responses):
+        request = requests[len(responses)] if isinstance(requests[len(responses)], dict) else {}
+        append_request_steps(request)
+
     final_metrics: dict[str, Any] = {"total_steps": len(steps)}
     if saw_prompt_tokens:
         final_metrics["total_prompt_tokens"] = total_prompt_tokens
@@ -254,7 +283,12 @@ def build_atif_trajectory(
             "name": "villani-code",
             "version": agent_version,
             "model_name": model,
-            "extra": {"provider": provider, "mode": "regular"},
+            "extra": {
+                "provider": provider,
+                "inference_provider": _inference_provider(provider),
+                "api_compatibility": _api_compatibility(provider),
+                "mode": "regular",
+            },
         },
         "steps": steps,
         "final_metrics": final_metrics,
