@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 from types import SimpleNamespace
 
 from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
@@ -21,6 +23,12 @@ class _SequenceClient:
         response = self._responses[self._idx]
         self._idx += 1
         return response
+
+
+class _FailingClient:
+    def create_message(self, payload, stream):
+        _ = payload, stream
+        raise RuntimeError("model unavailable")
 
 
 def _seed_repo(repo: Path) -> None:
@@ -77,13 +85,77 @@ def test_regular_trace_debug_writes_full_transcript_and_atif(tmp_path: Path) -> 
     assert atif["schema_version"] == "ATIF-v1.7"
 
 
-def test_normal_debug_writes_neither_new_artifact(tmp_path: Path) -> None:
+def test_normal_debug_writes_generic_trajectory_only(tmp_path: Path) -> None:
     debug_root = tmp_path / "debug"
     _run_regular(tmp_path, debug_root, debug="normal")
 
     transcript_path, trajectory_path = _artifact_paths(debug_root)
     assert not transcript_path.exists()
-    assert not trajectory_path.exists()
+    assert trajectory_path.exists()
+    atif = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    assert atif["schema_version"] == "ATIF-v1.7"
+    assert atif["extra"]["status"] == "completed"
+
+
+def test_openai_compatible_metadata_uses_lmstudio_inference_provider(tmp_path: Path) -> None:
+    debug_root = tmp_path / "debug"
+    _seed_repo(tmp_path)
+    runner = Runner(
+        client=_completed_client(),
+        repo=tmp_path,
+        model="local-model",
+        provider="openai",
+        stream=False,
+        print_stream=False,
+        debug_config=build_debug_config("trace", debug_root),
+    )
+    runner.run("please answer")
+
+    run_dir = _run_dir(debug_root)
+    session_meta = json.loads((run_dir / "session_meta.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_dir / "final_summary.json").read_text(encoding="utf-8"))
+    transcript = json.loads((run_dir / "transcript.full.json").read_text(encoding="utf-8"))
+    trajectory = json.loads((run_dir / "trajectory.json").read_text(encoding="utf-8"))
+
+    expected_model_metadata = {
+        "identifier": "local-model",
+        "inference_provider": "lmstudio",
+        "api_compatibility": "openai",
+    }
+    assert session_meta["agent"]["name"] == "villani-code"
+    assert session_meta["agent"]["version"]
+    assert session_meta["model_metadata"] == expected_model_metadata
+    assert summary["agent"] == session_meta["agent"]
+    assert summary["model_metadata"] == expected_model_metadata
+    assert transcript["model_metadata"] == expected_model_metadata
+    assert trajectory["agent"]["extra"]["inference_provider"] == "lmstudio"
+    assert trajectory["agent"]["extra"]["api_compatibility"] == "openai"
+
+
+def test_regular_trajectory_exists_after_model_request_failure(tmp_path: Path) -> None:
+    debug_root = tmp_path / "debug"
+    _seed_repo(tmp_path)
+    runner = Runner(
+        client=_FailingClient(),
+        repo=tmp_path,
+        model="local-model",
+        provider="openai",
+        stream=False,
+        print_stream=False,
+        debug_config=build_debug_config("normal", debug_root),
+    )
+
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        runner.run("please answer")
+
+    transcript_path, trajectory_path = _artifact_paths(debug_root)
+    assert not transcript_path.exists()
+    assert trajectory_path.exists()
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["extra"]["status"] == "failed"
+    assert trajectory["extra"]["termination_reason"] == "model_request_failed"
+    assert [step["source"] for step in trajectory["steps"]] == ["system", "user"]
 
 
 def test_debug_off_writes_neither_new_artifact(tmp_path: Path) -> None:
@@ -159,7 +231,12 @@ def test_atif_root_fields_ordered_steps_and_token_metrics(tmp_path: Path) -> Non
     assert atif["session_id"] == atif["trajectory_id"]
     assert atif["agent"]["name"] == "villani-code"
     assert atif["agent"]["model_name"] == "model-a"
-    assert atif["agent"]["extra"] == {"provider": "provider-a", "mode": "regular"}
+    assert atif["agent"]["extra"] == {
+        "provider": "provider-a",
+        "inference_provider": "provider-a",
+        "api_compatibility": None,
+        "mode": "regular",
+    }
     assert "steps" in atif
     assert [step["step_id"] for step in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
     assert [step["source"] for step in atif["steps"]] == ["system", "user", "agent"]
@@ -189,6 +266,7 @@ def test_atif_root_fields_ordered_steps_and_token_metrics(tmp_path: Path) -> Non
     full = json.loads(_artifact_paths(debug_root)[0].read_text(encoding="utf-8"))
     assert full["model"] == "model-a"
     assert full["provider"] == "provider-a"
+    assert full["model_metadata"] == {"identifier": "model-a", "inference_provider": "provider-a"}
     assert full["responses"][0]["usage"]["input_tokens"] == 11
     assert full["responses"][0]["usage"]["output_tokens"] == 7
     assert full["responses"][0]["usage"]["total_tokens"] == 18
@@ -267,7 +345,7 @@ def test_export_errors_are_non_fatal(monkeypatch, tmp_path: Path) -> None:
     assert result["response"]["content"][0]["text"] == "done"
     transcript_path, trajectory_path = _artifact_paths(debug_root)
     assert not transcript_path.exists()
-    assert not trajectory_path.exists()
+    assert trajectory_path.exists()
     assert "export failed" in (_run_dir(debug_root) / "stderr.log").read_text(encoding="utf-8")
 
 
