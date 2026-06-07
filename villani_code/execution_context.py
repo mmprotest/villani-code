@@ -219,9 +219,16 @@ class CommandRecord:
     warnings: list[str] = field(default_factory=list)
     no_progress_warning: bool = False
     force_finalization: bool = False
+    stdout: str = ""
+    stderr: str = ""
+    workspace_revision: int = 0
+    pipefail_available: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.pop("stdout", None)
+        payload.pop("stderr", None)
+        return payload
 
 
 @dataclass(slots=True)
@@ -236,6 +243,10 @@ class ValidationEvidence:
     scope: str
     exit_code: int
     suspicious: bool = False
+    weakened: bool = False
+    weakening_reasons: list[str] = field(default_factory=list)
+    unstable: bool = False
+    workspace_revision: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -304,6 +315,7 @@ class AttemptState:
     _last_evidence_signatures: set[str] = field(default_factory=set, repr=False)
     _last_command_exit: dict[str, int] = field(default_factory=dict, repr=False)
     _previous_command_had_warning: bool = field(default=False, repr=False)
+    workspace_revision: int = 0
 
     def add_command(self, record: CommandRecord) -> None:
         self.commands.append(record)
@@ -314,6 +326,8 @@ class AttemptState:
         for item in record.mutations.deleted:
             self.files_deleted.add(item.path)
         if record.mutations.has_effects():
+            self.workspace_revision += 1
+            record.workspace_revision = self.workspace_revision
             self.side_effects.append({"command": record.command, **record.mutations.to_dict()})
         if record.timed_out:
             self.timeouts += 1
@@ -692,8 +706,8 @@ class TaskExecutionContext:
     def _run_process(
         self, command: str, cwd: Path, env: Mapping[str, str], timeout: int
     ) -> tuple[int, str, str, bool]:
+        bash = shutil.which("bash", path=env.get("PATH")) if os.name == "posix" else None
         popen_kwargs: dict[str, Any] = {
-            "shell": True,
             "cwd": str(cwd),
             "env": dict(env),
             "stdout": subprocess.PIPE,
@@ -702,7 +716,10 @@ class TaskExecutionContext:
         }
         if os.name == "posix":
             popen_kwargs["start_new_session"] = True
-        proc = subprocess.Popen(command, **popen_kwargs)
+        if bash:
+            proc = subprocess.Popen([bash, "-o", "pipefail", "-c", command], **popen_kwargs)
+        else:
+            proc = subprocess.Popen(command, shell=True, **popen_kwargs)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
             return int(proc.returncode or 0), stdout or "", stderr or "", False
@@ -775,6 +792,9 @@ class TaskExecutionContext:
             snapshot_truncated=before_snapshot.truncated or after_snapshot.truncated,
             external_or_private_state_may_have_changed=True,
             warnings=warnings,
+            stdout=stdout,
+            stderr=stderr,
+            pipefail_available=bool(shutil.which("bash", path=env.get("PATH"))) if os.name == "posix" else False,
         )
         self.attempt.add_command(record)
         completed = subprocess.CompletedProcess(command, exit_code, stdout, stderr)
@@ -846,16 +866,24 @@ class TaskExecutionContext:
             label, strength = "smoke test in polluted/private context", 2
         else:
             label, strength = "command exit code only", 1
+        from villani_code.completion_consistency import validation_mask_reasons
+
+        weakening_reasons = validation_mask_reasons(record.command)
+        if "|" in record.command and not record.pipefail_available:
+            weakening_reasons.append("piped command ran without pipefail semantics")
         evidence = ValidationEvidence(
             command=record.command,
             label=label,
-            strength=strength,
+            strength=strength if not weakening_reasons else min(strength, 1),
             context_hash=record.environment_hash,
             clean_task_context=record.used_clean_task_context,
             depended_on_private_runtime=record.depended_on_private_runtime,
             produced_artifacts=produced_artifacts,
             scope="final expected behaviour" if final_behavior else "partial behaviour",
             exit_code=record.exit_code,
+            weakened=bool(weakening_reasons),
+            weakening_reasons=weakening_reasons,
+            workspace_revision=record.workspace_revision,
         )
         self.attempt.add_evidence(evidence)
         warning, force = self.attempt.register_progress(record, evidence)

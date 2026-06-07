@@ -19,12 +19,15 @@ from villani_code.tools import execute_tool
 
 class SequenceClient:
     def __init__(self, responses: list[dict]) -> None:
-        self.responses = responses
+        self.responses = list(responses)
         self.payloads: list[dict] = []
+        self._last_response = self.responses[-1] if self.responses else {}
 
     def create_message(self, payload, stream=False):
         self.payloads.append(payload)
-        return self.responses.pop(0)
+        if self.responses:
+            self._last_response = self.responses.pop(0)
+        return self._last_response
 
 
 def _tool_response(command: str, *, timeout_sec: int = 10, tool_id: str = "tool-1") -> dict:

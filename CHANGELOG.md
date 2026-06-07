@@ -10,3 +10,5 @@
 - Curated benchmark starting packs with distinct task instructions and pack lint validation tests.
 - Tightened CI release surface for Python 3.11 and Windows/core behavior, plus packaging smoke assertions.
 - Updated benchmark documentation and added a practical release checklist.
+
+- Added a general prompt-grounded final consistency check that tracks required deliverables, weakened validation evidence, unstable validation, unresolved self-identified defects, and last-known-better state before finalization.

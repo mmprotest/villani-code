@@ -15,6 +15,8 @@ class _SequenceClient:
 
     def create_message(self, payload, stream):
         _ = payload, stream
+        if self._idx >= len(self._responses):
+            return self._responses[-1]
         response = self._responses[self._idx]
         self._idx += 1
         return response

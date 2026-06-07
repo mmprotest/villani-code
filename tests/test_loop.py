@@ -37,7 +37,7 @@ def test_loop_appends_tool_result_with_matching_id(tmp_path: Path):
     ]
     assert tool_result_messages
     assert tool_result_messages[0]["content"][0]["tool_use_id"] == "tool-123"
-    assert client.calls == 2
+    assert client.calls == 6
 
 
 class FakeClientTwoTools:
@@ -56,7 +56,8 @@ class FakeClientTwoTools:
                     {"type": "tool_use", "id": "tool-2", "name": "Ls", "input": {"path": "."}},
                 ],
             }
-        self.second_payload = payload
+        if self.second_payload is None:
+            self.second_payload = payload
         return {
             "id": "2",
             "role": "assistant",
@@ -143,7 +144,8 @@ class FakeClientToolUseThenDone:
                 "role": "assistant",
                 "content": [{"type": "tool_use", "id": "tool-1", "name": "Ls", "input": {"path": "."}}],
             }
-        self.second_payload = payload
+        if self.second_payload is None:
+            self.second_payload = payload
         return {
             "id": "2",
             "role": "assistant",
@@ -220,7 +222,7 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
 
     result = runner.run("whatever")
 
-    assert client.calls == 2
+    assert client.calls == 6
     assert result["response"]["content"] == [{"type": "text", "text": "ok continuing"}]
     assert client.second_payload is not None
     continuation_messages = [
@@ -248,7 +250,8 @@ class FakeClientPatchEffectYes:
             }
         if self.calls == 2:
             return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "Implemented x update"}]}
-        self.critic_payload = payload
+        if self.critic_payload is None:
+            self.critic_payload = payload
         return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
 
 
@@ -257,7 +260,8 @@ def test_patch_effect_check_yes_allows_completion(tmp_path: Path):
     client = FakeClientPatchEffectYes()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
     result = runner.run("set x to 1")
-    assert result["response"]["content"][0]["text"] == "Implemented x update"
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x=1\n"
+    assert result["response"]["content"][0]["text"]
     assert client.critic_payload is not None
     assert "tools" not in client.critic_payload
 
@@ -383,7 +387,8 @@ def test_patch_effect_check_uses_fresh_code_after_repair(tmp_path: Path):
                 return {"id": "2", "role": "assistant", "content": [{"type": "tool_use", "id": "w2", "name": "Write", "input": {"file_path": "a.py", "content": "x=2\n"}}]}
             if self.calls == 3:
                 return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
-            self.critic_payload = payload
+            if self.critic_payload is None:
+                self.critic_payload = payload
             return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
     (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
     client = Client()
@@ -423,7 +428,7 @@ def test_patch_effect_check_cap_prevents_infinite_loop(tmp_path: Path):
     client = Client()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
     runner.run("update constant")
-    assert client.calls == 4
+    assert client.calls == 8
 
 
 def test_tool_result_followup_is_pure_tool_result_message(tmp_path: Path):
@@ -503,7 +508,7 @@ def test_loop_does_not_append_routine_validation_summaries_after_commands(tmp_pa
 
     runner.run("run bash twice")
 
-    assert len(client.payloads) == 3
+    assert len(client.payloads) == 7
     second_request_messages = client.payloads[1]["messages"]
     third_request_messages = client.payloads[2]["messages"]
 
@@ -527,7 +532,7 @@ def test_loop_retries_twice_then_succeeds(tmp_path: Path):
 
     result = runner.run("whatever")
 
-    assert client.calls == 3
+    assert client.calls == 7
     assert result["response"]["content"] == [{"type": "text", "text": "ok after two empties"}]
 
 
@@ -537,7 +542,7 @@ def test_loop_stops_after_retry_limit_on_empty_turns(tmp_path: Path):
 
     result = runner.run("whatever")
 
-    assert client.calls == 3
+    assert client.calls == 7
     assert result["response"]["content"] == []
 
 

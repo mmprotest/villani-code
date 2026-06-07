@@ -7,7 +7,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -17,6 +17,9 @@ from villani_code.autonomy import (
     VerificationEngine,
 )
 from villani_code.checkpoints import CheckpointManager
+from villani_code.completion_consistency import (
+    CompletionConsistencyTracker, FINAL_CONSISTENCY_REQUEST, HIGH_RISK_WARNING, WEAKER_STATE_WARNING,
+)
 from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
@@ -29,6 +32,7 @@ from villani_code.execution_context import (
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
+from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets
 from villani_code.plan_session import PlanAnswer, PlanOption, PlanQuestion, PlanSessionResult
 from villani_code.prompting import (
     build_approved_plan_context,
@@ -817,6 +821,9 @@ class Runner:
             raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
         self._task_execution_context.begin_attempt()
+        consistency = CompletionConsistencyTracker(instruction, self.repo)
+        final_check_pending = False
+        final_response_authorized = False
         messages = messages or build_initial_messages(self.repo, instruction)
         if self._failure_memory is not None:
             messages.append(
@@ -1106,6 +1113,12 @@ class Runner:
             ]
             return bool(meaningful)
 
+        def _write_consistency_artifacts() -> None:
+            if self._debug_recorder is not None:
+                consistency.write_artifacts(self._debug_recorder.artifacts.run_dir)
+            elif self._mission_dir is not None:
+                consistency.write_artifacts(self._mission_dir / "debug")
+
         def _finish_bounded(
             response: dict[str, Any], reason: str, completed: bool
         ) -> dict[str, Any]:
@@ -1154,6 +1167,7 @@ class Runner:
             self._update_mission_state(status=mission_status, changed_files=all_changes, compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
+            _write_consistency_artifacts()
             if self._debug_recorder is not None:
                 self._debug_recorder.write_attempt_state(
                     attempt_state.to_dict(),
@@ -1178,6 +1192,38 @@ class Runner:
                 "transcript": transcript,
                 "execution": execution.to_dict(),
             }
+
+        def _defer_for_final_consistency(response: dict[str, Any]) -> bool:
+            nonlocal final_check_pending, final_response_authorized
+            content_blocks = response.get("content", [])
+            assistant_text = "\n".join(
+                str(block.get("text", "")) for block in content_blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if final_response_authorized:
+                final_response_authorized = False
+                return False
+            if final_check_pending:
+                final_check_pending = False
+                favourable_only = bool(consistency.validations and consistency.validations[-1].exit_code == 0 and consistency.validations[-1].unstable)
+                risk = consistency.classify(assistant_text, final_claim_relies_on_favourable_run=favourable_only)
+                visible = consistency.record_check(assistant_text, risk)
+                weaker_warning = WEAKER_STATE_WARNING if consistency.current_weaker_than_best() else ""
+                if risk["level"] == "high" and consistency.high_risk_warning_count == 0:
+                    consistency.high_risk_warning_count += 1
+                    warning = "\n\n".join(part for part in (visible, weaker_warning, HIGH_RISK_WARNING) if part)
+                    messages.append({"role": "user", "content": [{"type": "text", "text": warning}]})
+                    _write_consistency_artifacts()
+                    return True
+                final_response_authorized = True
+                followup = "\n\n".join(part for part in (visible, weaker_warning, "Now provide the concise final response to the user.") if part)
+                messages.append({"role": "user", "content": [{"type": "text", "text": followup}]})
+                _write_consistency_artifacts()
+                return True
+            consistency.observe_agent_text(assistant_text)
+            final_check_pending = True
+            messages.append({"role": "user", "content": [{"type": "text", "text": FINAL_CONSISTENCY_REQUEST}]})
+            return True
 
         def _budget_reason(
             completed: bool = False, model_idle: bool = False
@@ -1266,6 +1312,11 @@ class Runner:
             tool_uses = [
                 b for b in response.get("content", []) if b.get("type") == "tool_use"
             ]
+            if tool_uses:
+                consistency.observe_agent_text("\n".join(
+                    str(block.get("text", "")) for block in response.get("content", [])
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ))
             empty = is_effectively_empty_content(response.get("content", []))
             if not tool_uses and empty and empty_turn_retries < 2:
                 empty_turn_retries += 1
@@ -1344,6 +1395,8 @@ class Runner:
                         reminder = "Benchmark mode requires an actual in-scope patch. Edit only expected/allowed support files and continue."
                         self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                         messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
+                        continue
+                    if _defer_for_final_consistency(response):
                         continue
                     reason = _budget_reason(completed=True)
                     if reason:
@@ -1514,6 +1567,8 @@ class Runner:
                         }
                     )
                     continue
+                if _defer_for_final_consistency(response):
+                    continue
                 reason = _budget_reason(completed=True) or "completed"
                 return _finish_bounded(response, reason, reason == "completed")
 
@@ -1561,8 +1616,30 @@ class Runner:
                 )
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
-                    if tool_name == "Read" and not result.get("is_error"):
-                        self._files_read.add(str(tool_input.get("file_path", "")))
+                if tool_name == "Read" and not result.get("is_error"):
+                    self._files_read.add(str(tool_input.get("file_path", "")))
+
+                if not result.get("is_error"):
+                    if tool_name == "Read":
+                        consistency.record_read(str(tool_input.get("file_path", "")))
+                    elif tool_name == "Write":
+                        path = str(tool_input.get("file_path", ""))
+                        consistency.record_write([path])
+                    elif tool_name == "Patch":
+                        try:
+                            paths = extract_unified_diff_targets(str(tool_input.get("unified_diff", "")), default_file_path=str(tool_input.get("file_path", "") or "") or None)
+                        except PatchApplyError:
+                            paths = [str(tool_input.get("file_path", ""))]
+                        consistency.record_write(paths)
+                    elif tool_name == "Bash" and self._task_execution_context.attempt.commands:
+                        command_record = self._task_execution_context.attempt.commands[-1]
+                        mutations = command_record.mutations
+                        changed = [item.path for item in [*mutations.created, *mutations.modified]]
+                        if changed:
+                            consistency.record_write(changed, created=bool(mutations.created))
+                        evidence = self._task_execution_context.attempt.validation_evidence[-1]
+                        tracked = consistency.record_validation(command_record.command, command_record.exit_code, command_record.stdout, command_record.stderr, strength=evidence.strength, clean=evidence.clean_task_context)
+                        evidence.unstable = tracked.unstable
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
                     self._patch_effect_check_pending = True
