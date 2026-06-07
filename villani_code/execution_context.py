@@ -4,6 +4,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -81,6 +82,54 @@ def _cap_text(value: str, limit: int) -> str:
         return value
     room = max(0, limit - len(TRUNCATION_NOTICE) - 1)
     return value[:room] + "\n" + TRUNCATION_NOTICE
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+_TIMESTAMP_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d:[0-5]\d(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"
+)
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.])(?:[A-Za-z]:[\\/]|/)(?:[^\s:\"'(),]+[\\/])*[^\s:\"'(),]*")
+_STRUCTURED_FAILURE_PATTERNS = (
+    re.compile(r"^(?:[A-Za-z_][\w.]*)(?:Error|Exception):(?:\s|$)"),
+    re.compile(r"^(?:AssertionError|ImportError|ModuleNotFoundError|SystemExit|KeyboardInterrupt)(?::|$)"),
+    re.compile(r"^(?:FAILED|ERROR)(?:\s|$|:)"),
+    re.compile(r"^(?:E\s+)?(?:assert(?:ion)?(?: failed)?|expected\b|actual\b)", re.IGNORECASE),
+    re.compile(r"(?:^|[\s:])(?:fatal )?error(?:[A-Z0-9_]*)(?:[\s:]|$)", re.IGNORECASE),
+    re.compile(r"(?:cannot find|not found|undefined reference|unresolved external|failed to (?:import|load|compile|build|run))", re.IGNORECASE),
+)
+
+
+def _normalize_failure_text(value: str) -> str:
+    value = _ANSI_ESCAPE_RE.sub("", value).strip()
+    value = _UUID_RE.sub("<uuid>", value)
+    value = _TIMESTAMP_RE.sub("<timestamp>", value)
+    value = re.sub(r"\b0x[0-9a-f]+\b", "<address>", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?i)(?:/tmp|/var/tmp|/private/tmp)[^\s:\"'(),]*", "<temp-path>", value)
+    value = _ABSOLUTE_PATH_RE.sub("<path>", value)
+    value = re.sub(r"(?i)\bline\s+\d+\b", "line <n>", value)
+    value = re.sub(r"(?<=\w):\d+(?::\d+)?\b", ":<n>", value)
+    value = re.sub(r"\bpid[=: ]+\d+\b", "pid=<n>", value, flags=re.IGNORECASE)
+    return " ".join(value.split())
+
+
+def failure_fingerprint(stdout: str, stderr: str, exit_code: int) -> str:
+    """Return a stable fingerprint for the most useful failure detail in command output."""
+    if exit_code == 0:
+        return "success"
+    combined = "\n".join(part for part in (stderr, stdout) if part)[-12000:]
+    lines = [_normalize_failure_text(line) for line in combined.splitlines()]
+    meaningful = [line for line in lines if line and not line.startswith(("Traceback (", "During handling"))]
+    for line in reversed(meaningful):
+        if any(pattern.search(line) for pattern in _STRUCTURED_FAILURE_PATTERNS):
+            return "structured:" + _digest(line.lower())
+    compact_tail = " | ".join(meaningful[-8:])[-2000:]
+    if compact_tail:
+        return "tail:" + _digest(compact_tail.lower())
+    return f"exit:{exit_code}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +268,7 @@ class CommandRecord:
     warnings: list[str] = field(default_factory=list)
     no_progress_warning: bool = False
     force_finalization: bool = False
+    failure_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -235,6 +285,7 @@ class ValidationEvidence:
     produced_artifacts: bool
     scope: str
     exit_code: int
+    failure_fingerprint: str = ""
     suspicious: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -302,6 +353,8 @@ class AttemptState:
     tool_steps: list[dict[str, Any]] = field(default_factory=list)
     tool_failures: list[str] = field(default_factory=list)
     _last_evidence_signatures: set[str] = field(default_factory=set, repr=False)
+    _evidence_repetitions: dict[str, tuple[int, int]] = field(default_factory=dict, repr=False)
+    _progress_epoch: int = field(default=0, repr=False)
     _last_command_exit: dict[str, int] = field(default_factory=dict, repr=False)
     _previous_command_had_warning: bool = field(default=False, repr=False)
 
@@ -315,6 +368,8 @@ class AttemptState:
             self.files_deleted.add(item.path)
         if record.mutations.has_effects():
             self.side_effects.append({"command": record.command, **record.mutations.to_dict()})
+            if "workspace" in record.mutations.path_classes:
+                self._progress_epoch += 1
         if record.timed_out:
             self.timeouts += 1
         self.snapshot_truncated = self.snapshot_truncated or record.snapshot_truncated
@@ -325,10 +380,16 @@ class AttemptState:
 
     def register_progress(self, record: CommandRecord, evidence: ValidationEvidence) -> tuple[bool, bool]:
         command_signature = " ".join(record.command.split())
-        count = self.repeated_commands.get(command_signature, 0) + 1
-        self.repeated_commands[command_signature] = count
-        evidence_signature = f"{command_signature}|{evidence.exit_code}|{evidence.label}"
-        new_evidence = evidence_signature not in self._last_evidence_signatures
+        command_count = self.repeated_commands.get(command_signature, 0) + 1
+        self.repeated_commands[command_signature] = command_count
+        evidence_signature = "|".join(
+            (command_signature, str(evidence.exit_code), evidence.label, evidence.failure_fingerprint)
+        )
+        previous_count, previous_epoch = self._evidence_repetitions.get(
+            evidence_signature, (0, -1)
+        )
+        evidence_count = previous_count + 1 if previous_epoch == self._progress_epoch else 1
+        new_evidence = evidence_count == 1
         self._last_evidence_signatures.add(evidence_signature)
         previous_exit = self._last_command_exit.get(command_signature)
         outcome_changed = previous_exit is not None and previous_exit != evidence.exit_code
@@ -337,16 +398,22 @@ class AttemptState:
         self._previous_command_had_warning = bool(record.warnings)
         workspace_effect = "workspace" in record.mutations.path_classes and record.mutations.has_effects()
         process_effect = bool(record.mutations.processes_started or record.mutations.ports_opened)
-        changed_strategy = count == 1
+        changed_strategy = command_count == 1
         progress = (
             workspace_effect or process_effect or new_evidence or changed_strategy
             or outcome_changed or warning_resolved
         )
+        if progress:
+            # Invalidate stale repetition pressure. The current evidence starts a fresh epoch so
+            # the immediately following identical result can still be counted as a repeat.
+            self._progress_epoch += 1
+            evidence_count = 1
+        self._evidence_repetitions[evidence_signature] = (evidence_count, self._progress_epoch)
         repeated_warning = any(
             value >= NO_PROGRESS_MAX_REPEATED_WARNINGS for value in self.repeated_warnings.values()
         )
-        repeated_command = count >= NO_PROGRESS_MAX_REPEATED_COMMANDS and not outcome_changed
-        if progress and not repeated_command and not repeated_warning:
+        repeated_command = evidence_count >= NO_PROGRESS_MAX_REPEATED_COMMANDS
+        if progress and not repeated_warning:
             self.no_progress_steps = 0
             return False, False
         self.no_progress_steps += 1
@@ -775,6 +842,7 @@ class TaskExecutionContext:
             snapshot_truncated=before_snapshot.truncated or after_snapshot.truncated,
             external_or_private_state_may_have_changed=True,
             warnings=warnings,
+            failure_fingerprint=failure_fingerprint(stdout, stderr, exit_code),
         )
         self.attempt.add_command(record)
         completed = subprocess.CompletedProcess(command, exit_code, stdout, stderr)
@@ -798,6 +866,11 @@ class TaskExecutionContext:
             if failure_signature not in self.attempt.tool_failures:
                 self.attempt.tool_failures.append(failure_signature)
         if count == 1:
+            self.attempt._progress_epoch += 1
+            self.attempt.no_progress_steps = 0
+            return False, False
+        if not is_error and tool_name in {"Write", "Patch"}:
+            self.attempt._progress_epoch += 1
             self.attempt.no_progress_steps = 0
             return False, False
         self.attempt.no_progress_steps += 1
@@ -856,6 +929,7 @@ class TaskExecutionContext:
             produced_artifacts=produced_artifacts,
             scope="final expected behaviour" if final_behavior else "partial behaviour",
             exit_code=record.exit_code,
+            failure_fingerprint=record.failure_fingerprint,
         )
         self.attempt.add_evidence(evidence)
         warning, force = self.attempt.register_progress(record, evidence)
