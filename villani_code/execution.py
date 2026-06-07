@@ -29,6 +29,8 @@ class ExecutionResult:
     runner_failures: list[str]
     terminated_reason: str
     completed: bool
+    attempt_state: dict[str, object]
+    failure_memory: dict[str, object] | None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

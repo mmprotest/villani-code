@@ -2,6 +2,7 @@
 
 ## 0.1.0rc1
 
+- Reduced runner telemetry regressions by separating compact model-visible command observations from full debug artifacts, bounding filesystem snapshots, handling command timeouts as tool results, fixing absolute Read path behaviour, and adding no-progress loop protection while preserving execution-context isolation.
 - Hardened benchmark validation command resolution with explicit allowlisting and clear environment-failure classification.
 - Added benchmark interpretation-status policy (`headline_comparable`, `informational_only`, `internal_only`) with blunt report banners.
 - Expanded aggregate provenance reporting so environment/harness instability is separated from agent weakness in summaries.

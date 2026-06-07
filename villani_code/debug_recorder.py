@@ -298,6 +298,7 @@ class DebugRecorder:
         truncated: bool = False,
         tool_call_id: str = "",
         turn_index: int | None = None,
+        full_debug_record: dict[str, Any] | None = None,
     ) -> None:
         payload = {
             "ts": self._ts(),
@@ -309,6 +310,12 @@ class DebugRecorder:
             "truncated": truncated,
             "tool_call_id": tool_call_id,
         }
+        if isinstance(full_debug_record, dict):
+            debug_record = copy.deepcopy(full_debug_record)
+            if not self.config.capture_command_output:
+                debug_record["stdout"] = str(debug_record.get("stdout", ""))[:240]
+                debug_record["stderr"] = str(debug_record.get("stderr", ""))[:240]
+            payload["full_debug_record"] = debug_record
         self._safe_append_jsonl("commands", payload)
         self.record_event("command_finished", f"Command finished: {command}", payload, turn_index=turn_index)
         if exit_code != 0:
@@ -480,6 +487,18 @@ class DebugRecorder:
             write_json(self.artifacts.path("trajectory.json"), trajectory)
 
         self._safe(_write)
+
+    def write_attempt_state(
+        self,
+        attempt_state: dict[str, Any],
+        failure_memory: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {"attempt_state": attempt_state, "failure_memory": failure_memory}
+        self._safe_write_json(self.artifacts.path("attempt_state.json"), payload)
+        for command in attempt_state.get("commands", []):
+            self._safe_append_jsonl("commands", {"ts": self._ts(), "execution_context": command})
+        for warning in attempt_state.get("warnings", []):
+            self.record_event("private_runtime_contamination", str(warning), {"warning": warning})
 
     def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
         if status == "completed":

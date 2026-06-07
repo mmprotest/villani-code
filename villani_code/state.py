@@ -4,6 +4,7 @@ import copy
 import ast
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +21,11 @@ from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
+from villani_code.execution_context import (
+    MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS,
+    FailureMemory,
+    TaskExecutionContext,
+)
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
@@ -41,6 +47,7 @@ from villani_code.tools import tool_specs
 from villani_code.transcripts import save_transcript
 from villani_code.context_projection import build_model_context_packet, render_model_context_packet
 from villani_code.event_recorder import RuntimeEventRecorder
+from villani_code.debug_artifacts import resolve_debug_root
 from villani_code.debug_mode import DebugConfig, DebugMode
 from villani_code.debug_recorder import DebugRecorder
 from villani_code.mission_state import MissionState, create_mission_state, get_mission_dir, save_mission_state
@@ -488,6 +495,9 @@ class Runner:
         benchmark_config: BenchmarkRuntimeConfig | None = None,
         debug_config: DebugConfig | None = None,
         provider: str | None = None,
+        private_runtime_paths: list[Path] | None = None,
+        task_environment: dict[str, str] | None = None,
+        allowed_private_paths: list[Path] | None = None,
     ):
         self.client = client
         self.repo = repo
@@ -517,6 +527,19 @@ class Runner:
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
         self._debug_config = debug_config or DebugConfig(mode=DebugMode.OFF)
         self.provider = provider
+        discovered_private_paths: list[Path] = list(private_runtime_paths or [])
+        discovered_private_paths.append(Path(__file__).resolve().parent)
+        discovered_private_paths.append(resolve_debug_root(self._debug_config.debug_root))
+        if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+            discovered_private_paths.append(Path(sys.prefix))
+        self._task_execution_context = TaskExecutionContext(
+            self.repo,
+            private_paths=discovered_private_paths,
+            task_environment=task_environment,
+            allowed_private_paths=allowed_private_paths or [],
+            snapshot_excluded_paths=[resolve_debug_root(self._debug_config.debug_root)],
+        )
+        self._failure_memory: FailureMemory | None = None
         self._debug_recorder: DebugRecorder | None = None
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
@@ -601,6 +624,24 @@ class Runner:
         if self.small_model:
             self._init_small_model_support()
 
+    def record_final_validation(
+        self,
+        *,
+        succeeded: bool,
+        summary: str,
+        believed_succeeded: str = "",
+    ) -> FailureMemory | None:
+        """Record external/final validation and retain contradictions for the next attempt."""
+        attempt = self._task_execution_context.attempt
+        self._task_execution_context.record_final_result(summary, succeeded)
+        if succeeded:
+            self._failure_memory = None
+            return None
+        self._failure_memory = attempt.build_failure_memory(believed_succeeded, summary)
+        if self._debug_recorder is not None:
+            self._debug_recorder.write_attempt_state(attempt.to_dict(), self._failure_memory.to_dict())
+        return self._failure_memory
+
     @property
     def event_callback(self) -> Callable[[dict[str, Any]], None]:
         return self._dispatch_event
@@ -661,6 +702,7 @@ class Runner:
                 truncated=bool(payload.get("truncated", False)),
                 tool_call_id=str(payload.get("tool_call_id", "") or ""),
                 turn_index=turn_index,
+                full_debug_record=dict(payload),
             )
 
 
@@ -774,7 +816,12 @@ class Runner:
         if approved_plan is not None and not approved_plan.ready_to_execute:
             raise RuntimeError("Approved plan is not ready to execute; unresolved clarifications remain.")
         self._ensure_mission(instruction)
+        self._task_execution_context.begin_attempt()
         messages = messages or build_initial_messages(self.repo, instruction)
+        if self._failure_memory is not None:
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": self._failure_memory.render_compact()}]}
+            )
         if approved_plan is not None:
             if self._mission_dir is not None:
                 (self._mission_dir / "plan_artifact.json").write_text(json.dumps(approved_plan.to_dict(), indent=2), encoding="utf-8")
@@ -1069,6 +1116,12 @@ class Runner:
                 for block in response.get("content", [])
                 if block.get("type") == "text"
             )
+            attempt_state = self._task_execution_context.finish_attempt()
+            for command_record in attempt_state.commands:
+                if not any(item.command == command_record.command for item in attempt_state.validation_evidence):
+                    self._task_execution_context.record_validation(command_record, kind="command")
+            if not completed:
+                self._failure_memory = attempt_state.build_failure_memory(final_text, reason)
             execution = ExecutionResult(
                 final_text=final_text,
                 turns_used=turns_used,
@@ -1085,6 +1138,8 @@ class Runner:
                 runner_failures=collect_runner_failures(transcript),
                 terminated_reason=reason,
                 completed=completed,
+                attempt_state=attempt_state.to_dict(),
+                failure_memory=self._failure_memory.to_dict() if self._failure_memory else None,
             )
             transcript["execution"] = execution.to_dict()
             transcript["final_assistant_content"] = response.get("content", [])
@@ -1100,6 +1155,10 @@ class Runner:
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
             if self._debug_recorder is not None:
+                self._debug_recorder.write_attempt_state(
+                    attempt_state.to_dict(),
+                    self._failure_memory.to_dict() if self._failure_memory else None,
+                )
                 self._debug_recorder.write_final_summary(
                     status=mission_status,
                     termination_reason=reason,
@@ -1224,11 +1283,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1425,7 +1479,10 @@ class Runner:
                     self.event_callback({"type": "benchmark_scope_reminder_injected", "task_id": self.benchmark_config.task_id, "reason": "no_meaningful_edit"})
                     messages.append({"role": "user", "content": [{"type": "text", "text": reminder}]})
                     continue
-                if self._patch_effect_check_pending and self._patch_effect_check_attempts < self._patch_effect_check_cap:
+                if (
+                    self._patch_effect_check_pending
+                    and self._patch_effect_check_attempts < self._patch_effect_check_cap
+                ):
                     self._patch_effect_check_attempts += 1
                     check_observation = self._run_patch_effect_check(response, _attributed_changed_files(), instruction)
                     if check_observation:
@@ -1457,38 +1514,11 @@ class Runner:
                         }
                     )
                     continue
-                reason = _budget_reason(completed=True)
-                if reason:
-                    return _finish_bounded(response, reason, reason == "completed")
-                transcript["final_assistant_content"] = response.get("content", [])
-                transcript_path = None
-                if not self._planning_read_only:
-                    transcript_path = self._save_transcript_and_link(transcript)
-                    self._save_session_snapshot(messages)
-                self._update_mission_state(status="completed", compact_summary=summarize_mission_state(self._mission_state) if self._mission_state else "")
-                if self._event_recorder is not None:
-                    self._event_recorder.write_digest()
-                if self._debug_recorder is not None:
-                    self._debug_recorder.write_final_summary(
-                        status="completed",
-                        termination_reason="completed",
-                        total_turns=turns_used,
-                        mission_id=self._mission_id,
-                    )
-                self._write_regular_trace_artifacts(
-                    transcript=transcript,
-                    messages=messages,
-                    status="completed",
-                    termination_reason="completed",
-                )
-                return {
-                    "response": response,
-                    "messages": messages,
-                    "transcript_path": str(transcript_path) if transcript_path is not None else "",
-                    "transcript": transcript,
-                }
+                reason = _budget_reason(completed=True) or "completed"
+                return _finish_bounded(response, reason, reason == "completed")
 
             tool_results: list[dict[str, Any]] = []
+            force_no_progress_finalization = False
             for block in tool_uses:
                 tool_name = block.get("name", "")
                 tool_input = dict(block.get("input", {}))
@@ -1526,21 +1556,17 @@ class Runner:
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
                 tool_calls_used += 1
+                force_no_progress_finalization = (
+                    force_no_progress_finalization or bool(result.get("force_finalization", False))
+                )
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
                         self._files_read.add(str(tool_input.get("file_path", "")))
 
                 if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    self._pending_verification = self._run_post_edit_verification(
-                        trigger=f"{tool_name} execution"
-                    )
                     self._patch_effect_check_pending = True
                     self._patch_effect_check_attempts = 0
-                elif tool_name == "Bash":
-                    self._pending_verification = self._run_verification(
-                        trigger=f"{tool_name} execution"
-                    )
 
                 if result.get("is_error"):
                     result_text = str(result.get("content", ""))
@@ -1667,6 +1693,8 @@ class Runner:
                 )
                 self._pending_verification = ""
             messages.append({"role": "user", "content": next_user_content})
+            if force_no_progress_finalization:
+                return _finish_bounded(response, "no_progress", False)
 
             reason = _budget_reason()
             if reason:
@@ -1708,67 +1736,107 @@ class Runner:
             for block in response.get("content", [])
             if isinstance(block, dict) and block.get("type") == "text"
         ).strip()
-        candidates = self._canonical_modified_paths(list(changed_files) + sorted(self._current_verification_targets) + sorted(self._intended_targets))
-        target = next(
-            (
-                path
-                for path in candidates
-                if path
-                and not path.startswith(("tmp", "temp", "debug", "scratch", ".villani", ".villani_code", "__pycache__"))
-                and (path.endswith(".py") or path.startswith(("src/", "app/", "lib/", "config/")))
-            ),
-            "",
+        candidates = self._canonical_modified_paths(
+            list(changed_files)
+            + sorted(self._current_verification_targets)
+            + sorted(self._intended_targets)
         )
-        if not target:
+        attempt = self._task_execution_context.attempt
+        candidate_summary = summarize_changes(candidates)
+        has_external_effect = any(
+            command.mutations.processes_started
+            or command.mutations.ports_opened
+            or "private-runtime" in command.path_classes
+            or "external/system" in command.path_classes
+            for command in attempt.commands
+        )
+        if not candidate_summary.intentional and not has_external_effect:
             self._patch_effect_check_pending = False
             return ""
-        target_path = (self.repo / target).resolve()
-        if not target_path.exists() or not target_path.is_file():
+        only_new_files = bool(candidate_summary.intentional) and all(
+            not self._task_execution_context.existed_at_attempt_start(self.repo / path)
+            for path in candidate_summary.intentional
+        )
+        if only_new_files and not _is_code_change_oriented_request(objective) and not has_external_effect:
             self._patch_effect_check_pending = False
             return ""
-        patched_text = target_path.read_text(encoding="utf-8", errors="replace")
-        patched_excerpt = patched_text[:2400]
-        intended_effect = self._derive_intended_effect(text, target, objective)
-        syntax_result = "not_applicable"
-        if target.endswith(".py"):
+
+        file_effects: list[dict[str, Any]] = []
+        remaining_excerpt_chars = 600
+        for relative_path in candidates[:10]:
+            path = (self.repo / relative_path).resolve()
+            excerpt = ""
+            state = "deleted-or-missing"
+            if path.exists() and path.is_file():
+                state = "present"
+                if remaining_excerpt_chars > 0:
+                    try:
+                        excerpt = path.read_text(encoding="utf-8", errors="replace")[:remaining_excerpt_chars]
+                    except OSError:
+                        excerpt = "<unreadable>"
+                    remaining_excerpt_chars -= len(excerpt)
+            file_effects.append({"path": relative_path, "state": state, "excerpt": excerpt})
+
+        cumulative_effect = {
+            "attempt": json.loads(attempt.compact_summary()),
+            "files": file_effects,
+        }
+        cumulative_text = json.dumps(cumulative_effect, indent=2)
+        if len(cumulative_text) > MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS:
+            cumulative_text = cumulative_text[: MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS - 16] + "\n[truncated]"
+        intended_effect = self._derive_intended_effect(text, ", ".join(candidates), objective)
+        legacy_syntax_result = "not_applicable"
+        syntax_target = next((item for item in file_effects if item["path"].endswith(".py")), None)
+        if syntax_target is not None:
             try:
-                ast.parse(patched_text)
-                syntax_result = "ok"
+                ast.parse(str(syntax_target["excerpt"]))
+                legacy_syntax_result = "ok"
             except SyntaxError as exc:
-                line = exc.lineno or "?"
-                syntax_result = f"syntax_error: {exc.msg} at line {line}"
+                legacy_syntax_result = f"syntax_error: {exc.msg} at line {exc.lineno or '?'}"
         prompt = (
-            "You are checking whether a code edit actually matches its intended effect.\n\n"
+            "Check whether the cumulative effects of this entire attempt match its intended effect. "
+            "Do not focus on whichever file happened to be edited last. Consider every changed or "
+            "deleted file, command, observable side effect, validation result, and unresolved warning.\n\n"
             f"Task objective:\n{objective}\n\n"
             f"Intended effect:\n{intended_effect}\n\n"
-            f"Fresh patched code:\n```\n{patched_excerpt}\n```\n\n"
-            f"Syntax check:\n{syntax_result}\n\n"
-            "Does the patched code actually implement the intended effect?\n"
+            f"Cumulative attempt state:\n{cumulative_text}\n\n"
             "Answer exactly one of:\nYES\nNO: <specific mismatch>"
         )
         self.event_callback(
             {
                 "type": "patch_effect_critic_started",
                 "canonical_modified_paths": candidates,
-                "target_file": target,
-                "syntax_check": syntax_result,
+                "attempt_state_summary": attempt.compact_summary(),
             }
         )
-        critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
+        critic_payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "system": "",
+            "max_tokens": 120,
+            "stream": False,
+        }
         critic_raw = self.client.create_message(critic_payload, stream=False)
-        critic_text = "\n".join(str(b.get("text", "")) for b in critic_raw.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
+        critic_text = "\n".join(
+            str(block.get("text", ""))
+            for block in critic_raw.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
         stripped = critic_text.lstrip()
-        if syntax_result.startswith("syntax_error"):
-            return f"Patch-effect check failed: {syntax_result}. Fix syntax before completion."
+        if legacy_syntax_result.startswith("syntax_error"):
+            self._patch_effect_check_pending = True
+            self._pending_verification = legacy_syntax_result
+            return f"Patch-effect check failed: {legacy_syntax_result}. Fix structure before completion."
         if stripped.startswith("YES"):
             self._patch_effect_check_pending = False
             return ""
         if stripped.startswith("NO:"):
-            return f"Patch-effect check mismatch: {critic_text[:400]}"
+            return f"Patch-effect check mismatch (cumulative attempt): {critic_text[:400]}"
         self._patch_effect_check_pending = False
         return (
-            "Patch-effect check was inconclusive. No syntax error or concrete mismatch was found. "
-            "Do not create new verification/proof files. If the edited source already satisfies the task objective, provide the final answer."
+            "Patch-effect check was inconclusive for the cumulative attempt. Review all changed files, "
+            "commands, side effects, validation evidence, and warnings before claiming completion. "
+            "Do not create new verification/proof files solely to manufacture success evidence."
         )
 
     def _derive_intended_effect(self, rationale: str, target: str, objective: str) -> str:
