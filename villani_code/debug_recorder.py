@@ -6,7 +6,10 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import os
 
+from villani_code import __version__
+from villani_code.atif_export import build_atif_trajectory, build_full_transcript_artifact
 from villani_code.debug_artifacts import DEBUG_JSONL_FILES, append_jsonl, append_text, create_debug_run_artifacts, write_json
 from villani_code.debug_mode import DebugConfig
 from villani_code.trace_summary import (
@@ -18,6 +21,30 @@ from villani_code.trace_summary import (
 )
 
 _RESULT_PREVIEW_LIMIT = 240
+
+
+def _api_compatibility(provider: str | None) -> str | None:
+    normalized = (provider or "").strip().lower()
+    return "openai" if normalized == "openai" else None
+
+
+def _inference_provider(provider: str | None) -> str | None:
+    configured = os.environ.get("VILLANI_INFERENCE_PROVIDER")
+    if configured and configured.strip():
+        return configured.strip()
+    return provider
+
+
+def _model_metadata(model: str | None, provider: str | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"identifier": model, "inference_provider": _inference_provider(provider)}
+    api_compatibility = _api_compatibility(provider)
+    if api_compatibility is not None:
+        metadata["api_compatibility"] = api_compatibility
+    return metadata
+
+
+def _agent_metadata() -> dict[str, str]:
+    return {"name": "villani-code", "version": __version__}
 
 
 class DebugRecorder:
@@ -50,10 +77,22 @@ class DebugRecorder:
                 "runtime_mode": mode,
                 "model": model,
                 "provider": provider,
+                "agent": _agent_metadata(),
+                "model_metadata": _model_metadata(model, provider),
                 "created_at": self._ts(),
             },
         )
-        self._emit("run_started", {"objective": objective, "runtime_mode": mode, "model": model, "provider": provider})
+        self._emit(
+            "run_started",
+            {
+                "objective": objective,
+                "runtime_mode": mode,
+                "model": model,
+                "provider": provider,
+                "agent": _agent_metadata(),
+                "model_metadata": _model_metadata(model, provider),
+            },
+        )
 
     def _normalize_changed_path(self, file_path: str) -> str:
         return normalize_repo_path(file_path, Path(self._repo))
@@ -380,6 +419,67 @@ class DebugRecorder:
 
     def write_working_context(self, text: str) -> None:
         self._safe(append_text, self.artifacts.path("working_context.txt"), text)
+
+    def write_regular_trajectory_artifact(
+        self,
+        *,
+        transcript: dict[str, Any],
+        messages: list[dict[str, Any]],
+        status: str,
+        termination_reason: str | None,
+        redact: bool,
+    ) -> None:
+        def _write() -> None:
+            trajectory = build_atif_trajectory(
+                run_id=self.run_id,
+                agent_version=__version__,
+                model=self._model,
+                provider=self._provider,
+                transcript=transcript,
+                messages=messages,
+                status=status,
+                termination_reason=termination_reason,
+                redact=redact,
+            )
+            write_json(self.artifacts.path("trajectory.json"), trajectory)
+
+        self._safe(_write)
+
+    def write_regular_trace_artifacts(
+        self,
+        *,
+        transcript: dict[str, Any],
+        messages: list[dict[str, Any]],
+        status: str,
+        termination_reason: str | None,
+        redact: bool,
+    ) -> None:
+        def _write() -> None:
+            transcript_artifact = build_full_transcript_artifact(
+                run_id=self.run_id,
+                model=self._model,
+                provider=self._provider,
+                transcript=transcript,
+                messages=messages,
+                status=status,
+                termination_reason=termination_reason,
+                redact=redact,
+            )
+            trajectory = build_atif_trajectory(
+                run_id=self.run_id,
+                agent_version=__version__,
+                model=self._model,
+                provider=self._provider,
+                transcript=transcript,
+                messages=messages,
+                status=status,
+                termination_reason=termination_reason,
+                redact=redact,
+            )
+            write_json(self.artifacts.path("transcript.full.json"), transcript_artifact)
+            write_json(self.artifacts.path("trajectory.json"), trajectory)
+
+        self._safe(_write)
 
     def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
         if status == "completed":

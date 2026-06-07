@@ -155,14 +155,19 @@ def normalize_repo_path(raw_path: Any, repo_root: Path | None) -> str:
     return normalized.lstrip("./")
 
 
-def _extract_repo_root(run_dir: Path) -> Path | None:
+def _load_session_meta(run_dir: Path) -> dict[str, Any]:
     session_meta = run_dir / "session_meta.json"
     if not session_meta.exists():
-        return None
+        return {}
     try:
         body = json.loads(session_meta.read_text(encoding="utf-8"))
     except Exception:
-        return None
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _extract_repo_root(run_dir: Path) -> Path | None:
+    body = _load_session_meta(run_dir)
     repo = body.get("repo")
     if isinstance(repo, str) and repo.strip():
         return Path(repo)
@@ -195,6 +200,7 @@ def _infer_tool_category(name: str) -> str:
 
 def build_tool_call_records_from_events(run_dir: Path) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     events = load_events(run_dir / "events.jsonl")
+    session_meta = _load_session_meta(run_dir)
     repo_root = _extract_repo_root(run_dir)
     warnings: list[str] = []
     validation_errors: list[str] = []
@@ -438,6 +444,7 @@ def write_tool_calls_from_events(run_dir: Path) -> Path:
 
 def aggregate_summary_from_events(run_dir: Path, *, status_override: str | None = None) -> dict[str, Any]:
     events = load_events(run_dir / "events.jsonl")
+    session_meta = _load_session_meta(run_dir)
     repo_root = _extract_repo_root(run_dir)
     warnings: list[str] = []
     validation_errors: list[str] = []
@@ -626,6 +633,8 @@ def aggregate_summary_from_events(run_dir: Path, *, status_override: str | None 
     summary: dict[str, Any] = {
         "run_id": run_id or run_dir.name,
         "status": status,
+        "agent": session_meta.get("agent"),
+        "model_metadata": session_meta.get("model_metadata"),
         "started_at": started_at_iso,
         "ended_at": ended_at_iso,
         "duration_ms": duration_ms,

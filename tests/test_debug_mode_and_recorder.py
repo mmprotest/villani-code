@@ -130,11 +130,28 @@ def test_mission_state_event_records_turn_index_when_available(tmp_path: Path) -
     assert mission_event["turn_index"] == 3
 
 
-def test_debug_metadata_records_configured_provider_not_internal_format(tmp_path: Path) -> None:
+def test_debug_metadata_separates_api_compatibility_from_inference_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VILLANI_INFERENCE_PROVIDER", "lmstudio")
     recorder = DebugRecorder(build_debug_config("trace", tmp_path), "prov", "obj", tmp_path, "execution", "m", provider="openai")
     session_meta = json.loads((tmp_path / "prov" / "session_meta.json").read_text(encoding="utf-8"))
     events = [json.loads(line) for line in (tmp_path / "prov" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     run_started = next(e for e in events if e["event_type"] == "run_started")
 
+    expected_model_metadata = {"identifier": "m", "inference_provider": "lmstudio", "api_compatibility": "openai"}
     assert session_meta["provider"] == "openai"
+    assert session_meta["agent"]["name"] == "villani-code"
+    assert session_meta["agent"]["version"]
+    assert session_meta["model_metadata"] == expected_model_metadata
     assert run_started["payload"]["provider"] == "openai"
+    assert run_started["payload"]["model_metadata"] == expected_model_metadata
+
+def test_openai_provider_does_not_imply_lmstudio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VILLANI_INFERENCE_PROVIDER", raising=False)
+    recorder = DebugRecorder(build_debug_config("trace", tmp_path), "prov2", "obj", tmp_path, "execution", "m", provider="openai")
+    session_meta = json.loads((tmp_path / "prov2" / "session_meta.json").read_text(encoding="utf-8"))
+
+    assert session_meta["model_metadata"] == {
+        "identifier": "m",
+        "inference_provider": "openai",
+        "api_compatibility": "openai",
+    }
