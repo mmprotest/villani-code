@@ -481,6 +481,18 @@ class DebugRecorder:
 
         self._safe(_write)
 
+    def write_attempt_state(
+        self,
+        attempt_state: dict[str, Any],
+        failure_memory: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {"attempt_state": attempt_state, "failure_memory": failure_memory}
+        self._safe_write_json(self.artifacts.path("attempt_state.json"), payload)
+        for command in attempt_state.get("commands", []):
+            self._safe_append_jsonl("commands", {"ts": self._ts(), "execution_context": command})
+        for warning in attempt_state.get("warnings", []):
+            self.record_event("private_runtime_contamination", str(warning), {"warning": warning})
+
     def write_final_summary(self, *, status: str, termination_reason: str, total_turns: int, mission_id: str = "") -> Path:
         if status == "completed":
             self._emit("run_completed", {"termination_reason": termination_reason, "mission_id": mission_id, "total_turns": total_turns})

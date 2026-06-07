@@ -327,6 +327,13 @@ class VillaniModeController:
                 )
                 task.status, task.outcome = self._adjudicate_task(task, verification)
                 task.status = self._update_lifecycle_after_attempt(task, op)
+                record_final_validation = getattr(self.runner, "record_final_validation", None)
+                if callable(record_final_validation):
+                    record_final_validation(
+                        succeeded=task.status == TaskLifecycle.PASSED.value,
+                        summary=verification.summary,
+                        believed_succeeded=task.outcome,
+                    )
                 self._update_category_attempt_state(task)
                 if task.status == TaskLifecycle.PASSED.value:
                     retired += 1

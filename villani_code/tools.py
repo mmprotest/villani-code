@@ -3,7 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import shutil
-import subprocess
+import shlex
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from villani_code.execution_context import TaskExecutionContext
 from villani_code.patch_apply import (
     PatchApplyError,
     apply_unified_diff_with_diagnostics,
@@ -56,6 +57,8 @@ class BashInput(BaseModel):
     command: str
     cwd: str = "."
     timeout_sec: int = 30
+    validation_kind: str = "command"
+    checks_final_behavior: bool = False
 
 
 class WriteInput(BaseModel):
@@ -143,6 +146,7 @@ def execute_tool(
     unsafe: bool = False,
     debug_callback: Any | None = None,
     tool_call_id: str = "",
+    execution_context: TaskExecutionContext | None = None,
 ) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
@@ -158,13 +162,13 @@ def execute_tool(
         if name == "Read":
             return _ok(_run_read(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Grep":
-            return _ok(_run_grep(parsed, repo))
+            return _ok(_run_grep(parsed, repo, execution_context=execution_context))
         if name == "Glob":
             return _ok(_run_glob(parsed, repo))
         if name == "Search":
-            return _ok(_run_search(parsed, repo))
+            return _ok(_run_search(parsed, repo, execution_context=execution_context))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id))
+            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id, execution_context=execution_context))
         if name == "Write":
             return _ok(_run_write(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Patch":
@@ -172,7 +176,7 @@ def execute_tool(
         if name == "WebFetch":
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
-            return _ok(_run_git(name, parsed, repo))
+            return _ok(_run_git(name, parsed, repo, execution_context=execution_context))
         if name == "SubmitPlan":
             return _ok("Plan artifact submitted")
     except Exception as exc:
@@ -208,15 +212,23 @@ def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None, to
     return raw.decode("utf-8", errors="replace")
 
 
-def _run_grep(data: GrepInput, repo: Path) -> str:
+def _run_grep(
+    data: GrepInput,
+    repo: Path,
+    execution_context: TaskExecutionContext | None = None,
+) -> str:
     base = _safe_path(repo, data.path)
-    rg_bin = shutil.which("rg")
+    context = execution_context or TaskExecutionContext(repo)
+    rg_bin = shutil.which("rg", path=context.environment.get("PATH"))
     if rg_bin:
         cmd = [rg_bin, "-n", data.pattern, str(base)]
         if data.include_hidden:
             cmd.append("--hidden")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        return "\n".join(proc.stdout.splitlines()[: data.max_results])
+        proc, record = context.run(shlex.join(cmd), repo, 30)
+        output = "\n".join(proc.stdout.splitlines()[: data.max_results])
+        if record.warnings:
+            output = output + ("\n" if output else "") + "\n".join(record.warnings)
+        return output
     return ""
 
 
@@ -225,40 +237,65 @@ def _run_glob(data: GlobInput, repo: Path) -> str:
     return "\n".join(sorted(hits))
 
 
-def _run_search(data: SearchInput, repo: Path) -> str:
-    rg_bin = shutil.which("rg")
+def _run_search(
+    data: SearchInput,
+    repo: Path,
+    execution_context: TaskExecutionContext | None = None,
+) -> str:
+    context = execution_context or TaskExecutionContext(repo)
+    rg_bin = shutil.which("rg", path=context.environment.get("PATH"))
     if not rg_bin:
-        return _run_grep(GrepInput(pattern=data.query, path=data.path), repo)
+        return _run_grep(GrepInput(pattern=data.query, path=data.path), repo, execution_context=context)
     base = _safe_path(repo, data.path)
     cmd = [rg_bin, "-n", "-C", str(data.context_lines), data.query, str(base)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    return proc.stdout
+    proc, record = context.run(shlex.join(cmd), repo, 30)
+    suffix = "\n" + "\n".join(record.warnings) if record.warnings else ""
+    return proc.stdout + suffix
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+def _run_bash(
+    data: BashInput,
+    repo: Path,
+    unsafe: bool,
+    debug_callback: Any | None = None,
+    tool_call_id: str = "",
+    execution_context: TaskExecutionContext | None = None,
+) -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
             if bad in lowered:
                 raise ValueError(f"Refusing command: {bad.strip()}")
     cwd = _safe_path(repo, data.cwd)
+    context = execution_context or TaskExecutionContext(repo)
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
-    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    proc, record = context.run(data.command, cwd, data.timeout_sec)
+    evidence = context.record_validation(
+        record,
+        kind=data.validation_kind if data.validation_kind in {"project", "smoke"} else "command",
+        final_behavior=data.checks_final_behavior,
+    )
+    payload = {
+        "command": data.command,
+        "exit_code": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "execution_context": record.to_dict(),
+        "warnings": record.warnings,
+        "validation_evidence": evidence.to_dict(),
+    }
     if callable(debug_callback):
         debug_callback(
             "command_finished",
             {
-                "command": data.command,
+                **payload,
                 "cwd": data.cwd,
-                "exit_code": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
                 "truncated": False,
                 "tool_call_id": tool_call_id,
             },
         )
-    return json.dumps({"command": data.command, "exit_code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}, indent=2)
+    return json.dumps(payload, indent=2)
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
@@ -338,7 +375,12 @@ def _run_webfetch(data: WebFetchInput) -> str:
     return r.text[:10000]
 
 
-def _run_git(name: str, data: GitSimpleInput, repo: Path) -> str:
+def _run_git(
+    name: str,
+    data: GitSimpleInput,
+    repo: Path,
+    execution_context: TaskExecutionContext | None = None,
+) -> str:
     mapping = {
         "GitStatus": ["status", "--short"],
         "GitDiff": ["diff"],
@@ -348,5 +390,9 @@ def _run_git(name: str, data: GitSimpleInput, repo: Path) -> str:
         "GitCommit": ["commit"],
     }
     cmd = ["git", *mapping[name], *data.args]
-    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True)
-    return proc.stdout or proc.stderr
+    context = execution_context or TaskExecutionContext(repo)
+    proc, record = context.run(shlex.join(cmd), repo, 30)
+    output = proc.stdout or proc.stderr
+    if record.warnings:
+        output = output + ("\n" if output else "") + "\n".join(record.warnings)
+    return output
