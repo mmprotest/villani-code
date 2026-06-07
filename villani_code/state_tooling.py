@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from villani_code.execution_context import (
+    MAX_AGENT_TOOL_RESULT_CHARS,
+    NO_PROGRESS_MESSAGE,
+    TRUNCATION_NOTICE,
+)
 from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets, parse_unified_diff
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
@@ -174,13 +179,7 @@ def _analyze_patch_mutation(
 
 
 def _sanitize_tool_input_file_path(tool_input: dict[str, Any], repo: Path) -> None:
-    """Normalize and sanitize a `file_path` value in tool_input in-place.
-
-    - Strip surrounding quotes
-    - Normalize backslashes to forward slashes
-    - If an absolute path points inside `repo`, convert to a repo-relative path
-    - Strip leading './' or leading '/'
-    """
+    """Normalize a file path without remapping external absolute paths into the workspace."""
     try:
         raw = tool_input.get("file_path")
         if not isinstance(raw, str):
@@ -188,18 +187,16 @@ def _sanitize_tool_input_file_path(tool_input: dict[str, Any], repo: Path) -> No
         fp = raw.strip()
         if (fp.startswith('"') and fp.endswith('"')) or (fp.startswith("'") and fp.endswith("'")):
             fp = fp[1:-1].strip()
-        fp = fp.strip('"').strip("'")
-        fp = fp.replace("\\", "/")
-        p = Path(fp)
-        if p.is_absolute():
+        fp = fp.strip('"').strip("'").replace("\\", "/")
+        path = Path(fp)
+        if path.is_absolute():
             try:
-                rel = p.resolve().relative_to(repo.resolve())
-                fp = str(rel).replace("\\", "/")
-            except Exception:
-                pass
-        fp = fp.lstrip("./")
-        if fp.startswith("/"):
-            fp = fp.lstrip("/")
+                fp = str(path.resolve().relative_to(repo.resolve())).replace("\\", "/")
+            except (OSError, ValueError):
+                tool_input["file_path"] = fp
+                return
+        while fp.startswith("./"):
+            fp = fp[2:]
         tool_input["file_path"] = fp
     except Exception:
         return
@@ -667,6 +664,21 @@ def execute_tool_with_lifecycle(
         tool_call_id=stable_tool_use_id,
         execution_context=getattr(runner, "_task_execution_context", None),
     )
+    execution_context = getattr(runner, "_task_execution_context", None)
+    if not result.get("progress_recorded", False) and execution_context is not None:
+        warning, force = execution_context.record_tool_step(
+            tool_name, tool_input, is_error=bool(result.get("is_error", False))
+        )
+        if warning:
+            content = str(result.get("content", ""))
+            suffix = ("\n" if content else "") + NO_PROGRESS_MESSAGE
+            combined = content + suffix
+            if len(combined) > MAX_AGENT_TOOL_RESULT_CHARS:
+                room = MAX_AGENT_TOOL_RESULT_CHARS - len(TRUNCATION_NOTICE) - 1
+                combined = combined[:room] + "\n" + TRUNCATION_NOTICE
+            result["content"] = combined
+            result["no_progress_warning"] = True
+            result["force_finalization"] = force
     runner.event_callback(
         {
             "type": "tool_result",

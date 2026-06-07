@@ -11,7 +11,12 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from villani_code.execution_context import TaskExecutionContext
+from villani_code.execution_context import (
+    MAX_AGENT_TOOL_RESULT_CHARS,
+    TRUNCATION_NOTICE,
+    TaskExecutionContext,
+    compact_command_observation,
+)
 from villani_code.patch_apply import (
     PatchApplyError,
     apply_unified_diff_with_diagnostics,
@@ -119,11 +124,18 @@ DENYLIST = ["rm -rf", "del /s", "format ", "mkfs", "dd if=", "curl ", "wget "]
 
 
 def _error(message: str) -> dict[str, Any]:
-    return {"content": message, "is_error": True}
+    return {"content": _cap_tool_content(message), "is_error": True}
 
 
-def _ok(content: str) -> dict[str, Any]:
-    return {"content": content, "is_error": False}
+def _cap_tool_content(content: str) -> str:
+    if len(content) <= MAX_AGENT_TOOL_RESULT_CHARS:
+        return content
+    room = max(0, MAX_AGENT_TOOL_RESULT_CHARS - len(TRUNCATION_NOTICE) - 1)
+    return content[:room] + "\n" + TRUNCATION_NOTICE
+
+
+def _ok(content: str, **metadata: Any) -> dict[str, Any]:
+    return {"content": _cap_tool_content(content), "is_error": False, **metadata}
 
 
 def tool_specs() -> list[dict[str, Any]]:
@@ -168,7 +180,15 @@ def execute_tool(
         if name == "Search":
             return _ok(_run_search(parsed, repo, execution_context=execution_context))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id, execution_context=execution_context))
+            content, metadata = _run_bash(
+                parsed,
+                repo,
+                unsafe=unsafe,
+                debug_callback=debug_callback,
+                tool_call_id=tool_call_id,
+                execution_context=execution_context,
+            )
+            return _ok(content, **metadata)
         if name == "Write":
             return _ok(_run_write(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Patch":
@@ -182,6 +202,14 @@ def execute_tool(
     except Exception as exc:
         return _error(str(exc))
     return _error("Unhandled tool")
+
+
+def _is_within_workspace(path: Path, repo: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(repo.resolve(strict=False))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _safe_path(repo: Path, raw: str) -> Path:
@@ -205,6 +233,11 @@ def _run_ls(data: LsInput, repo: Path) -> str:
 
 
 def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+    requested = Path(data.file_path).expanduser()
+    if requested.is_absolute() and not _is_within_workspace(requested, repo):
+        raise ValueError(
+            "Read is workspace-only for this path. Use a shell command such as cat, sed, or head if you need to inspect system files."
+        )
     path = _safe_path(repo, data.file_path)
     raw = path.read_bytes()[: data.max_bytes]
     if callable(debug_callback):
@@ -260,7 +293,7 @@ def _run_bash(
     debug_callback: Any | None = None,
     tool_call_id: str = "",
     execution_context: TaskExecutionContext | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
@@ -269,33 +302,42 @@ def _run_bash(
     cwd = _safe_path(repo, data.cwd)
     context = execution_context or TaskExecutionContext(repo)
     if callable(debug_callback):
-        debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
+        debug_callback(
+            "command_started",
+            {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id},
+        )
     proc, record = context.run(data.command, cwd, data.timeout_sec)
     evidence = context.record_validation(
         record,
         kind=data.validation_kind if data.validation_kind in {"project", "smoke"} else "command",
         final_behavior=data.checks_final_behavior,
     )
-    payload = {
+    compact = compact_command_observation(
+        command=data.command,
+        record=record,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        evidence=evidence,
+    )
+    full_debug_record = {
         "command": data.command,
+        "cwd": data.cwd,
         "exit_code": proc.returncode,
+        "timed_out": record.timed_out,
         "stdout": proc.stdout,
         "stderr": proc.stderr,
         "execution_context": record.to_dict(),
-        "warnings": record.warnings,
         "validation_evidence": evidence.to_dict(),
+        "tool_call_id": tool_call_id,
     }
     if callable(debug_callback):
-        debug_callback(
-            "command_finished",
-            {
-                **payload,
-                "cwd": data.cwd,
-                "truncated": False,
-                "tool_call_id": tool_call_id,
-            },
-        )
-    return json.dumps(payload, indent=2)
+        debug_callback("command_finished", full_debug_record)
+    return json.dumps(compact, ensure_ascii=False), {
+        "timed_out": record.timed_out,
+        "force_finalization": record.force_finalization,
+        "no_progress_warning": record.no_progress_warning,
+        "progress_recorded": True,
+    }
 
 
 def _run_write(data: WriteInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "") -> str:

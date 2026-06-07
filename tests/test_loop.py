@@ -490,7 +490,7 @@ def test_anthropic_message_order_after_tool_use_with_pending_verification(tmp_pa
     assert "<verification>order-check</verification>" in next_user_message["content"][-1]["content"]
 
 
-def test_loop_does_not_append_duplicate_validation_summary_when_dedup_returns_empty(tmp_path: Path):
+def test_loop_does_not_append_routine_validation_summaries_after_commands(tmp_path: Path):
     client = FakeClientTwoBashThenDone()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False)
     summaries = iter(
@@ -518,7 +518,7 @@ def test_loop_does_not_append_duplicate_validation_summary_when_dedup_returns_em
         if m["role"] == "user" and m["content"] and m["content"][0].get("type") == "tool_result"
     )
 
-    assert "<validation_summary>" in second_tool_result["content"][-1]["content"]
+    assert "<validation_summary>" not in second_tool_result["content"][-1]["content"]
     assert "<validation_summary>" not in third_tool_result["content"][-1]["content"]
 
 def test_loop_retries_twice_then_succeeds(tmp_path: Path):

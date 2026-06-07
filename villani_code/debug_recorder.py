@@ -298,6 +298,7 @@ class DebugRecorder:
         truncated: bool = False,
         tool_call_id: str = "",
         turn_index: int | None = None,
+        full_debug_record: dict[str, Any] | None = None,
     ) -> None:
         payload = {
             "ts": self._ts(),
@@ -309,6 +310,12 @@ class DebugRecorder:
             "truncated": truncated,
             "tool_call_id": tool_call_id,
         }
+        if isinstance(full_debug_record, dict):
+            debug_record = copy.deepcopy(full_debug_record)
+            if not self.config.capture_command_output:
+                debug_record["stdout"] = str(debug_record.get("stdout", ""))[:240]
+                debug_record["stderr"] = str(debug_record.get("stderr", ""))[:240]
+            payload["full_debug_record"] = debug_record
         self._safe_append_jsonl("commands", payload)
         self.record_event("command_finished", f"Command finished: {command}", payload, turn_index=turn_index)
         if exit_code != 0:
