@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -235,6 +236,29 @@ def _run_search(data: SearchInput, repo: Path) -> str:
     return proc.stdout
 
 
+def _task_command_env() -> dict[str, str]:
+    env = os.environ.copy()
+
+    # Keep Villani's private runtime out of model-issued task commands.
+    # Villani itself may run inside a venv, but Bash tool commands should
+    # execute against the task environment, not the agent runtime.
+    agent_venv = os.environ.get("VIRTUAL_ENV")
+
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+
+    if agent_venv:
+        agent_bin = os.path.normpath(os.path.join(agent_venv, "bin"))
+        env["PATH"] = os.pathsep.join(
+            part
+            for part in env.get("PATH", "").split(os.pathsep)
+            if part and os.path.normpath(part) != agent_bin
+        )
+
+    return env
+
+
 def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
     lowered = data.command.lower()
     if not unsafe:
@@ -244,7 +268,15 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
     cwd = _safe_path(repo, data.cwd)
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
-    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    proc = subprocess.run(
+        data.command,
+        shell=True,
+        cwd=str(cwd),
+        env=_task_command_env(),
+        capture_output=True,
+        text=True,
+        timeout=data.timeout_sec,
+    )
     if callable(debug_callback):
         debug_callback(
             "command_finished",
