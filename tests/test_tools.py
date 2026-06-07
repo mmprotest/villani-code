@@ -31,6 +31,59 @@ def test_task_command_env_removes_agent_runtime(monkeypatch):
     assert "/tmp/not-the-active-venv/bin" in env["PATH"].split(os.pathsep)
 
 
+def test_task_command_env_removes_sys_executable_venv_bin_when_virtual_env_unset(monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(
+            [
+                "/usr/local/bin",
+                "/installed-agent/venv/bin",
+                "/usr/bin",
+                "/tmp/not-the-active-venv/bin",
+            ]
+        ),
+    )
+
+    monkeypatch.setattr("villani_code.tools.sys.executable", "/installed-agent/venv/bin/python")
+    monkeypatch.setattr("villani_code.tools.sys.prefix", "/installed-agent/venv")
+    monkeypatch.setattr("villani_code.tools.sys.base_prefix", "/usr")
+
+    env = _task_command_env()
+    path_parts = env["PATH"].split(os.pathsep)
+
+    assert "/installed-agent/venv/bin" not in path_parts
+    assert "/usr/local/bin" in path_parts
+    assert "/usr/bin" in path_parts
+    assert "/tmp/not-the-active-venv/bin" in path_parts
+    assert "VIRTUAL_ENV" not in env
+
+
+def test_task_command_env_preserves_path_when_not_running_from_venv(monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(
+            [
+                "/usr/local/bin",
+                "/usr/bin",
+                "/tmp/project-venv/bin",
+            ]
+        ),
+    )
+
+    monkeypatch.setattr("villani_code.tools.sys.executable", "/usr/bin/python")
+    monkeypatch.setattr("villani_code.tools.sys.prefix", "/usr")
+    monkeypatch.setattr("villani_code.tools.sys.base_prefix", "/usr")
+
+    env = _task_command_env()
+    path_parts = env["PATH"].split(os.pathsep)
+
+    assert "/usr/local/bin" in path_parts
+    assert "/usr/bin" in path_parts
+    assert "/tmp/project-venv/bin" in path_parts
+
+
 def test_run_bash_uses_sanitized_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("VIRTUAL_ENV", "/installed-agent/venv")
     monkeypatch.setenv("PYTHONHOME", "/bad/pythonhome")

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -242,18 +243,30 @@ def _task_command_env() -> dict[str, str]:
     # Keep Villani's private runtime out of model-issued task commands.
     # Villani itself may run inside a venv, but Bash tool commands should
     # execute against the task environment, not the agent runtime.
+    candidate_bins: set[str] = set()
+
     agent_venv = os.environ.get("VIRTUAL_ENV")
+    if agent_venv:
+        candidate_bins.add(os.path.normpath(os.path.join(agent_venv, "bin")))
+
+    # Villani may be launched from a venv via PATH without VIRTUAL_ENV set.
+    # In that case, sys.executable still identifies the private runtime.
+    executable_bin = os.path.normpath(os.path.dirname(sys.executable))
+    executable_prefix = os.path.normpath(sys.prefix)
+    base_prefix = os.path.normpath(getattr(sys, "base_prefix", sys.prefix))
+
+    if executable_prefix != base_prefix or os.path.exists(os.path.join(executable_prefix, "pyvenv.cfg")):
+        candidate_bins.add(executable_bin)
 
     env.pop("VIRTUAL_ENV", None)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
 
-    if agent_venv:
-        agent_bin = os.path.normpath(os.path.join(agent_venv, "bin"))
+    if candidate_bins:
         env["PATH"] = os.pathsep.join(
             part
             for part in env.get("PATH", "").split(os.pathsep)
-            if part and os.path.normpath(part) != agent_bin
+            if part and os.path.normpath(part) not in candidate_bins
         )
 
     return env
