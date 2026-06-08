@@ -258,7 +258,10 @@ def _run_grep(
         if data.include_hidden:
             cmd.append("--hidden")
         proc, record = context.run(shlex.join(cmd), repo, 30)
-        output = "\n".join(proc.stdout.splitlines()[: data.max_results])
+        output_lines = proc.stdout.splitlines()
+        output = "\n".join(output_lines[: data.max_results])
+        if len(output_lines) > data.max_results:
+            output = output + ("\n" if output else "") + TRUNCATION_NOTICE
         if record.warnings:
             output = output + ("\n" if output else "") + "\n".join(record.warnings)
         return output

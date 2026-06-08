@@ -7,7 +7,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -29,6 +29,7 @@ from villani_code.execution_context import (
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
+from villani_code.positive_evidence import POSITIVE_EVIDENCE_WARNING_PREFIX
 from villani_code.plan_session import PlanAnswer, PlanOption, PlanQuestion, PlanSessionResult
 from villani_code.prompting import (
     build_approved_plan_context,
@@ -578,6 +579,7 @@ class Runner:
         self._no_progress_cycles = 0
         self._recovery_count = 0
         self._last_failed_tool_sig = ""
+        self._last_positive_evidence_final_warning_signature = ""
         self._repo_map = ""
         self._retriever: Retriever | None = None
         self._context_budget = (
@@ -639,6 +641,7 @@ class Runner:
             return None
         self._failure_memory = attempt.build_failure_memory(believed_succeeded, summary)
         if self._debug_recorder is not None:
+            self._write_positive_evidence_artifacts()
             self._debug_recorder.write_attempt_state(attempt.to_dict(), self._failure_memory.to_dict())
         return self._failure_memory
 
@@ -1155,6 +1158,7 @@ class Runner:
             if self._event_recorder is not None:
                 self._event_recorder.write_digest()
             if self._debug_recorder is not None:
+                self._write_positive_evidence_artifacts()
                 self._debug_recorder.write_attempt_state(
                     attempt_state.to_dict(),
                     self._failure_memory.to_dict() if self._failure_memory else None,
@@ -1262,6 +1266,14 @@ class Runner:
                 {"role": "assistant", "content": response.get("content", [])}
             )
             turns_used += 1
+            assistant_text_for_evidence = "\n".join(
+                str(block.get("text", ""))
+                for block in response.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            ledger = self._positive_evidence_ledger()
+            if ledger is not None and ledger.observe_agent_text(assistant_text_for_evidence, turns_used):
+                self._write_positive_evidence_artifacts()
 
             tool_uses = [
                 b for b in response.get("content", []) if b.get("type") == "tool_use"
@@ -1289,6 +1301,12 @@ class Runner:
             if benchmark_forced_read_no_progress_guard_active and tool_uses:
                 benchmark_forced_read_no_progress_guard_active = False
             if not tool_uses:
+                positive_evidence_warning = self._positive_evidence_final_warning(turns_used)
+                if positive_evidence_warning:
+                    messages.append(
+                        {"role": "user", "content": [{"type": "text", "text": positive_evidence_warning}]}
+                    )
+                    continue
                 content_blocks = response.get("content", [])
                 only_textual_response = bool(content_blocks) and all(
                     isinstance(block, dict) and block.get("type") == "text"
@@ -1357,6 +1375,7 @@ class Runner:
                     if self._event_recorder is not None:
                         self._event_recorder.write_digest()
                     if self._debug_recorder is not None:
+                        self._write_positive_evidence_artifacts()
                         self._debug_recorder.write_final_summary(
                             status="completed",
                             termination_reason="completed",
@@ -1559,6 +1578,32 @@ class Runner:
                 force_no_progress_finalization = (
                     force_no_progress_finalization or bool(result.get("force_finalization", False))
                 )
+                evidence_observation = self._observe_positive_evidence(
+                    tool_name, tool_input, result, tool_use_id, turns_used
+                )
+                warning_reason = ""
+                if evidence_observation.get("weakened_clear_attempt"):
+                    warning_reason = "weakened_clearing_validation"
+                elif result.get("no_progress_warning"):
+                    warning_reason = "no_progress"
+                else:
+                    ledger = self._positive_evidence_ledger()
+                    if ledger is not None and any(
+                        turns_used - entry.first_seen_turn >= 3 for entry in ledger.unresolved()
+                    ):
+                        already_warned = any(
+                            event.get("reason") == "stale_unresolved"
+                            and event.get("turn") == turns_used
+                            for event in ledger.warning_events
+                        )
+                        if not already_warned:
+                            warning_reason = "stale_unresolved"
+                if warning_reason:
+                    evidence_warning = self._positive_evidence_warning(
+                        turn=turns_used, reason=warning_reason
+                    )
+                    if evidence_warning and POSITIVE_EVIDENCE_WARNING_PREFIX not in str(result.get("content", "")):
+                        result["content"] = f"{result.get('content', '')}\n\n{evidence_warning}".strip()
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
@@ -2002,6 +2047,63 @@ class Runner:
         path = save_transcript(self.repo, transcript, redact=self.redact)
         self._update_mission_state(last_transcript_path=str(path))
         return path
+
+    def _positive_evidence_ledger(self):
+        return self._task_execution_context.attempt.positive_evidence
+
+    def _write_positive_evidence_artifacts(self) -> None:
+        ledger = self._positive_evidence_ledger()
+        if ledger is not None and self._debug_recorder is not None:
+            self._debug_recorder.write_positive_evidence(ledger.to_dict(), ledger.warning_events)
+
+    def _observe_positive_evidence(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        result: dict[str, Any],
+        tool_use_id: str,
+        turn: int,
+    ) -> dict[str, Any]:
+        ledger = self._positive_evidence_ledger()
+        if ledger is None:
+            return {}
+        observation = ledger.observe_tool_result(
+            tool_name,
+            tool_input,
+            str(result.get("content", "")),
+            turn=turn,
+            tool_use_id=tool_use_id,
+            is_error=bool(result.get("is_error", False)),
+        )
+        if tool_name == "Bash" and not result.get("is_error") and self._task_execution_context.attempt.commands:
+            record = self._task_execution_context.attempt.commands[-1]
+            for mutation in [*record.mutations.created, *record.mutations.modified]:
+                ledger.mark_modified(mutation.path, turn, tool_use_id=tool_use_id)
+        self._write_positive_evidence_artifacts()
+        return observation
+
+    def _positive_evidence_warning(self, *, turn: int, reason: str) -> str:
+        ledger = self._positive_evidence_ledger()
+        if ledger is None:
+            return ""
+        warning = ledger.render_warning(current_turn=turn, reason=reason)
+        if warning:
+            self._write_positive_evidence_artifacts()
+        return warning
+
+    def _positive_evidence_final_warning(self, turn: int) -> str:
+        ledger = self._positive_evidence_ledger()
+        if ledger is None:
+            return ""
+        unresolved = ledger.unresolved()
+        signature = json.dumps(
+            [(entry.path, entry.status, entry.occurrences, entry.last_seen_turn) for entry in unresolved],
+            sort_keys=True,
+        )
+        if not signature or signature == "[]" or signature == self._last_positive_evidence_final_warning_signature:
+            return ""
+        self._last_positive_evidence_final_warning_signature = signature
+        return self._positive_evidence_warning(turn=turn, reason="about_to_finalize")
 
     def _execute_tool_with_policy(
         self,

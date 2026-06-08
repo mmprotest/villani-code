@@ -488,6 +488,14 @@ class DebugRecorder:
 
         self._safe(_write)
 
+    def write_positive_evidence(self, ledger: dict[str, Any], warning_events: list[dict[str, Any]]) -> None:
+        self._safe_write_json(self.artifacts.path("positive_evidence_ledger.json"), ledger)
+        warning_path = self._jsonl_paths["positive_evidence_warnings"]
+        self._safe(lambda: warning_path.unlink(missing_ok=True))
+        self._safe(append_text, warning_path, "")
+        for event in warning_events:
+            self._safe(append_jsonl, warning_path, event)
+
     def write_attempt_state(
         self,
         attempt_state: dict[str, Any],

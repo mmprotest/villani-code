@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from villani_code.positive_evidence import PositiveEvidenceLedger
+
 PRIVATE_WARNING = (
     "Warning: this command modified or depended on runner-private state rather than only "
     "task/workspace state. Success evidence from this context may not reflect final validation."
@@ -352,6 +354,7 @@ class AttemptState:
     repeated_warnings: dict[str, int] = field(default_factory=dict)
     tool_steps: list[dict[str, Any]] = field(default_factory=list)
     tool_failures: list[str] = field(default_factory=list)
+    positive_evidence: PositiveEvidenceLedger | None = None
     _last_evidence_signatures: set[str] = field(default_factory=set, repr=False)
     _evidence_repetitions: dict[str, tuple[int, int]] = field(default_factory=dict, repr=False)
     _progress_epoch: int = field(default=0, repr=False)
@@ -476,6 +479,7 @@ class AttemptState:
             "no_progress_events": self.no_progress_events,
             "tool_steps": self.tool_steps,
             "tool_failures": self.tool_failures,
+            "positive_evidence_ledger": self.positive_evidence.to_dict() if self.positive_evidence else {"entries": []},
         }
 
     def build_failure_memory(self, believed_succeeded: str, final_validation: str) -> FailureMemory:
@@ -542,7 +546,10 @@ class TaskExecutionContext:
         self.task_environment = dict(task_environment or {})
         self.environment = self._build_environment(os.environ)
         self._attempt_files_before = Snapshot()
-        self.attempt = AttemptState(before=self.fingerprint(workspace, self.environment))
+        self.attempt = AttemptState(
+            before=self.fingerprint(workspace, self.environment),
+            positive_evidence=PositiveEvidenceLedger(workspace),
+        )
 
     def _allowed_private(self, path: str | Path) -> bool:
         resolved = _safe_resolve(path)
@@ -576,7 +583,11 @@ class TaskExecutionContext:
     def begin_attempt(self) -> AttemptState:
         before = self.fingerprint(self.boundaries.workspace, self.environment)
         self._attempt_files_before = self.snapshot_workspace()
-        self.attempt = AttemptState(before=before, snapshot_truncated=self._attempt_files_before.truncated)
+        self.attempt = AttemptState(
+            before=before,
+            snapshot_truncated=self._attempt_files_before.truncated,
+            positive_evidence=PositiveEvidenceLedger(self.boundaries.workspace),
+        )
         return self.attempt
 
     def existed_at_attempt_start(self, path: str | Path) -> bool:
