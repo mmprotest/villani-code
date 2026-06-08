@@ -347,3 +347,122 @@ def test_repeated_reads_participate_in_no_progress_guard(tmp_path: Path) -> None
 
     assert NO_PROGRESS_MESSAGE in results[2]["content"]
     assert results[3]["force_finalization"] is True
+
+
+def _run_repeated_failures(
+    tmp_path: Path, monkeypatch, errors: list[str], *, command: str = "run-validation"
+) -> tuple[TaskExecutionContext, list[dict]]:
+    context = TaskExecutionContext(tmp_path)
+    remaining = iter(errors)
+
+    def fake_run_process(_command, _cwd, _env, _timeout):
+        return 1, "", next(remaining), False
+
+    monkeypatch.setattr(context, "_run_process", fake_run_process)
+    results = [
+        execute_tool(
+            "Bash",
+            {"command": command, "cwd": ".", "timeout_sec": 5},
+            tmp_path,
+            unsafe=True,
+            execution_context=context,
+        )
+        for _ in errors
+    ]
+    return context, results
+
+
+def test_same_failed_command_with_different_traceback_is_progress(tmp_path: Path, monkeypatch) -> None:
+    errors = [
+        f'Traceback (most recent call last):\n  File "/tmp/run-{index}/check.py", line {index + 10}, in <module>\n{error}'
+        for index, error in enumerate(
+            [
+                "ModuleNotFoundError: No module named 'widget_core'",
+                "AttributeError: module 'widget_core' has no attribute 'build'",
+                "RuntimeError: backend initialization failed",
+                "AssertionError: expected 4 results, got 3",
+            ]
+        )
+    ]
+
+    context, results = _run_repeated_failures(tmp_path, monkeypatch, errors)
+
+    assert all(not result.get("no_progress_warning", False) for result in results)
+    assert all(not result.get("force_finalization", False) for result in results)
+    assert len({item.failure_fingerprint for item in context.attempt.validation_evidence}) == 4
+    assert context.attempt.no_progress_events == 0
+
+
+def test_same_failed_command_and_traceback_still_triggers_no_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    error = (
+        'Traceback (most recent call last):\n'
+        '  File "/tmp/session-a/check.py", line 42, in <module>\n'
+        "RuntimeError: validation remained broken"
+    )
+
+    context, results = _run_repeated_failures(tmp_path, monkeypatch, [error] * 4)
+
+    assert results[2]["no_progress_warning"] is True
+    assert results[2]["force_finalization"] is False
+    assert results[3]["force_finalization"] is True
+    assert context.attempt.no_progress_events == 2
+
+
+def test_file_mutation_resets_matching_failure_pressure(tmp_path: Path, monkeypatch) -> None:
+    context = TaskExecutionContext(tmp_path)
+    error = "RuntimeError: validation remained broken"
+    real_run_process = context._run_process
+
+    def fake_run_process(command, cwd, env, timeout):
+        if command == "run-validation":
+            return 1, "", error, False
+        return real_run_process(command, cwd, env, timeout)
+
+    monkeypatch.setattr(context, "_run_process", fake_run_process)
+    first_results = [
+        execute_tool(
+            "Bash",
+            {"command": "run-validation", "cwd": ".", "timeout_sec": 5},
+            tmp_path,
+            unsafe=True,
+            execution_context=context,
+        )
+        for _ in range(2)
+    ]
+    write_result = execute_tool(
+        "Bash",
+        {"command": "printf patched > implementation.py", "cwd": ".", "timeout_sec": 5},
+        tmp_path,
+        unsafe=True,
+        execution_context=context,
+    )
+    after_write = execute_tool(
+        "Bash",
+        {"command": "run-validation", "cwd": ".", "timeout_sec": 5},
+        tmp_path,
+        unsafe=True,
+        execution_context=context,
+    )
+
+    assert all(not result.get("no_progress_warning", False) for result in first_results)
+    assert write_result["is_error"] is False
+    assert (tmp_path / "implementation.py").read_text(encoding="utf-8") == "patched"
+    assert after_write.get("no_progress_warning", False) is False
+    assert after_write.get("force_finalization", False) is False
+    assert context.attempt.no_progress_events == 0
+
+
+def test_failure_fingerprint_normalizes_volatile_traceback_details(tmp_path: Path, monkeypatch) -> None:
+    errors = [
+        'Traceback (most recent call last):\n  File "/tmp/run-a/check.py", line 12, in <module>\nRuntimeError: request 123e4567-e89b-12d3-a456-426614174000 failed at 0x7ffeeabc',
+        'Traceback (most recent call last):\n  File "/tmp/run-b/check.py", line 987, in <module>\nRuntimeError: request 123e4567-e89b-12d3-a456-426614174111 failed at 0x1234abcd',
+        'Traceback (most recent call last):\n  File "/tmp/run-c/check.py", line 3, in <module>\nRuntimeError: request 123e4567-e89b-12d3-a456-426614174222 failed at 0x9999aaaa',
+    ]
+
+    context, results = _run_repeated_failures(tmp_path, monkeypatch, errors)
+
+    fingerprints = [item.failure_fingerprint for item in context.attempt.validation_evidence]
+    assert len(set(fingerprints)) == 1
+    assert results[2]["no_progress_warning"] is True
