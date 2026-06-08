@@ -1,0 +1,1 @@
+Running `cargo test` fails because Cargo cannot find the integration test file. Fix the project configuration so the test command succeeds.

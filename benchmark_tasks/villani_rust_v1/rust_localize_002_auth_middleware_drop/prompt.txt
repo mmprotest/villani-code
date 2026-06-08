@@ -1,0 +1,1 @@
+Authenticated API requests are being rejected even when a valid token is provided. The Authorization header is set correctly by the caller but the server always returns 401 Unauthorized. Find the root cause in the middleware pipeline and apply the minimal correct fix.

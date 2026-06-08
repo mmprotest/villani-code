@@ -59,7 +59,6 @@ class ClaudeCodeAgentRunner(AgentRunner):
         normalized_provider = (provider or "anthropic").strip().lower()
         if normalized_provider == "openai":
             env.pop("ANTHROPIC_BASE_URL", None)
-            env.pop("ANTHROPIC_API_KEY", None)
             if base_url:
                 env["OPENAI_BASE_URL"] = base_url
             if api_key:

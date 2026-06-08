@@ -1,0 +1,1 @@
+Error messages from the data loader always say "generic error" regardless of what actually went wrong, making it impossible to diagnose failures. Fix the error handling so that the original error details are preserved and visible in the error message.

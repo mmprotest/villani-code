@@ -1,0 +1,1 @@
+Records with equal priority are returned in a different order than they were inserted. Fix the sort so that insertion order is preserved for records with the same priority.

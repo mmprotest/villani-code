@@ -1,0 +1,8 @@
+[package]
+name = "config-loader"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "config_loader"
+path = "src/lib.rs"

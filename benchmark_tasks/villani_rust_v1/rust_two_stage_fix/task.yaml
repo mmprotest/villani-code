@@ -1,0 +1,30 @@
+id: rust_two_stage_fix
+family: bugfix
+difficulty: hard
+language: rust
+max_minutes: 10
+max_files_touched: 4
+expected_artifacts:
+- patch
+visible_verification:
+- cargo test --test test_fix -q
+hidden_verification:
+- cargo test -q
+success_policy:
+  require_visible_pass: true
+  require_hidden_pass: true
+  fail_on_timeout: true
+  fail_on_repo_dirty_outside_allowlist: true
+allowlist_paths:
+- target/
+- src/
+- tests/
+allowed_paths:
+- target/
+- src/
+- tests/
+expected_touched_max: 4
+adjacency_expected: true
+recovery_expected: true
+task_type: adjacent_two_file_fix
+benchmark_track: core
