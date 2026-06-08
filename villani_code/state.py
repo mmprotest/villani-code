@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import copy
-import ast
 import json
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -21,11 +20,7 @@ from villani_code.context_budget import ContextBudget
 from villani_code.context_governance import ContextGovernanceManager
 from villani_code.edits import ProposalStore
 from villani_code.execution import ExecutionBudget, ExecutionResult
-from villani_code.execution_context import (
-    MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS,
-    FailureMemory,
-    TaskExecutionContext,
-)
+from villani_code.execution_context import FailureMemory, TaskExecutionContext
 from villani_code.hooks import HookRunner
 from villani_code.mcp import load_mcp_config
 from villani_code.permissions import Decision, PermissionConfig, PermissionEngine
@@ -1514,6 +1509,10 @@ class Runner:
                         }
                     )
                     continue
+                candidate_warning = self._task_execution_context.attempt.unresolved_candidate_warning()
+                if candidate_warning:
+                    messages.append({"role": "user", "content": [{"type": "text", "text": candidate_warning}]})
+                    continue
                 reason = _budget_reason(completed=True) or "completed"
                 return _finish_bounded(response, reason, reason == "completed")
 
@@ -1731,124 +1730,33 @@ class Runner:
         self._user_event_callback(event)
 
     def _run_patch_effect_check(self, response: dict[str, Any], changed_files: list[str], objective: str) -> str:
-        text = "\n".join(
-            str(block.get("text", ""))
-            for block in response.get("content", [])
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
-        candidates = self._canonical_modified_paths(
-            list(changed_files)
-            + sorted(self._current_verification_targets)
-            + sorted(self._intended_targets)
-        )
+        """Return only filesystem, discovery, and validation facts; never infer semantic patch effects."""
+        del response, objective
         attempt = self._task_execution_context.attempt
-        candidate_summary = summarize_changes(candidates)
-        has_external_effect = any(
-            command.mutations.processes_started
-            or command.mutations.ports_opened
-            or "private-runtime" in command.path_classes
-            or "external/system" in command.path_classes
-            for command in attempt.commands
+        changed = self._canonical_modified_paths(
+            list(changed_files)
+            + sorted(attempt.files_created)
+            + sorted(attempt.files_modified)
+            + sorted(attempt.files_deleted)
         )
-        if not candidate_summary.intentional and not has_external_effect:
-            self._patch_effect_check_pending = False
-            return ""
-        only_new_files = bool(candidate_summary.intentional) and all(
-            not self._task_execution_context.existed_at_attempt_start(self.repo / path)
-            for path in candidate_summary.intentional
-        )
-        if only_new_files and not _is_code_change_oriented_request(objective) and not has_external_effect:
-            self._patch_effect_check_pending = False
-            return ""
-
-        file_effects: list[dict[str, Any]] = []
-        remaining_excerpt_chars = 600
-        for relative_path in candidates[:10]:
-            path = (self.repo / relative_path).resolve()
-            excerpt = ""
-            state = "deleted-or-missing"
-            if path.exists() and path.is_file():
-                state = "present"
-                if remaining_excerpt_chars > 0:
-                    try:
-                        excerpt = path.read_text(encoding="utf-8", errors="replace")[:remaining_excerpt_chars]
-                    except OSError:
-                        excerpt = "<unreadable>"
-                    remaining_excerpt_chars -= len(excerpt)
-            file_effects.append({"path": relative_path, "state": state, "excerpt": excerpt})
-
-        cumulative_effect = {
-            "attempt": json.loads(attempt.compact_summary()),
-            "files": file_effects,
-        }
-        cumulative_text = json.dumps(cumulative_effect, indent=2)
-        if len(cumulative_text) > MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS:
-            cumulative_text = cumulative_text[: MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS - 16] + "\n[truncated]"
-        intended_effect = self._derive_intended_effect(text, ", ".join(candidates), objective)
-        legacy_syntax_result = "not_applicable"
-        syntax_target = next((item for item in file_effects if item["path"].endswith(".py")), None)
-        if syntax_target is not None:
-            try:
-                ast.parse(str(syntax_target["excerpt"]))
-                legacy_syntax_result = "ok"
-            except SyntaxError as exc:
-                legacy_syntax_result = f"syntax_error: {exc.msg} at line {exc.lineno or '?'}"
-        prompt = (
-            "Check whether the cumulative effects of this entire attempt match its intended effect. "
-            "Do not focus on whichever file happened to be edited last. Consider every changed or "
-            "deleted file, command, observable side effect, validation result, and unresolved warning.\n\n"
-            f"Task objective:\n{objective}\n\n"
-            f"Intended effect:\n{intended_effect}\n\n"
-            f"Cumulative attempt state:\n{cumulative_text}\n\n"
-            "Answer exactly one of:\nYES\nNO: <specific mismatch>"
-        )
+        failed = [item.command for item in attempt.validation_evidence if item.exit_code != 0]
+        warning = attempt.unresolved_candidate_warning()
         self.event_callback(
             {
-                "type": "patch_effect_critic_started",
-                "canonical_modified_paths": candidates,
-                "attempt_state_summary": attempt.compact_summary(),
+                "type": "patch_effect_evidence_checked",
+                "canonical_modified_paths": changed,
+                "candidate_coverage_summary": attempt.candidate_coverage_summary(),
+                "failed_validation_commands": failed[-3:],
+                "truncated_discovery": bool(attempt.truncated_discovery_events),
             }
         )
-        critic_payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            "system": "",
-            "max_tokens": 120,
-            "stream": False,
-        }
-        critic_raw = self.client.create_message(critic_payload, stream=False)
-        critic_text = "\n".join(
-            str(block.get("text", ""))
-            for block in critic_raw.get("content", [])
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
-        stripped = critic_text.lstrip()
-        if legacy_syntax_result.startswith("syntax_error"):
-            self._patch_effect_check_pending = True
-            self._pending_verification = legacy_syntax_result
-            return f"Patch-effect check failed: {legacy_syntax_result}. Fix structure before completion."
-        if stripped.startswith("YES"):
-            self._patch_effect_check_pending = False
-            return ""
-        if stripped.startswith("NO:"):
-            return f"Patch-effect check mismatch (cumulative attempt): {critic_text[:400]}"
         self._patch_effect_check_pending = False
-        return (
-            "Patch-effect check was inconclusive for the cumulative attempt. Review all changed files, "
-            "commands, side effects, validation evidence, and warnings before claiming completion. "
-            "Do not create new verification/proof files solely to manufacture success evidence."
-        )
-
-    def _derive_intended_effect(self, rationale: str, target: str, objective: str) -> str:
-        banned = {"## analysis", "## fix summary", "summary", "changes made", "implementation"}
-        for raw in re.split(r"(?<=[.!?])\s+", rationale):
-            sentence = raw.strip().strip("#").strip()
-            if len(sentence) < 20:
-                continue
-            if sentence.lower() in banned or sentence.lower().startswith("##"):
-                continue
-            return sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
-        return f"The recent edit to {target} should address the requested behaviour."
+        if warning:
+            return warning
+        if failed:
+            commands = ", ".join(failed[-3:])
+            return f"Validation commands failed: {commands}. Current state has no new validation evidence proving those failures resolved."
+        return ""
 
     def _normalise_modified_path(self, raw_path: str) -> str:
         candidate = str(raw_path or "").strip().replace("\\", "/")

@@ -655,6 +655,9 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    execution_context = getattr(runner, "_task_execution_context", None)
+    if execution_context is not None:
+        execution_context.attempt.current_source_turn = emit_turn_index
     result = execute_tool(
         tool_name,
         tool_input,
@@ -664,14 +667,15 @@ def execute_tool_with_lifecycle(
         tool_call_id=stable_tool_use_id,
         execution_context=getattr(runner, "_task_execution_context", None),
     )
-    execution_context = getattr(runner, "_task_execution_context", None)
     if not result.get("progress_recorded", False) and execution_context is not None:
         warning, force = execution_context.record_tool_step(
             tool_name, tool_input, is_error=bool(result.get("is_error", False))
         )
         if warning:
             content = str(result.get("content", ""))
-            suffix = ("\n" if content else "") + NO_PROGRESS_MESSAGE
+            candidate_warning = execution_context.attempt.unresolved_candidate_warning() if execution_context is not None else ""
+            warning_text = NO_PROGRESS_MESSAGE + (("\n" + candidate_warning) if candidate_warning else "")
+            suffix = ("\n" if content else "") + warning_text
             combined = content + suffix
             if len(combined) > MAX_AGENT_TOOL_RESULT_CHARS:
                 room = MAX_AGENT_TOOL_RESULT_CHARS - len(TRUNCATION_NOTICE) - 1

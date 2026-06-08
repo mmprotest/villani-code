@@ -34,6 +34,8 @@ MAX_AGENT_TOOL_RESULT_CHARS = 12000
 MAX_AGENT_WARNING_COUNT = 5
 MAX_AGENT_MUTATION_ENTRIES = 10
 MAX_AGENT_ATTEMPT_STATE_SUMMARY_CHARS = 1500
+MAX_CANDIDATE_SNIPPET_CHARS = 240
+MAX_UNRESOLVED_WARNING_CHARS = 1500
 MAX_COMPACT_RETRY_MEMORY_CHARS = 2500
 MAX_SNAPSHOT_FILES = 5000
 MAX_SNAPSHOT_FILE_BYTES = 2_000_000
@@ -333,8 +335,24 @@ class FailureMemory:
 
 
 @dataclass(slots=True)
+class CandidateRecord:
+    path: str
+    source: str
+    source_turn: int | None = None
+    snippet: str | None = None
+    status: str = "unresolved"
+    first_seen: float = field(default_factory=time.time)
+    last_seen: float = field(default_factory=time.time)
+    cleared_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class AttemptState:
     before: ExecutionFingerprint
+    workspace_root: str = ""
     after: ExecutionFingerprint | None = None
     commands: list[CommandRecord] = field(default_factory=list)
     files_created: set[str] = field(default_factory=set)
@@ -357,15 +375,133 @@ class AttemptState:
     _progress_epoch: int = field(default=0, repr=False)
     _last_command_exit: dict[str, int] = field(default_factory=dict, repr=False)
     _previous_command_had_warning: bool = field(default=False, repr=False)
+    candidate_ledger: dict[str, CandidateRecord] = field(default_factory=dict)
+    truncated_discovery_events: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_candidate_warnings: list[str] = field(default_factory=list)
+    current_source_turn: int | None = field(default=None, repr=False)
+    _candidate_generation: int = field(default=0, repr=False)
+    _warning_generation: int = field(default=-1, repr=False)
+    _warning_emissions: int = field(default=0, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.workspace_root:
+            self.workspace_root = self.before.cwd
+        self.workspace_root = str(Path(self.workspace_root).resolve(strict=False))
+
+    def normalize_workspace_path(self, path: str | Path, cwd: str | Path | None = None) -> str | None:
+        raw = str(path).strip().strip('"\'')
+        if not raw:
+            return None
+        root = Path(self.workspace_root).resolve(strict=False)
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            base = Path(cwd).resolve(strict=False) if cwd else root
+            candidate = (base / candidate).resolve(strict=False)
+            if not _is_within(candidate, root) and cwd:
+                candidate = (root / raw).resolve(strict=False)
+        else:
+            candidate = candidate.resolve(strict=False)
+        if not _is_within(candidate, root):
+            return None
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            return None
+        value = relative.as_posix()
+        return value if value and value != "." else None
+
+    def record_candidate_file(self, path: str | Path, source: str, snippet: str | None = None, *, cwd: str | Path | None = None) -> CandidateRecord | None:
+        normalized = self.normalize_workspace_path(path, cwd=cwd)
+        if not normalized:
+            return None
+        now = time.time()
+        compact_snippet = _cap_text(" ".join(str(snippet).split()), MAX_CANDIDATE_SNIPPET_CHARS) if snippet else None
+        record = self.candidate_ledger.get(normalized)
+        if record is None:
+            record = CandidateRecord(
+                path=normalized, source=str(source), source_turn=self.current_source_turn,
+                snippet=compact_snippet, first_seen=now, last_seen=now,
+            )
+            self.candidate_ledger[normalized] = record
+            self._candidate_generation += 1
+        else:
+            record.last_seen = now
+            if compact_snippet and not record.snippet:
+                record.snippet = compact_snippet
+        return record
+
+    def _mark_candidate(self, path: str | Path, status: str, reason: str | None = None, *, cwd: str | Path | None = None) -> None:
+        normalized = self.normalize_workspace_path(path, cwd=cwd)
+        if not normalized or normalized not in self.candidate_ledger:
+            return
+        record = self.candidate_ledger[normalized]
+        record.status = status
+        record.last_seen = time.time()
+        if status == "cleared":
+            record.cleared_reason = reason or "cleared with evidence"
+
+    def mark_candidate_inspected(self, path: str | Path, *, cwd: str | Path | None = None) -> None:
+        normalized = self.normalize_workspace_path(path, cwd=cwd)
+        if normalized and normalized in self.candidate_ledger and self.candidate_ledger[normalized].status == "unresolved":
+            self._mark_candidate(normalized, "inspected")
+
+    def mark_candidate_modified(self, path: str | Path, *, cwd: str | Path | None = None) -> None:
+        self._mark_candidate(path, "modified", cwd=cwd)
+
+    def mark_candidate_cleared(self, path: str | Path, reason: str) -> None:
+        self._mark_candidate(path, "cleared", reason)
+
+    def unresolved_candidates(self, limit: int = 10) -> list[CandidateRecord]:
+        return [record for record in self.candidate_ledger.values() if record.status == "unresolved"][:limit]
+
+    def candidate_coverage_summary(self) -> dict[str, Any]:
+        counts = {status: 0 for status in ("unresolved", "inspected", "modified", "cleared")}
+        for record in self.candidate_ledger.values():
+            counts[record.status] = counts.get(record.status, 0) + 1
+        return {"total": len(self.candidate_ledger), **counts, "truncated_discovery": bool(self.truncated_discovery_events)}
+
+    def mark_truncated_discovery(self, source: str, reason: str) -> None:
+        self.truncated_discovery_events.append({
+            "source": source, "reason": reason, "turn": self.current_source_turn, "timestamp": time.time()
+        })
+
+    def unresolved_candidate_warning(self) -> str:
+        unresolved = self.unresolved_candidates(10)
+        if not unresolved:
+            return ""
+        if self._warning_generation == self._candidate_generation and self._warning_emissions >= 2:
+            return ""
+        if self._warning_generation != self._candidate_generation:
+            self._warning_generation = self._candidate_generation
+            self._warning_emissions = 0
+        rows = [
+            "Search discovered potentially relevant files that were not inspected, modified, or cleared. Inspect them, clear them with evidence, or run stronger validation.",
+            *[f"- {record.path}" for record in unresolved],
+        ]
+        if self.truncated_discovery_events:
+            rows.append("At least one discovery command was truncated or filtered, so repo-wide completeness is not proven.")
+        warning = _cap_text("\n".join(rows), MAX_UNRESOLVED_WARNING_CHARS)
+        self._warning_emissions += 1
+        self.unresolved_candidate_warnings.append(warning)
+        return warning
 
     def add_command(self, record: CommandRecord) -> None:
         self.commands.append(record)
         for item in record.mutations.created:
-            self.files_created.add(item.path)
+            normalized = self.normalize_workspace_path(item.path)
+            if normalized:
+                self.files_created.add(normalized)
+                self.mark_candidate_modified(normalized)
         for item in record.mutations.modified:
-            self.files_modified.add(item.path)
+            normalized = self.normalize_workspace_path(item.path)
+            if normalized:
+                self.files_modified.add(normalized)
+                self.mark_candidate_modified(normalized)
         for item in record.mutations.deleted:
-            self.files_deleted.add(item.path)
+            normalized = self.normalize_workspace_path(item.path)
+            if normalized:
+                self.files_deleted.add(normalized)
+                self.mark_candidate_modified(normalized)
         if record.mutations.has_effects():
             self.side_effects.append({"command": record.command, **record.mutations.to_dict()})
             if "workspace" in record.mutations.path_classes:
@@ -476,6 +612,10 @@ class AttemptState:
             "no_progress_events": self.no_progress_events,
             "tool_steps": self.tool_steps,
             "tool_failures": self.tool_failures,
+            "candidate_ledger": [record.to_dict() for record in self.candidate_ledger.values()],
+            "candidate_coverage_summary": self.candidate_coverage_summary(),
+            "truncated_discovery_events": self.truncated_discovery_events,
+            "unresolved_candidate_warnings": self.unresolved_candidate_warnings,
         }
 
     def build_failure_memory(self, believed_succeeded: str, final_validation: str) -> FailureMemory:
@@ -542,7 +682,7 @@ class TaskExecutionContext:
         self.task_environment = dict(task_environment or {})
         self.environment = self._build_environment(os.environ)
         self._attempt_files_before = Snapshot()
-        self.attempt = AttemptState(before=self.fingerprint(workspace, self.environment))
+        self.attempt = AttemptState(before=self.fingerprint(workspace, self.environment), workspace_root=str(workspace.resolve()))
 
     def _allowed_private(self, path: str | Path) -> bool:
         resolved = _safe_resolve(path)
@@ -576,7 +716,7 @@ class TaskExecutionContext:
     def begin_attempt(self) -> AttemptState:
         before = self.fingerprint(self.boundaries.workspace, self.environment)
         self._attempt_files_before = self.snapshot_workspace()
-        self.attempt = AttemptState(before=before, snapshot_truncated=self._attempt_files_before.truncated)
+        self.attempt = AttemptState(before=before, workspace_root=str(self.boundaries.workspace), snapshot_truncated=self._attempt_files_before.truncated)
         return self.attempt
 
     def existed_at_attempt_start(self, path: str | Path) -> bool:
@@ -591,11 +731,33 @@ class TaskExecutionContext:
             self._attempt_files_before.records, current.records, self.attempt.before, after
         )
         for item in cumulative.created:
-            self.attempt.files_created.add(item.path)
+            normalized = self.attempt.normalize_workspace_path(item.path)
+            if normalized:
+                self.attempt.files_created.add(normalized)
+                self.attempt.mark_candidate_modified(normalized)
         for item in cumulative.modified:
-            self.attempt.files_modified.add(item.path)
+            normalized = self.attempt.normalize_workspace_path(item.path)
+            if normalized:
+                self.attempt.files_modified.add(normalized)
+                self.attempt.mark_candidate_modified(normalized)
         for item in cumulative.deleted:
-            self.attempt.files_deleted.add(item.path)
+            normalized = self.attempt.normalize_workspace_path(item.path)
+            if normalized:
+                self.attempt.files_deleted.add(normalized)
+                self.attempt.mark_candidate_modified(normalized)
+        try:
+            git = subprocess.run(
+                ["git", "diff", "--name-only"], cwd=self.boundaries.workspace,
+                env=self.environment, text=True, capture_output=True, timeout=10, check=False,
+            )
+            if git.returncode == 0:
+                for raw_path in git.stdout.splitlines():
+                    normalized = self.attempt.normalize_workspace_path(raw_path)
+                    if normalized:
+                        self.attempt.files_modified.add(normalized)
+                        self.attempt.mark_candidate_modified(normalized)
+        except (OSError, subprocess.SubprocessError):
+            pass
         if cumulative.has_effects():
             self.attempt.side_effects.append({"scope": "cumulative-attempt", **cumulative.to_dict()})
         return self.attempt
@@ -940,6 +1102,9 @@ class TaskExecutionContext:
         ]
         if warning:
             record.warnings.append(NO_PROGRESS_MESSAGE)
+            candidate_warning = self.attempt.unresolved_candidate_warning()
+            if candidate_warning:
+                record.warnings.append(candidate_warning)
             if NO_PROGRESS_MESSAGE not in self.attempt.warnings:
                 self.attempt.warnings.append(NO_PROGRESS_MESSAGE)
         record.force_finalization = force

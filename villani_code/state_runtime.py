@@ -608,8 +608,25 @@ def truncate_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, An
 
 
 def git_changed_files(repo: Any) -> list[str]:
-    proc = subprocess.run(["git", "status", "--short"], cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    return [line[3:].strip() for line in proc.stdout.splitlines() if line.strip()]
+    repo_path = Path(repo).resolve()
+    proc = subprocess.run(["git", "status", "--short"], cwd=repo_path, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    changed: list[str] = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        raw = line[3:].strip()
+        if " -> " in raw:
+            raw = raw.split(" -> ")[-1].strip()
+        candidate = raw.replace("\\", "/").lstrip("./")
+        if not candidate or candidate.startswith("/"):
+            continue
+        try:
+            normalized = (repo_path / candidate).resolve(strict=False).relative_to(repo_path).as_posix()
+        except ValueError:
+            continue
+        if normalized not in changed:
+            changed.append(normalized)
+    return changed
 
 
 

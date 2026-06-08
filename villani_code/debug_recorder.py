@@ -495,6 +495,22 @@ class DebugRecorder:
     ) -> None:
         payload = {"attempt_state": attempt_state, "failure_memory": failure_memory}
         self._safe_write_json(self.artifacts.path("attempt_state.json"), payload)
+        self._safe_write_json(
+            self.artifacts.path("candidate_ledger.json"),
+            attempt_state.get("candidate_ledger", []),
+        )
+        self._safe_write_json(
+            self.artifacts.path("candidate_coverage_summary.json"),
+            attempt_state.get("candidate_coverage_summary", {}),
+        )
+        self._safe_write_json(
+            self.artifacts.path("truncated_discovery_events.json"),
+            attempt_state.get("truncated_discovery_events", []),
+        )
+        self._safe_write_json(
+            self.artifacts.path("unresolved_candidate_warnings.json"),
+            attempt_state.get("unresolved_candidate_warnings", []),
+        )
         for command in attempt_state.get("commands", []):
             self._safe_append_jsonl("commands", {"ts": self._ts(), "execution_context": command})
         for warning in attempt_state.get("warnings", []):
