@@ -20,6 +20,24 @@ PRIVATE_WARNING = (
     "task/workspace state. Success evidence from this context may not reflect final validation."
 )
 TIMEOUT_MESSAGE = "Command timed out before completion."
+WEAK_VALIDATION_MESSAGE = (
+    "Validation evidence is weak because the command output or exit status may be filtered/masked."
+)
+UNRESOLVED_VALIDATION_MESSAGE = (
+    "Unresolved failed validation remains. A previous check failed and has not been cleared by a "
+    "later successful equivalent or broader check."
+)
+VALIDATION_DRIFT_MESSAGE = (
+    "Files changed after the last successful validation. Re-run validation or justify finalizing "
+    "with weaker evidence."
+)
+
+_VALIDATION_INTENT_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9_])(test|pytest|make|check|build|eval|verify|validate|compare|diff|compile|run)(?:$|[^a-z0-9_])"
+)
+_WEAK_VALIDATION_RE = re.compile(
+    r"(?i)(?:\|\s*(?:head|tail|grep|awk|sed)\b|\bgrep\s+-v\b|\|\|\s*(?:true\b|echo\b)|;\s*echo\b)"
+)
 NO_PROGRESS_MESSAGE = (
     "No meaningful progress has been detected. Make a materially different change, run a "
     "materially different validation, or submit/stop."
@@ -55,6 +73,27 @@ def _digest(value: str) -> str:
 
 def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()[:16]
+
+
+def is_validation_like(command: str) -> bool:
+    return bool(_VALIDATION_INTENT_RE.search(command or ""))
+
+
+def is_weakened_validation_command(command: str) -> bool:
+    return bool(_WEAK_VALIDATION_RE.search(command or ""))
+
+
+def _validation_intents(command: str) -> frozenset[str]:
+    return frozenset(match.lower() for match in _VALIDATION_INTENT_RE.findall(command or ""))
+
+
+def _changed_files_fingerprint(mutations: "MutationSummary") -> str:
+    rows = [
+        *(f"created:{item.path}:{item.content_hash or ''}" for item in mutations.created),
+        *(f"modified:{item.path}:{item.content_hash or ''}" for item in mutations.modified),
+        *(f"deleted:{item.path}:{item.content_hash or ''}" for item in mutations.deleted),
+    ]
+    return _digest("\n".join(sorted(rows)))
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -269,6 +308,10 @@ class CommandRecord:
     no_progress_warning: bool = False
     force_finalization: bool = False
     failure_fingerprint: str = ""
+    weakened_validation: bool = False
+    changed_files_fingerprint: str = ""
+    output_excerpt: str = ""
+    step: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -287,6 +330,32 @@ class ValidationEvidence:
     exit_code: int
     failure_fingerprint: str = ""
     suspicious: bool = False
+    weakened: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class UnresolvedValidationFailure:
+    command: str
+    exit_code: int
+    excerpt: str
+    step: int
+    changed_files_fingerprint: str
+    intents: frozenset[str] = field(default_factory=frozenset, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["intents"] = sorted(self.intents)
+        return result
+
+
+@dataclass(slots=True)
+class SuccessfulValidationState:
+    command: str
+    step: int
+    changed_files_fingerprint: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -344,6 +413,9 @@ class AttemptState:
     validation_evidence: list[ValidationEvidence] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     unresolved_failures: list[str] = field(default_factory=list)
+    unresolved_validation_failures: list[UnresolvedValidationFailure] = field(default_factory=list)
+    best_successful_validation: SuccessfulValidationState | None = None
+    final_changed_files_fingerprint: str = ""
     timeouts: int = 0
     snapshot_truncated: bool = False
     no_progress_steps: int = 0
@@ -428,6 +500,58 @@ class AttemptState:
         record.force_finalization = self.no_progress_events >= 2
         return True, record.force_finalization
 
+    def track_validation(self, record: CommandRecord, evidence: ValidationEvidence) -> None:
+        if not is_validation_like(record.command):
+            return
+        intents = _validation_intents(record.command)
+        if record.exit_code != 0:
+            self.unresolved_validation_failures.append(
+                UnresolvedValidationFailure(
+                    command=record.command,
+                    exit_code=record.exit_code,
+                    excerpt=record.output_excerpt,
+                    step=record.step,
+                    changed_files_fingerprint=record.changed_files_fingerprint,
+                    intents=intents,
+                )
+            )
+            return
+        if evidence.weakened:
+            return
+        self.unresolved_validation_failures = [
+            failure
+            for failure in self.unresolved_validation_failures
+            if not (
+                failure.command == record.command
+                or bool(failure.intents & intents)
+                or failure.changed_files_fingerprint != record.changed_files_fingerprint
+            )
+        ]
+        self.best_successful_validation = SuccessfulValidationState(
+            command=record.command,
+            step=record.step,
+            changed_files_fingerprint=record.changed_files_fingerprint,
+        )
+
+    def finalization_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.unresolved_validation_failures:
+            summaries = []
+            for failure in self.unresolved_validation_failures[-3:]:
+                excerpt = f": {failure.excerpt}" if failure.excerpt else ""
+                summaries.append(
+                    f"- {failure.command} (exit {failure.exit_code}, step {failure.step}){excerpt}"
+                )
+            warnings.append(UNRESOLVED_VALIDATION_MESSAGE + "\n" + "\n".join(summaries))
+        if (
+            self.best_successful_validation is not None
+            and self.final_changed_files_fingerprint
+            and self.best_successful_validation.changed_files_fingerprint
+            != self.final_changed_files_fingerprint
+        ):
+            warnings.append(VALIDATION_DRIFT_MESSAGE)
+        return warnings
+
     def add_evidence(self, evidence: ValidationEvidence) -> None:
         self.validation_evidence.append(evidence)
         successful = [item for item in self.validation_evidence if item.exit_code == 0]
@@ -470,6 +594,9 @@ class AttemptState:
             "validation_evidence": [item.to_dict() for item in self.validation_evidence],
             "warnings": self.warnings,
             "unresolved_failures": self.unresolved_failures,
+            "unresolved_validation_failures": [item.to_dict() for item in self.unresolved_validation_failures],
+            "best_successful_validation": self.best_successful_validation.to_dict() if self.best_successful_validation else None,
+            "final_changed_files_fingerprint": self.final_changed_files_fingerprint,
             "timeouts": self.timeouts,
             "snapshot_truncated": self.snapshot_truncated,
             "no_progress_steps": self.no_progress_steps,
@@ -596,6 +723,7 @@ class TaskExecutionContext:
             self.attempt.files_modified.add(item.path)
         for item in cumulative.deleted:
             self.attempt.files_deleted.add(item.path)
+        self.attempt.final_changed_files_fingerprint = _changed_files_fingerprint(cumulative)
         if cumulative.has_effects():
             self.attempt.side_effects.append({"scope": "cumulative-attempt", **cumulative.to_dict()})
         return self.attempt
@@ -759,8 +887,10 @@ class TaskExecutionContext:
     def _run_process(
         self, command: str, cwd: Path, env: Mapping[str, str], timeout: int
     ) -> tuple[int, str, str, bool]:
+        bash = shutil.which("bash", path=env.get("PATH"))
+        process_command: str | list[str] = [bash, "-o", "pipefail", "-c", command] if bash else command
         popen_kwargs: dict[str, Any] = {
-            "shell": True,
+            "shell": not bool(bash),
             "cwd": str(cwd),
             "env": dict(env),
             "stdout": subprocess.PIPE,
@@ -769,7 +899,7 @@ class TaskExecutionContext:
         }
         if os.name == "posix":
             popen_kwargs["start_new_session"] = True
-        proc = subprocess.Popen(command, **popen_kwargs)
+        proc = subprocess.Popen(process_command, **popen_kwargs)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
             return int(proc.returncode or 0), stdout or "", stderr or "", False
@@ -843,6 +973,14 @@ class TaskExecutionContext:
             external_or_private_state_may_have_changed=True,
             warnings=warnings,
             failure_fingerprint=failure_fingerprint(stdout, stderr, exit_code),
+            weakened_validation=is_weakened_validation_command(command),
+            changed_files_fingerprint=_changed_files_fingerprint(
+                self._mutation_diff(
+                    self._attempt_files_before.records, after_snapshot.records, self.attempt.before, after_fp
+                )
+            ),
+            output_excerpt=_cap_text((stderr or stdout).strip(), 500),
+            step=len(self.attempt.commands) + 1,
         )
         self.attempt.add_command(record)
         completed = subprocess.CompletedProcess(command, exit_code, stdout, stderr)
@@ -930,8 +1068,13 @@ class TaskExecutionContext:
             scope="final expected behaviour" if final_behavior else "partial behaviour",
             exit_code=record.exit_code,
             failure_fingerprint=record.failure_fingerprint,
+            weakened=record.weakened_validation,
         )
+        if record.weakened_validation:
+            evidence.label = "weak " + evidence.label
+            evidence.strength = min(evidence.strength, 1)
         self.attempt.add_evidence(evidence)
+        self.attempt.track_validation(record, evidence)
         warning, force = self.attempt.register_progress(record, evidence)
         record.warnings = [
             item
@@ -971,6 +1114,8 @@ def compact_command_observation(
         ).splitlines()
     if evidence is not None:
         observation["evidence"] = evidence.label
+        if evidence.weakened:
+            observation["validation_warning"] = WEAK_VALIDATION_MESSAGE
     if record.timed_out:
         observation["message"] = TIMEOUT_MESSAGE
     if warnings or record.exit_code != 0 or record.no_progress_warning:
