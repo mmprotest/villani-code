@@ -1120,6 +1120,11 @@ class Runner:
             for command_record in attempt_state.commands:
                 if not any(item.command == command_record.command for item in attempt_state.validation_evidence):
                     self._task_execution_context.record_validation(command_record, kind="command")
+            validation_warnings = attempt_state.finalization_warnings()
+            if validation_warnings:
+                warning_text = "\n\n".join(validation_warnings)
+                response.setdefault("content", []).append({"type": "text", "text": warning_text})
+                final_text = f"{final_text}\n\n{warning_text}" if final_text else warning_text
             if not completed:
                 self._failure_memory = attempt_state.build_failure_memory(final_text, reason)
             execution = ExecutionResult(
