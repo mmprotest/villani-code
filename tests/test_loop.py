@@ -233,162 +233,148 @@ def test_loop_retries_on_empty_assistant_turn(tmp_path: Path):
     assert continuation_messages
 
 
-class FakeClientPatchEffectYes:
+class FakeClientPatchEffect:
     def __init__(self):
         self.calls = 0
-        self.critic_payload = None
+        self.payloads: list[dict] = []
 
     def create_message(self, payload, stream):
         self.calls += 1
+        self.payloads.append(payload)
         if self.calls == 1:
             return {
                 "id": "1",
                 "role": "assistant",
                 "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}],
             }
-        if self.calls == 2:
-            return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "Implemented x update"}]}
-        self.critic_payload = payload
-        return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
+        return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "Implemented x update"}]}
 
 
-def test_patch_effect_check_yes_allows_completion(tmp_path: Path):
+def test_patch_effect_check_allows_completion_without_critic_call(tmp_path: Path):
     (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
-    client = FakeClientPatchEffectYes()
+    client = FakeClientPatchEffect()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
+
     result = runner.run("set x to 1")
+
     assert result["response"]["content"][0]["text"] == "Implemented x update"
-    assert client.critic_payload is not None
-    assert "tools" not in client.critic_payload
+    assert client.calls == 2
+    assert not any(
+        "Patch-effect check mismatch" in block.get("text", "")
+        for message in result["messages"]
+        if message["role"] == "user"
+        for block in message["content"]
+    )
 
 
-def test_patch_effect_critic_runs_as_separate_call_on_source_edit(tmp_path: Path):
+def test_patch_effect_critic_does_not_run_on_source_edit(tmp_path: Path):
     class Client:
         def __init__(self):
             self.calls = 0
-            self.critic_payload = None
+
         def create_message(self, payload, stream):
             self.calls += 1
             if self.calls == 1:
                 return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "src/billing/totals.py", "content": "x=1\n"}}]}
-            if self.calls == 2:
-                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "updated billing totals field mapping"}]}
-            self.critic_payload = payload
-            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "NO: wrong field name still used"}]}
+            return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "updated billing totals field mapping"}]}
+
     (tmp_path / "src" / "billing").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "billing" / "totals.py").write_text("x=0\n", encoding="utf-8")
     events: list[dict] = []
     client = Client()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True, event_callback=events.append)
+
     runner.run("fix billing mapping bug")
-    assert client.critic_payload is not None
-    assert any(e.get("type") == "patch_effect_critic_started" for e in events)
 
-
-class FakeClientPatchEffectNo:
-    def __init__(self):
-        self.calls = 0
-        self.third_payload = None
-
-    def create_message(self, payload, stream):
-        self.calls += 1
-        if self.calls == 1:
-            return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
-        if self.calls == 2:
-            return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
-        self.third_payload = payload
-        return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "NO: constant unchanged"}]}
+    assert client.calls == 2
+    assert not any(event.get("type") == "patch_effect_critic_started" for event in events)
+    mechanical_event = next(event for event in events if event.get("type") == "patch_effect_check_completed")
+    assert mechanical_event == {
+        "type": "patch_effect_check_completed",
+        "canonical_modified_paths": ["src/billing/totals.py"],
+        "target_file": "src/billing/totals.py",
+        "syntax_check": "ok",
+        "turn_index": 2,
+    }
 
 
 def test_patch_effect_check_no_feeds_mismatch_back(tmp_path: Path):
     (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
-    client = FakeClientPatchEffectNo()
+    client = FakeClientPatchEffect()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
-    runner.run("update constant")
-    assert client.third_payload is not None
-    followups = [m for m in client.third_payload["messages"] if m["role"] == "user" and m["content"] and "Patch-effect check mismatch" in m["content"][0].get("text", "")]
-    assert followups
+
+    result = runner.run("update constant")
+
+    assert client.calls == 2
+    assert not any(
+        "Patch-effect check mismatch" in block.get("text", "")
+        for message in result["messages"]
+        if message["role"] == "user"
+        for block in message["content"]
+    )
 
 
-def test_patch_effect_check_malformed_treated_as_not_confirmed(tmp_path: Path):
-    class Client:
-        def __init__(self):
-            self.calls = 0
-            self.fourth_payload = None
-        def create_message(self, payload, stream):
-            self.calls += 1
-            if self.calls == 1:
-                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
-            if self.calls == 2:
-                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
-            if self.calls == 3:
-                return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "maybe"}]}
-            self.fourth_payload = payload
-            return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "NO: mismatch"}]}
+def test_patch_effect_check_is_mechanical_for_normal_source_edit(tmp_path: Path):
     (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
-    client = Client()
+    client = FakeClientPatchEffect()
     runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
-    runner.run("update constant")
-    assert client.fourth_payload is not None
-    assert any("Patch-effect check was inconclusive" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
-    assert any("Do not create new verification/proof files" in m["content"][0].get("text", "") for m in client.fourth_payload["messages"] if m["role"] == "user" and m["content"])
+
+    result = runner.run("update constant")
+
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x=1\n"
+    assert result["response"]["content"] == [{"type": "text", "text": "Implemented x update"}]
+    assert client.calls == 2
+    assert all(
+        "Patch-effect check mismatch" not in block.get("text", "")
+        for message in result["messages"]
+        if message["role"] == "user"
+        for block in message["content"]
+    )
 
 
-def test_patch_effect_check_ignores_heading_for_intended_effect(tmp_path: Path):
+def test_patch_effect_check_syntax_error_warning_is_injected(tmp_path: Path):
     class Client:
         def __init__(self):
             self.calls = 0
-            self.critic_payload = None
-        def create_message(self, payload, stream):
-            self.calls += 1
-            if self.calls == 1:
-                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
-            if self.calls == 2:
-                return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "## Fix Summary"}]}
-            self.critic_payload = payload
-            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
-    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
-    client = Client()
-    Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True).run("update constant")
-    assert "## Fix Summary" not in client.critic_payload["messages"][0]["content"][0]["text"]
+            self.third_payload = None
 
-
-def test_patch_effect_check_syntax_error_blocks_yes(tmp_path: Path):
-    class Client:
-        def __init__(self):
-            self.calls = 0
         def create_message(self, payload, stream):
             self.calls += 1
             if self.calls == 1:
                 return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "def broken(:\n"}}]}
             if self.calls == 2:
                 return {"id": "2", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
-            return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
-    (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
-    runner = Runner(client=Client(), repo=tmp_path, model="m", stream=False, auto_approve=True)
-    runner.run("update constant")
-    assert "syntax_error" in runner._pending_verification or runner._patch_effect_check_pending is True
-
-
-def test_patch_effect_check_uses_fresh_code_after_repair(tmp_path: Path):
-    class Client:
-        def __init__(self):
-            self.calls = 0
-            self.critic_payload = None
-        def create_message(self, payload, stream):
-            self.calls += 1
-            if self.calls == 1:
-                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
-            if self.calls == 2:
-                return {"id": "2", "role": "assistant", "content": [{"type": "tool_use", "id": "w2", "name": "Write", "input": {"file_path": "a.py", "content": "x=2\n"}}]}
             if self.calls == 3:
-                return {"id": "3", "role": "assistant", "content": [{"type": "text", "text": "done"}]}
-            self.critic_payload = payload
-            return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "YES"}]}
+                self.third_payload = payload
+                return {"id": "3", "role": "assistant", "content": [{"type": "tool_use", "id": "w2", "name": "Write", "input": {"file_path": "a.py", "content": "def fixed():\n    return True\n"}}]}
+            return {"id": "4", "role": "assistant", "content": [{"type": "text", "text": "fixed syntax"}]}
+
     (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
     client = Client()
-    Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True).run("update constant")
-    assert "x=2" in client.critic_payload["messages"][0]["content"][0]["text"]
+    runner = Runner(client=client, repo=tmp_path, model="m", stream=False, auto_approve=True)
+    observations: list[str] = []
+    original_check = runner._run_patch_effect_check
+
+    def record_check(*args, **kwargs):
+        observation = original_check(*args, **kwargs)
+        observations.append(observation)
+        return observation
+
+    runner._run_patch_effect_check = record_check
+    runner.run("update constant")
+
+    assert observations[0].startswith("Patch-effect check failed: syntax_error:")
+    assert observations[0].endswith("Fix syntax before completion.")
+    assert client.third_payload is not None
+    warnings = [
+        block.get("text", "")
+        for message in client.third_payload["messages"]
+        if message["role"] == "user"
+        for block in message["content"]
+        if "Patch-effect check failed: syntax_error:" in block.get("text", "")
+    ]
+    assert warnings
+    assert warnings[-1].endswith("Fix syntax before completion.")
 
 
 def test_normalise_modified_path_windows_under_repo(tmp_path: Path):
@@ -417,7 +403,7 @@ def test_patch_effect_check_cap_prevents_infinite_loop(tmp_path: Path):
         def create_message(self, payload, stream):
             self.calls += 1
             if self.calls == 1:
-                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "x=1\n"}}]}
+                return {"id": "1", "role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "a.py", "content": "def broken(:\n"}}]}
             return {"id": str(self.calls), "role": "assistant", "content": [{"type": "text", "text": "maybe"}]}
     (tmp_path / "a.py").write_text("x=0\n", encoding="utf-8")
     client = Client()
