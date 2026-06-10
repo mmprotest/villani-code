@@ -653,9 +653,15 @@ class Runner:
         if event_type == "command_environment_sanitized":
             self._debug_recorder.record_command_environment(
                 sanitization_ran=bool(payload.get("sanitization_ran", False)),
+                discovered_private_roots=list(payload.get("discovered_private_roots", [])),
+                environment_variables_removed=list(payload.get("environment_variables_removed", [])),
                 path_entries_removed=int(payload.get("path_entries_removed", 0)),
-                direct_path_variables_removed=list(payload.get("direct_path_variables_removed", [])),
-                variables_flagged=list(payload.get("variables_flagged", [])),
+                runner_owned_variables_considered=list(
+                    payload.get("runner_owned_variables_considered", [])
+                ),
+                possible_private_path_variables_flagged=list(
+                    payload.get("possible_private_path_variables_flagged", [])
+                ),
                 cwd=str(payload.get("cwd", ".")),
                 executable=str(payload.get("executable", "")),
                 tool_call_id=str(payload.get("tool_call_id", "") or ""),

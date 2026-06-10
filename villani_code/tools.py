@@ -237,9 +237,15 @@ def _command_environment(
             "command_environment_sanitized",
             {
                 "sanitization_ran": diagnostics.sanitization_ran,
+                "discovered_private_roots": list(diagnostics.discovered_private_roots),
+                "environment_variables_removed": list(diagnostics.environment_variables_removed),
                 "path_entries_removed": diagnostics.path_entries_removed,
-                "direct_path_variables_removed": list(diagnostics.direct_path_variables_removed),
-                "variables_flagged": list(diagnostics.variables_flagged),
+                "runner_owned_variables_considered": list(
+                    diagnostics.runner_owned_variables_considered
+                ),
+                "possible_private_path_variables_flagged": list(
+                    diagnostics.possible_private_path_variables_flagged
+                ),
                 "cwd": str(cwd),
                 "executable": executable,
                 "tool_call_id": tool_call_id,
