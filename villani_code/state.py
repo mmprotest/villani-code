@@ -650,6 +650,18 @@ class Runner:
                 turn_index=turn_index,
             )
             return
+        if event_type == "command_environment_sanitized":
+            self._debug_recorder.record_command_environment(
+                sanitization_ran=bool(payload.get("sanitization_ran", False)),
+                path_entries_removed=int(payload.get("path_entries_removed", 0)),
+                direct_path_variables_removed=list(payload.get("direct_path_variables_removed", [])),
+                variables_flagged=list(payload.get("variables_flagged", [])),
+                cwd=str(payload.get("cwd", ".")),
+                executable=str(payload.get("executable", "")),
+                tool_call_id=str(payload.get("tool_call_id", "") or ""),
+                turn_index=turn_index,
+            )
+            return
         if event_type == "command_finished":
             self._debug_recorder.record_command_finish(
                 command=str(payload.get("command", "")),

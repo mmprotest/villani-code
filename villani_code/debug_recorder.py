@@ -249,6 +249,32 @@ class DebugRecorder:
             turn_index=turn_index,
         )
 
+    def record_command_environment(
+        self,
+        *,
+        sanitization_ran: bool,
+        path_entries_removed: int,
+        direct_path_variables_removed: list[str],
+        variables_flagged: list[str],
+        cwd: str,
+        executable: str,
+        tool_call_id: str = "",
+        turn_index: int | None = None,
+    ) -> None:
+        payload = {
+            "ts": self._ts(),
+            "event": "command_environment_sanitized",
+            "sanitization_ran": sanitization_ran,
+            "path_entries_removed": path_entries_removed,
+            "direct_path_variables_removed": direct_path_variables_removed,
+            "variables_flagged": variables_flagged,
+            "cwd": cwd,
+            "executable": executable,
+            "tool_call_id": tool_call_id,
+        }
+        self._safe_append_jsonl("commands", payload)
+        self._emit("command_environment_sanitized", payload, turn_index=turn_index)
+
     def record_command_finish(
         self,
         command: str,

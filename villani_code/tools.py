@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from villani_code.command_environment import build_agent_command_environment
 from villani_code.patch_apply import (
     PatchApplyError,
     apply_unified_diff_with_diagnostics,
@@ -143,6 +145,7 @@ def execute_tool(
     unsafe: bool = False,
     debug_callback: Any | None = None,
     tool_call_id: str = "",
+    private_roots: tuple[Path, ...] | None = None,
 ) -> dict[str, Any]:
     model = TOOL_MODELS.get(name)
     if not model:
@@ -158,13 +161,13 @@ def execute_tool(
         if name == "Read":
             return _ok(_run_read(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Grep":
-            return _ok(_run_grep(parsed, repo))
+            return _ok(_run_grep(parsed, repo, debug_callback, tool_call_id, private_roots))
         if name == "Glob":
             return _ok(_run_glob(parsed, repo))
         if name == "Search":
-            return _ok(_run_search(parsed, repo))
+            return _ok(_run_search(parsed, repo, debug_callback, tool_call_id, private_roots))
         if name == "Bash":
-            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id))
+            return _ok(_run_bash(parsed, repo, unsafe=unsafe, debug_callback=debug_callback, tool_call_id=tool_call_id, private_roots=private_roots))
         if name == "Write":
             return _ok(_run_write(parsed, repo, debug_callback=debug_callback, tool_call_id=tool_call_id))
         if name == "Patch":
@@ -172,7 +175,7 @@ def execute_tool(
         if name == "WebFetch":
             return _ok(_run_webfetch(parsed))
         if name.startswith("Git"):
-            return _ok(_run_git(name, parsed, repo))
+            return _ok(_run_git(name, parsed, repo, debug_callback, tool_call_id, private_roots))
         if name == "SubmitPlan":
             return _ok("Plan artifact submitted")
     except Exception as exc:
@@ -208,14 +211,58 @@ def _run_read(data: ReadInput, repo: Path, debug_callback: Any | None = None, to
     return raw.decode("utf-8", errors="replace")
 
 
-def _run_grep(data: GrepInput, repo: Path) -> str:
+def _command_environment(
+    repo: Path,
+    command: str | list[str],
+    cwd: Path,
+    debug_callback: Any | None,
+    tool_call_id: str,
+    private_roots: tuple[Path, ...] | None,
+    *,
+    shell: bool = False,
+) -> dict[str, str]:
+    built = build_agent_command_environment(workspace=repo, private_roots=private_roots)
+    if callable(debug_callback):
+        executable = (
+            os.environ.get("COMSPEC", "cmd.exe")
+            if shell and os.name == "nt"
+            else "/bin/sh"
+            if shell
+            else shutil.which(str(command[0]), path=built.values.get("PATH")) or str(command[0])
+            if isinstance(command, list) and command
+            else ""
+        )
+        diagnostics = built.diagnostics
+        debug_callback(
+            "command_environment_sanitized",
+            {
+                "sanitization_ran": diagnostics.sanitization_ran,
+                "path_entries_removed": diagnostics.path_entries_removed,
+                "direct_path_variables_removed": list(diagnostics.direct_path_variables_removed),
+                "variables_flagged": list(diagnostics.variables_flagged),
+                "cwd": str(cwd),
+                "executable": executable,
+                "tool_call_id": tool_call_id,
+            },
+        )
+    return built.values
+
+
+def _run_grep(
+    data: GrepInput,
+    repo: Path,
+    debug_callback: Any | None = None,
+    tool_call_id: str = "",
+    private_roots: tuple[Path, ...] | None = None,
+) -> str:
     base = _safe_path(repo, data.path)
-    rg_bin = shutil.which("rg")
+    env = _command_environment(repo, ["rg"], repo, debug_callback, tool_call_id, private_roots)
+    rg_bin = shutil.which("rg", path=env.get("PATH"))
     if rg_bin:
         cmd = [rg_bin, "-n", data.pattern, str(base)]
         if data.include_hidden:
             cmd.append("--hidden")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env)
         return "\n".join(proc.stdout.splitlines()[: data.max_results])
     return ""
 
@@ -225,17 +272,24 @@ def _run_glob(data: GlobInput, repo: Path) -> str:
     return "\n".join(sorted(hits))
 
 
-def _run_search(data: SearchInput, repo: Path) -> str:
-    rg_bin = shutil.which("rg")
+def _run_search(
+    data: SearchInput,
+    repo: Path,
+    debug_callback: Any | None = None,
+    tool_call_id: str = "",
+    private_roots: tuple[Path, ...] | None = None,
+) -> str:
+    env = _command_environment(repo, ["rg"], repo, debug_callback, tool_call_id, private_roots)
+    rg_bin = shutil.which("rg", path=env.get("PATH"))
     if not rg_bin:
-        return _run_grep(GrepInput(pattern=data.query, path=data.path), repo)
+        return ""
     base = _safe_path(repo, data.path)
     cmd = [rg_bin, "-n", "-C", str(data.context_lines), data.query, str(base)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env)
     return proc.stdout
 
 
-def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "") -> str:
+def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | None = None, tool_call_id: str = "", private_roots: tuple[Path, ...] | None = None) -> str:
     lowered = data.command.lower()
     if not unsafe:
         for bad in DENYLIST:
@@ -244,7 +298,8 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
     cwd = _safe_path(repo, data.cwd)
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
-    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec)
+    env = _command_environment(repo, data.command, cwd, debug_callback, tool_call_id, private_roots, shell=True)
+    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec, env=env)
     if callable(debug_callback):
         debug_callback(
             "command_finished",
@@ -338,7 +393,7 @@ def _run_webfetch(data: WebFetchInput) -> str:
     return r.text[:10000]
 
 
-def _run_git(name: str, data: GitSimpleInput, repo: Path) -> str:
+def _run_git(name: str, data: GitSimpleInput, repo: Path, debug_callback: Any | None = None, tool_call_id: str = "", private_roots: tuple[Path, ...] | None = None) -> str:
     mapping = {
         "GitStatus": ["status", "--short"],
         "GitDiff": ["diff"],
@@ -348,5 +403,6 @@ def _run_git(name: str, data: GitSimpleInput, repo: Path) -> str:
         "GitCommit": ["commit"],
     }
     cmd = ["git", *mapping[name], *data.args]
-    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True)
+    env = _command_environment(repo, cmd, repo, debug_callback, tool_call_id, private_roots)
+    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env)
     return proc.stdout or proc.stderr
