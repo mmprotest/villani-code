@@ -2,6 +2,7 @@
 
 ## 0.1.0rc1
 
+- Made patch-effect checking mechanical only by removing model-visible semantic critic feedback while preserving syntax-error protection.
 - Improved private runtime root discovery for agent-issued command environment sanitization by deriving runner-private roots from runner-owned launch/config environment variables and executable paths, while keeping diagnostics artifact-only.
 - Added generic sanitization for agent-issued command environments so target workspace commands do not inherit Villani private runtime paths, while preserving write-only diagnostics in debug artifacts.
 - Hardened benchmark validation command resolution with explicit allowlisting and clear environment-failure classification.

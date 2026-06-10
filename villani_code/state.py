@@ -1688,11 +1688,6 @@ class Runner:
         self._user_event_callback(event)
 
     def _run_patch_effect_check(self, response: dict[str, Any], changed_files: list[str], objective: str) -> str:
-        text = "\n".join(
-            str(block.get("text", ""))
-            for block in response.get("content", [])
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
         candidates = self._canonical_modified_paths(list(changed_files) + sorted(self._current_verification_targets) + sorted(self._intended_targets))
         target = next(
             (
@@ -1712,8 +1707,6 @@ class Runner:
             self._patch_effect_check_pending = False
             return ""
         patched_text = target_path.read_text(encoding="utf-8", errors="replace")
-        patched_excerpt = patched_text[:2400]
-        intended_effect = self._derive_intended_effect(text, target, objective)
         syntax_result = "not_applicable"
         if target.endswith(".py"):
             try:
@@ -1722,39 +1715,18 @@ class Runner:
             except SyntaxError as exc:
                 line = exc.lineno or "?"
                 syntax_result = f"syntax_error: {exc.msg} at line {line}"
-        prompt = (
-            "You are checking whether a code edit actually matches its intended effect.\n\n"
-            f"Task objective:\n{objective}\n\n"
-            f"Intended effect:\n{intended_effect}\n\n"
-            f"Fresh patched code:\n```\n{patched_excerpt}\n```\n\n"
-            f"Syntax check:\n{syntax_result}\n\n"
-            "Does the patched code actually implement the intended effect?\n"
-            "Answer exactly one of:\nYES\nNO: <specific mismatch>"
-        )
         self.event_callback(
             {
-                "type": "patch_effect_critic_started",
+                "type": "patch_effect_check_completed",
                 "canonical_modified_paths": candidates,
                 "target_file": target,
                 "syntax_check": syntax_result,
             }
         )
-        critic_payload = {"model": self.model, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "system": "", "max_tokens": 120, "stream": False}
-        critic_raw = self.client.create_message(critic_payload, stream=False)
-        critic_text = "\n".join(str(b.get("text", "")) for b in critic_raw.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
-        stripped = critic_text.lstrip()
         if syntax_result.startswith("syntax_error"):
             return f"Patch-effect check failed: {syntax_result}. Fix syntax before completion."
-        if stripped.startswith("YES"):
-            self._patch_effect_check_pending = False
-            return ""
-        if stripped.startswith("NO:"):
-            return f"Patch-effect check mismatch: {critic_text[:400]}"
         self._patch_effect_check_pending = False
-        return (
-            "Patch-effect check was inconclusive. No syntax error or concrete mismatch was found. "
-            "Do not create new verification/proof files. If the edited source already satisfies the task objective, provide the final answer."
-        )
+        return ""
 
     def _derive_intended_effect(self, rationale: str, target: str, objective: str) -> str:
         banned = {"## analysis", "## fix summary", "summary", "changes made", "implementation"}
