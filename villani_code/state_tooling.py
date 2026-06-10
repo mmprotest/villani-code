@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from villani_code.command_environment import runner_private_roots
 from villani_code.patch_apply import PatchApplyError, extract_unified_diff_targets, parse_unified_diff
 from villani_code.permissions import Decision
 from villani_code.repo_rules import classify_repo_path, is_ignored_repo_path
@@ -658,6 +659,9 @@ def execute_tool_with_lifecycle(
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
 
+    debug_recorder = getattr(runner, "_debug_recorder", None)
+    debug_root = getattr(getattr(debug_recorder, "artifacts", None), "root", None)
+    private_roots = runner_private_roots(workspace=runner.repo, debug_root=debug_root)
     result = execute_tool(
         tool_name,
         tool_input,
@@ -665,6 +669,7 @@ def execute_tool_with_lifecycle(
         unsafe=runner.unsafe,
         debug_callback=_debug_callback_with_turn,
         tool_call_id=stable_tool_use_id,
+        private_roots=private_roots,
     )
     runner.event_callback(
         {
