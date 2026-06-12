@@ -24,6 +24,10 @@ def build_role_launch_request(role: str, objective: str, target_files: list[str]
         return SubagentLaunchRequest(role=role, inherit_mission_state=False, objective=objective, target_files=files, known_facts=[], ruled_out=[], allowed_tools=["Read", "Bash"], write_allowed=False, require_verification_evidence=True)
     if role == "bounded_patcher":
         return SubagentLaunchRequest(role=role, inherit_mission_state=True, objective=objective, target_files=files, known_facts=[], ruled_out=[], allowed_tools=["Read", "Patch", "Write", "Bash"], write_allowed=True, require_verification_evidence=True)
+    if role == "supervisor":
+        return SubagentLaunchRequest(role=role, inherit_mission_state=True, objective=objective, target_files=files, known_facts=[], ruled_out=[], allowed_tools=["Read", "Grep", "Search", "Bash"], write_allowed=False, require_verification_evidence=False)
+    if role == "worker":
+        return SubagentLaunchRequest(role=role, inherit_mission_state=True, objective=objective, target_files=files, known_facts=[], ruled_out=[], allowed_tools=["Read", "Patch", "Write", "Bash"], write_allowed=True, require_verification_evidence=True)
     return SubagentLaunchRequest(role="planner", inherit_mission_state=True, objective=objective, target_files=files, known_facts=[], ruled_out=[], allowed_tools=["Read", "Grep", "Search"], write_allowed=False, require_verification_evidence=False)
 
 
