@@ -125,7 +125,7 @@ def _ok(content: str) -> dict[str, Any]:
     return {"content": content, "is_error": False}
 
 
-def tool_specs() -> list[dict[str, Any]]:
+def tool_specs(memory_enabled: bool = False) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     for name, model in TOOL_MODELS.items():
         specs.append(
@@ -135,6 +135,10 @@ def tool_specs() -> list[dict[str, Any]]:
                 "input_schema": model.model_json_schema(),
             }
         )
+    if memory_enabled:
+        from villani_code.task_memory import memory_tool_specs
+
+        specs.extend(memory_tool_specs())
     return specs
 
 

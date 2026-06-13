@@ -462,6 +462,19 @@ def execute_tool_with_policy(
     except Exception:
         pass
 
+    if tool_name.startswith("memory_"):
+        memory = getattr(runner, "_task_memory", None)
+        if memory is None:
+            return {"content": "Task-scoped memory is disabled", "is_error": True}
+        return execute_tool_with_lifecycle(
+            runner=runner,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            forced=False,
+            turn_index=runner._current_turn_index if isinstance(getattr(runner, "_current_turn_index", None), int) else 0,
+        )
+
     if tool_name == "SubmitPlan":
         if not getattr(runner, "_planning_read_only", False):
             return {"content": "SubmitPlan is available only in planning mode", "is_error": True}
@@ -662,15 +675,34 @@ def execute_tool_with_lifecycle(
     debug_recorder = getattr(runner, "_debug_recorder", None)
     debug_root = getattr(getattr(debug_recorder, "artifacts", None), "root", None)
     private_roots = runner_private_roots(workspace=runner.repo, debug_root=debug_root)
-    result = execute_tool(
-        tool_name,
-        tool_input,
-        runner.repo,
-        unsafe=runner.unsafe,
-        debug_callback=_debug_callback_with_turn,
-        tool_call_id=stable_tool_use_id,
-        private_roots=private_roots,
-    )
+    memory = getattr(runner, "_task_memory", None)
+    target_existed_before: bool | None = None
+    if memory is not None and tool_name == "Write" and tool_input.get("file_path"):
+        try:
+            target_existed_before = (runner.repo / str(tool_input["file_path"])).resolve().exists()
+        except OSError:
+            target_existed_before = None
+    if memory is not None and tool_name.startswith("memory_"):
+        result = memory.execute_tool(tool_name, tool_input)
+    else:
+        result = execute_tool(
+            tool_name,
+            tool_input,
+            runner.repo,
+            unsafe=runner.unsafe,
+            debug_callback=_debug_callback_with_turn,
+            tool_call_id=stable_tool_use_id,
+            private_roots=private_roots,
+        )
+    if memory is not None:
+        if not tool_name.startswith("memory_"):
+            memory.observe_tool_result(
+                tool_name,
+                tool_input,
+                result,
+                target_existed_before=target_existed_before,
+            )
+        memory.after_tool_call()
     runner.event_callback(
         {
             "type": "tool_result",

@@ -145,3 +145,6 @@ Thumbs.db
 # Local secrets / config
 *.env
 .env.*
+
+# Villani task-scoped run memory
+.villani/memory/
