@@ -94,7 +94,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
     return bool(getattr(settings, "villani_mode", False))
 
 
-def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, auto_approve: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> Runner:
+def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, auto_approve: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None, memory_enabled: bool = False, memory_update_interval_tool_calls: int = 5) -> Runner:
     resolved_repo = repo.resolve()
     try:
         ensure_runtime_dependencies_not_shadowed(resolved_repo)
@@ -116,7 +116,7 @@ def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream
             thinking_obj = thinking
     benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json) if benchmark_runtime_json else None
     debug_config = build_debug_config(debug_mode.value if isinstance(debug_mode, DebugMode) else str(debug_mode), debug_dir=debug_dir)
-    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, auto_approve=auto_approve, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, debug_config=debug_config, provider=provider)
+    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, auto_approve=auto_approve, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, debug_config=debug_config, provider=provider, memory_enabled=memory_enabled, memory_update_interval_tool_calls=memory_update_interval_tool_calls)
 
 
 def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, auto_approve: bool = False, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> None:
@@ -199,9 +199,11 @@ def run(
     benchmark_runtime_json: Optional[str] = typer.Option(None, "--benchmark-runtime-json", hidden=True),
     debug: Optional[str] = typer.Option(None, "--debug", flag_value="normal"),
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
+    memory_enabled: bool = typer.Option(False, "--memory-enabled/--no-memory-enabled", envvar="VILLANI_MEMORY_ENABLED"),
+    memory_update_interval_tool_calls: int = typer.Option(5, "--memory-update-interval-tool-calls", min=1, envvar="VILLANI_MEMORY_UPDATE_INTERVAL_TOOL_CALLS"),
 ) -> None:
     debug_mode = DebugMode(build_debug_config(debug).mode.value)
-    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, auto_approve, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir)
+    runner = _build_runner(base_url, model, repo, max_tokens, stream, thinking, unsafe, verbose, extra_json, redact, dangerously_skip_permissions, auto_accept_edits, auto_approve, plan_mode, max_repair_attempts, small_model, provider, api_key, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir, memory_enabled=memory_enabled, memory_update_interval_tool_calls=memory_update_interval_tool_calls)
     if auto_approve:
         console.print("Auto-approval: ON")
     result = runner.run(instruction)

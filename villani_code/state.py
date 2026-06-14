@@ -6,7 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from rich.console import Console
 
@@ -38,6 +38,7 @@ from villani_code.retrieval import Retriever
 from villani_code.skills import discover_skills
 from villani_code.streaming import StreamCoalescer, assemble_anthropic_stream
 from villani_code.tools import tool_specs
+from villani_code.task_memory import TaskMemory
 from villani_code.transcripts import save_transcript
 from villani_code.context_projection import build_model_context_packet, render_model_context_packet
 from villani_code.event_recorder import RuntimeEventRecorder
@@ -488,6 +489,8 @@ class Runner:
         benchmark_config: BenchmarkRuntimeConfig | None = None,
         debug_config: DebugConfig | None = None,
         provider: str | None = None,
+        memory_enabled: bool = False,
+        memory_update_interval_tool_calls: int = 5,
     ):
         self.client = client
         self.repo = repo
@@ -517,6 +520,9 @@ class Runner:
         self.benchmark_config = benchmark_config or BenchmarkRuntimeConfig()
         self._debug_config = debug_config or DebugConfig(mode=DebugMode.OFF)
         self.provider = provider
+        self.memory_enabled = bool(memory_enabled)
+        self.memory_update_interval_tool_calls = max(1, int(memory_update_interval_tool_calls))
+        self._task_memory: TaskMemory | None = None
         self._debug_recorder: DebugRecorder | None = None
         self._benchmark_noop_completion_attempts = 0
         self.console = Console()
@@ -609,6 +615,15 @@ class Runner:
         self._user_event_callback = callback or (lambda _event: None)
 
     def _debug_tool_callback(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self._task_memory is not None and event_type == "command_finished":
+            self._task_memory.record_command(
+                command=str(payload.get("command", "")),
+                cwd=str(payload.get("cwd", ".")),
+                exit_code=payload.get("exit_code") if isinstance(payload.get("exit_code"), int) else None,
+                stdout=str(payload.get("stdout", "")),
+                stderr=str(payload.get("stderr", "")),
+                duration_ms=payload.get("duration_ms") if isinstance(payload.get("duration_ms"), int) else None,
+            )
         if self._debug_recorder is None:
             return
         callback_turn_index = payload.get("turn_index")
@@ -777,7 +792,7 @@ class Runner:
             )
         text = VillaniModeController.format_summary(summary)
         response = {"role": "assistant", "content": [{"type": "text", "text": text}]}
-        return {"response": response, "summary": summary}
+        return {"response": response, "summary": summary, "telemetry": self._finalize_task_memory()}
 
     def run(
         self,
@@ -851,7 +866,7 @@ class Runner:
                     and target_path.is_file()
                 ):
                     required_initial_read = diagnosed_target_file
-        tools = tool_specs()
+        tools = tool_specs(memory_enabled=self._task_memory is not None)
         transcript: dict[str, Any] = {
             "requests": [],
             "responses": [],
@@ -1029,6 +1044,27 @@ class Runner:
             benchmark_config=self.benchmark_config,
             task_mode=self._task_mode,
         )
+        if self._task_memory is not None:
+            system.append({
+                "type": "text",
+                "text": (
+                    "You have access to task-scoped memory tools. Use memory tools as part of your normal workflow. "
+                    "At the start of the task, call either memory_get_current_state or memory_get_repo_summary before "
+                    "doing broad repo exploration. Before repeating file reads, broad searches, commands, failed patches, "
+                    "or debugging attempts, call the relevant memory tool first. Use memory_get_repo_summary for the initial "
+                    "repo map, memory_get_current_state for the latest task state, memory_recent_commands before rerunning "
+                    "commands, memory_recent_failures before debugging test/build failures, memory_changed_files before "
+                    "editing or verifying changed files, memory_inspected_files before reopening files, and memory_search "
+                    "when looking for prior observations, paths, errors, or decisions. "
+                    "For memory_record_hypothesis, status must be one of: active, confirmed, rejected, superseded. "
+                    "Use confirmed when a hypothesis is verified or proven true. "
+                    "Use rejected when a hypothesis is disproven. "
+                    "Use superseded when a newer hypothesis replaces it. "
+                    "When an approach fails, record it with memory_record_dead_end. "
+                    "When you form a useful debugging theory, record it with memory_record_hypothesis. "
+                    "Do not call memory tools blindly every turn. Use them to avoid repeated discovery and repeated failed work."
+                ),
+            })
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
             messages.append(
@@ -1123,6 +1159,7 @@ class Runner:
                 "transcript_path": str(transcript_path) if transcript_path is not None else "",
                 "transcript": transcript,
                 "execution": execution.to_dict(),
+                "telemetry": self._finalize_task_memory(),
             }
 
         def _budget_reason(
@@ -1221,11 +1258,6 @@ class Runner:
                 reason = _budget_reason()
                 if reason:
                     return _finish_bounded(response, reason, reason == "completed")
-                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
-                    targets = self._extract_tool_targets(tool_name, tool_input)
-                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
-                        meaningful_repo_edit_made = True
-                        prose_edit_intent_recovery_attempts = 0
                 continue
             if tool_uses or not empty:
                 empty_turn_retries = 0
@@ -1311,6 +1343,7 @@ class Runner:
                         "messages": messages,
                         "transcript_path": str(transcript_path),
                         "transcript": transcript,
+                        "telemetry": self._finalize_task_memory(),
                     }
                 proposal = self._capture_edit_proposal(response)
                 if proposal:
@@ -1471,6 +1504,7 @@ class Runner:
                     "messages": messages,
                     "transcript_path": str(transcript_path) if transcript_path is not None else "",
                     "transcript": transcript,
+                    "telemetry": self._finalize_task_memory(),
                 }
 
             tool_results: list[dict[str, Any]] = []
@@ -1505,12 +1539,18 @@ class Runner:
                         "messages": messages,
                         "transcript_path": "",
                         "transcript": transcript,
+                        "telemetry": self._finalize_task_memory(),
                     }
 
                 result = self._execute_tool_with_policy(
                     tool_name, tool_input, tool_use_id, len(messages)
                 )
                 tool_calls_used += 1
+                if tool_name in {"Write", "Patch"} and not result.get("is_error"):
+                    targets = sorted(self._intended_targets)
+                    if any(not _is_generated_or_runtime_artifact(target) for target in targets):
+                        meaningful_repo_edit_made = True
+                        prose_edit_intent_recovery_attempts = 0
                 if self.small_model:
                     result = self._truncate_tool_result(tool_name, result)
                     if tool_name == "Read" and not result.get("is_error"):
@@ -1782,6 +1822,18 @@ class Runner:
             self._mission_id = self._mission_state.mission_id
             self._mission_dir = get_mission_dir(self.repo, self._mission_id)
             self._event_recorder = RuntimeEventRecorder(self._mission_dir)
+            if self.memory_enabled:
+                try:
+                    self._task_memory = TaskMemory(
+                        self.repo,
+                        self._mission_id,
+                        update_interval_tool_calls=self.memory_update_interval_tool_calls,
+                    )
+                    self._task_memory.initialize()
+                except Exception as exc:
+                    import logging
+                    logging.getLogger(__name__).warning("Task memory initialization failed: %s", exc)
+                    self._task_memory = None
             if self._debug_config.enabled:
                 self._debug_recorder = DebugRecorder(
                     config=self._debug_config,
@@ -1833,6 +1885,22 @@ class Runner:
         path = save_transcript(self.repo, transcript, redact=self.redact)
         self._update_mission_state(last_transcript_path=str(path))
         return path
+
+    def _finalize_task_memory(self) -> dict[str, Any]:
+        if self._task_memory is None:
+            return {
+                "memory_enabled": False,
+                "memory_run_dir": "",
+                "memory_records_written": 0,
+                "memory_tool_calls": 0,
+                "memory_search_calls": 0,
+                "memory_current_state_tokens": 0,
+                "file_reopen_count": 0,
+                "duplicate_command_count": 0,
+                "duplicate_failed_attempt_count": 0,
+            }
+        self._task_memory.regenerate_current_state()
+        return self._task_memory.telemetry()
 
     def _execute_tool_with_policy(
         self,
