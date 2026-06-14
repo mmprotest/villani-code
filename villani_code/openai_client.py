@@ -210,7 +210,7 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
 
 
 class OpenAIClient:
-    def __init__(self, base_url: str, api_key: str | None = None, timeout: float = 120.0):
+    def __init__(self, base_url: str, api_key: str | None = None, timeout: float = 300.0):
         self.base_url = normalize_openai_base_url(base_url)
         self.api_key = api_key
         self.timeout = timeout

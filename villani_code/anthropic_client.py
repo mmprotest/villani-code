@@ -8,7 +8,7 @@ from villani_code.streaming import parse_sse_events
 
 
 class AnthropicClient:
-    def __init__(self, base_url: str, timeout: float = 120.0):
+    def __init__(self, base_url: str, timeout: float = 300.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
