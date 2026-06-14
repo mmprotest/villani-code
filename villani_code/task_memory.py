@@ -46,7 +46,9 @@ class MemoryNoInput(BaseModel):
 class MemoryHypothesisInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hypothesis: str
-    status: str
+    status: str = Field(
+        description="Hypothesis status. Use one of: active, confirmed, rejected, superseded. Use confirmed for verified/proven hypotheses."
+    )
     evidence: str
 
 
@@ -309,9 +311,32 @@ class TaskMemory:
             elif name == "memory_inspected_files":
                 content = self._format_records(self._read_records("file_inspection.jsonl")[-data.limit:])
             elif name == "memory_record_hypothesis":
-                if data.status not in {"active", "confirmed", "rejected", "superseded"}:
+                status_aliases = {
+                    "verified": "confirmed",
+                    "proven": "confirmed",
+                    "true": "confirmed",
+                    "done": "confirmed",
+                    "failed": "rejected",
+                    "false": "rejected",
+                    "invalid": "rejected",
+                    "wrong": "rejected",
+                    "replaced": "superseded",
+                }
+                status = str(data.status or "").strip().lower()
+                status = status_aliases.get(status, status)
+
+                if status not in {"active", "confirmed", "rejected", "superseded"}:
                     raise ValueError("status must be active, confirmed, rejected, or superseded")
-                self._append("hypotheses.jsonl", {"ts": _now(), "hypothesis": data.hypothesis, "status": data.status, "evidence": data.evidence})
+
+                self._append(
+                    "hypotheses.jsonl",
+                    {
+                        "ts": _now(),
+                        "hypothesis": data.hypothesis,
+                        "status": status,
+                        "evidence": data.evidence,
+                    },
+                )
                 content = "Hypothesis recorded."
             else:
                 self._append("dead_ends.jsonl", {"ts": _now(), "attempt": data.attempt, "why_failed": data.why_failed, "avoid": data.avoid})

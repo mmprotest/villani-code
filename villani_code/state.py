@@ -1055,10 +1055,14 @@ class Runner:
                     "repo map, memory_get_current_state for the latest task state, memory_recent_commands before rerunning "
                     "commands, memory_recent_failures before debugging test/build failures, memory_changed_files before "
                     "editing or verifying changed files, memory_inspected_files before reopening files, and memory_search "
-                    "when looking for prior observations, paths, errors, or decisions. When an approach fails, record it "
-                    "with memory_record_dead_end. When you form a useful debugging theory, record it with "
-                    "memory_record_hypothesis. Do not call memory tools blindly every turn. Use them to avoid repeated "
-                    "discovery and repeated failed work."
+                    "when looking for prior observations, paths, errors, or decisions. "
+                    "For memory_record_hypothesis, status must be one of: active, confirmed, rejected, superseded. "
+                    "Use confirmed when a hypothesis is verified or proven true. "
+                    "Use rejected when a hypothesis is disproven. "
+                    "Use superseded when a newer hypothesis replaces it. "
+                    "When an approach fails, record it with memory_record_dead_end. "
+                    "When you form a useful debugging theory, record it with memory_record_hypothesis. "
+                    "Do not call memory tools blindly every turn. Use them to avoid repeated discovery and repeated failed work."
                 ),
             })
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
