@@ -1048,9 +1048,17 @@ class Runner:
             system.append({
                 "type": "text",
                 "text": (
-                    "You have access to task-scoped memory tools. Use them before repeating repo discovery, "
-                    "reopening files, rerunning broad searches, rerunning failed commands, or retrying failed "
-                    "approaches. Record hypotheses and dead ends when doing so would prevent repeated failed work."
+                    "You have access to task-scoped memory tools. Use memory tools as part of your normal workflow. "
+                    "At the start of the task, call either memory_get_current_state or memory_get_repo_summary before "
+                    "doing broad repo exploration. Before repeating file reads, broad searches, commands, failed patches, "
+                    "or debugging attempts, call the relevant memory tool first. Use memory_get_repo_summary for the initial "
+                    "repo map, memory_get_current_state for the latest task state, memory_recent_commands before rerunning "
+                    "commands, memory_recent_failures before debugging test/build failures, memory_changed_files before "
+                    "editing or verifying changed files, memory_inspected_files before reopening files, and memory_search "
+                    "when looking for prior observations, paths, errors, or decisions. When an approach fails, record it "
+                    "with memory_record_dead_end. When you form a useful debugging theory, record it with "
+                    "memory_record_hypothesis. Do not call memory tools blindly every turn. Use them to avoid repeated "
+                    "discovery and repeated failed work."
                 ),
             })
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
