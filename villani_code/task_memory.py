@@ -74,15 +74,36 @@ MEMORY_TOOL_MODELS: dict[str, type[BaseModel]] = {
 
 def memory_tool_specs() -> list[dict[str, Any]]:
     descriptions = {
-        "memory_search": "Search task-scoped run memory by case-insensitive keywords.",
-        "memory_get_repo_summary": "Get the compact task-scoped repository summary.",
-        "memory_get_current_state": "Get the compact rolling task state.",
-        "memory_recent_commands": "Get recent commands and their results.",
-        "memory_recent_failures": "Get recent failed validation/build/test/check signals.",
-        "memory_changed_files": "Get recent file change records.",
-        "memory_inspected_files": "Get recent inspected-file records.",
-        "memory_record_hypothesis": "Record an interpretive hypothesis and evidence in task memory.",
-        "memory_record_dead_end": "Record a failed approach that should not be repeated.",
+    "memory_search": (
+        "Search task-scoped run memory for prior observations, paths, errors, commands, decisions, "
+        "hypotheses, file inspections, changes, and failed approaches. Use before repeating discovery work."
+    ),
+    "memory_get_repo_summary": (
+        "Get the static task-scoped repository summary. This is mainly for initial repo structure, not current debugging state."
+    ),
+    "memory_get_current_state": (
+        "Get the compact rolling task state, including repo summary, inspected files, commands run, changes made, "
+        "current failures, active hypotheses, dead ends, and next best action. Use this at the start of the task."
+    ),
+    "memory_recent_commands": (
+        "Get recent commands and results. Use before rerunning commands or checking what has already been tried."
+    ),
+    "memory_recent_failures": (
+        "Get recent failed commands and failed validation/build/test/check signals. Use immediately after a failed command "
+        "before choosing the next debugging step."
+    ),
+    "memory_changed_files": (
+        "Get recent file change records. Use before editing, verifying, or reasoning about files that may have already changed."
+    ),
+    "memory_inspected_files": (
+        "Get recent inspected-file records. Use before reopening files or repeating broad searches."
+    ),
+    "memory_record_hypothesis": (
+        "Record a debugging hypothesis and evidence. Status must be active, confirmed, rejected, or superseded."
+    ),
+    "memory_record_dead_end": (
+        "Record a failed approach, failed patch, repeated failure, or command path that should not be repeated."
+    ),
     }
     return [
         {"name": name, "description": descriptions[name], "input_schema": model.model_json_schema()}
@@ -304,7 +325,20 @@ class TaskMemory:
             elif name == "memory_recent_commands":
                 content = self._format_records(self._read_records("command_history.jsonl")[-data.limit:])
             elif name == "memory_recent_failures":
-                failed = [row for row in self._read_records("test_signals.jsonl") if not row.get("passed")]
+                failed_signals = [
+                    {"source": "test_signals", **row}
+                    for row in self._read_records("test_signals.jsonl")
+                    if not row.get("passed")
+                ]
+                failed_commands = [
+                    {"source": "command_history", **row}
+                    for row in self._read_records("command_history.jsonl")
+                    if row.get("exit_code") not in (0, None)
+                ]
+                failed = sorted(
+                    failed_signals + failed_commands,
+                    key=lambda row: str(row.get("ts", "")),
+                )
                 content = self._format_records(failed[-data.limit:])
             elif name == "memory_changed_files":
                 content = self._format_records(self._read_records("code_changes.jsonl")[-data.limit:])
