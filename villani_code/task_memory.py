@@ -60,13 +60,8 @@ class MemoryDeadEndInput(BaseModel):
 
 
 MEMORY_TOOL_MODELS: dict[str, type[BaseModel]] = {
-    "memory_search": MemorySearchInput,
-    "memory_get_repo_summary": MemoryNoInput,
     "memory_get_current_state": MemoryNoInput,
-    "memory_recent_commands": MemoryLimitInput,
-    "memory_recent_failures": MemoryLimitInput,
-    "memory_changed_files": MemoryLimitInput,
-    "memory_inspected_files": MemoryLimitInput,
+    "memory_search": MemorySearchInput,
     "memory_record_hypothesis": MemoryHypothesisInput,
     "memory_record_dead_end": MemoryDeadEndInput,
 }
@@ -74,39 +69,30 @@ MEMORY_TOOL_MODELS: dict[str, type[BaseModel]] = {
 
 def memory_tool_specs() -> list[dict[str, Any]]:
     descriptions = {
-    "memory_search": (
-        "Search task-scoped run memory for prior observations, paths, errors, commands, decisions, "
-        "hypotheses, file inspections, changes, and failed approaches. Use before repeating discovery work."
-    ),
-    "memory_get_repo_summary": (
-        "Get the static task-scoped repository summary. This is mainly for initial repo structure, not current debugging state."
-    ),
-    "memory_get_current_state": (
-        "Get the compact rolling task state, including repo summary, inspected files, commands run, changes made, "
-        "current failures, active hypotheses, dead ends, and next best action. Use this at the start of the task."
-    ),
-    "memory_recent_commands": (
-        "Get recent commands and results. Use before rerunning commands or checking what has already been tried."
-    ),
-    "memory_recent_failures": (
-        "Get recent failed commands and failed validation/build/test/check signals. Use immediately after a failed command "
-        "before choosing the next debugging step."
-    ),
-    "memory_changed_files": (
-        "Get recent file change records. Use before editing, verifying, or reasoning about files that may have already changed."
-    ),
-    "memory_inspected_files": (
-        "Get recent inspected-file records. Use before reopening files or repeating broad searches."
-    ),
-    "memory_record_hypothesis": (
-        "Record a debugging hypothesis and evidence. Status must be active, confirmed, rejected, or superseded."
-    ),
-    "memory_record_dead_end": (
-        "Record a failed approach, failed patch, repeated failure, or command path that should not be repeated."
-    ),
+        "memory_get_current_state": (
+            "Get the compact task-scoped state for this run: repo summary, inspected files, commands run, "
+            "changes made, current failures, active hypotheses, dead ends, and next best action. Use only "
+            "when this information is likely to change your next action."
+        ),
+        "memory_search": (
+            "Search task-scoped memory for prior commands, failures, file inspections, changed files, "
+            "hypotheses, dead ends, paths, errors, or decisions. Use only when looking up prior state would "
+            "avoid repeated work."
+        ),
+        "memory_record_hypothesis": (
+            "Record a useful debugging hypothesis and evidence. Status must be active, confirmed, rejected, "
+            "or superseded. Use confirmed for verified/proven hypotheses."
+        ),
+        "memory_record_dead_end": (
+            "Record a failed approach, failed patch, repeated failure, or command path that should not be repeated."
+        ),
     }
     return [
-        {"name": name, "description": descriptions[name], "input_schema": model.model_json_schema()}
+        {
+            "name": name,
+            "description": descriptions[name],
+            "input_schema": model.model_json_schema(),
+        }
         for name, model in MEMORY_TOOL_MODELS.items()
     ]
 
@@ -267,9 +253,40 @@ class TaskMemory:
             if tool_name == "Read" and tool_input.get("file_path"):
                 self.record_inspection(str(tool_input["file_path"]))
             elif tool_name == "Bash":
-                self._record_shell_inspections(
-                    str(tool_input.get("command", "")), str(tool_input.get("cwd", "."))
+                command = str(tool_input.get("command", ""))
+                cwd = str(tool_input.get("cwd", "."))
+
+                stdout = ""
+                stderr = ""
+                exit_code: int | None = None
+
+                try:
+                    decoded = json.loads(str(result.get("content", "")))
+                    if isinstance(decoded, dict):
+                        stdout = str(decoded.get("stdout", ""))
+                        stderr = str(decoded.get("stderr", ""))
+                        raw_exit_code = decoded.get("exit_code")
+                        if isinstance(raw_exit_code, int):
+                            exit_code = raw_exit_code
+                        command = str(decoded.get("command", command))
+                except Exception:
+                    # Keep a useful failure record even if the Bash result is not JSON.
+                    stdout = str(result.get("content", ""))
+
+                if result.get("is_error") and exit_code is None:
+                    exit_code = 1
+                    stderr = stderr or str(result.get("content", ""))
+
+                self.record_command(
+                    command=command,
+                    cwd=cwd,
+                    exit_code=exit_code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    duration_ms=None,
                 )
+
+                self._record_shell_inspections(command, cwd)
             elif tool_name in {"Grep", "Search"}:
                 content = str(result.get("content", ""))
                 seen: set[str] = set()
@@ -389,6 +406,8 @@ class TaskMemory:
 
     @staticmethod
     def _format_records(records: list[dict[str, Any]]) -> str:
+        if not records:
+            return "No matching memory records."
         return "\n".join(json.dumps(row, ensure_ascii=False, default=str) for row in records)
 
     def search(self, query: str, limit: int = 10) -> str:
@@ -415,7 +434,20 @@ class TaskMemory:
             inspected = self._read_records("file_inspection.jsonl")[-8:]
             commands = self._read_records("command_history.jsonl")[-6:]
             changes = self._read_records("code_changes.jsonl")[-8:]
-            failures = [row for row in self._read_records("test_signals.jsonl") if not row.get("passed")][-5:]
+            failed_signals = [
+                {"source": "test_signals", **row}
+                for row in self._read_records("test_signals.jsonl")
+                if not row.get("passed")
+            ]
+            failed_commands = [
+                {"source": "command_history", **row}
+                for row in self._read_records("command_history.jsonl")
+                if row.get("exit_code") not in (0, None)
+            ]
+            failures = sorted(
+                failed_signals + failed_commands,
+                key=lambda row: str(row.get("ts", "")),
+            )[-5:]
             hypotheses = [row for row in self._read_records("hypotheses.jsonl") if row.get("status") == "active"][-5:]
             dead_ends = self._read_records("dead_ends.jsonl")[-5:]
             bullet = lambda rows, field, fallback="None": [f"* {_safe_text(row.get(field, ''), 300)}" for row in rows] or [f"* {fallback}"]

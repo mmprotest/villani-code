@@ -1047,24 +1047,13 @@ class Runner:
         if self._task_memory is not None:
             system.append({
                 "type": "text",
-            "text": (
-                "You have access to task-scoped memory tools. Use them as part of your normal workflow. "
-                "At the start of the task, your first memory call should be memory_get_current_state. "
-                "Use memory_get_repo_summary only when you specifically need the static repo map. "
-                "After any failed command, failed build, failed test, failed verification, or repeated error, call "
-                "memory_recent_failures before choosing the next fix. Before rerunning a command, call "
-                "memory_recent_commands. Before reopening files, call memory_inspected_files. Before editing or "
-                "verifying changed files, call memory_changed_files. Use memory_search when looking for prior "
-                "observations, paths, errors, commands, or decisions. "
-                "When an approach fails or a change does not fix the failure, record it with memory_record_dead_end "
-                "before trying a different approach. When you form a useful debugging theory, record it with "
-                "memory_record_hypothesis. "
-                "For memory_record_hypothesis, status must be one of: active, confirmed, rejected, superseded. "
-                "Use confirmed when a hypothesis is verified or proven true. Use rejected when a hypothesis is disproven. "
-                "Use superseded when a newer hypothesis replaces it. "
-                "The purpose of memory is to avoid repeated discovery, repeated commands, repeated file reads, and repeated "
-                "failed fixes."
-            ),
+                "text": (
+                    "You have access to task-scoped memory tools. Use memory only when it is likely to reduce repeated work. "
+                    "Use memory_get_current_state to check the current task state. Use memory_search to find prior commands, "
+                    "failures, inspected files, changes, hypotheses, or dead ends. Record useful hypotheses with "
+                    "memory_record_hypothesis and failed approaches with memory_record_dead_end. Do not call memory tools "
+                    "unless the result is likely to change your next action."
+                ),
             })
         if self.small_model or self.villani_mode or self.benchmark_config.enabled:
             preferred_text = ", ".join(self._task_contract["preferred_targets"][:2]) or "none yet"
@@ -1694,57 +1683,16 @@ class Runner:
                 )
                 self._pending_verification = ""
 
-            if self._task_memory is not None and next_user_content:
-                failed_bash_commands: list[str] = []
-                failed_tool_names: list[str] = []
+            next_user_content = copy.deepcopy(tool_results)
 
-                for block, result in zip(tool_uses, tool_results):
-                    tool_name = str(block.get("name", ""))
-                    if tool_name.startswith("memory_"):
-                        continue
-
-                    if result.get("is_error"):
-                        failed_tool_names.append(tool_name)
-                        continue
-
-                    if tool_name == "Bash":
-                        try:
-                            decoded = json.loads(str(result.get("content", "")))
-                        except Exception:
-                            decoded = {}
-                        exit_code = decoded.get("exit_code") if isinstance(decoded, dict) else None
-                        if isinstance(exit_code, int) and exit_code != 0:
-                            command = str(decoded.get("command", "") or block.get("input", {}).get("command", ""))
-                            failed_bash_commands.append(command)
-
-                memory_called_this_turn = any(
-                    str(block.get("name", "")).startswith("memory_")
-                    for block in tool_uses
+            if self._pending_verification and next_user_content:
+                existing = str(next_user_content[-1].get("content", ""))
+                next_user_content[-1]["content"] = (
+                    f"{existing}\n\n{self._pending_verification}"
+                    if existing
+                    else self._pending_verification
                 )
-
-                if (failed_bash_commands or failed_tool_names) and not memory_called_this_turn:
-                    failed_summary_parts: list[str] = []
-                    if failed_bash_commands:
-                        failed_summary_parts.append(
-                            "Failed command(s): "
-                            + "; ".join(cmd[:240] for cmd in failed_bash_commands[:3])
-                        )
-                    if failed_tool_names:
-                        failed_summary_parts.append(
-                            "Failed tool(s): "
-                            + ", ".join(failed_tool_names[:5])
-                        )
-
-                    reminder = (
-                        "\n\nMemory reminder: the previous tool step failed. "
-                        + " ".join(failed_summary_parts)
-                        + " Before choosing the next fix, call memory_recent_failures or memory_recent_commands. "
-                        "If this approach should not be repeated, record it with memory_record_dead_end. "
-                        "Do not continue by repeating the same command or patch without checking memory first."
-                    )
-
-                    existing = str(next_user_content[-1].get("content", ""))
-                    next_user_content[-1]["content"] = existing + reminder
+                self._pending_verification = ""
 
             messages.append({"role": "user", "content": next_user_content})
 
