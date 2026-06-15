@@ -1251,6 +1251,7 @@ def save_session_snapshot(runner: Any, messages: list[dict[str, Any]]) -> None:
 
 
 def render_stream_event(runner: Any, event: dict[str, Any]) -> None:
+    print(event)
     if event.get("type") == "message_stop":
         tail = runner._coalescer.flush()
         if tail:
