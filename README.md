@@ -1,185 +1,136 @@
 # Villani Code
 
-**The runtime that forces small local models to do real repo work.**
+**Plug in Villani Code, get a 46% performance improvement over Claude Code when using the same small model.**
 
-Most coding agents look impressive right up until you take away the easy mode.
+Villani Code is a local-first coding-agent runtime designed to make smaller open models do real repository work: navigate files, run commands, make patches, survive verification, and keep working through messy terminal environments.
 
-Give them a smaller local model, a bounded repo task, a hard verifier, and no frontier-model safety blanket, and the whole thing starts to wobble.
+The latest upgraded Villani Code runtime was tested against Claude Code using the same model: **Qwen3.5 9B**.
 
-**Villani Code is built for that environment.**
+Same model. Same tasks. Different agent runtime.
 
-It is a terminal-first coding agent runtime designed to get useful, verifiable work out of constrained local backends, not just produce a polished transcript and a hopeful diff.
+Villani Code won.
 
-On the benchmark runs in this repo, **Villani Code achieved the highest solve rate at every reported Qwen3.5 size: 4B, 9B, and 27B.** The strongest result is not just that it solves more. At **27B**, it also does it in substantially less total time than the baseline runner.
+![Claude Code vs Villani Code](docs/assets/01_claude_vs_villani_performance.png)
 
-![All tasks combined: success rate vs total runtime](03_qwen35_combined_frontier_success_vs_total_runtime_reversed_x.png)
+## Headline result
 
-## The pitch
-
-This is the uncomfortable gap in the coding-agent market:
-
-Everyone wants the economics, privacy, and deployability of small local models.
-
-Almost nobody has a runtime that makes those models perform like serious tools.
-
-That is what Villani Code is trying to fix.
-
-The bet is simple:
-
-**Small models do not need more hype. They need a better runtime.**
-
-A loose runtime wastes tokens, drifts across the repo, edits the wrong files, and dies in verification.
-
-A tighter runtime can make the same class of model materially more useful.
-
-That is the whole game.
-
-## What the current benchmark says
-
-Across the combined task set used in the current runs, Villani Code outperformed Claude Code at every tested Qwen3.5 size.
-
-| Model | Villani | Claude Code |
+| Runner | Score | Success rate |
 |---|---:|---:|
-| Qwen3.5 4B | **33/40 (82.5%)** | 28/40 (70.0%) |
-| Qwen3.5 9B | **34/40 (85.0%)** | 30/40 (75.0%) |
-| Qwen3.5 27B | **37/40 (92.5%)** | 28/40 (70.0%) |
+| **Villani Code + Qwen3.5 9B** | **38/60** | **63.3%** |
+| Claude Code + Qwen3.5 9B | 26/60 | 43.3% |
 
-![All tasks combined: success rate by runner](01_qwen35_combined_success_rate.png)
+**Villani Code delivered a 46% relative performance improvement over Claude Code.**
 
-That is the headline.
+This comparison covers **12 overlapping Terminal-Bench tasks**, with **5 runs per task**, for **60 runs per agent**.
 
-The more important point is what sits underneath it:
-
-- **4B:** Villani solves more tasks, but usually takes longer to get there.
-- **9B:** Villani still solves more, with a meaningful gap in useful work done.
-- **27B:** Villani is better on both axes. Higher solve rate, lower total runtime.
-
-That last result matters because it kills the easy dismissal.
-
-This is not just “slower but a bit more thorough.”
-
-At 27B, the runtime is shifting the frontier.
+Villani Code won **6 tasks**, tied **6 tasks**, and lost **0**.
 
 ## Why this matters
 
-Most agent benchmarks quietly reward the easiest operating conditions:
+Claude Code is backed by one of the strongest AI companies in the world. It usually gets to lean on frontier Claude models to do a lot of the heavy lifting.
 
-- strong hosted models
-- huge context windows
-- vague task definitions
-- weak verification pressure
-- workflows that hide failure behind long transcripts
+This comparison removes that advantage.
 
-That is not where the interesting product opportunity is.
+Both systems ran on **Qwen3.5 9B**.
 
-The interesting opportunity is in making **smaller, cheaper, private models** do work that people would otherwise assume requires a much stronger backend.
+That makes the agent runtime visible.
 
-If you can reliably pull useful repo work out of 4B to 30B-class local models, you get three things at once:
+The result: Villani Code performs better with the same small model.
 
-- lower inference cost
-- better privacy posture
-- a much wider deployment surface
+The runner matters. Tool handling matters. Failure recovery matters. State management matters. The execution loop matters. The boring engineering around the model matters.
 
-That is a serious wedge.
+## Cost and efficiency
 
-## Where Villani is strongest
+Villani Code did not get the higher score by spending more tokens.
 
-The current runs show that the gains are not randomly distributed.
+![Cost per run](docs/assets/02_cost_per_run.png)
 
-Villani is especially strong on **bounded repo work** such as bug fixing, file localization, and terminal-centric tasks where the runtime can keep the model disciplined.
+| Metric | Villani Code | Claude Code |
+|---|---:|---:|
+| Score | **38/60** | 26/60 |
+| Mean tokens / run | **1.65M** | 10.43M |
+| Mean time / run | **3.8 min** | 5.6 min |
+| Mean turns / run | **61.7** | 112.5 |
+| Mean tool calls / run | **60.4** | 84.5 |
+| Avg API-equivalent cost / run | **$0.16** | $1.04 |
+| Cost / successful run | **$0.25** | $2.41 |
 
-![Solved tasks by task type](01_solved_tasks_by_type_fixed.png)
+API-equivalent cost uses Qwen3.5 9B list pricing of **$0.10/M input tokens** and **$0.15/M output tokens**, with cached tokens counted as input tokens.
 
-That split matters.
+![Per-run comparison](docs/assets/03_per_run_comparison.png)
 
-Anyone can get a model to look clever in an open-ended coding conversation.
+## Task-level comparison
 
-The harder problem is getting it to:
+| Task | Villani Code | Claude Code | Delta |
+|---|---:|---:|---:|
+| `build-pmars` | 4/5 | 1/5 | +3 |
+| `fix-git` | 5/5 | 2/5 | +3 |
+| `git-multibranch` | 3/5 | 1/5 | +2 |
+| `kv-store-grpc` | 5/5 | 5/5 | +0 |
+| `mcmc-sampling-stan` | 3/5 | 3/5 | +0 |
+| `nginx-request-logging` | 5/5 | 4/5 | +1 |
+| `openssl-selfsigned-cert` | 4/5 | 4/5 | +0 |
+| `pypi-server` | 2/5 | 2/5 | +0 |
+| `query-optimize` | 2/5 | 0/5 | +2 |
+| `fix-code-vulnerability` | 1/5 | 1/5 | +0 |
+| `largest-eigenval` | 2/5 | 1/5 | +1 |
+| `sanitize-git-repo` | 2/5 | 2/5 | +0 |
 
-- find the right area of the repo
-- make a useful patch
-- avoid unnecessary drift
-- survive verification
+| **Total** | **38/60** | **26/60** | **+12** |
 
-That is where smaller models usually fall apart.
+## Current Terminal-Bench lower-bound score
 
-That is exactly where runtime design starts to matter.
+Villani Code currently has a **99/445 lower-bound score** on the full Terminal-Bench 2.0 suite using Qwen3.5 9B.
 
-## What Villani Code actually is
+![Terminal-Bench lower bound](docs/assets/04_terminal_bench_lower_bound.png)
 
-Villani Code is a terminal-first coding agent runtime for:
+| Score definition | Score | Rate |
+|---|---:|---:|
+| Verifier-counted lower bound | **99/445** | **22.25%** |
+| Strict clean-only lower bound | 98/445 | 22.02% |
+
+The official Terminal-Bench submission is being prepared.
+
+## What Villani Code is
+
+Villani Code is a terminal-first coding agent for:
 
 - bounded bug fixes
 - repo navigation and localization
+- command-driven debugging
 - test-guided patching
-- constrained maintenance work
 - local inference setups
 - privacy-sensitive codebases
+- smaller open model backends
 
-It is not trying to be an all-purpose autonomous software engineer.
+It is built for the environment where most coding agents start to fall apart: smaller models, hard verification, constrained context, terminal noise, failed commands, and real repositories.
 
-It is trying to be something much more commercially useful:
+## What changed in the upgraded runtime
 
-**a system that turns underestimated local models into tools that can land real work.**
+The latest Villani Code upgrade includes:
 
-## What makes it different
+- new execution loop
+- better local model integration
+- cleaner tool handling
+- improved failure recovery
+- task-scoped memory system
+- better state tracking across long-running coding tasks
 
-### Built for constrained backends
-Villani is designed around the failure modes of smaller models, not around the fantasy that every user has a frontier API on tap.
+The benchmark comparison evaluates the upgraded runtime as a whole.
 
-### Terminal first
-It lives where coding work actually happens: files, diffs, commands, tests, verification, and repo state.
+## Thesis
 
-### Bounded and disciplined
-The runtime is built to reduce drift, limit pointless wandering, and keep the model oriented toward a solvable patch.
+**Small models do not just need better weights. They need a better runtime.**
 
-### Verification-oriented
-The target is not a nice conversation. The target is accepted work.
+Most coding-agent performance is attributed to the foundation model. This result shows the runtime can move the frontier too.
 
-### Local-first by design
-Villani fits environments where shipping private code to a hosted frontier provider is expensive, undesirable, or impossible.
+Same Qwen3.5 9B model.
 
-## The thesis
+Claude Code: 26/60.
 
-**Model capability is not the whole story. Runtime quality moves the frontier too.**
+Villani Code: 38/60.
 
-That is the thesis behind Villani Code.
-
-And the benchmark signal in this repo points in the same direction:
-
-- same model family
-- same size classes
-- different runner
-- materially different outcomes
-
-That is not a branding trick.
-
-That is the product.
-
-## Where it should win
-
-Villani Code is a strong fit when:
-
-- code must stay local or private
-- model cost matters
-- tasks are bounded and verifier-friendly
-- you want more useful work from smaller backends
-- you care about limiting what the agent touches
-
-## Where it is not trying to win
-
-Villani Code is not trying to be:
-
-- a generic chat shell with tools stapled on
-- a frontier-model replacement for every problem
-- a flashy demo optimized for open-ended conversations
-- a claim that runtime matters more than model forever
-
-That is not the point.
-
-The point is narrower, and more valuable:
-
-**with the right runtime, smaller local models become much harder to dismiss.**
+That is the product thesis.
 
 ## Quickstart
 
@@ -217,4 +168,12 @@ Autonomous pass:
 
 ```bash
 villani-code --villani-mode --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
+```
+
+## Report
+
+The full benchmark report is available here:
+
+```text
+Villani_Code_Terminal_Bench_12_Task_Report.pdf
 ```
