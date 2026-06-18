@@ -14,6 +14,7 @@ RUNTIME_ARTIFACT_PATTERNS = [
     "**/*.egg-info/**",
     "build/**",
     "dist/**",
+    "target/**",
     ".pytest_cache/**",
     "**/.mypy_cache/**",
     "**/.ruff_cache/**",

@@ -1,0 +1,1 @@
+The project fails to compile because a module cannot be found. Fix the module structure so the project builds and all tests pass.

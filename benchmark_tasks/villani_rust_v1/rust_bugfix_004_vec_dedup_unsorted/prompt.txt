@@ -1,0 +1,1 @@
+The deduplication function leaves duplicate entries in the output when the same value appears non-consecutively. Fix it so all duplicates are removed while preserving the original order of first occurrences, then verify the behavior.

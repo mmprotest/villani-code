@@ -1,0 +1,12 @@
+[package]
+name = "greeter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "greeter"
+path = "src/lib.rs"
+
+[[test]]
+name = "test_integration"
+path = "test/test_integration.rs"

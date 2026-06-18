@@ -1,0 +1,18 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": ["src/lib.rs", "src/errors.rs"],
+  "reference_patch_size_lines": 6,
+  "primary_skill": "rust-debugging",
+  "secondary_skills": ["cargo-test", "rust-error-handling", "rust-traits"],
+  "name": "rust_bugfix_014_error_chain_swallowed",
+  "difficulty": "hard",
+  "runtime_stressors": ["fault_localization", "test_interpretation", "multi_file_patch"],
+  "task_type": "multi_file_bugfix",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": true,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": ["read_files", "edit_files", "run_tests"],
+  "evaluation_focus": ["correctness", "deterministic_tests", "error_chain_preservation"],
+  "benchmark_bucket": "baseline"
+}

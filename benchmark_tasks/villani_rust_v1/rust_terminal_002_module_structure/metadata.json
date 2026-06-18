@@ -1,0 +1,18 @@
+{
+  "seed_type": "bug-seeded",
+  "expected_files": ["src/lib.rs"],
+  "reference_patch_size_lines": 4,
+  "primary_skill": "rust-module-system",
+  "secondary_skills": ["cargo-build", "rust-project-structure"],
+  "name": "rust_terminal_002_module_structure",
+  "difficulty": "medium",
+  "runtime_stressors": ["compile_error_diagnosis", "file_navigation"],
+  "task_type": "terminal",
+  "requires_repo_navigation": true,
+  "requires_multi_step_reasoning": false,
+  "has_false_fix_trap": false,
+  "requires_retry_recovery": false,
+  "likely_tool_sequence": ["read_files", "list_directory", "edit_files", "run_tests"],
+  "evaluation_focus": ["correctness", "compile_success"],
+  "benchmark_bucket": "baseline"
+}

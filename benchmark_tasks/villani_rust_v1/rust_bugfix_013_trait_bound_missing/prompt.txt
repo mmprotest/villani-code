@@ -1,0 +1,1 @@
+The generic print_items function fails to compile when called with any type. Fix the function signature so it works correctly with any displayable type and the tests pass.
