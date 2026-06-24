@@ -47,7 +47,7 @@ The runner matters. Tool handling matters. Failure recovery matters. State manag
 
 A smaller local model should not be dismissed as weak just because it is small. In the right runtime, it can perform in the same band as much larger flagship coding-agent stacks.
 
-## Previous same-model runtime comparison
+## Qwen3.5 9B same-model runtime comparison
 
 Villani Code was also tested against Claude Code using the same model: **Qwen3.5 9B**.
 
