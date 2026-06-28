@@ -1,8 +1,9 @@
 import http from 'node:http';
-import { complete } from '@earendil-works/pi-ai/compat';
+import * as PiAI from '@earendil-works/pi-ai';
+const complete = (PiAI as any).complete;
 import type { OpenAIMessage } from './protocol.js';
 
-export interface PiModelProxyOptions { model:any; apiKey?:string; headers?:Record<string,string>; signal?:AbortSignal; timeoutMs?:number; completeFn?:typeof complete; }
+export interface PiModelProxyOptions { model:any; apiKey?:string; headers?:Record<string,string>; signal?:AbortSignal; timeoutMs?:number; completeFn?:any; }
 export function zeroUsage(){return {prompt_tokens:0,completion_tokens:0,total_tokens:0};}
 export function sanitizeError(e:unknown){return String((e as Error)?.message||e).replace(/Bearer\s+\S+/ig,'Bearer [redacted]').replace(/sk-[A-Za-z0-9_-]+/g,'[redacted]').replace(/(OPENAI_API_KEY|ANTHROPIC_API_KEY|VILLANI_API_KEY)=[^\s]+/ig,'$1=[redacted]').replace(/(authorization|api[-_]?key|x-api-key)["':= ]+[^,}\s]+/ig,'$1=[redacted]');}
 function debug(message:string){if(process.env.VILLANI_PI_DEBUG==='1') console.error(`[pi-villani proxy] ${message}`);}
