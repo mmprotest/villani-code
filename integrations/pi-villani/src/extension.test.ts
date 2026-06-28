@@ -1,0 +1,2 @@
+import test from 'node:test'; import assert from 'node:assert/strict'; import activate from './index.js';
+test('registers actual Pi command API descriptors',()=>{const names:string[]=[]; const api:any={registerCommand:(name:string,opts:any)=>{names.push(name); assert.equal(typeof opts.handler,'function');}}; activate(api); assert.deepEqual(names,['villani','villani-abort','villani-confirm-test']);});

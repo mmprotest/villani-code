@@ -35,14 +35,30 @@ jobs:
           if [[ "${{ matrix.ext }}" == "zip" ]]; then 7z a ../$name villani-code; else tar -czf ../$name villani-code; fi
           cd ..
           shasum -a 256 "$name" > "${name}.sha256"
+          mkdir -p smoke-asset
+          python - "$name" smoke-asset <<'PY'
+          import sys, tarfile, zipfile
+          from pathlib import Path
+          archive, dest = Path(sys.argv[1]), Path(sys.argv[2])
+          if archive.suffix == '.zip':
+              with zipfile.ZipFile(archive) as zf:
+                  zf.extractall(dest)
+          else:
+              with tarfile.open(archive, 'r:gz') as tf:
+                  tf.extractall(dest)
+          PY
+          python packaging/smoke_test_runtime.py smoke-asset/villani-code/villani-code${{ runner.os == 'Windows' && '.exe' || '' }}
       - uses: actions/upload-artifact@v4
-        with: {name: runtime-${{ matrix.key }}, path: "villani-runtime-v0.1.0-${{ matrix.key }}.${{ matrix.ext }}*"}
+        with:
+          name: runtime-${{ matrix.key }}
+          path: "villani-runtime-v0.1.0-${{ matrix.key }}.${{ matrix.ext }}*"
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: {path: artifacts}
+        with:
+          path: artifacts
       - run: find artifacts -name '*.sha256' -exec cat {} \; > checksums.txt
       - uses: softprops/action-gh-release@v2
         with:

@@ -1,0 +1,2 @@
+import test from 'node:test'; import assert from 'node:assert/strict'; import { sanitizedEnv } from './process.js';
+test('sanitizes secrets only in proxy mode',()=>{const e=sanitizedEnv({proxyMode:true,env:{OPENAI_API_KEY:'x',CUSTOM_TOKEN:'y',PATH:'p'}}); assert.equal(e.OPENAI_API_KEY,undefined); assert.equal(e.CUSTOM_TOKEN,undefined); assert.equal(e.PATH,'p'); assert.equal(sanitizedEnv({proxyMode:false,env:{OPENAI_API_KEY:'x'}}).OPENAI_API_KEY,'x');});

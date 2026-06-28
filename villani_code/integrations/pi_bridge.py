@@ -86,7 +86,7 @@ class PendingApproval:
     run_id:str; request_id:str; tool:str; ready:threading.Event=field(default_factory=threading.Event); approved:bool|None=None
 @dataclass(slots=True)
 class ActiveRun:
-    command:RunCommand; abort_requested:threading.Event=field(default_factory=threading.Event); thread:threading.Thread|None=None; pending_approvals:dict[str,PendingApproval]=field(default_factory=dict); touched_files:set[str]=field(default_factory=set)
+    command:RunCommand; abort_requested:threading.Event=field(default_factory=threading.Event); thread:threading.Thread|None=None; pending_approvals:dict[str,PendingApproval]=field(default_factory=dict); touched_files:set[str]=field(default_factory=set); approval_seq:int=0
 class PiBridge:
     def __init__(self,*,stdin:TextIO|None=None,stdout:TextIO|None=None,stderr:TextIO|None=None,runner_factory:Callable[...,Any]|None=None)->None:
         self.stdin=stdin or sys.stdin; self.stdout=stdout or sys.stdout; self.stderr=stderr or sys.stderr; self.runner_factory=runner_factory or build_default_runner; self.runs={}; self.lock=threading.Lock()
@@ -131,7 +131,7 @@ class PiBridge:
             for m in map_runner_event(cmd.id,e): self.emit(m)
         def appr(tool,inp):
             if ar.abort_requested.is_set(): return False
-            title,summary=summarize_approval_request(tool,inp); req=f'{cmd.id}:{len(ar.pending_approvals)+1}'
+            title,summary=summarize_approval_request(tool,inp); ar.approval_seq += 1; req=f'{cmd.id}:{ar.approval_seq}'
             p=PendingApproval(cmd.id,req,tool); ar.pending_approvals[req]=p; self.emit({'type':'approval_required','id':cmd.id,'request_id':req,'tool':tool,'title':title,'summary':summary})
             p.ready.wait(); self.emit({'type':'approval_resolved','id':cmd.id,'request_id':req,'approved':bool(p.approved)}); return bool(p.approved) and not ar.abort_requested.is_set()
         try:
@@ -144,6 +144,8 @@ class PiBridge:
             if ex.get('completed') is False: self.emit({'type':'run_failed','success':False,'error':str(reason or 'Runner stopped before completion.'),**base})
             else: self.emit({'type':'run_completed','success':True,**base})
         except Exception as exc:
+            if ar.abort_requested.is_set():
+                self.emit({'type':'run_aborted','id':cmd.id}); return
             print(traceback.format_exc(),file=self.stderr); self.emit({'type':'run_failed','id':cmd.id,'success':False,'error':str(exc),'summary':str(exc)})
         finally:
             for req,p in list(ar.pending_approvals.items()): ar.pending_approvals.pop(req,None); p.approved=False; p.ready.set()
