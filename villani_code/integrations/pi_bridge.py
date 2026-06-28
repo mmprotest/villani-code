@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json,io,os,queue,subprocess,sys,threading,traceback
+import hashlib,json,io,os,queue,subprocess,sys,threading,traceback,time
 from dataclasses import dataclass,field
 from pathlib import Path
 from typing import Any,Callable,TextIO
@@ -96,16 +96,24 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
         tool=str(event.get('name') or event.get('tool') or 'tool')
         result=event.get('result') if isinstance(event.get('result'),dict) else {}
         exit_code=event.get('exit_code', result.get('exit_code', result.get('returncode')))
-        is_error=bool(event.get('is_error') or (tool=='Bash' and exit_code is not None and exit_code != 0))
+        is_error=bool(event.get('is_error'))
         summary=summarize_tool_result(event)
-        out.append({'type':'tool_finished','id':run_id,'tool':tool,'ok':not is_error,'is_error':is_error,'summary':summary})
-        out.append({'type':'bridge_diagnostic','id':run_id,'message':'tool result mapped'})
+        base={'type':t,'id':run_id,'tool':tool,'ok':not is_error,'is_error':is_error,'summary':summary}
+        if exit_code is not None: base['exit_code']=exit_code
+        for key in ('stdout_preview','stderr_preview','truncated'):
+            if key in event: base[key]=event[key]
+            elif key in result: base[key]=result[key]
+        if 'stdout_preview' not in base and result.get('stdout') is not None: base['stdout_preview']=_preview(result.get('stdout'))
+        if 'stderr_preview' not in base and result.get('stderr') is not None: base['stderr_preview']=_preview(result.get('stderr'))
+        out.append(base)
+        out.append({'type':'bridge_diagnostic','id':run_id,'message':f'{t} mapped'})
         if tool in {'Write','Patch','Edit'}:
             path=_workspace_path(event); out.append({'type':'workspace_changed','id':run_id, **({'path':path} if path else {})})
     elif t=='command_started':
-        command=_cap(event.get('command',''),500); out.append({'type':'tool_progress','id':run_id,'tool':'Bash','message':f'Running command: {command}'})
+        command=_cap(event.get('command',''),500); out.append({'type':'command_started','id':run_id,'tool':'Bash','command':command, **({'cwd':str(event.get('cwd'))} if event.get('cwd') else {})})
     elif t=='command_finished':
-        exit_code=event.get('exit_code'); out.append({'type':'tool_finished','id':run_id,'tool':'Bash','ok':exit_code==0,'is_error':exit_code!=0,'summary':f'Command finished: exit {exit_code}'})
+        exit_code=event.get('exit_code');
+        out.append({'type':'command_finished','id':run_id,'tool':'Bash','command':_cap(event.get('command',''),500),'exit_code':exit_code,'stdout_preview':_preview(event.get('stdout_preview',event.get('stdout',''))),'stderr_preview':_preview(event.get('stderr_preview',event.get('stderr',''))),'truncated':bool(event.get('truncated'))})
     elif t=='validation_step_started': out.append({'type':'verification_started','id':run_id,'name':event.get('name')})
     elif t in {'validation_step_finished','validation_completed'}: out.append({'type':'verification_finished','id':run_id,'passed':event.get('passed')})
     elif t in {'command_wandering_detected','progress_governor_redirected','governor_redirect'}: out.append({'type':'governor_redirect','id':run_id,'reason':event.get('reason')})
@@ -137,7 +145,7 @@ class PendingApproval:
     run_id:str; request_id:str; tool:str; ready:threading.Event=field(default_factory=threading.Event); approved:bool|None=None
 @dataclass(slots=True)
 class ActiveRun:
-    command:RunCommand; abort_requested:threading.Event=field(default_factory=threading.Event); thread:threading.Thread|None=None; pending_approvals:dict[str,PendingApproval]=field(default_factory=dict); touched_files:set[str]=field(default_factory=set); approval_seq:int=0
+    command:RunCommand; abort_requested:threading.Event=field(default_factory=threading.Event); thread:threading.Thread|None=None; pending_approvals:dict[str,PendingApproval]=field(default_factory=dict); touched_files:set[str]=field(default_factory=set); approval_seq:int=0; last_runner_event_type:str='run_started'; last_runner_event_at:float=field(default_factory=time.monotonic); last_bridge_event_at:float=field(default_factory=time.monotonic); heartbeat_due_at:float=field(default_factory=lambda: time.monotonic()+15)
 class PiBridge:
     def __init__(self,*,stdin:TextIO|None=None,stdout:TextIO|None=None,stderr:TextIO|None=None,runner_factory:Callable[...,Any]|None=None)->None:
         self.stdin=stdin or sys.stdin; self.stdout=stdout or sys.stdout; self.stderr=stderr or sys.stderr; self.runner_factory=runner_factory or build_default_runner
@@ -146,6 +154,10 @@ class PiBridge:
     def emit(self,e):
         self.stdout.write(to_json_line(e)); self.stdout.flush()
     def _queue_event(self,e:dict[str,Any]|None):
+        if e is not None and e.get('id'):
+            with self._lock:
+                ar=self._active.get(str(e.get('id')))
+                if ar: ar.last_bridge_event_at=time.monotonic()
         if self._stdio_running: self._events.put(e)
         elif e is not None: self.emit(e)
     def _diagnostic(self,run_id:str|None,message:str,**extra:Any)->None:
@@ -154,6 +166,13 @@ class PiBridge:
         ev.update({k:v for k,v in extra.items() if k!='api_key'})
         self._queue_event(ev)
     def _drain_events(self)->None:
+        now=time.monotonic()
+        with self._lock:
+            active=list(self._active.items())
+        for run_id,ar in active:
+            if now-ar.last_runner_event_at>=15 and now>=ar.heartbeat_due_at:
+                ar.heartbeat_due_at=now+15
+                self._events.put({'type':'runner_heartbeat','id':run_id,'last_event_type':ar.last_runner_event_type,'seconds_since_last_event':int(now-ar.last_runner_event_at),'worker_alive':bool(ar.thread and ar.thread.is_alive())})
         while True:
             try: ev=self._events.get_nowait()
             except queue.Empty: return
@@ -241,6 +260,7 @@ class PiBridge:
         self._diagnostic(cmd.id,'run worker started')
         def ev(e):
             if e.get('type')=='approval_required': return
+            ar.last_runner_event_type=str(e.get('type') or 'unknown'); ar.last_runner_event_at=time.monotonic(); ar.heartbeat_due_at=ar.last_runner_event_at+15
             for m in map_runner_event(cmd.id,e): self._queue_event(m)
         def appr(tool,inp):
             if ar.abort_requested.is_set(): return False
