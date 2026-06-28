@@ -33,7 +33,8 @@ function toPiContext(messages:OpenAIMessage[]=[], tools:any[]|undefined){return 
 function toPiTools(tools:any[]|undefined){return tools?.map(t=>t?.function?{name:t.function.name,description:t.function.description,parameters:t.function.parameters}:t);}
 function fromOpenAIToolCall(c:any){return {id:c.id,name:c.name??c.function?.name,arguments:parseArgs(c.arguments??c.function?.arguments)};}
 function parseArgs(a:any){if(typeof a==='string'){try{return JSON.parse(a);}catch{return a;}} return a??{};}
-function toOpenAIToolCalls(blocks:any[]){return blocks.filter((block)=>block?.type==='toolCall').map((block,index)=>({id:block.id||`call_${index}`,type:'function',function:{name:block.name??block.function?.name,arguments:typeof (block.arguments??block.function?.arguments)==='string'?(block.arguments??block.function?.arguments):JSON.stringify(block.arguments??block.function?.arguments??{})}}));}
+function normalizeToolArguments(value:unknown):Record<string,unknown>{ if(value==null) return {}; if(typeof value==='string'){ const trimmed=value.trim(); if(!trimmed) return {}; try{ const parsed=JSON.parse(trimmed); if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)) return parsed as Record<string,unknown>; return {}; }catch{return {};} } if(typeof value==='object'&&!Array.isArray(value)) return value as Record<string,unknown>; return {}; }
+function toOpenAIToolCalls(blocks:any[]){return blocks.filter((block)=>block?.type==='toolCall').map((block,index)=>{const rawArguments=block.arguments??block.function?.arguments; return {id:block.id||`call_${index}`,type:'function',function:{name:String(block.name??block.function?.name??''),arguments:JSON.stringify(normalizeToolArguments(rawArguments))}};});}
 export function toOpenAIFinishReason(reason:AssistantMessage['stopReason']):string{if(reason==='toolUse')return 'tool_calls'; if(reason==='length')return 'length'; return 'stop';}
 export function toOpenAIUsage(usage:Usage):Record<string,number>{return {prompt_tokens:usage.input,completion_tokens:usage.output,total_tokens:usage.totalTokens||usage.input+usage.output};}
 export function piAssistantToOpenAIResponse(message:AssistantMessage):Record<string,unknown>{
@@ -74,4 +75,4 @@ export class PiModelProxy { private server?:http.Server; completionSource?:strin
 }
 export async function startModelProxyFromPiModel(options:PiModelProxyOptions){const p=new PiModelProxy(options); const url=await p.start(); return {url,close:()=>p.stop(),proxy:p,get completionSource(){return p.completionSource;}};}
 export const startModelProxy=startModelProxyFromPiModel;
-export const _test={toPiContext,openAIChatToPiContext,piAssistantToOpenAIResponse,writeOpenAIStream,sanitizeErrorMessage};
+export const _test={toPiContext,openAIChatToPiContext,piAssistantToOpenAIResponse,writeOpenAIStream,sanitizeErrorMessage,toOpenAIToolCalls,normalizeToolArguments};

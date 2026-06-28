@@ -78,9 +78,9 @@ def assemble_anthropic_stream(events: Iterable[dict[str, Any]]) -> dict[str, Any
                 raw = partial_json.pop(index)
                 try:
                     parsed = json.loads(raw)
-                    response["content"][index]["input"] = parsed
+                    response["content"][index]["input"] = parsed if isinstance(parsed, dict) else {}
                 except json.JSONDecodeError:
-                    response["content"][index]["input"] = raw
+                    response["content"][index]["input"] = {}
         elif etype == "message_delta":
             delta = event.get("delta", {})
             if isinstance(delta, dict):

@@ -58,15 +58,17 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
     t=event.get('type'); out=[]
     phase={'diagnosis_attempted','diagnosis_generated','planning_started','repair_attempt_started'}
     if t in phase: out.append({'type':'phase','id':run_id,'phase':t})
-    elif t=='model_request_started': out += [{'type':'phase','id':run_id,'phase':t},{'type':'bridge_diagnostic','id':run_id,'message':'model request started'}]
-    elif t in {'model_request_completed','model_request_failed'}: out.append({'type':'bridge_diagnostic','id':run_id,'message':t})
-    elif t=='tool_started': out += [{'type':'tool_started','id':run_id,'tool':event.get('name')},{'type':'bridge_diagnostic','id':run_id,'message':'tool started'}]
+    elif t=='model_request_started': out += [{'type':'phase','id':run_id,'phase':t},{'type':'model_request_started','id':run_id},{'type':'bridge_diagnostic','id':run_id,'message':'model request started'}]
+    elif t=='model_request_completed': out += [{'type':'model_request_completed','id':run_id},{'type':'bridge_diagnostic','id':run_id,'message':'model response received'}]
+    elif t=='model_request_failed': out.append({'type':'bridge_diagnostic','id':run_id,'message':t})
+    elif t=='tool_started': out += [{'type':'tool_started','id':run_id,'tool':event.get('name')},{'type':'bridge_diagnostic','id':run_id,'message':f"tool started: {event.get('name') or ''}".strip()}]
     elif t=='tool_finished':
         out.append({'type':'tool_finished','id':run_id,'tool':event.get('name'),'is_error':event.get('is_error')})
         if event.get('name') in {'Write','Patch','Edit'}: out.append({'type':'workspace_changed','id':run_id})
     elif t=='validation_step_started': out.append({'type':'verification_started','id':run_id,'name':event.get('name')})
     elif t in {'validation_step_finished','validation_completed'}: out.append({'type':'verification_finished','id':run_id,'passed':event.get('passed')})
     elif t in {'command_wandering_detected','progress_governor_redirected','governor_redirect'}: out.append({'type':'governor_redirect','id':run_id,'reason':event.get('reason')})
+    elif t=='stream_text' and os.environ.get('VILLANI_PI_DEBUG')=='1': out.append({'type':'stream_text','id':run_id,'text':_cap(event.get('text',''),240)})
     return out
 
 def extract_summary(r:dict[str,Any])->str|None:

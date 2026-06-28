@@ -101,3 +101,26 @@ def test_pi_proxy_single_chunk_stream_assembles_tool_calls():
     assert response["content"][1]["type"] == "tool_use"
     assert response["content"][1]["name"] == "Write"
     assert response["content"][1]["input"] == {"file_path": "a.txt"}
+
+
+def _assembled_tool_input(arguments: str):
+    chunk = {
+        "id": "pi-villani-1700000000000",
+        "object": "chat.completion.chunk",
+        "created": 1700000000,
+        "model": "pi-test",
+        "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "Read", "arguments": arguments}}]}, "finish_reason": "tool_calls"}],
+    }
+    return assemble_anthropic_stream(openai_stream_to_anthropic_events([f"data: {json.dumps(chunk)}", "data: [DONE]"], model="pi-test"))["content"][1]["input"]
+
+
+def test_openai_streaming_tool_call_object_arguments_produces_dict():
+    assert _assembled_tool_input('{"path":"x"}') == {"path": "x"}
+
+
+def test_openai_streaming_tool_call_json_string_arguments_produces_empty_dict():
+    assert _assembled_tool_input('"repo"') == {}
+
+
+def test_openai_streaming_tool_call_invalid_string_arguments_produces_empty_dict():
+    assert _assembled_tool_input('repo') == {}

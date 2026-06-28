@@ -86,6 +86,18 @@ def build_openai_payload(payload: dict[str, Any], stream: bool) -> dict[str, Any
     return out
 
 
+def _coerce_tool_input(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 def _map_openai_finish_reason_to_anthropic(finish_reason: str | None) -> str | None:
     mapping = {
         "stop": "end_turn",
@@ -181,10 +193,7 @@ def convert_openai_response_to_anthropic(response: dict[str, Any]) -> dict[str, 
     for tool_call in message.get("tool_calls", []) or []:
         function = tool_call.get("function", {})
         arguments = function.get("arguments", "{}")
-        try:
-            parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else dict(arguments)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            parsed_arguments = {}
+        parsed_arguments = _coerce_tool_input(arguments)
         content.append(
             {
                 "type": "tool_use",
