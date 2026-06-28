@@ -10,6 +10,9 @@ HIDDEN={'.villani','.villani_code','__pycache__'}
 def _visible(p:str)->bool:
     parts=p.replace('\\','/').split('/'); return not (any(x in HIDDEN for x in parts) or p.endswith('.pyc'))
 def _cap(v:Any,n:int=2000)->str: return str(v)[:n]
+def _preview(v:Any,n:int=500)->str:
+    text='' if v is None else str(v)
+    return text[:n]
 def summarize_approval_request(tool_name:str, tool_input:dict[str,Any])->tuple[str,dict[str,Any]]:
     if tool_name=='Write':
         path=str(tool_input.get('path') or tool_input.get('file_path') or '')
@@ -54,6 +57,31 @@ def attributed_changed_files(repo:Path,before_dirty:list[str],before_dirty_hashe
         else: pre.append(f)
     return sorted(set(filter(_visible,changed))), sorted(set(filter(_visible,pre)))
 
+def summarize_tool_result(event:dict[str,Any])->str:
+    tool=str(event.get('name') or event.get('tool') or 'tool')
+    result=event.get('result') if isinstance(event.get('result'),dict) else {}
+    inp=event.get('input') if isinstance(event.get('input'),dict) else {}
+    command=event.get('command') or result.get('command') or inp.get('command')
+    exit_code=event.get('exit_code', result.get('exit_code', result.get('returncode')))
+    stdout=result.get('stdout_preview', event.get('stdout_preview', result.get('stdout')))
+    stderr=result.get('stderr_preview', event.get('stderr_preview', result.get('stderr')))
+    truncated=bool(event.get('truncated') or result.get('truncated') or (stdout is not None and len(str(stdout))>500) or (stderr is not None and len(str(stderr))>500))
+    if tool=='Bash' or command is not None or exit_code is not None:
+        parts=[f"Bash finished: exit {exit_code if exit_code is not None else 'unknown'}"]
+        if command: parts.append(f"command: {_preview(command)}")
+        if stdout: parts.append(f"stdout: {_preview(stdout)}")
+        if stderr: parts.append(f"stderr: {_preview(stderr)}")
+        if truncated: parts.append('output truncated')
+        return '\n'.join(parts)
+    if event.get('is_error'): return f"{tool} failed"
+    return f"{tool} finished"
+
+def _workspace_path(event:dict[str,Any])->str|None:
+    inp=event.get('input') if isinstance(event.get('input'),dict) else {}
+    result=event.get('result') if isinstance(event.get('result'),dict) else {}
+    path=inp.get('path') or inp.get('file_path') or result.get('path') or result.get('file_path')
+    return str(path) if path else None
+
 def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
     t=event.get('type'); out=[]
     phase={'diagnosis_attempted','diagnosis_generated','planning_started','repair_attempt_started'}
@@ -61,14 +89,22 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
     elif t=='model_request_started': out += [{'type':'phase','id':run_id,'phase':t},{'type':'model_request_started','id':run_id},{'type':'bridge_diagnostic','id':run_id,'message':'model request started'}]
     elif t=='model_request_completed': out += [{'type':'model_request_completed','id':run_id},{'type':'bridge_diagnostic','id':run_id,'message':'model response received'}]
     elif t=='model_request_failed': out.append({'type':'bridge_diagnostic','id':run_id,'message':t})
-    elif t=='tool_started': out += [{'type':'tool_started','id':run_id,'tool':event.get('name')},{'type':'bridge_diagnostic','id':run_id,'message':f"tool started: {event.get('name') or ''}".strip()}]
-    elif t=='tool_finished':
-        out.append({'type':'tool_finished','id':run_id,'tool':event.get('name'),'is_error':event.get('is_error')})
-        if event.get('name') in {'Write','Patch','Edit'}: out.append({'type':'workspace_changed','id':run_id})
+    elif t=='tool_started':
+        tool=str(event.get('name') or 'tool'); inp=event.get('input') if isinstance(event.get('input'),dict) else {}; command=inp.get('command')
+        out += [{'type':'tool_started','id':run_id,'tool':tool, **({'command':_cap(command,500)} if command else {})},{'type':'bridge_diagnostic','id':run_id,'message':f"tool started: {tool}".strip()}]
+    elif t in {'tool_result','tool_finished'}:
+        tool=str(event.get('name') or 'tool'); is_error=bool(event.get('is_error')); summary=summarize_tool_result(event)
+        out.append({'type':'tool_finished','id':run_id,'tool':tool,'ok':not is_error,'is_error':is_error,'summary':summary})
+        if tool in {'Write','Patch','Edit'}:
+            path=_workspace_path(event); out.append({'type':'workspace_changed','id':run_id, **({'path':path} if path else {})})
+    elif t=='command_started':
+        command=_cap(event.get('command',''),500); out.append({'type':'tool_progress','id':run_id,'tool':'Bash','message':f'Running command: {command}'})
+    elif t=='command_finished':
+        exit_code=event.get('exit_code'); out.append({'type':'tool_finished','id':run_id,'tool':'Bash','ok':exit_code==0,'is_error':exit_code!=0,'summary':f'Command finished: exit {exit_code}'})
     elif t=='validation_step_started': out.append({'type':'verification_started','id':run_id,'name':event.get('name')})
     elif t in {'validation_step_finished','validation_completed'}: out.append({'type':'verification_finished','id':run_id,'passed':event.get('passed')})
     elif t in {'command_wandering_detected','progress_governor_redirected','governor_redirect'}: out.append({'type':'governor_redirect','id':run_id,'reason':event.get('reason')})
-    elif t=='stream_text' and os.environ.get('VILLANI_PI_DEBUG')=='1': out.append({'type':'stream_text','id':run_id,'text':_cap(event.get('text',''),240)})
+    elif t=='stream_text': out.append({'type':'stream_text','id':run_id,'text':_cap(event.get('text',''),240)})
     return out
 
 def extract_summary(r:dict[str,Any])->str|None:
@@ -203,10 +239,10 @@ class PiBridge:
             for m in map_runner_event(cmd.id,e): self._queue_event(m)
         def appr(tool,inp):
             if ar.abort_requested.is_set(): return False
-            title,summary=summarize_approval_request(tool,inp); ar.approval_seq += 1; req=f'{cmd.id}:{ar.approval_seq}'
-            p=PendingApproval(cmd.id,req,tool)
+            summary,safe_input=summarize_approval_request(str(tool),inp); ar.approval_seq += 1; req=f'{cmd.id}:{ar.approval_seq}'
+            p=PendingApproval(cmd.id,req,str(tool))
             with self._lock: ar.pending_approvals[req]=p; self._pending_approvals[req]=p
-            self._queue_event({'type':'approval_required','id':cmd.id,'request_id':req,'tool':tool,'title':title,'summary':summary})
+            self._queue_event({'type':'approval_required','id':cmd.id,'request_id':req,'tool':str(tool),'summary':summary,'input':safe_input})
             p.ready.wait(); self._queue_event({'type':'approval_resolved','id':cmd.id,'request_id':req,'approved':bool(p.approved)}); return bool(p.approved) and not ar.abort_requested.is_set()
         try:
             if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
