@@ -120,10 +120,46 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
     elif t=='stream_text': out.append({'type':'stream_text','id':run_id,'text':_cap(event.get('text',''),240)})
     return out
 
+def _extract_text_blocks(value:Any)->str|None:
+    blocks=value if isinstance(value,list) else (value.get('content') if isinstance(value,dict) else None)
+    if not isinstance(blocks,list): return None
+    texts=[]
+    for block in blocks:
+        if isinstance(block,str):
+            text=block
+        elif isinstance(block,dict) and block.get('type') in {None,'text'}:
+            text=block.get('text') or block.get('content') or ''
+        else:
+            continue
+        if isinstance(text,str) and text.strip(): texts.append(text.strip())
+    joined='\n\n'.join(texts).strip()
+    return joined or None
+
+def _cap_summary(text:str,n:int=6000)->str:
+    text=text.strip()
+    return text if len(text)<=n else text[:n].rstrip()+"…"
+
 def extract_summary(r:dict[str,Any])->str|None:
-    for k in ('summary','response'):
+    for k in ('summary','final_text'):
         v=r.get(k)
-        if isinstance(v,str): return v[:4000]
+        if isinstance(v,str) and v.strip(): return _cap_summary(v)
+    ex=r.get('execution')
+    if isinstance(ex,dict) and isinstance(ex.get('final_text'),str) and ex.get('final_text','').strip(): return _cap_summary(ex['final_text'])
+    response=r.get('response')
+    if isinstance(response,str) and response.strip(): return _cap_summary(response)
+    if isinstance(response,dict):
+        text=_extract_text_blocks(response.get('content'))
+        if text: return _cap_summary(text)
+    transcript=r.get('transcript')
+    if isinstance(transcript,dict):
+        text=_extract_text_blocks(transcript.get('final_assistant_content'))
+        if text: return _cap_summary(text)
+        responses=transcript.get('responses')
+        if isinstance(responses,list) and responses:
+            last=responses[-1]
+            if isinstance(last,dict):
+                text=_extract_text_blocks(last.get('content'))
+                if text: return _cap_summary(text)
     return None
 
 def run_existing_runner(runner:Any, command:RunCommand)->dict[str,Any]:
@@ -286,7 +322,7 @@ class PiBridge:
             changed,pre=attributed_changed_files(repo,before,before_hash,ar.touched_files)
             if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
             ex=result.get('execution') if isinstance(result.get('execution'),dict) else {}; reason=ex.get('terminated_reason') or ex.get('reason')
-            base={'id':cmd.id,'changed_files':changed,'preexisting_dirty_files':pre,'summary':extract_summary(result),'transcript_path':result.get('transcript_path'),'verification_passed':result.get('verification_passed'),'terminated_reason':reason}
+            base={'id':cmd.id,'changed_files':changed,'preexisting_dirty_files':pre,'summary':extract_summary(result) or 'Villani completed. See transcript for details.','transcript_path':result.get('transcript_path'),'verification_passed':result.get('verification_passed'),'terminated_reason':reason}
             if ex.get('completed') is False: self._queue_event({'type':'run_failed','success':False,'error':str(reason or 'Runner stopped before completion.'),**base})
             else: self._queue_event({'type':'run_completed','success':True,**base})
         except Exception as exc:
