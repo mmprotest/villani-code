@@ -677,6 +677,31 @@ def execute_tool_with_lifecycle(
         debug_callback = getattr(runner, "_debug_tool_callback", None)
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
+        if event_type == "command_started":
+            runner.event_callback(
+                {
+                    "type": "command_started",
+                    "name": "Bash",
+                    "command": payload.get("command"),
+                    "cwd": payload.get("cwd"),
+                    "tool_use_id": payload.get("tool_call_id"),
+                    "turn_index": emit_turn_index,
+                }
+            )
+        elif event_type == "command_finished":
+            runner.event_callback(
+                {
+                    "type": "command_finished",
+                    "name": "Bash",
+                    "command": payload.get("command"),
+                    "cwd": payload.get("cwd"),
+                    "exit_code": payload.get("exit_code"),
+                    "stdout_preview": str(payload.get("stdout") or "")[:500],
+                    "stderr_preview": str(payload.get("stderr") or "")[:500],
+                    "tool_use_id": payload.get("tool_call_id"),
+                    "turn_index": emit_turn_index,
+                }
+            )
 
     debug_recorder = getattr(runner, "_debug_recorder", None)
     debug_root = getattr(getattr(debug_recorder, "artifacts", None), "root", None)

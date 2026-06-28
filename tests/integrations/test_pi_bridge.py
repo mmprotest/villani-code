@@ -60,14 +60,14 @@ def test_modes_and_max_turns_are_passed(tmp_path):
     r=DummyRunner(); b,out,_,made=make_bridge(r); b.handle(run_cmd(tmp_path,mode='runner',limits={'max_turns':7})); wait_for(out,lambda e:e['type']=='run_completed'); assert made[0].calls[0][0]=='run'; assert isinstance(made[0].calls[0][2],ExecutionBudget); assert made[0].calls[0][2].max_turns==7
     r2=DummyRunner(); b,out,_,made=make_bridge(r2); b.handle(run_cmd(tmp_path,id='r2',mode='villani')); wait_for(out,lambda e:e['type']=='run_completed'); assert made[0].calls[0][0]=='villani'
 
-def test_stream_text_and_executionplan_approval_events_are_not_exposed(tmp_path):
-    b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'stream')); wait_for(out,lambda e:e['type']=='run_completed'); assert 'SECRET' not in out.getvalue(); assert 'approval_required' not in [e['type'] for e in events(out)]
+def test_stream_text_is_capped_and_executionplan_approval_events_are_not_exposed(tmp_path):
+    b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'stream')); wait_for(out,lambda e:e['type']=='run_completed'); assert any(e['type']=='stream_text' and e['text']=='SECRET' for e in events(out)); assert 'approval_required' not in [e['type'] for e in events(out)]
 
 def test_write_approval_blocks_and_rejected_write_does_not_mutate_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path); b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'write')); wait_for(out,lambda e:e['type']=='approval_required'); assert not (tmp_path/'a.txt').exists(); b.approval(type('C',(),{'id':'r1','request_id':'r1:1','approved':False})()); wait_for(out,lambda e:e['type']=='run_completed'); assert not (tmp_path/'a.txt').exists()
 
 def test_bash_approval_summary_is_concise(tmp_path):
-    b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'bash')); wait_for(out,lambda e:e['type']=='approval_required'); e=[x for x in events(out) if x['type']=='approval_required'][0]; assert e['title']=='Run command'; assert e['summary']=={'command':'echo hello && cat secret'}; b.abort('r1')
+    b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'bash')); wait_for(out,lambda e:e['type']=='approval_required'); e=[x for x in events(out) if x['type']=='approval_required'][0]; assert e['summary']=='Run command'; assert e['input']=={'command':'echo hello && cat secret'}; b.abort('r1')
 
 def test_duplicate_unknown_and_malformed_approval_responses(tmp_path):
     b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'approve-twice')); wait_for(out,lambda e:e['type']=='approval_required'); b.handle({'type':'approval_response','id':'r1','request_id':'r1:1','approved':True}); wait_for(out,lambda e:e.get('request_id')=='r1:2'); b.handle({'type':'approval_response','id':'r1','request_id':'r1:1','approved':False}); b.handle({'type':'approval_response','id':'r1','request_id':'nope','approved':True}); b.handle({'type':'approval_response','id':'r1','request_id':'r1:2','approved':'yes'}); assert sum(1 for e in events(out) if e['type']=='error')>=3; b.approval(type('C',(),{'id':'r1','request_id':'r1:2','approved':True})()); wait_for(out,lambda e:e['type']=='run_completed')
@@ -175,3 +175,33 @@ def test_worker_continues_when_git_status_times_out(monkeypatch, tmp_path):
     b.handle(run_cmd(tmp_path))
     wait_for(out,lambda e:e['type']=='run_failed')
     assert any(e['type']=='run_failed' for e in events(out))
+
+def test_approval_required_shape_and_bash_input_command(tmp_path):
+    b,out,_,_=make_bridge(); b.handle(run_cmd(tmp_path,'bash')); wait_for(out,lambda e:e['type']=='approval_required')
+    e=[x for x in events(out) if x['type']=='approval_required'][0]
+    assert isinstance(e['summary'], str)
+    assert isinstance(e['input'], dict)
+    assert e['summary']=='Run command'
+    assert e['input']['command']=='echo hello && cat secret'
+    assert e['tool']=='Bash'
+    assert 'title' not in e
+    b.abort('r1')
+
+def test_map_runner_event_maps_tool_result_and_command_lifecycle():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    finished=map_runner_event('r', {'type':'tool_result','name':'Bash','input':{'command':'echo hi'},'is_error':False,'result':{'exit_code':0,'stdout':'hello'}})
+    assert finished[0]['type']=='tool_finished'
+    assert finished[0]['tool']=='Bash'
+    assert finished[0]['ok'] is True
+    assert 'Bash finished: exit 0' in finished[0]['summary']
+    progress=map_runner_event('r', {'type':'command_started','command':'sleep 1'})
+    assert progress==[{'type':'tool_progress','id':'r','tool':'Bash','message':'Running command: sleep 1'}]
+    done=map_runner_event('r', {'type':'command_finished','exit_code':1})
+    assert done==[{'type':'tool_finished','id':'r','tool':'Bash','ok':False,'is_error':True,'summary':'Command finished: exit 1'}]
+
+def test_bash_tool_result_summary_truncates_output():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    long='x'*800
+    ev=map_runner_event('r', {'type':'tool_result','name':'Bash','input':{'command':'pytest'},'result':{'exit_code':1,'stdout':long,'stderr':long}})[0]
+    assert len(ev['summary']) < 1200
+    assert 'output truncated' in ev['summary']
