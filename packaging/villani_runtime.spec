@@ -1,6 +1,7 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+SPEC_DIR = Path(SPECPATH).resolve()
+ROOT = SPEC_DIR.parent
 ENTRY = ROOT / "packaging" / "villani_runtime_entry.py"
 
 
