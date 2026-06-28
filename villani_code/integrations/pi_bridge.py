@@ -23,7 +23,15 @@ def summarize_approval_request(tool_name:str, tool_input:dict[str,Any])->tuple[s
 
 def git_changed_files(repo:Path)->list[str]:
     try:
-        r=subprocess.run(['git','status','--porcelain=v1','--untracked-files=all'],cwd=repo,text=True,capture_output=True,timeout=10)
+        r=subprocess.run(
+            ['git','status','--porcelain=v1','--untracked-files=all'],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
         if r.returncode: return []
         files=[]
         for line in r.stdout.splitlines():
@@ -186,7 +194,7 @@ class PiBridge:
         if not p: self.emit({'type':'error','id':cmd.id,'error':'Unknown approval request id'}); return
         p.approved=cmd.approved; p.ready.set()
     def _worker(self,ar):
-        cmd=ar.command; repo=Path(cmd.repo); before=git_changed_files(repo); before_hash=hash_files(repo,before)
+        cmd=ar.command; repo=Path(cmd.repo); before=[]; before_hash={}
         self._diagnostic(cmd.id,'run worker started')
         def ev(e):
             if e.get('type')=='approval_required': return
@@ -200,12 +208,16 @@ class PiBridge:
             p.ready.wait(); self._queue_event({'type':'approval_resolved','id':cmd.id,'request_id':req,'approved':bool(p.approved)}); return bool(p.approved) and not ar.abort_requested.is_set()
         try:
             if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
+            self._diagnostic(cmd.id,'capturing initial git status')
+            before=git_changed_files(repo)
+            before_hash=hash_files(repo,before)
+            self._diagnostic(cmd.id,'captured initial git status')
             source='pi-proxy' if cmd.config.pi_model_proxy else 'direct-config'; self._diagnostic(cmd.id,f'model configuration source={source} provider={cmd.config.provider} model={cmd.config.model} base_url={cmd.config.base_url}')
             self._diagnostic(cmd.id,'creating runner')
             runner=self.runner_factory(cmd,ev,appr)
             self._diagnostic(cmd.id,'runner created; entering execution')
             result=run_existing_runner(runner,cmd)
-            self._diagnostic(cmd.id,'runner returned result')
+            self._diagnostic(cmd.id,'runner.run returned')
             changed,pre=attributed_changed_files(repo,before,before_hash,ar.touched_files)
             if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
             ex=result.get('execution') if isinstance(result.get('execution'),dict) else {}; reason=ex.get('terminated_reason') or ex.get('reason')

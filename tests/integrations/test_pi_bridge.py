@@ -140,3 +140,38 @@ def test_abort_command_denies_pending_approvals_through_stdio(tmp_path):
     os.write(w,(json.dumps(run_cmd(tmp_path,'approve-twice'))+'\n').encode()); wait_for(out,lambda e:e['type']=='approval_required')
     os.write(w,(json.dumps({'type':'abort','id':'r1'})+'\n').encode()); os.close(w)
     th.join(2); assert any(e['type']=='approval_resolved' and e['approved'] is False for e in events(out)); assert any(e['type']=='run_aborted' for e in events(out))
+
+def test_git_changed_files_uses_devnull_stdin(monkeypatch, tmp_path):
+    calls=[]
+    class Proc:
+        returncode=0; stdout='?? x.py\n'; stderr=''
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs); return Proc()
+    monkeypatch.setattr('villani_code.integrations.pi_bridge.subprocess.run', fake_run)
+    assert git_changed_files(tmp_path)==['x.py']
+    assert calls[0]['stdin'] is subprocess.DEVNULL
+    assert calls[0]['check'] is False
+    assert calls[0]['timeout']==10
+
+def test_worker_diagnostics_order_before_runner(tmp_path):
+    out=io.StringIO(); order=[]
+    def factory(cmd,event_callback,approval_callback):
+        order.extend([e.get('message', e['type']) for e in events(out)])
+        return DummyRunner(approval_callback,event_callback)
+    b=PiBridge(stdin=io.StringIO(),stdout=out,runner_factory=factory)
+    b.handle(run_cmd(tmp_path))
+    wait_for(out,lambda e:e['type']=='run_completed')
+    assert 'run_started' in [e['type'] for e in events(out)]
+    assert 'capturing initial git status' in order
+    assert 'captured initial git status' in order
+    assert 'creating runner' in order
+    assert order.index('capturing initial git status') < order.index('captured initial git status') < order.index('creating runner')
+
+def test_worker_continues_when_git_status_times_out(monkeypatch, tmp_path):
+    def boom(_repo):
+        raise subprocess.TimeoutExpired(['git'], 10)
+    monkeypatch.setattr('villani_code.integrations.pi_bridge.git_changed_files', boom)
+    b,out,_,_=make_bridge()
+    b.handle(run_cmd(tmp_path))
+    wait_for(out,lambda e:e['type']=='run_failed')
+    assert any(e['type']=='run_failed' for e in events(out))

@@ -703,3 +703,21 @@ def test_diagnosis_confidence_weak_without_file_evidence(tmp_path: Path) -> None
     }
     confidence = state_runtime.classify_diagnosis_target_confidence(runner, diagnosis, failure_evidence=None)
     assert confidence == "weak"
+
+def test_git_changed_files_uses_devnull_stdin_and_is_safe(monkeypatch, tmp_path):
+    import subprocess
+    from villani_code import state_runtime
+    calls=[]
+    class Proc:
+        returncode=0; stdout=' M a.py\n'; stderr=''
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs); return Proc()
+    monkeypatch.setattr(state_runtime.subprocess, 'run', fake_run)
+    assert state_runtime.git_changed_files(tmp_path)==['a.py']
+    assert calls[0]['stdin'] is subprocess.DEVNULL
+    assert calls[0]['check'] is False
+    assert calls[0]['timeout']==10
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 10)
+    monkeypatch.setattr(state_runtime.subprocess, 'run', timeout)
+    assert state_runtime.git_changed_files(tmp_path)==[]
