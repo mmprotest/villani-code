@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json,os,subprocess,sys,threading,traceback
+import hashlib,json,io,os,queue,subprocess,sys,threading,traceback
 from dataclasses import dataclass,field
 from pathlib import Path
 from typing import Any,Callable,TextIO
@@ -89,15 +89,67 @@ class ActiveRun:
     command:RunCommand; abort_requested:threading.Event=field(default_factory=threading.Event); thread:threading.Thread|None=None; pending_approvals:dict[str,PendingApproval]=field(default_factory=dict); touched_files:set[str]=field(default_factory=set); approval_seq:int=0
 class PiBridge:
     def __init__(self,*,stdin:TextIO|None=None,stdout:TextIO|None=None,stderr:TextIO|None=None,runner_factory:Callable[...,Any]|None=None)->None:
-        self.stdin=stdin or sys.stdin; self.stdout=stdout or sys.stdout; self.stderr=stderr or sys.stderr; self.runner_factory=runner_factory or build_default_runner; self.runs={}; self.lock=threading.Lock()
+        self.stdin=stdin or sys.stdin; self.stdout=stdout or sys.stdout; self.stderr=stderr or sys.stderr; self.runner_factory=runner_factory or build_default_runner
+        self._events: queue.Queue[dict[str, Any] | None]=queue.Queue(); self._active: dict[str, ActiveRun]={}; self._pending_approvals: dict[str, PendingApproval]={}; self._lock=threading.Lock()
+        self.runs=self._active; self.lock=self._lock; self._stdio_running=False
     def emit(self,e):
         self.stdout.write(to_json_line(e)); self.stdout.flush()
+    def _queue_event(self,e:dict[str,Any]|None):
+        if self._stdio_running: self._events.put(e)
+        elif e is not None: self.emit(e)
+    def _diagnostic(self,run_id:str|None,message:str,**extra:Any)->None:
+        ev={'type':'bridge_diagnostic','message':message}
+        if run_id: ev['id']=run_id
+        ev.update({k:v for k,v in extra.items() if k!='api_key'})
+        self._queue_event(ev)
+    def _drain_events(self)->None:
+        while True:
+            try: ev=self._events.get_nowait()
+            except queue.Empty: return
+            if ev is not None: self.emit(ev)
+    def _stdin_reader(self,commands:queue.Queue[dict[str,Any]|None])->None:
+        try:
+            try: fd=self.stdin.fileno()
+            except (AttributeError,io.UnsupportedOperation,OSError,ValueError,TypeError): fd=None  # type: ignore[name-defined]
+            if fd is not None:
+                buf=b''
+                while True:
+                    chunk=os.read(fd,4096)
+                    if not chunk: break
+                    buf += chunk
+                    while b'\n' in buf:
+                        raw,buf=buf.split(b'\n',1); line=raw.decode('utf-8',errors='replace')
+                        if line.strip():
+                            try: commands.put(parse_json_line(line))
+                            except Exception as exc: self._queue_event({'type':'error','error':str(exc)})
+                if buf.strip():
+                    try: commands.put(parse_json_line(buf.decode('utf-8',errors='replace')))
+                    except Exception as exc: self._queue_event({'type':'error','error':str(exc)})
+            else:
+                for raw_line in self.stdin:
+                    if not str(raw_line).strip(): continue
+                    try: commands.put(parse_json_line(str(raw_line)))
+                    except Exception as exc: self._queue_event({'type':'error','error':str(exc)})
+        finally:
+            commands.put(None)
+    def run_stdio(self)->None:
+        self._stdio_running=True; self.emit(ready_event()); commands: queue.Queue[dict[str,Any]|None]=queue.Queue(); stdin_closed=False
+        threading.Thread(target=self._stdin_reader,args=(commands,),daemon=True).start()
+        while True:
+            self._drain_events()
+            if stdin_closed:
+                with self._lock: active=bool(self._active)
+                if not active: break
+                try: cmd=commands.get(timeout=0.02)
+                except queue.Empty: continue
+            else:
+                try: cmd=commands.get(timeout=0.02)
+                except queue.Empty: continue
+            if cmd is None:
+                stdin_closed=True; continue
+            self.handle(cmd)
     def run_forever(self):
-        self.emit(ready_event())
-        for line in self.stdin:
-            if not line.strip(): continue
-            try: self.handle(parse_json_line(line))
-            except Exception as exc: self.emit({'type':'error','error':str(exc)})
+        self.run_stdio()
     def handle(self,p):
         try:
             t=p.get('type')
@@ -109,49 +161,66 @@ class PiBridge:
         except Exception as exc:
             self.emit({'type':'error','error':str(exc)})
     def start_run(self,cmd):
-        with self.lock:
-            if cmd.id in self.runs: self.emit({'type':'error','id':cmd.id,'error':'Duplicate active run id'}); return
-            ar=ActiveRun(cmd); self.runs[cmd.id]=ar
+        repo=str(Path(cmd.repo))
+        with self._lock:
+            if cmd.id in self._active: self.emit({'type':'error','id':cmd.id,'error':'Duplicate active run id'}); return
+            ar=ActiveRun(cmd); self._active[cmd.id]=ar
+        self._queue_event({'type':'bridge_diagnostic','id':cmd.id,'message':'run command received'})
+        self._queue_event({'type':'run_started','id':cmd.id,'run_id':cmd.id,'task':cmd.task,'repo':repo,'mode':cmd.mode})
         th=threading.Thread(target=self._worker,args=(ar,),daemon=True); ar.thread=th; th.start()
     def abort(self,run_id):
-        ar=self.runs.get(run_id)
+        with self._lock: ar=self._active.get(run_id)
         if not ar: self.emit({'type':'error','id':run_id,'error':'Unknown run id'}); return
         ar.abort_requested.set();
         for req,p in list(ar.pending_approvals.items()):
-            ar.pending_approvals.pop(req,None); p.approved=False; p.ready.set()
+            ar.pending_approvals.pop(req,None)
+            with self._lock: self._pending_approvals.pop(req,None)
+            p.approved=False; p.ready.set()
         self.emit({'type':'abort_requested','id':run_id})
     def approval(self,cmd):
-        ar=self.runs.get(cmd.id)
+        with self._lock:
+            p=self._pending_approvals.pop(cmd.request_id,None)
+            ar=self._active.get(cmd.id)
+            if p and ar: ar.pending_approvals.pop(cmd.request_id,None)
         if not ar: self.emit({'type':'error','id':cmd.id,'error':'Unknown run id'}); return
-        p=ar.pending_approvals.pop(cmd.request_id,None)
         if not p: self.emit({'type':'error','id':cmd.id,'error':'Unknown approval request id'}); return
         p.approved=cmd.approved; p.ready.set()
     def _worker(self,ar):
         cmd=ar.command; repo=Path(cmd.repo); before=git_changed_files(repo); before_hash=hash_files(repo,before)
-        self.emit({'type':'run_started','id':cmd.id})
+        self._diagnostic(cmd.id,'run worker started')
         def ev(e):
             if e.get('type')=='approval_required': return
-            for m in map_runner_event(cmd.id,e): self.emit(m)
+            for m in map_runner_event(cmd.id,e): self._queue_event(m)
         def appr(tool,inp):
             if ar.abort_requested.is_set(): return False
             title,summary=summarize_approval_request(tool,inp); ar.approval_seq += 1; req=f'{cmd.id}:{ar.approval_seq}'
-            p=PendingApproval(cmd.id,req,tool); ar.pending_approvals[req]=p; self.emit({'type':'approval_required','id':cmd.id,'request_id':req,'tool':tool,'title':title,'summary':summary})
-            p.ready.wait(); self.emit({'type':'approval_resolved','id':cmd.id,'request_id':req,'approved':bool(p.approved)}); return bool(p.approved) and not ar.abort_requested.is_set()
+            p=PendingApproval(cmd.id,req,tool)
+            with self._lock: ar.pending_approvals[req]=p; self._pending_approvals[req]=p
+            self._queue_event({'type':'approval_required','id':cmd.id,'request_id':req,'tool':tool,'title':title,'summary':summary})
+            p.ready.wait(); self._queue_event({'type':'approval_resolved','id':cmd.id,'request_id':req,'approved':bool(p.approved)}); return bool(p.approved) and not ar.abort_requested.is_set()
         try:
-            if ar.abort_requested.is_set(): self.emit({'type':'run_aborted','id':cmd.id}); return
-            runner=self.runner_factory(cmd,ev,appr); result=run_existing_runner(runner,cmd)
+            if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
+            source='pi-proxy' if cmd.config.pi_model_proxy else 'direct-config'; self._diagnostic(cmd.id,f'model configuration source={source} provider={cmd.config.provider} model={cmd.config.model} base_url={cmd.config.base_url}')
+            self._diagnostic(cmd.id,'creating runner')
+            runner=self.runner_factory(cmd,ev,appr)
+            self._diagnostic(cmd.id,'runner created; entering execution')
+            result=run_existing_runner(runner,cmd)
+            self._diagnostic(cmd.id,'runner returned result')
             changed,pre=attributed_changed_files(repo,before,before_hash,ar.touched_files)
-            if ar.abort_requested.is_set(): self.emit({'type':'run_aborted','id':cmd.id}); return
+            if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
             ex=result.get('execution') if isinstance(result.get('execution'),dict) else {}; reason=ex.get('terminated_reason') or ex.get('reason')
             base={'id':cmd.id,'changed_files':changed,'preexisting_dirty_files':pre,'summary':extract_summary(result),'transcript_path':result.get('transcript_path'),'verification_passed':result.get('verification_passed'),'terminated_reason':reason}
-            if ex.get('completed') is False: self.emit({'type':'run_failed','success':False,'error':str(reason or 'Runner stopped before completion.'),**base})
-            else: self.emit({'type':'run_completed','success':True,**base})
+            if ex.get('completed') is False: self._queue_event({'type':'run_failed','success':False,'error':str(reason or 'Runner stopped before completion.'),**base})
+            else: self._queue_event({'type':'run_completed','success':True,**base})
         except Exception as exc:
-            if ar.abort_requested.is_set():
-                self.emit({'type':'run_aborted','id':cmd.id}); return
-            print(traceback.format_exc(),file=self.stderr); self.emit({'type':'run_failed','id':cmd.id,'success':False,'error':str(exc),'summary':str(exc)})
+            self._diagnostic(cmd.id,f'exception: {exc}')
+            if ar.abort_requested.is_set(): self._queue_event({'type':'run_aborted','id':cmd.id}); return
+            print(traceback.format_exc(),file=self.stderr); self._queue_event({'type':'run_failed','id':cmd.id,'success':False,'error':str(exc),'summary':str(exc)})
         finally:
-            for req,p in list(ar.pending_approvals.items()): ar.pending_approvals.pop(req,None); p.approved=False; p.ready.set()
-            self.runs.pop(cmd.id,None)
-def main_stdio(): PiBridge().run_forever()
+            for req,p in list(ar.pending_approvals.items()):
+                ar.pending_approvals.pop(req,None)
+                with self._lock: self._pending_approvals.pop(req,None)
+                p.approved=False; p.ready.set()
+            with self._lock: self._active.pop(cmd.id,None)
+def main_stdio(): PiBridge().run_stdio()
 if __name__=='__main__': main_stdio()
