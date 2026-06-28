@@ -262,3 +262,23 @@ def test_run_completed_includes_summary_from_final_assistant_content(tmp_path):
     es=wait_for(out,lambda e:e['type']=='run_completed')
     ev=[e for e in es if e['type']=='run_completed'][-1]
     assert ev['summary']=='All tests pass.'
+
+def test_map_runner_event_maps_stream_text_field():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'stream_text','text':'hello human'})
+    assert ev==[{'type':'stream_text','id':'r','text':'hello human'}]
+
+def test_map_runner_event_extracts_assistant_content_text_blocks():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'assistant_response','content':[{'type':'text','text':'First'},{'type':'tool_use','input':{'x':1}},{'type':'text','text':'Second'}]})
+    assert ev==[{'type':'stream_text','id':'r','text':'First\n\nSecond'}]
+
+def test_map_runner_event_does_not_emit_hidden_prompts_or_tool_json_as_stream_text():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    assert map_runner_event('r', {'type':'hidden_prompt','content':[{'type':'text','text':'secret prompt'}]})==[]
+    assert map_runner_event('r', {'type':'assistant_response','content':[{'type':'tool_use','input':{'command':'pytest'}}]})==[]
+
+def test_bridge_diagnostic_remains_diagnostic_event_for_render_suppression():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'model_request_started'})
+    assert {'type':'bridge_diagnostic','id':'r','message':'model request started'} in ev

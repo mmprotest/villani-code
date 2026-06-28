@@ -512,7 +512,7 @@ test("/villani approval pending sets status/widget and accepted clears widget", 
     else process.env.VILLANI_USE_PI_MODEL = oldUsePi;
   }
   assert.ok(
-    statuses.some((a) => a[0] === "villani" && /awaiting approval/.test(a[1])),
+    statuses.some((a) => a[0] === "villani" && a[1] === "Waiting for approval..."),
   );
   assert.ok(widgets.some((a) => a[0] === "villani" && Array.isArray(a[1])));
   assert.ok(widgets.some((a) => a[0] === "villani" && a[1] === undefined));
@@ -549,8 +549,7 @@ test("tool result and finished events update status without notify spam", async 
     },
   );
   assert.deepEqual(notes, []);
-  assert.ok(statuses.includes("Command finished"));
-  assert.ok(statuses.some((s) => /Villani: Running command/.test(s)));
+  assert.deepEqual(statuses, []);
 });
 
 test("/villani keeps waiting after nonzero tool_finished and renders next model event", async () => {
@@ -585,7 +584,6 @@ test("/villani keeps waiting after nonzero tool_finished and renders next model 
     else process.env.VILLANI_USE_PI_MODEL = oldUsePi;
   }
   assert.doesNotMatch(notes.join("\n"), /Villani tool finished/);
-  assert.ok(statuses.includes("Command finished"));
   assert.ok(statuses.includes("Villani is thinking..."));
   assert.equal(sent.length, 1);
 });
@@ -693,9 +691,6 @@ test("command lifecycle sets then clears widget through final result", async () 
     if (oldUsePi === undefined) delete process.env.VILLANI_USE_PI_MODEL;
     else process.env.VILLANI_USE_PI_MODEL = oldUsePi;
   }
-  assert.ok(
-    widgets.some((a) => a[0] === "villani" && String(a[1]).includes("echo hi")),
-  );
   assert.ok(widgets.some((a) => a[0] === "villani" && a[1] === undefined));
   assert.equal(sent.length, 1);
 });
@@ -710,4 +705,97 @@ test("villani-result renderer displays summary text", async () => {
     ),
     /Summary/,
   );
+});
+
+test("strict render allowlist suppresses bridge plumbing", async () => {
+  const { renderBridgeEvent, shouldRenderUserFacingEvent } = await import("./render.js");
+  const calls: any[] = [];
+  const ctx = {
+    ui: {
+      notify: (...a: any[]) => calls.push(["notify", ...a]),
+      setStatus: (...a: any[]) => calls.push(["setStatus", ...a]),
+      setWidget: (...a: any[]) => calls.push(["setWidget", ...a]),
+    },
+  };
+  for (const event of [
+    { type: "bridge_diagnostic", message: "event received: tool_result" },
+    { type: "bridge_diagnostic", message: "bridge heartbeat pong" },
+    { type: "runner_heartbeat" },
+    { type: "pong" },
+    { type: "tool_result", summary: "tool_result mapped" },
+  ]) {
+    assert.equal(shouldRenderUserFacingEvent(event), false);
+    await renderBridgeEvent(event, {}, ctx);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("stream_text renders clean assistant blocks and suppresses duplicates/whitespace", async () => {
+  const { renderBridgeEvent, resetVillaniUiState } = await import("./render.js");
+  resetVillaniUiState();
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (m: string) => notes.push(m) } };
+  await renderBridgeEvent({ type: "stream_text", text: "\n\nI'll start...\n\n" }, {}, ctx);
+  await renderBridgeEvent({ type: "stream_text", text: "I'll start..." }, {}, ctx);
+  await renderBridgeEvent({ type: "stream_text", text: "\n \t\n" }, {}, ctx);
+  assert.deepEqual(notes, ["I'll start..."]);
+});
+
+test("tool and command events render readable English", async () => {
+  const { renderBridgeEvent, resetVillaniUiState } = await import("./render.js");
+  resetVillaniUiState();
+  const notes: string[] = [];
+  const widgets: any[] = [];
+  const statuses: string[] = [];
+  const ctx = {
+    ui: {
+      notify: (m: string) => notes.push(m),
+      setWidget: (_: string, w: any) => widgets.push(w),
+      setStatus: (_: string, s: string) => statuses.push(s),
+    },
+  };
+  await renderBridgeEvent({ type: "tool_started", tool: "Bash" }, {}, ctx);
+  await renderBridgeEvent({ type: "command_started", command: "python -m pytest -v" }, {}, ctx);
+  await renderBridgeEvent({ type: "command_finished", command: "python -m pytest -v", exit_code: 1, stderr_preview: "boom" }, {}, ctx);
+  assert.ok(notes.includes("Preparing command"));
+  assert.ok(notes.includes("Running command:\npython -m pytest -v"));
+  assert.ok(notes.includes("Command finished: exit 1\n\nstderr:\nboom"));
+  assert.doesNotMatch(notes.join("\n"), /tool_started|command_started|command_finished/);
+  assert.ok(statuses.includes("Running command..."));
+  assert.ok(widgets.some((w) => String(w).includes("python -m pytest -v")));
+});
+
+test("model request clears stale command widget and final clears widget", async () => {
+  const { renderBridgeEvent, resetVillaniUiState } = await import("./render.js");
+  resetVillaniUiState();
+  const widgets: any[] = [];
+  const statuses: string[] = [];
+  const ctx = {
+    ui: {
+      notify: () => {},
+      setWidget: (_: string, w: any) => widgets.push(w),
+      setStatus: (_: string, s: string) => statuses.push(s),
+    },
+  };
+  await renderBridgeEvent({ type: "command_started", command: "echo hi" }, {}, ctx);
+  await renderBridgeEvent({ type: "command_finished", command: "echo hi", exit_code: 0, stdout_preview: "hi" }, {}, ctx);
+  await renderBridgeEvent({ type: "model_request_started" }, {}, ctx);
+  await renderBridgeEvent({ type: "run_completed", summary: "final assistant summary" }, {}, ctx);
+  assert.ok(widgets.some((w) => String(w).includes("Command finished: exit 0")));
+  assert.ok(widgets.some((w) => w === undefined));
+  assert.ok(statuses.includes("Completed"));
+});
+
+test("final message includes final assistant summary", async () => {
+  const { finalMessage } = await import("./render.js");
+  const msg = finalMessage({
+    type: "run_completed",
+    summary: "final assistant summary",
+    changed_files: ["src/a.ts"],
+    transcript_path: "/tmp/t.jsonl",
+  });
+  assert.match(msg, /Villani completed/);
+  assert.match(msg, /final assistant summary/);
+  assert.match(msg, /Changed files:\n- src\/a\.ts/);
+  assert.match(msg, /Transcript: \/tmp\/t\.jsonl/);
 });
