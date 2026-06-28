@@ -1,9 +1,15 @@
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+ENTRY = ROOT / "packaging" / "villani_runtime_entry.py"
+
+
 # PyInstaller spec for the Pi Villani runtime bridge executable.
 block_cipher = None
 
 a = Analysis(
-    ['packaging/villani_runtime_entry.py'],
-    pathex=[],
+    [str(ENTRY)],
+    pathex=[str(ROOT)],
     binaries=[],
     datas=[],
     hiddenimports=['villani_code.integrations.pi_bridge'],
