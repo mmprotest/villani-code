@@ -49,7 +49,7 @@ def test_assemble_input_json_delta_chunks_into_dict():
     assert msg["content"][0]["input"] == {"file_path": "a.txt", "content": "hello"}
 
 
-def test_assemble_input_json_delta_malformed_keeps_raw_string():
+def test_assemble_input_json_delta_malformed_keeps_empty_dict():
     events = [
         {"type": "message_start", "message": {"id": "m", "role": "assistant"}},
         {
@@ -68,7 +68,7 @@ def test_assemble_input_json_delta_malformed_keeps_raw_string():
 
     msg = assemble_anthropic_stream(events)
 
-    assert msg["content"][0]["input"] == '{"file_path":"a.txt"'
+    assert msg["content"][0]["input"] == {}
 
 
 def test_assemble_preserves_usage_from_message_stop():

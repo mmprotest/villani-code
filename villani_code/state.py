@@ -59,6 +59,12 @@ from villani_code.utils import (
 )
 
 
+def _safe_tool_input(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 def _dedupe_preserve(items: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -1502,7 +1508,7 @@ class Runner:
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
                 tool_name = block.get("name", "")
-                tool_input = dict(block.get("input", {}))
+                tool_input = _safe_tool_input(block.get("input"))
                 tool_use_id = str(block.get("id"))
                 self.event_callback(
                     {
@@ -1662,7 +1668,7 @@ class Runner:
                 consecutive_no_edit_turns += 1
 
             mutating_tools = any(
-                self._is_mutating_tool_call(b.get("name", ""), dict(b.get("input", {})))
+                self._is_mutating_tool_call(b.get("name", ""), _safe_tool_input(b.get("input")))
                 for b in tool_uses
             )
             recon_turn = bool(tool_uses) and not mutating_tools and not edited_this_turn

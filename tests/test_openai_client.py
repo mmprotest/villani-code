@@ -62,3 +62,9 @@ def test_convert_openai_response_preserves_usage_id_model_and_stop_reason() -> N
     assert converted["model"] == "gpt-4o-mini"
     assert converted["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     assert converted["stop_reason"] == "end_turn"
+
+
+def test_convert_openai_response_non_object_tool_arguments_are_empty() -> None:
+    response = {"id": "r", "model": "m", "choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "tool_calls": [{"id": "call_1", "function": {"name": "Read", "arguments": '"repo"'}}]}}]}
+    converted = convert_openai_response_to_anthropic(response)
+    assert converted["content"][0]["input"] == {}
