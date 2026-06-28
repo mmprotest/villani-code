@@ -16,7 +16,6 @@ import {
   finalMessage,
   notify,
   renderBridgeEvent,
-  renderVillaniResultMessage,
   resetVillaniUiState,
   sendDurableVillaniMessage,
   setStatus,
@@ -589,9 +588,6 @@ async function doctor(ctx: any) {
   await notify(ctx, lines.join("\n"), "info");
 }
 export default function activate(api: any) {
-  try {
-    api.registerMessageRenderer?.("villani-result", renderVillaniResultMessage);
-  } catch {}
   const reg = (
     name: string,
     description: string,
