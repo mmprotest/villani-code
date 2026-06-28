@@ -34,7 +34,15 @@ jobs:
           cd dist-runtime
           if [[ "${{ matrix.ext }}" == "zip" ]]; then 7z a ../$name villani-code; else tar -czf ../$name villani-code; fi
           cd ..
-          shasum -a 256 "$name" > "${name}.sha256"
+          python - "$name" > "${name}.sha256" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          print(f"{digest}  {path.name}")
+          PY
           mkdir -p smoke-asset
           python - "$name" smoke-asset <<'PY'
           import sys, tarfile, zipfile
