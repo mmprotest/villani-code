@@ -12,7 +12,7 @@ def _visible(p:str)->bool:
 def _cap(v:Any,n:int=2000)->str: return str(v)[:n]
 def _preview(v:Any,n:int=500)->str:
     text='' if v is None else str(v)
-    return text[:n]
+    return text[:n] + ('...' if len(text)>n else '')
 def summarize_approval_request(tool_name:str, tool_input:dict[str,Any])->tuple[str,dict[str,Any]]:
     if tool_name=='Write':
         path=str(tool_input.get('path') or tool_input.get('file_path') or '')
@@ -93,8 +93,13 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
         tool=str(event.get('name') or 'tool'); inp=event.get('input') if isinstance(event.get('input'),dict) else {}; command=inp.get('command')
         out += [{'type':'tool_started','id':run_id,'tool':tool, **({'command':_cap(command,500)} if command else {})},{'type':'bridge_diagnostic','id':run_id,'message':f"tool started: {tool}".strip()}]
     elif t in {'tool_result','tool_finished'}:
-        tool=str(event.get('name') or 'tool'); is_error=bool(event.get('is_error')); summary=summarize_tool_result(event)
+        tool=str(event.get('name') or event.get('tool') or 'tool')
+        result=event.get('result') if isinstance(event.get('result'),dict) else {}
+        exit_code=event.get('exit_code', result.get('exit_code', result.get('returncode')))
+        is_error=bool(event.get('is_error') or (tool=='Bash' and exit_code is not None and exit_code != 0))
+        summary=summarize_tool_result(event)
         out.append({'type':'tool_finished','id':run_id,'tool':tool,'ok':not is_error,'is_error':is_error,'summary':summary})
+        out.append({'type':'bridge_diagnostic','id':run_id,'message':'tool result mapped'})
         if tool in {'Write','Patch','Edit'}:
             path=_workspace_path(event); out.append({'type':'workspace_changed','id':run_id, **({'path':path} if path else {})})
     elif t=='command_started':
@@ -242,6 +247,8 @@ class PiBridge:
             summary,safe_input=summarize_approval_request(str(tool),inp); ar.approval_seq += 1; req=f'{cmd.id}:{ar.approval_seq}'
             p=PendingApproval(cmd.id,req,str(tool))
             with self._lock: ar.pending_approvals[req]=p; self._pending_approvals[req]=p
+            if not isinstance(summary,str): summary=str(summary)
+            if not isinstance(safe_input,dict): safe_input={}
             self._queue_event({'type':'approval_required','id':cmd.id,'request_id':req,'tool':str(tool),'summary':summary,'input':safe_input})
             p.ready.wait(); self._queue_event({'type':'approval_resolved','id':cmd.id,'request_id':req,'approved':bool(p.approved)}); return bool(p.approved) and not ar.abort_requested.is_set()
         try:
