@@ -46,21 +46,27 @@ function sanitizeDetails(value:any, seen=new WeakSet<object>()):any{
 }
 function verificationStatus(event:any):string|undefined{const verification=event.verification_status??event.verificationStatus??event.verification; if(!verification)return undefined; if(typeof verification==='string') return `Verification: ${verification}`; if(typeof verification==='object'){const status=verification.status??verification.result??verification.outcome; return status?`Verification: ${status}`:undefined;} return `Verification: ${String(verification)}`;}
 export function finalMessage(event:any){const files=visibleChangedFiles(event.changed_files||event.changedFiles||[]); const head=event.type==='run_completed'?'Villani completed':event.type==='run_aborted'?'Villani aborted':'Villani failed'; const transcript=event.transcript_path||event.transcriptPath; const verification=verificationStatus(event); return [head,event.summary||event.error||event.message,files.length?`Changed files:\n${files.map((f:string)=>`- ${f}`).join('\n')}`:'',transcript?`Transcript: ${transcript}`:'',verification].filter(Boolean).join('\n\n');}
+let lastStreamAt=0;
 export async function renderBridgeEvent(event:any, _pi:any, ctx:any): Promise<void> {
   const debug=process.env.VILLANI_PI_DEBUG==='1';
   const tool=String(event.tool??event.name??'unknown');
   const summary=String(event.summary??'').slice(0,500);
   const command=typeof event.command==='string'?event.command.slice(0,500):'';
   if(event.type==='approval_required') return;
-  if(event.type==='bridge_diagnostic'&&!debug) return;
-  if(event.type==='bridge_diagnostic'&&debug) await notify(ctx, `Villani diagnostic: ${event.message||event.error||'diagnostic'}`, 'info');
-  else if(event.type==='run_started') await notify(ctx, 'Villani run started.', 'info');
-  else if(event.type==='model_request_started') await notify(ctx, 'Villani is thinking...', 'info');
-  else if(event.type==='model_request_completed') await notify(ctx, 'Villani received model response', 'info');
-  else if(event.type==='tool_started') await notify(ctx, `Villani tool started: ${tool}${command?` — ${command}`:''}`, 'info');
-  else if(event.type==='tool_progress') await notify(ctx, `Villani: ${String(event.message||'tool progress').slice(0,500)}`, 'info');
-  else if(event.type==='tool_finished') await notify(ctx, `Villani tool finished: ${tool}${summary?` — ${summary}`:''}`, event.ok===false||event.is_error?'warn':'info');
-  else if(event.type==='stream_text') { const text=String(event.text||'').trim().slice(0,240); if(text) await notify(ctx, `Villani: ${text}`, 'info'); }
-  else if(new Set(['ready','phase','workspace_changed','verification_started','verification_finished','governor_redirect','approval_resolved']).has(event.type)) await notify(ctx, `Villani: ${event.type}`, 'info');
-  if(event.type==='error') await notify(ctx, `Villani error: ${event.error||event.message||'unknown error'}`, 'error');
+  if(event.type==='bridge_diagnostic') { if(debug) await notify(ctx, `Villani diagnostic: ${event.message||event.error||'diagnostic'}`, 'info'); return; }
+  if(event.type==='run_started') await notify(ctx, 'Villani run started.', 'info');
+  else if(event.type==='model_request_started') await setStatus(ctx, 'Villani is thinking...');
+  else if(event.type==='model_request_completed') await setStatus(ctx, 'Villani received model response');
+  else if(event.type==='model_request_failed') await notify(ctx, `Villani model request failed: ${event.error||event.message||'unknown error'}`, 'error');
+  else if(event.type==='tool_started') {
+    if(tool==='Bash') await setStatus(ctx, 'Villani running command');
+    await notify(ctx, `Villani tool started: ${tool}${command?` — ${command}`:''}`, 'info');
+  }
+  else if(event.type==='tool_progress') { const msg=`Villani: ${String(event.message||'tool progress').slice(0,500)}`; await setStatus(ctx, msg); await notify(ctx, msg, 'info'); }
+  else if(event.type==='tool_finished') {
+    if(tool==='Bash') await setStatus(ctx, 'Command finished');
+    await notify(ctx, `Villani tool finished: ${tool}${summary?` — ${summary}`:''}`, event.ok===false||event.is_error?'warn':'info');
+  }
+  else if(event.type==='stream_text') { const text=String(event.text||'').trim().slice(0,240); const now=Date.now(); if(text&&now-lastStreamAt>1000){lastStreamAt=now; await setStatus(ctx, `Villani: ${text}`);} }
+  else if(event.type==='error') await notify(ctx, `Villani error: ${event.error||event.message||'unknown error'}`, 'error');
 }
