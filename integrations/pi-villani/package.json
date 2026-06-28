@@ -30,16 +30,16 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "0.80.2",
     "@earendil-works/pi-coding-agent": "0.80.2",
-    "typescript": "5.9.2",
+    "@types/adm-zip": "0.5.7",
     "@types/node": "24.3.0",
-    "@types/adm-zip": "0.5.7"
+    "typescript": "5.9.2"
   },
   "dependencies": {
     "adm-zip": "0.5.16",
     "tar": "7.4.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "0.80.2",
-    "@earendil-works/pi-coding-agent": "0.80.2"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   }
 }
