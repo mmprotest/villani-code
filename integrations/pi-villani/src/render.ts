@@ -57,16 +57,29 @@ export async function renderBridgeEvent(event:any, _pi:any, ctx:any): Promise<vo
   if(event.type==='run_started') await notify(ctx, 'Villani run started.', 'info');
   else if(event.type==='model_request_started') await setStatus(ctx, 'Villani is thinking...');
   else if(event.type==='model_request_completed') await setStatus(ctx, 'Villani received model response');
+  else if(event.type==='proxy_request_started') await setStatus(ctx, 'Villani is sending request to Pi model...');
+  else if(event.type==='proxy_request_completed') await setStatus(ctx, 'Villani received model response');
+  else if(event.type==='proxy_request_failed') await setStatus(ctx, 'Villani Pi model request failed');
   else if(event.type==='model_request_failed') await notify(ctx, `Villani model request failed: ${event.error||event.message||'unknown error'}`, 'error');
   else if(event.type==='tool_started') {
-    if(tool==='Bash') await setStatus(ctx, 'Villani running command');
+    if(tool==='Bash') await setStatus(ctx, 'Villani preparing command...');
     await notify(ctx, `Villani tool started: ${tool}${command?` — ${command}`:''}`, 'info');
   }
+  else if(event.type==='command_started') { await setStatus(ctx, 'Villani running command'); await setWidget(ctx, ['Running command:', command]); }
+  else if(event.type==='command_finished') {
+    await setStatus(ctx, 'Command finished');
+    const lines=[`Command finished: exit ${event.exit_code ?? 'unknown'}`];
+    if(event.stderr_preview) lines.push(`stderr: ${String(event.stderr_preview).slice(0,500)}`);
+    if(event.stdout_preview) lines.push(`stdout: ${String(event.stdout_preview).slice(0,500)}`);
+    await setWidget(ctx, lines.join('\n'));
+  }
+  else if(event.type==='tool_result') await setStatus(ctx, 'Villani produced tool result for runner');
   else if(event.type==='tool_progress') { const msg=`Villani: ${String(event.message||'tool progress').slice(0,500)}`; await setStatus(ctx, msg); await notify(ctx, msg, 'info'); }
   else if(event.type==='tool_finished') {
-    if(tool==='Bash') await setStatus(ctx, 'Command finished');
+    await setStatus(ctx, 'Villani finished tool handling');
     await notify(ctx, `Villani tool finished: ${tool}${summary?` — ${summary}`:''}`, event.ok===false||event.is_error?'warn':'info');
   }
+  else if(event.type==='runner_heartbeat') await setStatus(ctx, `Villani is still running. Last runner event: ${String(event.last_event_type||'unknown')}.`);
   else if(event.type==='stream_text') { const text=String(event.text||'').trim().slice(0,240); const now=Date.now(); if(text&&now-lastStreamAt>1000){lastStreamAt=now; await setStatus(ctx, `Villani: ${text}`);} }
   else if(event.type==='error') await notify(ctx, `Villani error: ${event.error||event.message||'unknown error'}`, 'error');
 }

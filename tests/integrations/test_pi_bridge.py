@@ -190,14 +190,14 @@ def test_approval_required_shape_and_bash_input_command(tmp_path):
 def test_map_runner_event_maps_tool_result_and_command_lifecycle():
     from villani_code.integrations.pi_bridge import map_runner_event
     finished=map_runner_event('r', {'type':'tool_result','name':'Bash','input':{'command':'echo hi'},'is_error':False,'result':{'exit_code':0,'stdout':'hello'}})
-    assert finished[0]['type']=='tool_finished'
+    assert finished[0]['type']=='tool_result'
     assert finished[0]['tool']=='Bash'
     assert finished[0]['ok'] is True
     assert 'Bash finished: exit 0' in finished[0]['summary']
-    progress=map_runner_event('r', {'type':'command_started','command':'sleep 1'})
-    assert progress==[{'type':'tool_progress','id':'r','tool':'Bash','message':'Running command: sleep 1'}]
-    done=map_runner_event('r', {'type':'command_finished','exit_code':1})
-    assert done==[{'type':'tool_finished','id':'r','tool':'Bash','ok':False,'is_error':True,'summary':'Command finished: exit 1'}]
+    progress=map_runner_event('r', {'type':'command_started','command':'sleep 1','cwd':'/tmp'})
+    assert progress==[{'type':'command_started','id':'r','tool':'Bash','command':'sleep 1','cwd':'/tmp'}]
+    done=map_runner_event('r', {'type':'command_finished','command':'false','exit_code':1,'stderr':'bad'})
+    assert done==[{'type':'command_finished','id':'r','tool':'Bash','command':'false','exit_code':1,'stdout_preview':'','stderr_preview':'bad','truncated':False}]
 
 def test_bash_tool_result_summary_truncates_output():
     from villani_code.integrations.pi_bridge import map_runner_event
@@ -205,3 +205,32 @@ def test_bash_tool_result_summary_truncates_output():
     ev=map_runner_event('r', {'type':'tool_result','name':'Bash','input':{'command':'pytest'},'result':{'exit_code':1,'stdout':long,'stderr':long}})[0]
     assert len(ev['summary']) < 1200
     assert 'output truncated' in ev['summary']
+
+
+def test_nonzero_bash_events_do_not_map_to_run_failed():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    command = map_runner_event('r', {'type':'command_finished','command':'false','exit_code':255})
+    result = map_runner_event('r', {'type':'tool_result','name':'Bash','is_error':False,'result':{'exit_code':255}})
+    assert all(e['type'] != 'run_failed' for e in command + result)
+    assert command[0]['type'] == 'command_finished'
+    assert result[0]['type'] == 'tool_result'
+    assert result[0]['is_error'] is False
+
+def test_runner_heartbeat_is_emitted_after_idle_active_run(monkeypatch):
+    from villani_code.integrations import pi_bridge as mod
+    b,out,_,_=make_bridge()
+    ar=mod.ActiveRun(type('Cmd',(),{'id':'r-heart'})())
+    ar.last_runner_event_type='tool_result'
+    ar.last_runner_event_at=0
+    ar.heartbeat_due_at=0
+    ar.thread=type('T',(),{'is_alive':lambda self: True})()
+    b._active['r-heart']=ar
+    b._stdio_running=True
+    monkeypatch.setattr(mod.time, 'monotonic', lambda: 16)
+    b._drain_events()
+    ev=events(out)[0]
+    assert ev['type']=='runner_heartbeat'
+    assert ev['id']=='r-heart'
+    assert ev['last_event_type']=='tool_result'
+    assert ev['seconds_since_last_event']==16
+    assert ev['worker_alive'] is True

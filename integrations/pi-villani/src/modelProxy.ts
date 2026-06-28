@@ -16,7 +16,7 @@ export async function resolvePiComplete(importer:PiCompleteResolver=(name)=>impo
 
 type Usage={input:number;output:number;totalTokens?:number};
 type AssistantMessage={role?:'assistant';content?:any[];responseId?:string;timestamp:number;responseModel?:string;model?:string;usage?:Usage;stopReason?:'stop'|'toolUse'|'length'|'error'|'aborted'|string;errorMessage?:string};
-export interface PiModelProxyOptions { model:any; apiKey?:string; headers?:Record<string,string>; signal?:AbortSignal; timeoutMs?:number; completeFn?:any; completeSource?:string; completeImporter?:PiCompleteResolver; pi?:any; }
+export interface PiModelProxyOptions { model:any; apiKey?:string; headers?:Record<string,string>; signal?:AbortSignal; timeoutMs?:number; completeFn?:any; completeSource?:string; completeImporter?:PiCompleteResolver; pi?:any; onEvent?:(event:any)=>void; }
 export class UpstreamModelError extends Error{constructor(message:string){super(message);this.name='UpstreamModelError';}}
 export class AbortRequestError extends Error{constructor(message='Pi model request aborted'){super(message);this.name='AbortRequestError';}}
 export function abortError(){return new AbortRequestError();}
@@ -57,20 +57,22 @@ export class PiModelProxy { private server?:http.Server; completionSource?:strin
   private async handle(req:http.IncomingMessage,res:http.ServerResponse){if(req.method!=='POST'||(req.url||'').split('?')[0]!=='/v1/chat/completions'){res.writeHead(404).end();return;} debug('POST /v1/chat/completions'); try{const body=await new Promise<string>((resolve,reject)=>{let b=''; req.on('data',d=>b+=d); req.on('end',()=>resolve(b)); req.on('error',reject);}); const payload=JSON.parse(body||'{}'); const context=openAIChatToPiContext(payload); const assistant=normalizeAssistant(await this.complete(context,payload),payload,this.options.model); if(payload.stream) writeOpenAIStream(res,assistant); else writeJson(res,200,piAssistantToOpenAIResponse(assistant));}catch(e){debug(`Pi complete failed: ${sanitizeErrorMessage(e)}`); writeProxyError(res,e);}}
   private async complete(context:any,payload:any){
     debug('calling Pi complete');
+    this.options.onEvent?.({type:'proxy_request_started'});
+    const completeSafely=async (fn:Function, receiver:any, args:any[])=>{try{const r=await fn.apply(receiver,args); this.options.onEvent?.({type:'proxy_request_completed'}); return r;}catch(e){this.options.onEvent?.({type:'proxy_request_failed', error:sanitizeErrorMessage(e)}); throw e;}};
     const opts={apiKey:this.options.apiKey,headers:this.options.headers,maxTokens:payload.max_tokens,temperature:payload.temperature,signal:this.options.signal,timeoutMs:this.options.timeoutMs};
     let completeFn=this.options.completeFn;
     if(typeof completeFn==='function'){
       this.completionSource=this.options.completeSource??'injected:completeFn';
-      const r=await completeFn(this.options.model,context,opts); debug('Pi complete returned'); return r;
+      const r=await completeSafely(completeFn, undefined, [this.options.model,context,opts]); debug('Pi complete returned'); return r;
     }
     let resolveError:unknown;
     try{const resolved=await resolvePiComplete(this.options.completeImporter); completeFn=resolved.fn; this.completionSource=resolved.source;}catch(e){resolveError=e;}
-    if(typeof completeFn==='function'){const r=await completeFn(this.options.model,context,opts); debug('Pi complete returned'); return r;}
+    if(typeof completeFn==='function'){const r=await completeSafely(completeFn, undefined, [this.options.model,context,opts]); debug('Pi complete returned'); return r;}
     debug(`Pi completion helper unavailable: ${sanitizeErrorMessage(resolveError)}`);
     const model=this.options.model;
     const fallbacks:[string,any][]=[['model.api.streamSimple',model?.api?.streamSimple],['model.complete',model?.complete],['ctx.pi.complete',this.options.pi?.complete]];
-    for(const [source,fn] of fallbacks){if(typeof fn!=='function') continue; this.completionSource=source; const r=await fn.call(source==='ctx.pi.complete'?this.options.pi:(source==='model.complete'?model:model?.api),model,context,opts); debug(`${source} returned`); return r;}
-    throw new Error('Active Pi model cannot be proxied: no supported completion API found.');
+    for(const [source,fn] of fallbacks){if(typeof fn!=='function') continue; this.completionSource=source; const receiver=source==='ctx.pi.complete'?this.options.pi:(source==='model.complete'?model:model?.api); const r=await completeSafely(fn, receiver, [model,context,opts]); debug(`${source} returned`); return r;}
+    { const error=new Error('Active Pi model cannot be proxied: no supported completion API found.'); this.options.onEvent?.({type:'proxy_request_failed', error:sanitizeErrorMessage(error)}); throw error; }
   }
 }
 export async function startModelProxyFromPiModel(options:PiModelProxyOptions){const p=new PiModelProxy(options); const url=await p.start(); return {url,close:()=>p.stop(),proxy:p,get completionSource(){return p.completionSource;}};}
