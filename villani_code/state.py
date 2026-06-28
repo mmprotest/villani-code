@@ -491,6 +491,7 @@ class Runner:
         provider: str | None = None,
         memory_enabled: bool = False,
         memory_update_interval_tool_calls: int = 5,
+        external_approval_mode: bool = False,
     ):
         self.client = client
         self.repo = repo
@@ -507,6 +508,7 @@ class Runner:
         self.bypass_permissions = bypass_permissions
         self.auto_accept_edits = auto_accept_edits
         self.auto_approve = auto_approve
+        self.external_approval_mode = external_approval_mode
         self.plan_mode = plan_mode
         self.max_repair_attempts = max_repair_attempts
         self.approval_callback = approval_callback or (lambda _n, _i: True)

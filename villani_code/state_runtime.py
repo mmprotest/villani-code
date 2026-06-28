@@ -1306,7 +1306,7 @@ def ensure_project_memory_and_plan(runner: Any, instruction: str) -> None:
         update_session_state(runner.repo, session)
         return
 
-    if runner.villani_mode:
+    if runner.villani_mode or getattr(runner, "external_approval_mode", False):
         runner.event_callback({"type": "plan_auto_approved", "risk": plan.risk_level.value})
         update_session_state(runner.repo, session)
         return

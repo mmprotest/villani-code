@@ -1,0 +1,51 @@
+name: Build Pi Villani Runtime Release
+on:
+  workflow_dispatch:
+  push:
+    tags: ["pi-villani-runtime-v*"]
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - key: win32-x64
+            os: windows-latest
+            ext: zip
+          - key: darwin-arm64
+            os: macos-14
+            ext: tar.gz
+          - key: darwin-x64
+            os: macos-13
+            ext: tar.gz
+          - key: linux-x64
+            os: ubuntu-latest
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m pip install -e . pyinstaller
+      - run: pyinstaller packaging/villani_runtime.spec --distpath dist-runtime/villani-code
+      - run: python packaging/smoke_test_runtime.py dist-runtime/villani-code/villani-code${{ runner.os == 'Windows' && '.exe' || '' }}
+      - shell: bash
+        run: |
+          name="villani-runtime-v0.1.0-${{ matrix.key }}.${{ matrix.ext }}"
+          cd dist-runtime
+          if [[ "${{ matrix.ext }}" == "zip" ]]; then 7z a ../$name villani-code; else tar -czf ../$name villani-code; fi
+          cd ..
+          shasum -a 256 "$name" > "${name}.sha256"
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-${{ matrix.key }}, path: "villani-runtime-v0.1.0-${{ matrix.key }}.${{ matrix.ext }}*"}
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {path: artifacts}
+      - run: find artifacts -name '*.sha256' -exec cat {} \; > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/villani-runtime-v0.1.0-*
+            checksums.txt

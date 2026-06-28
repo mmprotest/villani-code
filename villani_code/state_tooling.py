@@ -518,7 +518,13 @@ def execute_tool_with_policy(
     if policy.decision == Decision.DENY:
         return {"content": "Denied by permission policy", "is_error": True}
     if policy.decision == Decision.ASK:
-        if getattr(runner, "auto_approve", False):
+        if getattr(runner, "external_approval_mode", False):
+            runner.event_callback({"type": "approval_required", "name": tool_name, "input": tool_input})
+            approved = runner.approval_callback(tool_name, tool_input)
+            runner.event_callback({"type": "approval_resolved", "name": tool_name, "input": tool_input, "approved": approved})
+            if not approved:
+                return {"content": "User denied tool execution", "is_error": True}
+        elif getattr(runner, "auto_approve", False):
             runner.event_callback(
                 {
                     "type": "approval_auto_resolved",
