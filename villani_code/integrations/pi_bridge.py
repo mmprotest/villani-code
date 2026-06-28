@@ -99,12 +99,15 @@ class PiBridge:
             try: self.handle(parse_json_line(line))
             except Exception as exc: self.emit({'type':'error','error':str(exc)})
     def handle(self,p):
-        t=p.get('type')
-        if t=='ping': self.emit({'type':'pong','id':p.get('id')}); return
-        if t=='run': self.start_run(parse_run_command(p)); return
-        if t=='abort': self.abort(str(p.get('id',''))); return
-        if t=='approval_response': self.approval(parse_approval_response_command(p)); return
-        self.emit({'type':'error','error':f'Unknown bridge command type: {t}'})
+        try:
+            t=p.get('type')
+            if t=='ping': self.emit({'type':'pong','id':p.get('id')}); return
+            if t=='run': self.start_run(parse_run_command(p)); return
+            if t=='abort': self.abort(str(p.get('id',''))); return
+            if t=='approval_response': self.approval(parse_approval_response_command(p)); return
+            self.emit({'type':'error','error':f'Unknown bridge command type: {t}'})
+        except Exception as exc:
+            self.emit({'type':'error','error':str(exc)})
     def start_run(self,cmd):
         with self.lock:
             if cmd.id in self.runs: self.emit({'type':'error','id':cmd.id,'error':'Duplicate active run id'}); return

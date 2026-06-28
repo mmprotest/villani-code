@@ -2,7 +2,7 @@
 block_cipher = None
 
 a = Analysis(
-    ['villani_code/cli.py'],
+    ['packaging/villani_runtime_entry.py'],
     pathex=[],
     binaries=[],
     datas=[],
