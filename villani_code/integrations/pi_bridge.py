@@ -117,7 +117,13 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
     elif t=='validation_step_started': out.append({'type':'verification_started','id':run_id,'name':event.get('name')})
     elif t in {'validation_step_finished','validation_completed'}: out.append({'type':'verification_finished','id':run_id,'passed':event.get('passed')})
     elif t in {'command_wandering_detected','progress_governor_redirected','governor_redirect'}: out.append({'type':'governor_redirect','id':run_id,'reason':event.get('reason')})
-    elif t=='stream_text': out.append({'type':'stream_text','id':run_id,'text':_cap(event.get('text',''),240)})
+    elif t in {'stream_text','assistant_text','model_text'}:
+        text=event.get('text') if isinstance(event.get('text'),str) else event.get('content')
+        extracted=text if isinstance(text,str) else _extract_text_blocks(text)
+        if isinstance(extracted,str) and extracted.strip(): out.append({'type':'stream_text','id':run_id,'text':_cap(extracted.strip(),240)})
+    elif t in {'assistant_message','assistant_response','model_response','response_completed'}:
+        text=_extract_text_blocks(event.get('content'))
+        if text: out.append({'type':'stream_text','id':run_id,'text':_cap(text,240)})
     return out
 
 def _extract_text_blocks(value:Any)->str|None:

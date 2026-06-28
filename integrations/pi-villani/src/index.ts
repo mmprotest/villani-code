@@ -112,8 +112,8 @@ async function handleApproval(run: ActiveRun, ctx: any, e: any) {
   let approved = false;
   const message = approvalMessage(e);
   try {
-    await setStatus(ctx, `Villani awaiting approval: ${tool}`);
-    await setWidget(ctx, ["Villani is awaiting approval", message]);
+    await setStatus(ctx, "Waiting for approval...");
+    await setWidget(ctx, ["Pending approval", message]);
     approved = await confirm(ctx, approvalTitle(e), message, {
       signal: run.abort.signal,
     });
@@ -129,13 +129,10 @@ async function handleApproval(run: ActiveRun, ctx: any, e: any) {
   }
   if (run.pending.get(requestId) !== false) return;
   run.pending.set(requestId, true);
-  await setStatus(
-    ctx,
-    approved ? "Villani approval accepted" : "Villani approval denied",
-  );
+  await setStatus(ctx, "Villani is thinking...");
   run.bridge?.respondToApproval(run.id, requestId, approved);
   if (process.env.VILLANI_PI_DEBUG === "1")
-    await notify(ctx, "Villani diagnostic: approval response sent", "info");
+    console.error("[pi-villani bridge] approval response sent");
 }
 function denyPending(run: ActiveRun) {
   for (const [id, done] of run.pending) {
@@ -324,11 +321,7 @@ export async function runVillani(
         try {
           bridge.send({ type: "ping", id: `${runId}-post-tool-ping` });
           const pong = await bridge.waitForEvent("pong", 3000, abort.signal);
-          if (pong)
-            await setStatus(
-              ctx,
-              `Villani is still running. Last event: ${eventType}. Bridge is alive.`,
-            );
+          if (pong) await setStatus(ctx, "Villani is thinking...");
           else
             await notify(
               ctx,
@@ -449,10 +442,10 @@ export async function runVillani(
       await setStatus(
         ctx,
         final.type === "run_completed"
-          ? "Villani completed"
+          ? "Completed"
           : final.type === "run_aborted"
-            ? "Villani aborted"
-            : "Villani failed",
+            ? "Failed"
+            : "Failed",
       );
       await sendDurableVillaniMessage(pi, ctx, finalMessage(final), final);
     }

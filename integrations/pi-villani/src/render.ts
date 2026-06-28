@@ -3,11 +3,53 @@ export type VillaniUiState = {
   lastCommand?: string;
   lastCommandExitCode?: number;
   lastCommandPreview?: string;
+  lastAssistantText?: string;
   finalSummary?: string;
   changedFiles?: string[];
   transcriptPath?: string;
   lastEventAt?: number;
 };
+
+const USER_FACING_EVENT_TYPES = new Set([
+  "stream_text",
+  "tool_started",
+  "command_started",
+  "command_finished",
+  "approval_required",
+  "approval_resolved",
+  "run_completed",
+  "run_failed",
+  "run_aborted",
+  "model_request_started",
+  "model_request_completed",
+  "model_request_failed",
+  "proxy_request_started",
+  "proxy_request_completed",
+  "proxy_request_failed",
+]);
+
+export function shouldRenderUserFacingEvent(event: any): boolean {
+  if (!event || typeof event !== "object") return false;
+  const type = String(event.type || "");
+  if (!USER_FACING_EVENT_TYPES.has(type)) return false;
+  if (
+    type === "bridge_diagnostic" ||
+    type === "runner_heartbeat" ||
+    type === "pong"
+  )
+    return false;
+  const text = `${event.message || ""} ${event.text || ""}`;
+  if (/bridge heartbeat pong|event received|tool_result mapped/i.test(text))
+    return false;
+  return true;
+}
+
+export function cleanAssistantText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/\r\n/g, "\n").trim();
+  if (!text) return null;
+  return text;
+}
 
 export async function notify(
   ctx: any,
@@ -158,10 +200,23 @@ export function finalMessage(event: any) {
 function preview(event: any) {
   const parts = [];
   if (event.stderr_preview)
-    parts.push(`stderr: ${String(event.stderr_preview).slice(0, 500)}`);
-  if (event.stdout_preview)
-    parts.push(`stdout: ${String(event.stdout_preview).slice(0, 500)}`);
+    parts.push(`stderr:\n${String(event.stderr_preview).slice(0, 500)}`);
+  if (!event.stderr_preview && event.stdout_preview)
+    parts.push(`output:\n${String(event.stdout_preview).slice(0, 500)}`);
   return parts.join("\n");
+}
+function toolStartedMessage(event: any): string {
+  const tool = String(event.tool || event.name || "tool");
+  const input = event.input && typeof event.input === "object" ? event.input : {};
+  const path = event.path || input.path || input.file_path || event.file_path;
+  if (tool === "GitStatus") return "Checking repository status";
+  if (tool === "GitDiff") return "Reading current changes";
+  if (tool === "GitLog") return "Reading git history";
+  if (tool === "Read") return `Reading file: ${path || "unknown"}`;
+  if (tool === "Write") return `Writing file: ${path || "unknown"}`;
+  if (tool === "Patch") return `Applying patch: ${path || "unknown"}`;
+  if (tool === "Bash") return "Preparing command";
+  return "Villani is working...";
 }
 export function reduceVillaniUiState(
   state: VillaniUiState,
@@ -169,43 +224,45 @@ export function reduceVillaniUiState(
 ): VillaniUiState {
   const next = { ...state, lastEventAt: Date.now() };
   if (event.type === "run_started") next.phase = "Starting Villani...";
-  else if (
-    event.type === "model_request_started" ||
-    event.type === "proxy_request_started"
-  )
+  else if (event.type === "model_request_started") {
     next.phase = "Villani is thinking...";
-  else if (
-    event.type === "model_request_completed" ||
-    event.type === "proxy_request_completed"
-  )
-    next.phase = "Checking result";
-  else if (event.type === "approval_required")
-    next.phase = "Villani wants approval";
+    next.lastCommand = undefined;
+    next.lastCommandExitCode = undefined;
+    next.lastCommandPreview = undefined;
+  } else if (event.type === "proxy_request_started")
+    next.phase = "Villani is thinking...";
+  else if (event.type === "model_request_completed")
+    next.phase = "Villani is thinking...";
+  else if (event.type === "proxy_request_completed")
+    next.phase = "Villani is thinking...";
+  else if (event.type === "approval_required") next.phase = "Waiting for approval...";
+  else if (event.type === "approval_resolved") next.phase = "Villani is thinking...";
+  else if (event.type === "tool_started") {
+    const tool = String(event.tool || event.name || "");
+    next.phase =
+      tool === "Read" || tool.startsWith("Git")
+        ? "Reading files..."
+        : tool === "Patch" || tool === "Write"
+          ? "Applying changes..."
+          : tool === "Bash"
+            ? "Running command..."
+            : "Villani is thinking...";
+  }
   else if (event.type === "command_started") {
-    next.phase = "Running command";
+    next.phase = "Running command...";
     next.lastCommand = String(event.command || "").slice(0, 500);
     next.lastCommandExitCode = undefined;
     next.lastCommandPreview = undefined;
   } else if (event.type === "command_finished") {
-    next.phase = "Command finished";
+    next.phase = "Finished command";
     next.lastCommand = String(event.command || next.lastCommand || "").slice(
       0,
       500,
     );
     next.lastCommandExitCode = event.exit_code;
     next.lastCommandPreview = preview(event);
-  } else if (event.type === "tool_result" || event.type === "tool_finished") {
-    next.phase =
-      event.tool === "Bash" ? "Command finished" : "Applying changes";
-  } else if (event.type === "workspace_changed") {
-    next.phase = "Applying changes";
-    if (event.path)
-      next.changedFiles = visibleChangedFiles([
-        ...(next.changedFiles || []),
-        String(event.path),
-      ]);
   } else if (event.type === "verification_started")
-    next.phase = "Checking result";
+    next.phase = "Villani is thinking...";
   else if (event.type === "run_completed") {
     next.phase = "Completed";
     next.finalSummary = event.summary;
@@ -225,9 +282,9 @@ export function reduceVillaniUiState(
   return next;
 }
 export function widgetForState(state: VillaniUiState): any {
-  if (state.phase === "Running command")
+  if (state.phase === "Running command...")
     return ["Running command:", state.lastCommand || ""];
-  if (state.phase === "Command finished")
+  if (state.phase === "Finished command")
     return [
       `Command finished: exit ${state.lastCommandExitCode ?? "unknown"}`,
       state.lastCommandPreview || "",
@@ -244,14 +301,35 @@ export async function renderState(ctx: any, state: VillaniUiState) {
   await setWidget(ctx, widgetForState(state));
 }
 let state: VillaniUiState = { phase: "Starting Villani..." };
-let lastStreamAt = 0;
 export async function renderBridgeEvent(
   event: any,
   _pi: any,
   ctx: any,
 ): Promise<void> {
   const debug = process.env.VILLANI_PI_DEBUG === "1";
-  if (event.type === "approval_required") return;
+  if (!shouldRenderUserFacingEvent(event)) {
+    if (
+      debug &&
+      event?.type === "bridge_diagnostic" &&
+      !/heartbeat pong/i.test(String(event.message || ""))
+    )
+      console.error(
+        `[pi-villani bridge] ${event.message || event.error || "diagnostic"}`,
+      );
+    return;
+  }
+  if (event.type === "approval_required") {
+    state = reduceVillaniUiState(state, event);
+    await setStatus(ctx, state.phase);
+    await setWidget(ctx, ["Pending approval", event.summary || event.message || ""]);
+    return;
+  }
+  if (event.type === "approval_resolved") {
+    state = reduceVillaniUiState(state, event);
+    await setStatus(ctx, state.phase);
+    await setWidget(ctx, undefined);
+    return;
+  }
   if (event.type === "bridge_diagnostic") {
     if (debug && !/heartbeat pong/i.test(String(event.message || "")))
       console.error(
@@ -264,8 +342,11 @@ export async function renderBridgeEvent(
     event.type === "run_completed" ||
     event.type === "run_failed" ||
     event.type === "run_aborted"
-  )
+  ) {
+    state = reduceVillaniUiState(state, event);
+    await renderState(ctx, state);
     return;
+  }
   if (event.type === "error") {
     await notify(
       ctx,
@@ -286,20 +367,39 @@ export async function renderBridgeEvent(
     );
     return;
   }
-  if (event.type === "tool_progress") {
-    const msg = `Villani: ${String(event.message || "tool progress").slice(0, 500)}`;
-    await setStatus(ctx, msg);
+  if (event.type === "stream_text") {
+    const text = cleanAssistantText(event.text ?? event.content);
+    if (text && text !== state.lastAssistantText) {
+      state = { ...state, lastAssistantText: text, lastEventAt: Date.now() };
+      await notify(ctx, text, "info");
+    }
     return;
   }
-  if (event.type === "stream_text") {
-    const text = String(event.text || "")
-      .trim()
-      .slice(0, 240);
-    const now = Date.now();
-    if (text && now - lastStreamAt > 1000) {
-      lastStreamAt = now;
-      await setStatus(ctx, `Villani: ${text}`);
-    }
+  if (event.type === "tool_started") {
+    state = reduceVillaniUiState(state, event);
+    await setStatus(ctx, state.phase);
+    await notify(ctx, toolStartedMessage(event), "info");
+    await setWidget(ctx, widgetForState(state));
+    return;
+  }
+  if (event.type === "command_started") {
+    state = reduceVillaniUiState(state, event);
+    await setStatus(ctx, state.phase);
+    await notify(ctx, `Running command:\n${state.lastCommand || ""}`, "info");
+    await setWidget(ctx, widgetForState(state));
+    return;
+  }
+  if (event.type === "command_finished") {
+    state = reduceVillaniUiState(state, event);
+    const msg = [
+      `Command finished: exit ${state.lastCommandExitCode ?? "unknown"}`,
+      state.lastCommandPreview || "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    await setStatus(ctx, state.phase);
+    await notify(ctx, msg, "info");
+    await setWidget(ctx, widgetForState(state));
     return;
   }
   state = reduceVillaniUiState(state, event);
