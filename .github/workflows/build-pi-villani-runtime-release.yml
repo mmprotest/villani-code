@@ -1,4 +1,6 @@
 name: Build Pi Villani Runtime Release
+permissions:
+  contents: write
 on:
   workflow_dispatch:
   push:
