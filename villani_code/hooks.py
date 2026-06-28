@@ -39,6 +39,8 @@ class HookRunner:
     def _run_shell(self, command: str, payload: dict[str, Any]) -> HookResult:
         proc = subprocess.run(
             command,
+            # Hooks intentionally receive the payload on stdin; this uses a private pipe,
+            # not the bridge JSONL stdin.
             input=json.dumps(payload),
             capture_output=True,
             text=True,

@@ -315,7 +315,7 @@ def run_validation(repo: Path, changed_files: list[str], event_callback: Any | N
         if event_callback:
             event_callback({"type": "validation_step_started", "name": step.name, "command": command, "reasons": planned_step.reasons})
         started = time.monotonic()
-        proc = subprocess.run(command, shell=True, cwd=repo, text=True, capture_output=True)
+        proc = subprocess.run(command, shell=True, cwd=repo, text=True, capture_output=True, stdin=subprocess.DEVNULL)
         result = ValidationStepResult(step, command, proc.returncode, proc.stdout, proc.stderr, time.monotonic() - started, planned_step.reasons)
         results.append(result)
         if event_callback:
