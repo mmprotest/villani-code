@@ -1,9 +1,21 @@
 import http from 'node:http';
-import * as PiAI from '@earendil-works/pi-ai';
-const complete = (PiAI as any).complete;
 import type { OpenAIMessage } from './protocol.js';
 
-export interface PiModelProxyOptions { model:any; apiKey?:string; headers?:Record<string,string>; signal?:AbortSignal; timeoutMs?:number; completeFn?:any; }
+
+export type PiCompleteResolver = (name:string)=>Promise<any>;
+export async function resolvePiComplete(importer:PiCompleteResolver=(name)=>import(name)):Promise<{fn:any;source:string}>{
+  const candidates=['@earendil-works/pi-ai','@earendil-works/pi-ai/compat'];
+  for(const name of candidates){
+    try{
+      const mod=await importer(name);
+      const options:[string,any][]=[['complete',(mod as any).complete],['default.complete',(mod as any).default?.complete],['compat.complete',(mod as any).compat?.complete]];
+      for(const [exportName,fn] of options) if(typeof fn==='function') return {fn,source:`${name}:${exportName}`};
+    }catch{ /* try next candidate */ }
+  }
+  throw new Error('No compatible Pi completion helper found in @earendil-works/pi-ai or @earendil-works/pi-ai/compat.');
+}
+
+export interface PiModelProxyOptions { model:any; apiKey?:string; headers?:Record<string,string>; signal?:AbortSignal; timeoutMs?:number; completeFn?:any; completeSource?:string; completeImporter?:PiCompleteResolver; pi?:any; }
 export function zeroUsage(){return {prompt_tokens:0,completion_tokens:0,total_tokens:0};}
 export function sanitizeError(e:unknown){return String((e as Error)?.message||e).replace(/Bearer\s+\S+/ig,'Bearer [redacted]').replace(/sk-[A-Za-z0-9_-]+/g,'[redacted]').replace(/(OPENAI_API_KEY|ANTHROPIC_API_KEY|VILLANI_API_KEY)=[^\s]+/ig,'$1=[redacted]').replace(/(authorization|api[-_]?key|x-api-key)["':= ]+[^,}\s]+/ig,'$1=[redacted]');}
 function debug(message:string){if(process.env.VILLANI_PI_DEBUG==='1') console.error(`[pi-villani proxy] ${message}`);}
@@ -21,12 +33,40 @@ function usage(r:any){const u=r?.usage??{}; const p=u.prompt_tokens??u.promptTok
 function finishReason(a:any){if(a.stopReason==='toolUse')return 'tool_calls'; if(a.stopReason==='length')return 'length'; if(a.stopReason==='stop')return 'stop'; return a.tool_calls.length?'tool_calls':'stop';}
 function throwForStopReason(a:any){if(a.stopReason==='error') throw new Error('Pi completion stopped with error.'); if(a.stopReason==='aborted'){const e=new Error('Pi completion aborted.'); (e as any).name='AbortError'; throw e;}}
 
-export class PiModelProxy { private server?:http.Server; constructor(private readonly options:PiModelProxyOptions){}
+export class PiModelProxy { private server?:http.Server; completionSource?:string; constructor(private readonly options:PiModelProxyOptions){this.completionSource=options.completeSource;}
   async start():Promise<string>{this.server=http.createServer((req,res)=>void this.handle(req,res)); if(this.options.signal) this.options.signal.addEventListener('abort',()=>void this.stop(),{once:true}); await new Promise<void>(r=>this.server!.listen(0,'127.0.0.1',r)); const addr=this.server.address(); if(!addr||typeof addr==='string') throw new Error('Proxy bind failed'); const url=`http://127.0.0.1:${addr.port}`; debug(`listening on ${url}`); return url;}
   async stop():Promise<void>{const s=this.server; if(!s)return; this.server=undefined; await new Promise<void>(r=>s.close(()=>r()));}
   private async handle(req:http.IncomingMessage,res:http.ServerResponse){if(req.method!=='POST'||(req.url||'').split('?')[0]!=='/v1/chat/completions'){res.writeHead(404).end();return;} debug('POST /v1/chat/completions'); try{const body=await new Promise<string>((resolve,reject)=>{let b=''; req.on('data',d=>b+=d); req.on('end',()=>resolve(b)); req.on('error',reject);}); const payload=JSON.parse(body||'{}'); const context=toPiContext(payload.messages||[],payload.tools); const raw=await this.complete(context,payload); const a=assistantFromPi(raw); throwForStopReason(a); const msg:any={role:'assistant',content:a.text}; if(a.tool_calls.length) msg.tool_calls=a.tool_calls; const base:any={id:'pi-villani',created:Math.floor(Date.now()/1000),model:payload.model||this.options.model?.id||'pi-current-model'}; const choice={index:0,finish_reason:finishReason(a)}; if(payload.stream){res.writeHead(200,{'content-type':'text/event-stream'}); res.write(`data: ${JSON.stringify({...base,object:'chat.completion.chunk',choices:[{...choice,delta:msg}]})}\n\n`); res.end('data: [DONE]\n\n');} else {res.writeHead(200,{'content-type':'application/json'}); res.end(JSON.stringify({...base,object:'chat.completion',choices:[{...choice,message:msg}],usage:usage(raw)}));}}catch(e){debug(`Pi complete failed: ${sanitizeError(e)}`); res.writeHead(500,{'content-type':'application/json'}); res.end(JSON.stringify({error:{message:sanitizeError(e),type:'upstream_error',code:'pi_completion_failed'}}));}}
-  private async complete(context:any,payload:any){debug('calling Pi complete'); const completeFn=this.options.completeFn??complete; if(typeof completeFn!=='function') throw new Error('PiAI.complete is unavailable.'); const r=await completeFn(this.options.model,context,{apiKey:this.options.apiKey,headers:this.options.headers,maxTokens:payload.max_tokens,temperature:payload.temperature,signal:this.options.signal,timeoutMs:this.options.timeoutMs}); debug('Pi complete returned'); return r;}
+  private async complete(context:any,payload:any){
+    debug('calling Pi complete');
+    const opts={apiKey:this.options.apiKey,headers:this.options.headers,maxTokens:payload.max_tokens,temperature:payload.temperature,signal:this.options.signal,timeoutMs:this.options.timeoutMs};
+    let completeFn=this.options.completeFn;
+    if(typeof completeFn==='function'){
+      this.completionSource=this.options.completeSource??'injected:completeFn';
+      const r=await completeFn(this.options.model,context,opts); debug('Pi complete returned'); return r;
+    }
+    let resolveError:unknown;
+    try{
+      const resolved=await resolvePiComplete(this.options.completeImporter);
+      completeFn=resolved.fn; this.completionSource=resolved.source;
+    }catch(e){
+      resolveError=e;
+    }
+    if(typeof completeFn==='function'){
+      const r=await completeFn(this.options.model,context,opts); debug('Pi complete returned'); return r;
+    }
+    debug(`Pi completion helper unavailable: ${sanitizeError(resolveError)}`);
+    const model=this.options.model;
+    const fallbacks:[string,any][]=[['model.api.streamSimple',model?.api?.streamSimple],['model.complete',model?.complete],['ctx.pi.complete',this.options.pi?.complete]];
+    for(const [source,fn] of fallbacks){
+      if(typeof fn!=='function') continue;
+      this.completionSource=source;
+      const r=await fn.call(source==='ctx.pi.complete'?this.options.pi:(source==='model.complete'?model:model?.api),model,context,opts);
+      debug(`${source} returned`); return r;
+    }
+    throw new Error('Active Pi model cannot be proxied: no supported completion API found.');
+  }
 }
-export async function startModelProxyFromPiModel(options:PiModelProxyOptions){const p=new PiModelProxy(options); const url=await p.start(); return {url,close:()=>p.stop(),proxy:p};}
+export async function startModelProxyFromPiModel(options:PiModelProxyOptions){const p=new PiModelProxy(options); const url=await p.start(); return {url,close:()=>p.stop(),proxy:p,get completionSource(){return p.completionSource;}};}
 export const startModelProxy=startModelProxyFromPiModel;
 export const _test={toPiContext,assistantFromPi,sanitizeError};
