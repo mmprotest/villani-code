@@ -15,7 +15,7 @@ jobs:
             os: macos-14
             ext: tar.gz
           - key: darwin-x64
-            os: macos-13
+            os: macos-26
             ext: tar.gz
           - key: linux-x64
             os: ubuntu-latest
