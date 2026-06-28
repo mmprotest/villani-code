@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import io, json, subprocess, tempfile, time
+import io, json, os, subprocess, tempfile, time, threading
 from pathlib import Path
 
 from villani_code.execution import ExecutionBudget
@@ -87,3 +87,56 @@ def test_changed_file_attribution_cases(tmp_path):
     for path in ['.villani/a','.villani_code/b','__pycache__/c.pyc','d.pyc']:
         q=tmp_path/path; q.parent.mkdir(parents=True,exist_ok=True); q.write_text('x')
     ch,pre=attributed_changed_files(tmp_path,before,hashes,set()); assert not any(x.startswith(('.villani','.villani_code','__pycache__')) or x.endswith('.pyc') for x in ch+pre)
+
+class BlockingRunner(DummyRunner):
+    def __init__(self, started=None, release=None, approval_callback=None, event_callback=None):
+        super().__init__(approval_callback,event_callback); self.started=started or threading.Event(); self.release=release or threading.Event()
+    def run(self, task, execution_budget=None):
+        self.started.set(); self.release.wait(2); return {'response':'ok','execution':{'completed':True}}
+
+def run_stdio_in_thread(bridge):
+    th=threading.Thread(target=bridge.run_stdio,daemon=True); th.start(); return th
+
+def test_run_stdio_emits_ready():
+    b,out,_,_=make_bridge(); b.stdin=io.StringIO(''); b.run_stdio(); assert events(out)[0]['type']=='ready'
+
+def test_run_stdio_accepts_ping_and_returns_pong_without_stdin_eof():
+    r,w=os.pipe(); inp=os.fdopen(r,'r'); out=io.StringIO(); b=PiBridge(stdin=inp,stdout=out,runner_factory=lambda *a: DummyRunner())
+    th=run_stdio_in_thread(b); wait_for(out,lambda e:e['type']=='ready')
+    os.write(w,b'{"type":"ping","id":"p1"}\n'); wait_for(out,lambda e:e['type']=='pong' and e.get('id')=='p1')
+    assert th.is_alive(); os.close(w); th.join(2)
+
+def test_run_stdio_accepts_run_command_and_emits_run_started(tmp_path):
+    b,out,_,_=make_bridge(); b.stdin=io.StringIO(json.dumps(run_cmd(tmp_path))+"\n"); b.run_stdio(); assert any(e['type']=='run_started' for e in events(out))
+
+def test_run_stdio_keeps_running_after_stdin_closes_while_active_run_is_running(tmp_path):
+    started=threading.Event(); release=threading.Event(); runner=BlockingRunner(started,release)
+    b,out,_,_=make_bridge(runner); b.stdin=io.StringIO(json.dumps(run_cmd(tmp_path))+"\n")
+    th=run_stdio_in_thread(b); wait_for(out,lambda e:e['type']=='run_started'); assert started.wait(1); time.sleep(0.05); assert th.is_alive(); release.set(); th.join(2); assert not th.is_alive()
+
+def test_run_started_is_emitted_before_runner_factory_is_called(tmp_path):
+    out=io.StringIO(); order=[]
+    def factory(cmd,event_callback,approval_callback):
+        order.append([e['type'] for e in events(out)]); return DummyRunner(approval_callback,event_callback)
+    b=PiBridge(stdin=io.StringIO(json.dumps(run_cmd(tmp_path))+"\n"),stdout=out,runner_factory=factory); b.run_stdio()
+    assert 'run_started' in order[0]
+
+def test_bridge_error_before_run_started_is_surfaced_by_stdio_loop():
+    b,out,_,_=make_bridge(); b.stdin=io.StringIO('{"type":"run","id":"r"}\n'); b.run_stdio(); es=events(out); assert es[0]['type']=='ready'; assert any(e['type']=='error' and 'task is required' in e['error'] for e in es)
+
+def test_worker_events_are_drained_from_queue(tmp_path):
+    b,out,_,_=make_bridge(); b.stdin=io.StringIO(json.dumps(run_cmd(tmp_path,'stream'))+"\n"); b.run_stdio(); assert any(e['type']=='run_completed' for e in events(out)); assert b._events.empty()
+
+def test_approval_response_works_through_queued_stdin_command(tmp_path):
+    r,w=os.pipe(); inp=os.fdopen(r,'r'); out=io.StringIO(); b=PiBridge(stdin=inp,stdout=out,runner_factory=lambda *a: DummyRunner(a[2],a[1]))
+    th=run_stdio_in_thread(b); wait_for(out,lambda e:e['type']=='ready')
+    os.write(w,(json.dumps(run_cmd(tmp_path,'write'))+'\n').encode()); wait_for(out,lambda e:e['type']=='approval_required')
+    os.write(w,(json.dumps({'type':'approval_response','id':'r1','request_id':'r1:1','approved':False})+'\n').encode()); os.close(w)
+    th.join(2); assert any(e['type']=='approval_resolved' and e['approved'] is False for e in events(out)); assert any(e['type']=='run_completed' for e in events(out))
+
+def test_abort_command_denies_pending_approvals_through_stdio(tmp_path):
+    r,w=os.pipe(); inp=os.fdopen(r,'r'); out=io.StringIO(); b=PiBridge(stdin=inp,stdout=out,runner_factory=lambda *a: DummyRunner(a[2],a[1]))
+    th=run_stdio_in_thread(b); wait_for(out,lambda e:e['type']=='ready')
+    os.write(w,(json.dumps(run_cmd(tmp_path,'approve-twice'))+'\n').encode()); wait_for(out,lambda e:e['type']=='approval_required')
+    os.write(w,(json.dumps({'type':'abort','id':'r1'})+'\n').encode()); os.close(w)
+    th.join(2); assert any(e['type']=='approval_resolved' and e['approved'] is False for e in events(out)); assert any(e['type']=='run_aborted' for e in events(out))
