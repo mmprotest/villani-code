@@ -30,7 +30,7 @@ jobs:
       - run: python packaging/smoke_test_runtime.py dist-runtime/villani-code/villani-code${{ runner.os == 'Windows' && '.exe' || '' }}
       - shell: bash
         run: |
-          name="villani-runtime-v0.1.0-${{ matrix.key }}.${{ matrix.ext }}"
+          name="villani-runtime-v0.1.2-${{ matrix.key }}.${{ matrix.ext }}"
           cd dist-runtime
           if [[ "${{ matrix.ext }}" == "zip" ]]; then 7z a ../$name villani-code; else tar -czf ../$name villani-code; fi
           cd ..
@@ -51,7 +51,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-${{ matrix.key }}
-          path: "villani-runtime-v0.1.0-${{ matrix.key }}.${{ matrix.ext }}*"
+          path: "villani-runtime-v0.1.2-${{ matrix.key }}.${{ matrix.ext }}*"
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -63,5 +63,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/villani-runtime-v0.1.0-*
+            artifacts/**/villani-runtime-v0.1.2-*
             checksums.txt
