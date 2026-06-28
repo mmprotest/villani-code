@@ -234,3 +234,31 @@ def test_runner_heartbeat_is_emitted_after_idle_active_run(monkeypatch):
     assert ev['last_event_type']=='tool_result'
     assert ev['seconds_since_last_event']==16
     assert ev['worker_alive'] is True
+
+def test_extract_summary_reads_response_content_blocks():
+    from villani_code.integrations.pi_bridge import extract_summary
+    result={'response':{'content':[{'type':'text','text':'All 14 tests pass.'},{'type':'text','text':'Summary here.'}]}}
+    assert extract_summary(result)=='All 14 tests pass.\n\nSummary here.'
+
+def test_extract_summary_reads_execution_final_text():
+    from villani_code.integrations.pi_bridge import extract_summary
+    assert extract_summary({'execution':{'final_text':'final markdown'}})=='final markdown'
+
+def test_extract_summary_reads_transcript_final_assistant_content():
+    from villani_code.integrations.pi_bridge import extract_summary
+    result={'transcript':{'final_assistant_content':[{'type':'text','text':'final assistant'}]}}
+    assert extract_summary(result)=='final assistant'
+
+def test_extract_summary_falls_back_safely_when_absent():
+    from villani_code.integrations.pi_bridge import extract_summary
+    assert extract_summary({'response':{'content':[{'type':'toolCall','arguments':{'x':1}}]}}) is None
+
+def test_run_completed_includes_summary_from_final_assistant_content(tmp_path):
+    class R(DummyRunner):
+        def run(self, task, execution_budget=None):
+            return {'response':{'content':[{'type':'text','text':'All tests pass.'}]},'execution':{'completed':True}}
+    b,out,_,_=make_bridge(R())
+    b.handle(run_cmd(tmp_path))
+    es=wait_for(out,lambda e:e['type']=='run_completed')
+    ev=[e for e in es if e['type']=='run_completed'][-1]
+    assert ev['summary']=='All tests pass.'
