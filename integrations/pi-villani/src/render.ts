@@ -1,3 +1,5 @@
+import { Text } from "@earendil-works/pi-tui";
+
 export type VillaniUiState = {
   phase: string;
   lastCommand?: string;
@@ -405,11 +407,40 @@ export async function renderBridgeEvent(
   state = reduceVillaniUiState(state, event);
   await renderState(ctx, state);
 }
-export function renderVillaniResultMessage(message: any): any {
-  const text = Array.isArray(message?.content)
-    ? message.content.map((p: any) => p?.text ?? "").join("\n")
-    : String(message?.content ?? "");
-  return text;
+export function renderVillaniResultMessage(
+  message: any,
+  _options?: any,
+  theme?: any,
+): any {
+  const text = extractVillaniResultText(message);
+
+  let rendered = text;
+  if (theme?.fg && message?.customType) {
+    rendered = `${theme.fg("accent", "[villani-result]")}\n\n${text}`;
+  }
+
+  return new Text(rendered, 0, 0);
+}
+
+function extractVillaniResultText(message: any): string {
+  const content = message?.content;
+
+  if (typeof content === "string") return content;
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part.text === "string") return part.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (content && typeof content.text === "string") return content.text;
+
+  return String(content ?? "");
 }
 export function resetVillaniUiState() {
   state = { phase: "Starting Villani..." };

@@ -695,16 +695,49 @@ test("command lifecycle sets then clears widget through final result", async () 
   assert.equal(sent.length, 1);
 });
 
-test("villani-result renderer displays summary text", async () => {
+test("renderVillaniResultMessage returns a renderable component, not a string", async () => {
   const { renderVillaniResultMessage } = await import("./render.js");
-  assert.match(
-    String(
-      renderVillaniResultMessage({
-        content: [{ type: "text", text: "Villani completed\n\nSummary" }],
-      }),
-    ),
-    /Summary/,
+  const component = renderVillaniResultMessage({
+    customType: "villani-result",
+    content: [{ type: "text", text: "Villani completed\n\nSummary" }],
+  });
+
+  assert.notEqual(typeof component, "string");
+  assert.equal(typeof component.render, "function");
+});
+
+test("renderVillaniResultMessage handles string content", async () => {
+  const { renderVillaniResultMessage } = await import("./render.js");
+  const component = renderVillaniResultMessage({ content: "plain summary" });
+
+  assert.notEqual(typeof component, "string");
+  assert.match(component.render(80).join("\n"), /plain summary/);
+});
+
+test("renderVillaniResultMessage handles text-part array content", async () => {
+  const { renderVillaniResultMessage } = await import("./render.js");
+  const component = renderVillaniResultMessage({
+    content: [{ type: "text", text: "Villani completed\n\nSummary" }],
+  });
+
+  assert.notEqual(typeof component, "string");
+  assert.match(component.render(80).join("\n"), /Summary/);
+});
+
+test("final villani-result message rendering does not throw", async () => {
+  const { renderVillaniResultMessage } = await import("./render.js");
+  const component = renderVillaniResultMessage(
+    {
+      customType: "villani-result",
+      content: [{ type: "text", text: "Villani completed\n\nSummary" }],
+    },
+    undefined,
+    { fg: (_name: string, text: string) => text },
   );
+
+  assert.doesNotThrow(() => component.render(80));
+  assert.match(component.render(80).join("\n"), /\[villani-result\]/);
+  assert.match(component.render(80).join("\n"), /Summary/);
 });
 
 test("strict render allowlist suppresses bridge plumbing", async () => {
