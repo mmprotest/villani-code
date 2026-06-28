@@ -5,7 +5,7 @@ pi install npm:@mmprotest/pi-villani
 ```
 Provides `/villani <task>`, `/villani-abort`, and `/villani-confirm-test`.
 
-Runtime version: `v0.1.2`.
+Runtime version: `v0.1.3`.
 
 ## Abort semantics
 
