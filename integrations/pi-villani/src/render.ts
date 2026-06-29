@@ -1,8 +1,48 @@
+export type VillaniCopyCategory =
+  | "thinking"
+  | "analysis"
+  | "reading"
+  | "writing"
+  | "running"
+  | "testing"
+  | "debugging"
+  | "review"
+  | "failure"
+  | "complete";
+
+const VILLANI_COPY: Record<VillaniCopyCategory, string[]> = {
+  thinking: ["Villani is make plan...", "Villaniplan forming...", "Villani thinks. Nobody interrupt.", "Villani has doctrine now...", "Villanithoughts classified..."],
+  analysis: ["Villanalysis begins...", "Villani inspect problem...", "Villani finds weak logic...", "Villanicommission investigates...", "Villani determines blame..."],
+  reading: ["Villani reads file. File nervous.", "Villaniread begins...", "Villani opens file for questioning...", "Villanidossier opened...", "Villani checks file loyalty..."],
+  writing: ["Villani makes file obey...", "Villanipatch imposed...", "Villani writes new order...", "Villanification applied...", "Villani edits without remorse..."],
+  running: ["Villani gives command...", "Villanicommand issued...", "Villani demands output...", "Villanirun begins...", "Villani expects obedience..."],
+  testing: ["Villani begins inspection...", "Villanitest begins...", "Villani demands green tests...", "Villaniverdict pending...", "Villani checks for lies..."],
+  debugging: ["Villani hunts weak bug...", "Villanidebug begins...", "Villani asks bug hard questions...", "Villanistack confesses...", "Villani removes instability..."],
+  review: ["Villanireview begins...", "Villani judges patch...", "Villanicompliance checked...", "Villani approves, reluctantly...", "Villani checks for betrayal..."],
+  failure: ["Villani sees failure. Unacceptable.", "Villanifailure recorded...", "Villani prepares punishment...", "Villani blames weak implementation...", "Villani demands second attempt..."],
+  complete: ["Villanified. Accept result.", "Villani declares victory...", "Villani restores order...", "Villanivictory logged...", "Villani permits ship..."],
+};
+
+const copyCounters = new Map<string, number>();
+
+export function villaniCopy(category: VillaniCopyCategory): string {
+  const options = VILLANI_COPY[category];
+  const current = copyCounters.get(category) ?? 0;
+  copyCounters.set(category, current + 1);
+  return options[current % options.length];
+}
+
+export function resetVillaniCopyCounters(): void {
+  copyCounters.clear();
+}
+
 export type VillaniUiState = {
   phase: string;
   lastCommand?: string;
   lastCommandExitCode?: number;
   lastCommandPreview?: string;
+  lastToolPath?: string;
+  lastToolKind?: "reading" | "writing";
   lastAssistantText?: string;
   finalSummary?: string;
   changedFiles?: string[];
@@ -12,6 +52,7 @@ export type VillaniUiState = {
 
 const USER_FACING_EVENT_TYPES = new Set([
   "stream_text",
+  "phase",
   "tool_started",
   "command_started",
   "command_finished",
@@ -26,6 +67,10 @@ const USER_FACING_EVENT_TYPES = new Set([
   "proxy_request_started",
   "proxy_request_completed",
   "proxy_request_failed",
+  "verification_started",
+  "verification_finished",
+  "validation_started",
+  "validation_finished",
 ]);
 
 export function shouldRenderUserFacingEvent(event: any): boolean {
@@ -149,6 +194,44 @@ function sanitizeDetails(value: any, seen = new WeakSet<object>()): any {
   }
   return String(value);
 }
+
+function commandCategory(command: unknown): VillaniCopyCategory {
+  const text = String(command || "");
+  return /pytest|\btest\b|coverage|tox|unittest/i.test(text) ? "testing" : "running";
+}
+
+function pathFromEvent(event: any): string | undefined {
+  const input = event.input && typeof event.input === "object" ? event.input : {};
+  const value = event.path || event.file_path || event.filepath || event.filename || event.target_file || input.path || input.file_path || input.filepath || input.filename || input.target_file;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function commandFromEvent(event: any): string | undefined {
+  const input = event.input && typeof event.input === "object" ? event.input : {};
+  const value = event.command || input.command;
+  return typeof value === "string" && value.trim() ? value.slice(0, 500) : undefined;
+}
+
+function categoryForEvent(event: any): VillaniCopyCategory | undefined {
+  const type = String(event.type || "");
+  const phase = String(event.phase || "");
+  const tool = String(event.tool || event.name || "");
+  if (type === "model_request_started" || type === "proxy_request_started") return "thinking";
+  if (type === "phase" && /diagnosis|planning/i.test(phase)) return "analysis";
+  if (type === "tool_started") {
+    if (["Read", "GitStatus", "GitDiff", "GitLog"].includes(tool)) return "reading";
+    if (["Write", "Patch", "Edit"].includes(tool)) return "writing";
+    if (tool === "Bash") return commandCategory(commandFromEvent(event));
+  }
+  if (type === "command_started") return commandCategory(commandFromEvent(event));
+  if (type === "command_finished" && Number(event.exit_code ?? 0) !== 0) return "debugging";
+  if (type === "validation_started" || type === "verification_started") return "testing";
+  if (type === "validation_finished" || type === "verification_finished") return "review";
+  if (type === "run_failed") return "failure";
+  if (type === "run_completed") return "complete";
+  return undefined;
+}
+
 function verificationStatus(event: any): string | undefined {
   const verification =
     event.verification_status ?? event.verificationStatus ?? event.verification;
@@ -205,93 +288,96 @@ function preview(event: any) {
     parts.push(`output:\n${String(event.stdout_preview).slice(0, 500)}`);
   return parts.join("\n");
 }
-function toolStartedMessage(event: any): string {
+export function toolStartedMessage(event: any): string {
   const tool = String(event.tool || event.name || "tool");
-  const input = event.input && typeof event.input === "object" ? event.input : {};
-  const path = event.path || input.path || input.file_path || event.file_path;
-  if (tool === "GitStatus") return "Checking repository status";
-  if (tool === "GitDiff") return "Reading current changes";
-  if (tool === "GitLog") return "Reading git history";
-  if (tool === "Read") return `Reading file: ${path || "unknown"}`;
-  if (tool === "Write") return `Writing file: ${path || "unknown"}`;
-  if (tool === "Patch") return `Applying patch: ${path || "unknown"}`;
-  if (tool === "Bash") return "Preparing command";
-  return "Villani is working...";
+  const path = pathFromEvent(event);
+  if (tool === "GitStatus" || tool === "GitDiff" || tool === "GitLog" || tool === "Read") return path ? `Villani reads file. File nervous.\nFile: ${path}` : "Villani reads file. File nervous.";
+  if (tool === "Write" || tool === "Edit") return path ? `Villani makes file obey.\nFile: ${path}` : "Villani makes file obey.";
+  if (tool === "Patch") return path ? `Villanipatch imposed.\nFile: ${path}` : "Villanipatch imposed.";
+  if (tool === "Bash") return commandFromEvent(event) ? `Command:\n${commandFromEvent(event)}` : "Villani gives command...";
+  return "Villani is make plan...";
 }
+
 export function reduceVillaniUiState(
   state: VillaniUiState,
   event: any,
 ): VillaniUiState {
   const next = { ...state, lastEventAt: Date.now() };
-  if (event.type === "run_started") next.phase = "Starting Villani...";
+  if (event.type === "run_started") next.phase = villaniCopy("thinking");
   else if (event.type === "model_request_started") {
-    next.phase = "Villani is thinking...";
+    next.phase = villaniCopy("thinking");
     next.lastCommand = undefined;
     next.lastCommandExitCode = undefined;
     next.lastCommandPreview = undefined;
   } else if (event.type === "proxy_request_started")
-    next.phase = "Villani is thinking...";
+    next.phase = villaniCopy("thinking");
   else if (event.type === "model_request_completed")
-    next.phase = "Villani is thinking...";
+    next.phase = villaniCopy("thinking");
   else if (event.type === "proxy_request_completed")
-    next.phase = "Villani is thinking...";
+    next.phase = villaniCopy("thinking");
   else if (event.type === "approval_required") next.phase = "Waiting for approval...";
-  else if (event.type === "approval_resolved") next.phase = "Villani is thinking...";
+  else if (event.type === "approval_resolved") next.phase = villaniCopy("thinking");
   else if (event.type === "tool_started") {
     const tool = String(event.tool || event.name || "");
-    next.phase =
-      tool === "Read" || tool.startsWith("Git")
-        ? "Reading files..."
-        : tool === "Patch" || tool === "Write"
-          ? "Applying changes..."
-          : tool === "Bash"
-            ? "Running command..."
-            : "Villani is thinking...";
+    const category = categoryForEvent(event) || "thinking";
+    next.phase = villaniCopy(category);
+    next.lastToolPath = pathFromEvent(event);
+    next.lastToolKind = ["Read", "GitStatus", "GitDiff", "GitLog"].includes(tool) ? "reading" : (["Write", "Patch", "Edit"].includes(tool) ? "writing" : undefined);
+    if (tool === "Bash") {
+      next.lastCommand = commandFromEvent(event);
+      next.lastToolPath = undefined;
+      next.lastToolKind = undefined;
+    }
   }
   else if (event.type === "command_started") {
-    next.phase = "Running command...";
+    next.phase = villaniCopy(commandCategory(event.command));
     next.lastCommand = String(event.command || "").slice(0, 500);
     next.lastCommandExitCode = undefined;
     next.lastCommandPreview = undefined;
   } else if (event.type === "command_finished") {
-    next.phase = "Finished command";
+    next.phase = villaniCopy(Number(event.exit_code ?? 0) !== 0 ? "debugging" : "review");
     next.lastCommand = String(event.command || next.lastCommand || "").slice(
       0,
       500,
     );
     next.lastCommandExitCode = event.exit_code;
     next.lastCommandPreview = preview(event);
-  } else if (event.type === "verification_started")
-    next.phase = "Villani is thinking...";
+  } else if (event.type === "phase") {
+    next.phase = villaniCopy(categoryForEvent(event) || "thinking");
+  } else if (event.type === "verification_started" || event.type === "validation_started")
+    next.phase = villaniCopy("testing");
+  else if (event.type === "verification_finished" || event.type === "validation_finished")
+    next.phase = villaniCopy("review");
   else if (event.type === "run_completed") {
-    next.phase = "Completed";
+    next.phase = villaniCopy("complete");
     next.finalSummary = event.summary;
     next.changedFiles = visibleChangedFiles(
       event.changed_files || event.changedFiles || next.changedFiles || [],
     );
     next.transcriptPath = event.transcript_path || event.transcriptPath;
   } else if (event.type === "run_failed") {
-    next.phase = "Failed";
+    next.phase = villaniCopy("failure");
     next.finalSummary = event.summary || event.error;
-  } else if (event.type === "run_aborted") next.phase = "Failed";
+  } else if (event.type === "run_aborted") next.phase = villaniCopy("failure");
   else if (
     event.type === "runner_heartbeat" &&
     Date.now() - (state.lastEventAt || 0) > 15000
   )
-    next.phase = "Villani is thinking...";
+    next.phase = villaniCopy("thinking");
   return next;
 }
 export function widgetForState(state: VillaniUiState): any {
-  if (state.phase === "Running command...")
-    return ["Running command:", state.lastCommand || ""];
-  if (state.phase === "Finished command")
+  if (state.lastToolPath && state.lastToolKind)
+    return ["File:", state.lastToolPath].join("\n");
+  if (state.lastCommandExitCode !== undefined)
     return [
       `Command finished: exit ${state.lastCommandExitCode ?? "unknown"}`,
       state.lastCommandPreview || "",
     ]
       .filter(Boolean)
       .join("\n");
-  if (state.phase === "Completed" || state.phase === "Failed") return undefined;
+  if (state.lastCommand)
+    return ["Command:", state.lastCommand].join("\n");
   if (state.changedFiles?.length)
     return `Changed files:\n${state.changedFiles.map((f) => `- ${f}`).join("\n")}`;
   return undefined;
@@ -378,14 +464,12 @@ export async function renderBridgeEvent(
   if (event.type === "tool_started") {
     state = reduceVillaniUiState(state, event);
     await setStatus(ctx, state.phase);
-    await notify(ctx, toolStartedMessage(event), "info");
-    await setWidget(ctx, widgetForState(state));
+    await setWidget(ctx, widgetForState(state) || toolStartedMessage(event));
     return;
   }
   if (event.type === "command_started") {
     state = reduceVillaniUiState(state, event);
     await setStatus(ctx, state.phase);
-    await notify(ctx, `Running command:\n${state.lastCommand || ""}`, "info");
     await setWidget(ctx, widgetForState(state));
     return;
   }

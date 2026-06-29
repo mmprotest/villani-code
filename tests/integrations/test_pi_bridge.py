@@ -282,3 +282,42 @@ def test_bridge_diagnostic_remains_diagnostic_event_for_render_suppression():
     from villani_code.integrations.pi_bridge import map_runner_event
     ev=map_runner_event('r', {'type':'model_request_started'})
     assert {'type':'bridge_diagnostic','id':'r','message':'model request started'} in ev
+
+def test_tool_started_read_preserves_input_file_path():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'tool_started','name':'Read','input':{'file_path':'src/foo.py','content':'secret'}})[0]
+    assert ev['type']=='tool_started'
+    assert ev['input']=={'file_path':'src/foo.py'}
+    assert ev['path']=='src/foo.py'
+
+
+def test_tool_started_read_preserves_event_path():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'tool_started','name':'Read','path':'src/bar.py','input':{}})[0]
+    assert ev['path']=='src/bar.py'
+    assert ev['input']=={}
+
+
+def test_tool_started_bash_preserves_input_command_and_command():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'tool_started','name':'Bash','input':{'command':'pytest -q','cwd':'/tmp','env':{'SECRET':'x'}}})[0]
+    assert ev['input']=={'command':'pytest -q','cwd':'/tmp'}
+    assert ev['command']=='pytest -q'
+
+
+def test_tool_result_preserves_safe_input_path_and_command():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'tool_result','name':'Bash','input':{'command':'python -m pytest','path':'tests/test_x.py','headers':{'authorization':'x'}},'result':{'exit_code':1,'stderr':'bad'}})[0]
+    assert ev['input']=={'path':'tests/test_x.py','command':'python -m pytest'}
+    assert ev['path']=='tests/test_x.py'
+    assert ev['command']=='python -m pytest'
+    assert ev['stderr_preview']=='bad'
+
+
+def test_tool_started_safe_input_excludes_sensitive_and_large_fields():
+    from villani_code.integrations.pi_bridge import map_runner_event
+    ev=map_runner_event('r', {'type':'tool_started','name':'Patch','input':{'path':'a.py','content':'secret file','patch':'diff --git secret','env':{'API_KEY':'x'},'headers':{'authorization':'x'},'api_key':'x','secret':'x','command':'echo ok'}})[0]
+    assert ev['input']=={'path':'a.py','command':'echo ok'}
+    dumped=json.dumps(ev).lower()
+    for forbidden in ['content','diff --git','env','headers','api_key','secret file']:
+        assert forbidden not in dumped

@@ -584,7 +584,7 @@ test("/villani keeps waiting after nonzero tool_finished and renders next model 
     else process.env.VILLANI_USE_PI_MODEL = oldUsePi;
   }
   assert.doesNotMatch(notes.join("\n"), /Villani tool finished/);
-  assert.ok(statuses.includes("Villani is thinking..."));
+  assert.ok(statuses.some((s) => /^Villani|^Villani/.test(s)));
   assert.equal(sent.length, 1);
 });
 
@@ -600,10 +600,8 @@ test("repeated model_request_started updates status without notify spam", async 
   };
   await renderBridgeEvent({ type: "model_request_started" }, {}, ctx);
   await renderBridgeEvent({ type: "model_request_started" }, {}, ctx);
-  assert.deepEqual(statuses, [
-    "Villani is thinking...",
-    "Villani is thinking...",
-  ]);
+  assert.equal(statuses.length, 2);
+  assert.ok(statuses.every((s) => /^Villani/.test(s)));
   assert.deepEqual(notes, []);
 });
 
@@ -745,11 +743,9 @@ test("tool and command events render readable English", async () => {
   await renderBridgeEvent({ type: "tool_started", tool: "Bash" }, {}, ctx);
   await renderBridgeEvent({ type: "command_started", command: "python -m pytest -v" }, {}, ctx);
   await renderBridgeEvent({ type: "command_finished", command: "python -m pytest -v", exit_code: 1, stderr_preview: "boom" }, {}, ctx);
-  assert.ok(notes.includes("Preparing command"));
-  assert.ok(notes.includes("Running command:\npython -m pytest -v"));
-  assert.ok(notes.includes("Command finished: exit 1\n\nstderr:\nboom"));
-  assert.doesNotMatch(notes.join("\n"), /tool_started|command_started|command_finished/);
-  assert.ok(statuses.includes("Running command..."));
+  assert.deepEqual(notes, ["Command finished: exit 1\n\nstderr:\nboom"]);
+  assert.doesNotMatch(notes.join("\n"), /tool_started|command_started|command_finished|Preparing command|Running command:/);
+  assert.ok(statuses.some((s) => /^Villani/.test(s)));
   assert.ok(widgets.some((w) => String(w).includes("python -m pytest -v")));
 });
 
@@ -771,7 +767,7 @@ test("model request clears stale command widget and final clears widget", async 
   await renderBridgeEvent({ type: "run_completed", summary: "final assistant summary" }, {}, ctx);
   assert.ok(widgets.some((w) => String(w).includes("Command finished: exit 0")));
   assert.ok(widgets.some((w) => w === undefined));
-  assert.ok(statuses.includes("Completed"));
+  assert.ok(statuses.some((s) => /^Villani/.test(s)));
 });
 
 test("final message includes final assistant summary", async () => {

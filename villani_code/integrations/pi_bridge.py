@@ -13,6 +13,42 @@ def _cap(v:Any,n:int=2000)->str: return str(v)[:n]
 def _preview(v:Any,n:int=500)->str:
     text='' if v is None else str(v)
     return text[:n] + ('...' if len(text)>n else '')
+
+def safe_tool_input(value):
+    if not isinstance(value, dict):
+        return {}
+    allowed = {}
+    for key in (
+        "path",
+        "file_path",
+        "filepath",
+        "filename",
+        "target_file",
+        "command",
+        "cwd",
+        "operation",
+    ):
+        if key in value and value[key] is not None:
+            allowed[key] = _cap(value[key], 500)
+    return allowed
+
+def extract_tool_path(event, input):
+    candidates = [
+        event.get("path"),
+        event.get("file_path"),
+        event.get("filepath"),
+        event.get("filename"),
+        event.get("target_file"),
+        input.get("path"),
+        input.get("file_path"),
+        input.get("filepath"),
+        input.get("filename"),
+        input.get("target_file"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return _cap(candidate.strip(), 500)
+    return None
 def summarize_approval_request(tool_name:str, tool_input:dict[str,Any])->tuple[str,dict[str,Any]]:
     if tool_name=='Write':
         path=str(tool_input.get('path') or tool_input.get('file_path') or '')
@@ -90,15 +126,20 @@ def map_runner_event(run_id:str,event:dict[str,Any])->list[dict[str,Any]]:
     elif t=='model_request_completed': out += [{'type':'model_request_completed','id':run_id},{'type':'bridge_diagnostic','id':run_id,'message':'model response received'}]
     elif t=='model_request_failed': out.append({'type':'bridge_diagnostic','id':run_id,'message':t})
     elif t=='tool_started':
-        tool=str(event.get('name') or 'tool'); inp=event.get('input') if isinstance(event.get('input'),dict) else {}; command=inp.get('command')
-        out += [{'type':'tool_started','id':run_id,'tool':tool, **({'command':_cap(command,500)} if command else {})},{'type':'bridge_diagnostic','id':run_id,'message':f"tool started: {tool}".strip()}]
+        tool=str(event.get('name') or event.get('tool') or 'tool'); inp=event.get('input') if isinstance(event.get('input'),dict) else {}
+        safe_input=safe_tool_input(inp); path=extract_tool_path(event,safe_input); command=safe_input.get('command')
+        out += [{'type':'tool_started','id':run_id,'tool':tool,'input':safe_input, **({'path':path} if path else {}), **({'command':command} if command else {})},{'type':'bridge_diagnostic','id':run_id,'message':f"tool started: {tool}".strip()}]
     elif t in {'tool_result','tool_finished'}:
         tool=str(event.get('name') or event.get('tool') or 'tool')
         result=event.get('result') if isinstance(event.get('result'),dict) else {}
         exit_code=event.get('exit_code', result.get('exit_code', result.get('returncode')))
         is_error=bool(event.get('is_error'))
         summary=summarize_tool_result(event)
-        base={'type':t,'id':run_id,'tool':tool,'ok':not is_error,'is_error':is_error,'summary':summary}
+        inp=event.get('input') if isinstance(event.get('input'),dict) else {}
+        safe_input=safe_tool_input(inp); path=extract_tool_path(event,safe_input); command=safe_input.get('command')
+        base={'type':t,'id':run_id,'tool':tool,'ok':not is_error,'is_error':is_error,'summary':summary,'input':safe_input}
+        if path: base['path']=path
+        if command: base['command']=command
         if exit_code is not None: base['exit_code']=exit_code
         for key in ('stdout_preview','stderr_preview','truncated'):
             if key in event: base[key]=event[key]
