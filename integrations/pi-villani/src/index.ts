@@ -5,7 +5,7 @@ import {
   VILLANI_RUNTIME_TAG,
   VILLANI_RUNTIME_VERSION,
 } from "./runtimeConfig.js";
-import { VillaniBridgeProcess } from "./process.js";
+import { VillaniBridgeProcess, type BridgeLaunchOptions } from "./process.js";
 import {
   resolvePiModel,
   sanitizeError,
@@ -159,6 +159,10 @@ function denyPending(run: ActiveRun) {
 function bridgeStderr(bridge: VillaniBridgeProcess) {
   return bridge.getRecentStderr?.() ?? bridge.stderr ?? "";
 }
+
+function bridgeLaunchOptions(ctx: any): BridgeLaunchOptions {
+  return ctx?.bridgeLaunchOptions ?? ctx?.villaniBridgeLaunchOptions ?? {};
+}
 function bridgeDiagnosticMessage(e: unknown) {
   const msg = sanitizeError(e);
   if (/ModuleNotFoundError: No module named ['"]villani_code['"]/.test(msg))
@@ -174,8 +178,10 @@ async function assertBridgePing(
   ctx: any,
   env?: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  launchOptions: BridgeLaunchOptions = bridgeLaunchOptions(ctx),
 ) {
   const bridge = new VillaniBridgeProcess(executable, {
+    ...launchOptions,
     env,
     startupTimeoutMs: 30000,
     cwd: ctx.cwd ?? process.cwd(),
@@ -319,6 +325,7 @@ export async function runVillani(
     }
     await setStatus(ctx, nextVillaniStatus("thinking", "runtime-start") ?? "Villaniplan forming...");
     const bridge = new VillaniBridgeProcess(executable, {
+      ...bridgeLaunchOptions(ctx),
       env,
       startupTimeoutMs: 30000,
       proxyMode: usePi,
