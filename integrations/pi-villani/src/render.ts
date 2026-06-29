@@ -7,6 +7,7 @@ export type VillaniCopyCategory =
   | "testing"
   | "debugging"
   | "review"
+  | "approval"
   | "failure"
   | "complete";
 
@@ -19,11 +20,26 @@ const VILLANI_COPY: Record<VillaniCopyCategory, string[]> = {
   testing: ["Villani begins inspection...", "Villanitest begins...", "Villani demands green tests...", "Villaniverdict pending...", "Villani checks for lies..."],
   debugging: ["Villani hunts weak bug...", "Villanidebug begins...", "Villani asks bug hard questions...", "Villanistack confesses...", "Villani removes instability..."],
   review: ["Villanireview begins...", "Villani judges patch...", "Villanicompliance checked...", "Villani approves, reluctantly...", "Villani checks for betrayal..."],
+  approval: [
+    "Villani requires authorization...",
+    "Villaniclearance required...",
+    "Villani requests permission. Briefly.",
+    "Villani pauses for approval...",
+    "Villani awaits command authority...",
+    "Villani demands signed order...",
+    "Villanipermission pending...",
+    "Villani asks council. Reluctantly.",
+  ],
   failure: ["Villani sees failure. Unacceptable.", "Villanifailure recorded...", "Villani prepares punishment...", "Villani blames weak implementation...", "Villani demands second attempt..."],
   complete: ["Villanified. Accept result.", "Villani declares victory...", "Villani restores order...", "Villanivictory logged...", "Villani permits ship..."],
 };
 
 const copyCounters = new Map<string, number>();
+let lastStatusCategory: VillaniCopyCategory | undefined;
+let lastStatusText: string | undefined;
+let lastStatusAt = 0;
+let lastStatusDetailKey: string | undefined;
+let lastRenderedStatus: string | undefined;
 
 export function villaniCopy(category: VillaniCopyCategory): string {
   const options = VILLANI_COPY[category];
@@ -34,6 +50,37 @@ export function villaniCopy(category: VillaniCopyCategory): string {
 
 export function resetVillaniCopyCounters(): void {
   copyCounters.clear();
+  resetVillaniStatusManager();
+}
+
+export function resetVillaniStatusManager(): void {
+  lastStatusCategory = undefined;
+  lastStatusText = undefined;
+  lastStatusAt = 0;
+  lastStatusDetailKey = undefined;
+  lastRenderedStatus = undefined;
+}
+
+function shouldUpdateStatus(category: VillaniCopyCategory, detailKey?: string): boolean {
+  const now = Date.now();
+  if (category !== lastStatusCategory) return true;
+  if (detailKey && detailKey !== lastStatusDetailKey) return true;
+  if (now - lastStatusAt > 12000) return true;
+  return false;
+}
+
+export function nextVillaniStatus(category: VillaniCopyCategory, detailKey?: string): string | undefined {
+  if (!shouldUpdateStatus(category, detailKey)) return undefined;
+  const text = villaniCopy(category);
+  lastStatusCategory = category;
+  lastStatusText = text;
+  lastStatusAt = Date.now();
+  lastStatusDetailKey = detailKey;
+  return text;
+}
+
+export function currentStatusFallback(category: VillaniCopyCategory): string {
+  return lastStatusCategory === category && lastStatusText ? lastStatusText : villaniCopy(category);
 }
 
 export type VillaniUiState = {
@@ -217,6 +264,7 @@ function categoryForEvent(event: any): VillaniCopyCategory | undefined {
   const phase = String(event.phase || "");
   const tool = String(event.tool || event.name || "");
   if (type === "model_request_started" || type === "proxy_request_started") return "thinking";
+  if (type === "approval_required") return "approval";
   if (type === "phase" && /diagnosis|planning/i.test(phase)) return "analysis";
   if (type === "tool_started") {
     if (["Read", "GitStatus", "GitDiff", "GitLog"].includes(tool)) return "reading";
@@ -303,24 +351,28 @@ export function reduceVillaniUiState(
   event: any,
 ): VillaniUiState {
   const next = { ...state, lastEventAt: Date.now() };
-  if (event.type === "run_started") next.phase = villaniCopy("thinking");
+  const applyStatus = (category: VillaniCopyCategory, detailKey?: string) => {
+    const status = nextVillaniStatus(category, detailKey);
+    if (status) next.phase = status;
+  };
+  if (event.type === "run_started") applyStatus("thinking", "run-started");
   else if (event.type === "model_request_started") {
-    next.phase = villaniCopy("thinking");
+    applyStatus("thinking", "model-request");
     next.lastCommand = undefined;
     next.lastCommandExitCode = undefined;
     next.lastCommandPreview = undefined;
   } else if (event.type === "proxy_request_started")
-    next.phase = villaniCopy("thinking");
-  else if (event.type === "model_request_completed")
-    next.phase = villaniCopy("thinking");
-  else if (event.type === "proxy_request_completed")
-    next.phase = villaniCopy("thinking");
-  else if (event.type === "approval_required") next.phase = "Waiting for approval...";
-  else if (event.type === "approval_resolved") next.phase = villaniCopy("thinking");
+    applyStatus("thinking", "model-request");
+  else if (event.type === "model_request_completed") {
+    if (!state.phase) applyStatus("review", "model-completed");
+  } else if (event.type === "proxy_request_completed") {
+    // Keep existing status; proxy completion is heartbeat-like UI noise.
+  } else if (event.type === "approval_required") applyStatus("approval", event.request_id || event.requestId);
+  else if (event.type === "approval_resolved") applyStatus("thinking", "approval-resolved");
   else if (event.type === "tool_started") {
     const tool = String(event.tool || event.name || "");
     const category = categoryForEvent(event) || "thinking";
-    next.phase = villaniCopy(category);
+    applyStatus(category, `${tool}:${pathFromEvent(event) || commandFromEvent(event) || ""}`);
     next.lastToolPath = pathFromEvent(event);
     next.lastToolKind = ["Read", "GitStatus", "GitDiff", "GitLog"].includes(tool) ? "reading" : (["Write", "Patch", "Edit"].includes(tool) ? "writing" : undefined);
     if (tool === "Bash") {
@@ -330,12 +382,13 @@ export function reduceVillaniUiState(
     }
   }
   else if (event.type === "command_started") {
-    next.phase = villaniCopy(commandCategory(event.command));
-    next.lastCommand = String(event.command || "").slice(0, 500);
+    const command = String(event.command || "").slice(0, 500);
+    applyStatus(commandCategory(event.command), command);
+    next.lastCommand = command;
     next.lastCommandExitCode = undefined;
     next.lastCommandPreview = undefined;
   } else if (event.type === "command_finished") {
-    next.phase = villaniCopy(Number(event.exit_code ?? 0) !== 0 ? "debugging" : "review");
+    applyStatus(Number(event.exit_code ?? 0) !== 0 ? "debugging" : "review", String(event.command || next.lastCommand || ""));
     next.lastCommand = String(event.command || next.lastCommand || "").slice(
       0,
       500,
@@ -343,27 +396,27 @@ export function reduceVillaniUiState(
     next.lastCommandExitCode = event.exit_code;
     next.lastCommandPreview = preview(event);
   } else if (event.type === "phase") {
-    next.phase = villaniCopy(categoryForEvent(event) || "thinking");
+    applyStatus(categoryForEvent(event) || "thinking", String(event.phase || ""));
   } else if (event.type === "verification_started" || event.type === "validation_started")
-    next.phase = villaniCopy("testing");
+    applyStatus("testing", event.type);
   else if (event.type === "verification_finished" || event.type === "validation_finished")
-    next.phase = villaniCopy("review");
+    applyStatus("review", event.type);
   else if (event.type === "run_completed") {
-    next.phase = villaniCopy("complete");
+    applyStatus("complete", "run-completed");
     next.finalSummary = event.summary;
     next.changedFiles = visibleChangedFiles(
       event.changed_files || event.changedFiles || next.changedFiles || [],
     );
     next.transcriptPath = event.transcript_path || event.transcriptPath;
   } else if (event.type === "run_failed") {
-    next.phase = villaniCopy("failure");
+    applyStatus("failure", "run-failed");
     next.finalSummary = event.summary || event.error;
-  } else if (event.type === "run_aborted") next.phase = villaniCopy("failure");
+  } else if (event.type === "run_aborted") applyStatus("failure", "run-aborted");
   else if (
     event.type === "runner_heartbeat" &&
     Date.now() - (state.lastEventAt || 0) > 15000
   )
-    next.phase = villaniCopy("thinking");
+    applyStatus("thinking", "heartbeat");
   return next;
 }
 export function widgetForState(state: VillaniUiState): any {
@@ -383,10 +436,13 @@ export function widgetForState(state: VillaniUiState): any {
   return undefined;
 }
 export async function renderState(ctx: any, state: VillaniUiState) {
-  await setStatus(ctx, state.phase);
+  if (state.phase && state.phase !== lastRenderedStatus) {
+    await setStatus(ctx, state.phase);
+    lastRenderedStatus = state.phase;
+  }
   await setWidget(ctx, widgetForState(state));
 }
-let state: VillaniUiState = { phase: "Starting Villani..." };
+let state: VillaniUiState = { phase: "" };
 export async function renderBridgeEvent(
   event: any,
   _pi: any,
@@ -407,7 +463,7 @@ export async function renderBridgeEvent(
   if (event.type === "approval_required") {
     state = reduceVillaniUiState(state, event);
     await setStatus(ctx, state.phase);
-    await setWidget(ctx, ["Pending approval", event.summary || event.message || ""]);
+    await setWidget(ctx, ["Villaniclearance required", event.summary || event.message || ""]);
     return;
   }
   if (event.type === "approval_resolved") {
@@ -490,5 +546,6 @@ export async function renderBridgeEvent(
   await renderState(ctx, state);
 }
 export function resetVillaniUiState() {
-  state = { phase: "Starting Villani..." };
+  state = { phase: "" };
+  resetVillaniStatusManager();
 }

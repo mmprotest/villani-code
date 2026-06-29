@@ -450,7 +450,7 @@ test("approvalMessage never renders object and includes Bash command", async () 
   assert.match(msg, /Command:\necho hi/);
   assert.equal(
     approvalTitle({ tool: "Bash" }),
-    "Villani wants to run a shell command",
+    "Villani requests command authority",
   );
 });
 
@@ -512,9 +512,10 @@ test("/villani approval pending sets status/widget and accepted clears widget", 
     else process.env.VILLANI_USE_PI_MODEL = oldUsePi;
   }
   assert.ok(
-    statuses.some((a) => a[0] === "villani" && a[1] === "Waiting for approval..."),
+    statuses.some((a) => a[0] === "villani" && /approval|authorization|authority|clearance/i.test(String(a[1]))),
   );
-  assert.ok(widgets.some((a) => a[0] === "villani" && Array.isArray(a[1])));
+  assert.ok(widgets.some((a) => a[0] === "villani" && Array.isArray(a[1]) && a[1][0] === "Villaniclearance required"));
+  assert.doesNotMatch(JSON.stringify(widgets), /Pending approval|Allow this operation|\[object Object\]/);
   assert.ok(widgets.some((a) => a[0] === "villani" && a[1] === undefined));
   assert.equal(confirms[0][2].signal instanceof AbortSignal, true);
 });
@@ -600,7 +601,7 @@ test("repeated model_request_started updates status without notify spam", async 
   };
   await renderBridgeEvent({ type: "model_request_started" }, {}, ctx);
   await renderBridgeEvent({ type: "model_request_started" }, {}, ctx);
-  assert.equal(statuses.length, 2);
+  assert.equal(statuses.length, 1);
   assert.ok(statuses.every((s) => /^Villani/.test(s)));
   assert.deepEqual(notes, []);
 });
