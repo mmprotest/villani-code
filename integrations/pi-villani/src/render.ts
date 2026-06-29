@@ -12,14 +12,14 @@ export type VillaniCopyCategory =
   | "complete";
 
 const VILLANI_COPY: Record<VillaniCopyCategory, string[]> = {
-  thinking: ["Villani is make plan...", "Villaniplan forming...", "Villani thinks. Nobody interrupt.", "Villani has doctrine now...", "Villanithoughts classified..."],
-  analysis: ["Villanalysis begins...", "Villani inspect problem...", "Villani finds weak logic...", "Villanicommission investigates...", "Villani determines blame..."],
-  reading: ["Villani reads file. File nervous.", "Villaniread begins...", "Villani opens file for questioning...", "Villanidossier opened...", "Villani checks file loyalty..."],
-  writing: ["Villani makes file obey...", "Villanipatch imposed...", "Villani writes new order...", "Villanification applied...", "Villani edits without remorse..."],
-  running: ["Villani gives command...", "Villanicommand issued...", "Villani demands output...", "Villanirun begins...", "Villani expects obedience..."],
-  testing: ["Villani begins inspection...", "Villanitest begins...", "Villani demands green tests...", "Villaniverdict pending...", "Villani checks for lies..."],
-  debugging: ["Villani hunts weak bug...", "Villanidebug begins...", "Villani asks bug hard questions...", "Villanistack confesses...", "Villani removes instability..."],
-  review: ["Villanireview begins...", "Villani judges patch...", "Villanicompliance checked...", "Villani approves, reluctantly...", "Villani checks for betrayal..."],
+  thinking: ["Villani is make plan...", "Villaniplan forming...", "Villani thinks. Nobody interrupt.", "Villani has doctrine now...", "Villanithoughts classified...","Villani think. Room become unsafe.","Plan is weak. Villani improve.","Villani make brain do labour...","Villani is decide what reality means...","Villani has thought. Other thoughts dismissed...","Villani is make superior plan..."],
+  analysis: ["Villanalysis begins...", "Villani inspect problem...", "Villani finds weak logic...", "Villanicommission investigates...", "Villani determines blame...","Villani is inspect problem...","Analysis now under state control...","Villani is find where truth escaped...","Villani is diagnose amateur logic...","Villani discovers obvious failure. Embarrassing."],
+  reading: ["Villani reads file. File nervous.", "Villaniread begins...", "Villani open file for questioning...", "Villanidossier opened...", "Villani check file loyalty...","Villani is read file...","File contents now under suspicion...","File summoned for questioning...","Villani is see what file hide...","File classified. Villani has access...","Villaninterrogation begins...","Villani reads. File should be grateful.","Villani study file. File not impressive."],
+  writing: ["Villani makes file obey...", "Villanipatch imposed...", "Villani writes new order...", "Villanification applied...", "Villani edits without remorse...","Villani patches. Code say thank you.","Villani is make file obey...","File corrected by authority...","Villani is fixing file attitude..."],
+  running: ["Villani gives command...", "Villanicommand issued...", "Villani demands output...", "Villanirun begins...", "Villani expects obedience...","Machine must now explain itself...","Villani is launch operation..."],
+  testing: ["Villani begins inspection...", "Villanitest begins...", "Villani demands green tests...", "Villaniverdict pending...", "Villani checks for lies...","Villanitest begins...","Villani is ask why fail...","Villaninspection. Code scared...","Code must prove usefulness...","Villani hunt fake success..."],
+  debugging: ["Villani hunts weak bug...", "Villanidebug begins...", "Villani asks bug hard questions...", "Villanistack confesses...", "Villani removes instability...","Villani is hunt bug...","Villani correct disorder...","Villani is make error confess...","Bug hide. Villani interrogate..."],
+  review: ["Villanireview begins...", "Villani judges patch...", "Villanicompliance checked...", "Villani approves, reluctantly...", "Villani check for betrayal...","Villani judge patch...","Villanicompliance checked...","Patch must justify existence..."],
   approval: [
     "Villani requires authorization...",
     "Villaniclearance required...",
@@ -29,9 +29,11 @@ const VILLANI_COPY: Record<VillaniCopyCategory, string[]> = {
     "Villani demands signed order...",
     "Villanipermission pending...",
     "Villani asks council. Reluctantly.",
+    "Villani is need approval...",
+    "Villani want signed order...",
   ],
-  failure: ["Villani sees failure. Unacceptable.", "Villanifailure recorded...", "Villani prepares punishment...", "Villani blames weak implementation...", "Villani demands second attempt..."],
-  complete: ["Villanified. Accept result.", "Villani declares victory...", "Villani restores order...", "Villanivictory logged...", "Villani permits ship..."],
+  failure: ["Villani sees failure. Unacceptable.", "Villanifailure recorded...", "Villani prepare punishment...", "Villani blames weak implementation...", "Villani demand second attempt...","Result is shameful. Villani informed...","Failure reported to Villani ministry...","Villani is record disgrace...","Villani blames weak architecture. Correctly."],
+  complete: ["Villanified. Accept result.", "Villani declares victory...", "Villani restores order...", "Villanivictory logged...", "Villani permits ship...","Villani declare victory. Obviously.","Villani accept outcome as adequate tribute...","Villani create history. New world order established."],
 };
 
 const copyCounters = new Map<string, number>();
