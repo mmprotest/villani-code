@@ -11,72 +11,19 @@ function api() {
     },
   };
 }
-test("registers Villani Pi commands", () => {
+test("registers only the public /villani command", () => {
   const a = api();
   activate(a);
-  assert.deepEqual(Object.keys(a.commands), [
-    "villani",
+  assert.deepEqual(Object.keys(a.commands), ["villani"]);
+  for (const removed of [
     "villani-abort",
     "villani-confirm-test",
     "villani-ping",
     "villani-doctor",
     "villani-proxy-test",
     "villani-bridge-ping",
-  ]);
-});
-test("/villani-ping only notifies OK", async () => {
-  const a = api();
-  activate(a);
-  const notes: any[] = [];
-  await a.commands["villani-ping"].handler("", {
-    ui: { notify: (m: string) => notes.push(m) },
-  });
-  assert.deepEqual(notes, ["Villani ping OK"]);
-});
-test("/villani-confirm-test accepted, rejected, and missing UI are visible", async () => {
-  for (const value of [true, false]) {
-    const a = api();
-    activate(a);
-    const notes: string[] = [];
-    await a.commands["villani-confirm-test"].handler("", {
-      ui: { notify: (m: string) => notes.push(m), confirm: async () => value },
-    });
-    assert.equal(notes[0], "Villani confirmation test starting...");
-    assert.equal(
-      notes.at(-1),
-      value ? "Villani confirmation accepted" : "Villani confirmation rejected",
-    );
-  }
-  const a = api();
-  activate(a);
-  const notes: string[] = [];
-  await a.commands["villani-confirm-test"].handler("", {
-    ui: { notify: (m: string) => notes.push(m) },
-  });
-  assert.deepEqual(notes, [
-    "Villani confirmation test starting...",
-    "Villani confirmation UI unavailable",
-  ]);
-});
-test("/villani-doctor prints diagnostics without secrets", async () => {
-  const a = api();
-  activate(a);
-  const notes: string[] = [];
-  process.env.VILLANI_API_KEY = "secret";
-  try {
-    await a.commands["villani-doctor"].handler("", {
-      cwd: "/tmp/repo",
-      model: { id: "m" },
-      modelRegistry: { getApiKeyAndHeaders() {} },
-      ui: { notify: (m: string) => notes.push(m) },
-    });
-    const msg = notes.join("\n");
-    assert.match(msg, /package version: 0.1.4/);
-    assert.match(msg, /runtime version: 0.1.3/);
-    assert.match(msg, /ctx.model exists: true/);
-    assert.doesNotMatch(msg, /secret|VILLANI_API_KEY/);
-  } finally {
-    delete process.env.VILLANI_API_KEY;
+  ]) {
+    assert.equal(a.commands[removed], undefined);
   }
 });
 import {
@@ -447,7 +394,7 @@ test("approvalMessage never renders object and includes Bash command", async () 
     input: { command: "echo hi" },
   });
   assert.doesNotMatch(msg, /\[object Object\]/);
-  assert.match(msg, /Command:\necho hi/);
+  assert.match(msg, /Command: echo hi/);
   assert.equal(
     approvalTitle({ tool: "Bash" }),
     "Villani requests command authority",
@@ -475,7 +422,7 @@ test("confirm passes signal option to ctx.ui.confirm", async () => {
   assert.equal(args[2].signal, signal);
 });
 
-test("/villani approval pending sets status/widget and accepted clears widget", async () => {
+test("/villani approval pending clears widget, sets status, confirms, and accepted clears widget", async () => {
   const old = process.env.VILLANI_COMMAND;
   const oldUsePi = process.env.VILLANI_USE_PI_MODEL;
   const p = bridgeScript(
@@ -514,8 +461,13 @@ test("/villani approval pending sets status/widget and accepted clears widget", 
   assert.ok(
     statuses.some((a) => a[0] === "villani" && /approval|authorization|authority|clearance/i.test(String(a[1]))),
   );
-  assert.ok(widgets.some((a) => a[0] === "villani" && Array.isArray(a[1]) && a[1][0] === "Villaniclearance required"));
-  assert.doesNotMatch(JSON.stringify(widgets), /Pending approval|Allow this operation|\[object Object\]/);
+  assert.ok(widgets.length > 0);
+  assert.equal(widgets[0][0], "villani");
+  assert.equal(widgets[0][1], undefined);
+  assert.equal(confirms[0][0], "Villani requests command authority");
+  assert.match(confirms[0][1], /Command: echo hi/);
+  assert.match(confirms[0][1], /Approve this Villani action\?/);
+  assert.doesNotMatch(JSON.stringify(widgets), /Villani requests command authority|Command: echo hi|Pending approval|Allow this operation|\[object Object\]/);
   assert.ok(widgets.some((a) => a[0] === "villani" && a[1] === undefined));
   assert.equal(confirms[0][2].signal instanceof AbortSignal, true);
 });

@@ -89,15 +89,6 @@ export function approvalTitle(request: any) {
   if (tool === "GitDiff") return "Villani requests diff inspection";
   return "Villani requests approval";
 }
-function approvalLead(tool: string): string {
-  if (tool === "Bash") return "Villani requests command authority.";
-  if (tool === "Read") return "Villani requests dossier access.";
-  if (tool === "Write") return "Villani requests edit authority.";
-  if (tool === "Patch") return "Villani requests patch authority.";
-  if (tool === "GitStatus") return "Villani requests repository inspection.";
-  if (tool === "GitDiff") return "Villani requests diff inspection.";
-  return "Villaniclearance required.";
-}
 export function approvalMessage(request: any) {
   const input =
     request.input &&
@@ -114,12 +105,15 @@ export function approvalMessage(request: any) {
     typeof request.path === "string" ? request.path :
     undefined;
 
-  const lines = [approvalLead(tool), ""];
+  const lines: string[] = [];
 
-  lines.push("Operation:", tool, "");
-
-  if (command) lines.push("Command:", command, "");
-  if (path) lines.push("File:", path, "");
+  if (tool === "Bash" && command) lines.push(`Command: ${command}`, "");
+  else if ((tool === "Write" || tool === "Patch") && path) lines.push(`File: ${path}`, "");
+  else {
+    lines.push("Operation:", tool, "");
+    if (command) lines.push(`Command: ${command}`, "");
+    if (path) lines.push(`File: ${path}`, "");
+  }
 
   lines.push("Approve this Villani action?");
   return lines.join("\n");
@@ -132,8 +126,8 @@ async function handleApproval(run: ActiveRun, ctx: any, e: any) {
   let approved = false;
   const message = approvalMessage(e);
   try {
-    await setStatus(ctx, nextVillaniStatus("approval", requestId) ?? "Villani pauses for approval...");
-    await setWidget(ctx, ["Villaniclearance required", message]);
+    await setWidget(ctx, undefined);
+    await setStatus(ctx, nextVillaniStatus("approval", requestId) ?? "Villaniclearance required...");
     approved = await confirm(ctx, approvalTitle(e), message, {
       signal: run.abort.signal,
     });
@@ -149,7 +143,7 @@ async function handleApproval(run: ActiveRun, ctx: any, e: any) {
   }
   if (run.pending.get(requestId) !== false) return;
   run.pending.set(requestId, true);
-  await setStatus(ctx, nextVillaniStatus("thinking", "approval-resolved") ?? "Villanithoughts classified...");
+  await setStatus(ctx, approved ? "Villani resumes operation..." : "Villani records denial...");
   run.bridge?.respondToApproval(run.id, requestId, approved);
   if (process.env.VILLANI_PI_DEBUG === "1")
     console.error("[pi-villani bridge] approval response sent");
@@ -261,7 +255,7 @@ export async function runVillani(
   if (activeRun) {
     await notify(
       ctx,
-      "Villani is already running. Use /villani-abort first.",
+      "Villani is already running. Wait for the active run to finish or cancel the session.",
       "warn",
     );
     return;
@@ -619,41 +613,6 @@ export default function activate(api: any) {
   ) => api.registerCommand(name, { description, handler });
   reg("villani", "Run Villani Code on a task", async (args, ctx) =>
     safeCommand(ctx, "Villani", () => runVillani(args, ctx?.pi ?? api, ctx)),
-  );
-  reg("villani-abort", "Abort the active Villani run", async (_args, ctx) =>
-    safeCommand(ctx, "Villani abort", async () => {
-      await abortVillani(ctx);
-    }),
-  );
-  reg("villani-confirm-test", "Test Villani approval UI", async (_args, ctx) =>
-    safeCommand(ctx, "Villani confirmation test", async () => {
-      await notify(ctx, "Villani confirmation test starting...");
-      if (!ctx?.ui?.confirm) {
-        await notify(ctx, "Villani confirmation UI unavailable", "warn");
-        return;
-      }
-      const ok = await confirm(
-        ctx,
-        "Villani confirmation test",
-        "Confirm Villani test?",
-      );
-      await notify(
-        ctx,
-        ok ? "Villani confirmation accepted" : "Villani confirmation rejected",
-      );
-    }),
-  );
-  reg("villani-ping", "Check Villani extension loading", async (_args, ctx) =>
-    safeCommand(ctx, "Villani ping", () => notify(ctx, "Villani ping OK")),
-  );
-  reg("villani-doctor", "Show Villani diagnostics", async (_args, ctx) =>
-    safeCommand(ctx, "Villani doctor", () => doctor(ctx)),
-  );
-  reg("villani-proxy-test", "Test Villani Pi model proxy", async (_args, ctx) =>
-    safeCommand(ctx, "Villani proxy test", () => proxyTest(ctx)),
-  );
-  reg("villani-bridge-ping", "Ping Villani bridge stdio", async (_args, ctx) =>
-    safeCommand(ctx, "Villani bridge ping", () => bridgePing(ctx)),
   );
   try {
     api.onSessionStart?.(async (ctx: any) =>
