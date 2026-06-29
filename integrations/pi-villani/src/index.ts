@@ -587,7 +587,7 @@ async function doctor(ctx: any) {
     }
   })();
   const lines = [
-    `package version: 0.1.4`,
+    `package version: 0.1.5`,
     `runtime version: ${VILLANI_RUNTIME_VERSION}`,
     `cwd: ${ctx.cwd ?? process.cwd()}`,
     `ctx.model exists: ${!!ctx.model}`,

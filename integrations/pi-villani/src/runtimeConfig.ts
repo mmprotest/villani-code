@@ -1,4 +1,4 @@
-export const VILLANI_RUNTIME_VERSION = "0.1.4";
+export const VILLANI_RUNTIME_VERSION = "0.1.5";
 export const VILLANI_RUNTIME_REPOSITORY = "mmprotest/villani-code";
 export const VILLANI_RUNTIME_TAG = `pi-villani-runtime-v${VILLANI_RUNTIME_VERSION}`;
 export type PlatformKey = "win32-x64"|"darwin-arm64"|"darwin-x64"|"linux-x64";

@@ -142,7 +142,7 @@ pi install npm:@mmprotest/pi-villani
 ```
 Provides `/villani <task>`.
 
-Runtime version: `v0.1.4`.
+Runtime version: `v0.1.5`.
 
 ## Pi Usage
 
