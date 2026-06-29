@@ -14,6 +14,7 @@ import {
 import {
   confirm,
   finalMessage,
+  nextVillaniStatus,
   notify,
   renderBridgeEvent,
   resetVillaniUiState,
@@ -79,10 +80,23 @@ export async function safeCommand(
   }
 }
 export function approvalTitle(request: any) {
-  if (request.tool === "Bash") return "Villani wants to run a shell command";
-  if (request.tool === "Write") return "Villani wants to write a file";
-  if (request.tool === "Patch") return "Villani wants to apply a patch";
-  return "Villani wants approval";
+  const tool = String(request.tool || "");
+  if (tool === "Bash") return "Villani requests command authority";
+  if (tool === "Read") return "Villani requests dossier access";
+  if (tool === "Write") return "Villani requests edit authority";
+  if (tool === "Patch") return "Villani requests patch authority";
+  if (tool === "GitStatus") return "Villani requests repository inspection";
+  if (tool === "GitDiff") return "Villani requests diff inspection";
+  return "Villani requests approval";
+}
+function approvalLead(tool: string): string {
+  if (tool === "Bash") return "Villani requests command authority.";
+  if (tool === "Read") return "Villani requests dossier access.";
+  if (tool === "Write") return "Villani requests edit authority.";
+  if (tool === "Patch") return "Villani requests patch authority.";
+  if (tool === "GitStatus") return "Villani requests repository inspection.";
+  if (tool === "GitDiff") return "Villani requests diff inspection.";
+  return "Villaniclearance required.";
 }
 export function approvalMessage(request: any) {
   const input =
@@ -91,16 +105,23 @@ export function approvalMessage(request: any) {
     !Array.isArray(request.input)
       ? request.input
       : {};
-  const path = typeof input.path === "string" ? input.path : undefined;
+
+  const tool = String(request.tool || "operation");
   const command = typeof input.command === "string" ? input.command : undefined;
-  const safeSummary =
-    typeof request.summary === "string" && request.summary.trim()
-      ? request.summary
-      : "Approval required";
-  const lines = [safeSummary, ""];
+  const path =
+    typeof input.path === "string" ? input.path :
+    typeof input.file_path === "string" ? input.file_path :
+    typeof request.path === "string" ? request.path :
+    undefined;
+
+  const lines = [approvalLead(tool), ""];
+
+  lines.push("Operation:", tool, "");
+
   if (command) lines.push("Command:", command, "");
-  else if (path) lines.push("File:", path, "");
-  lines.push("Allow this operation?");
+  if (path) lines.push("File:", path, "");
+
+  lines.push("Approve this Villani action?");
   return lines.join("\n");
 }
 async function handleApproval(run: ActiveRun, ctx: any, e: any) {
@@ -111,8 +132,8 @@ async function handleApproval(run: ActiveRun, ctx: any, e: any) {
   let approved = false;
   const message = approvalMessage(e);
   try {
-    await setStatus(ctx, "Waiting for approval...");
-    await setWidget(ctx, ["Pending approval", message]);
+    await setStatus(ctx, nextVillaniStatus("approval", requestId) ?? "Villani pauses for approval...");
+    await setWidget(ctx, ["Villaniclearance required", message]);
     approved = await confirm(ctx, approvalTitle(e), message, {
       signal: run.abort.signal,
     });
@@ -128,7 +149,7 @@ async function handleApproval(run: ActiveRun, ctx: any, e: any) {
   }
   if (run.pending.get(requestId) !== false) return;
   run.pending.set(requestId, true);
-  await setStatus(ctx, "Villani is thinking...");
+  await setStatus(ctx, nextVillaniStatus("thinking", "approval-resolved") ?? "Villanithoughts classified...");
   run.bridge?.respondToApproval(run.id, requestId, approved);
   if (process.env.VILLANI_PI_DEBUG === "1")
     console.error("[pi-villani bridge] approval response sent");
@@ -232,7 +253,7 @@ export async function runVillani(
 ): Promise<void> {
   resetVillaniUiState();
   await notify(ctx, "Villani starting...", "info");
-  await setStatus(ctx, "Starting Villani...");
+  await setStatus(ctx, nextVillaniStatus("thinking", "startup") ?? "Villaniplan forming...");
   if (!task?.trim()) {
     await notify(ctx, "/villani requires a task argument", "warn");
     return;
@@ -271,10 +292,10 @@ export async function runVillani(
     let config: any;
     let env: any;
     if (usePi) {
-      await setStatus(ctx, "Preparing model connection...");
+      await setStatus(ctx, nextVillaniStatus("analysis", "model-connection") ?? "Villanalysis begins...");
       model = await resolvePiModel(ctx);
       const auth = await resolveModelAuth(ctx, model);
-      await setStatus(ctx, "Preparing model connection...");
+      await setStatus(ctx, nextVillaniStatus("analysis", "model-connection") ?? "Villanalysis begins...");
       proxy = await startModelProxyFromPiModel({
         model,
         apiKey: auth.apiKey,
@@ -296,13 +317,13 @@ export async function runVillani(
       config = envConfig();
       env = process.env;
     }
-    await setStatus(ctx, "Starting Villani...");
+    await setStatus(ctx, nextVillaniStatus("thinking", "runtime-start") ?? "Villaniplan forming...");
     const executable = await resolveVillaniRuntime({ signal: abort.signal });
     if (process.env.VILLANI_COMMAND) {
-      await setStatus(ctx, "Starting Villani...");
+      await setStatus(ctx, nextVillaniStatus("thinking", "runtime-start") ?? "Villaniplan forming...");
       await assertBridgePing(executable, ctx, env, abort.signal);
     }
-    await setStatus(ctx, "Starting Villani...");
+    await setStatus(ctx, nextVillaniStatus("thinking", "runtime-start") ?? "Villaniplan forming...");
     const bridge = new VillaniBridgeProcess(executable, {
       env,
       startupTimeoutMs: 30000,
@@ -311,16 +332,19 @@ export async function runVillani(
       cwd: ctx.cwd ?? process.cwd(),
     });
     run.bridge = bridge;
-    await setStatus(ctx, "Starting Villani...");
+    await setStatus(ctx, nextVillaniStatus("thinking", "runtime-start") ?? "Villaniplan forming...");
     await bridge.waitUntilReady(undefined, abort.signal);
-    await setStatus(ctx, "Villani is thinking...");
+    await setStatus(ctx, nextVillaniStatus("thinking", "approval-resolved") ?? "Villanithoughts classified...");
     const startPostToolTimer = (eventType: string) => {
       clearPostToolTimer();
       postToolTimer = setTimeout(async () => {
         try {
           bridge.send({ type: "ping", id: `${runId}-post-tool-ping` });
           const pong = await bridge.waitForEvent("pong", 3000, abort.signal);
-          if (pong) await setStatus(ctx, "Villani is thinking...");
+          if (pong) {
+            const status = nextVillaniStatus("thinking", "post-tool-ping");
+            if (status) await setStatus(ctx, status);
+          }
           else
             await notify(
               ctx,
@@ -419,7 +443,7 @@ export async function runVillani(
       mode: "runner",
       config,
     });
-    await setStatus(ctx, "Villani is thinking...");
+    await setStatus(ctx, nextVillaniStatus("thinking", "approval-resolved") ?? "Villanithoughts classified...");
     try {
       await runStartedPromise;
     } catch (e) {

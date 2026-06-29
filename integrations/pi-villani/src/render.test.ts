@@ -4,6 +4,7 @@ import {
   cleanAssistantText,
   reduceVillaniUiState,
   renderBridgeEvent,
+  nextVillaniStatus,
   resetVillaniCopyCounters,
   resetVillaniUiState,
   toolStartedMessage,
@@ -93,8 +94,68 @@ test('cleanAssistantText trims without Villani prefix', () => {
 
 test('approval message remains literal and readable', () => {
   const request = { tool: 'Bash', summary: 'Run command', input: { command: 'python -m pytest -v' } };
-  assert.equal(approvalTitle(request), 'Villani wants to run a shell command');
+  assert.equal(approvalTitle(request), 'Villani requests command authority');
   const msg = approvalMessage(request);
+  assert.match(msg, /Villani requests command authority\./);
   assert.match(msg, /Command:\npython -m pytest -v/);
+  assert.match(msg, /Approve this Villani action\?/);
+  assert.doesNotMatch(msg, /Allow this operation\?/);
   assert.doesNotMatch(msg, /\[object Object\]/);
+});
+
+
+test('repeated model_request_started only updates status once within 12 seconds', () => {
+  resetVillaniCopyCounters();
+  const first = reduceVillaniUiState({ phase: 'x' }, { type: 'model_request_started' });
+  const second = reduceVillaniUiState(first, { type: 'model_request_started' });
+  assert.equal(first.phase, 'Villani is make plan...');
+  assert.equal(second.phase, first.phase);
+});
+
+test('proxy_request_started does not spam new thinking copy when already thinking', () => {
+  resetVillaniCopyCounters();
+  const first = reduceVillaniUiState({ phase: 'x' }, { type: 'model_request_started' });
+  const second = reduceVillaniUiState(first, { type: 'proxy_request_started' });
+  assert.equal(second.phase, first.phase);
+});
+
+test('approval_required uses approval category copy and widget avoids pending approval', async () => {
+  resetVillaniCopyCounters();
+  const rec = ctxRecorder();
+  await renderBridgeEvent({ type: 'approval_required', request_id: 'r1', tool: 'Read', summary: 'Read' }, {}, rec.ctx);
+  assert.equal(rec.statuses.at(-1), 'Villani requires authorization...');
+  assert.doesNotMatch(JSON.stringify(rec.widgets), /Pending approval/);
+  assert.match(JSON.stringify(rec.widgets), /Villaniclearance required/);
+});
+
+test('approval titles use Villani-style copy for Read and Bash', () => {
+  assert.equal(approvalTitle({ tool: 'Read' }), 'Villani requests dossier access');
+  assert.equal(approvalTitle({ tool: 'Bash' }), 'Villani requests command authority');
+});
+
+test('approval message for Read without path is readable', () => {
+  const msg = approvalMessage({ tool: 'Read', input: {} });
+  assert.match(msg, /Villani requests dossier access\./);
+  assert.match(msg, /Operation:\nRead/);
+  assert.match(msg, /Approve this Villani action\?/);
+  assert.doesNotMatch(msg, /unknown|\[object Object\]|Allow this operation\?/i);
+});
+
+test('after approval_resolved status does not hardcode old thinking copy', () => {
+  resetVillaniCopyCounters();
+  const state = reduceVillaniUiState({ phase: 'approval' }, { type: 'approval_resolved' });
+  assert.notEqual(state.phase, 'Villani is thinking...');
+});
+
+test('villaniCopy approval rotates deterministically', () => {
+  resetVillaniCopyCounters();
+  assert.equal(villaniCopy('approval'), 'Villani requires authorization...');
+  assert.equal(villaniCopy('approval'), 'Villaniclearance required...');
+});
+
+test('nextVillaniStatus suppresses repeated status until detail changes', () => {
+  resetVillaniCopyCounters();
+  assert.equal(nextVillaniStatus('thinking', 'same'), 'Villani is make plan...');
+  assert.equal(nextVillaniStatus('thinking', 'same'), undefined);
+  assert.equal(nextVillaniStatus('thinking', 'different'), 'Villaniplan forming...');
 });
