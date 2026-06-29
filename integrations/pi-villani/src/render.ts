@@ -370,7 +370,7 @@ export function reduceVillaniUiState(
   } else if (event.type === "proxy_request_completed") {
     // Keep existing status; proxy completion is heartbeat-like UI noise.
   } else if (event.type === "approval_required") applyStatus("approval", event.request_id || event.requestId);
-  else if (event.type === "approval_resolved") applyStatus("thinking", "approval-resolved");
+  else if (event.type === "approval_resolved") next.phase = event.approved === false ? "Villani records denial..." : "Villani resumes operation...";
   else if (event.type === "tool_started") {
     const tool = String(event.tool || event.name || "");
     const category = categoryForEvent(event) || "thinking";
@@ -464,8 +464,8 @@ export async function renderBridgeEvent(
   }
   if (event.type === "approval_required") {
     state = reduceVillaniUiState(state, event);
+    await setWidget(ctx, undefined);
     await setStatus(ctx, state.phase);
-    await setWidget(ctx, ["Villaniclearance required", event.summary || event.message || ""]);
     return;
   }
   if (event.type === "approval_resolved") {

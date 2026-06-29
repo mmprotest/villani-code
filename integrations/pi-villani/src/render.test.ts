@@ -96,8 +96,8 @@ test('approval message remains literal and readable', () => {
   const request = { tool: 'Bash', summary: 'Run command', input: { command: 'python -m pytest -v' } };
   assert.equal(approvalTitle(request), 'Villani requests command authority');
   const msg = approvalMessage(request);
-  assert.match(msg, /Villani requests command authority\./);
-  assert.match(msg, /Command:\npython -m pytest -v/);
+  assert.doesNotMatch(msg, /Villani requests command authority/);
+  assert.match(msg, /Command: python -m pytest -v/);
   assert.match(msg, /Approve this Villani action\?/);
   assert.doesNotMatch(msg, /Allow this operation\?/);
   assert.doesNotMatch(msg, /\[object Object\]/);
@@ -124,8 +124,8 @@ test('approval_required uses approval category copy and widget avoids pending ap
   const rec = ctxRecorder();
   await renderBridgeEvent({ type: 'approval_required', request_id: 'r1', tool: 'Read', summary: 'Read' }, {}, rec.ctx);
   assert.equal(rec.statuses.at(-1), 'Villani requires authorization...');
-  assert.doesNotMatch(JSON.stringify(rec.widgets), /Pending approval/);
-  assert.match(JSON.stringify(rec.widgets), /Villaniclearance required/);
+  assert.deepEqual(rec.widgets, [undefined]);
+  assert.doesNotMatch(JSON.stringify(rec.widgets), /Pending approval|Villaniclearance required|Allow this operation|\[object Object\]/);
 });
 
 test('approval titles use Villani-style copy for Read and Bash', () => {
@@ -135,10 +135,21 @@ test('approval titles use Villani-style copy for Read and Bash', () => {
 
 test('approval message for Read without path is readable', () => {
   const msg = approvalMessage({ tool: 'Read', input: {} });
-  assert.match(msg, /Villani requests dossier access\./);
+  assert.doesNotMatch(msg, /Villani requests dossier access/);
   assert.match(msg, /Operation:\nRead/);
   assert.match(msg, /Approve this Villani action\?/);
   assert.doesNotMatch(msg, /unknown|\[object Object\]|Allow this operation\?/i);
+});
+
+
+test('approval_resolved accepted and denied clear widget with short continuation status', async () => {
+  for (const [approved, expected] of [[true, 'Villani resumes operation...'], [false, 'Villani records denial...']] as const) {
+    resetVillaniUiState();
+    const rec = ctxRecorder();
+    await renderBridgeEvent({ type: 'approval_resolved', approved }, {}, rec.ctx);
+    assert.equal(rec.statuses.at(-1), expected);
+    assert.deepEqual(rec.widgets, [undefined]);
+  }
 });
 
 test('after approval_resolved status does not hardcode old thinking copy', () => {
