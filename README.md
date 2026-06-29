@@ -133,6 +133,21 @@ Autonomous pass:
 villani-code --villani-mode --base-url http://127.0.0.1:1234 --model your-model --repo /path/to/repo
 ```
 
+## Use Villani Code in Pi
+
+# @mmprotest/pi-villani
+Install with:
+```bash
+pi install npm:@mmprotest/pi-villani
+```
+Provides `/villani <task>`.
+
+Runtime version: `v0.1.4`.
+
+## Pi Usage
+
+Run Villani with `/villani <task>`. Active runs are still cleaned up automatically on process/session cancellation or error cleanup.
+
 ## Reports
 
 - [Villani Code Terminal-Bench 2.0 Qwen3.6 27B Report](docs/Villani_Code_Terminal_Bench_2_Qwen27B_Report.pdf)
