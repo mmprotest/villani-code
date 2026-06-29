@@ -45,6 +45,12 @@ function bridgeScript(body: string) {
 }
 const readyPrelude =
   "process.stdout.write(JSON.stringify({type:'ready'})+'\\n');\nconst send=e=>process.stdout.write(JSON.stringify(e)+'\\n');\n";
+function fakeBridgeLaunch(fakeBridgeScriptPath: string) {
+  return {
+    executableOverride: process.execPath,
+    bridgeArgsOverride: [fakeBridgeScriptPath],
+  };
+}
 
 test("/villani sends command notification and only reports run started after run_started event", async () => {
   const old = process.env.VILLANI_COMMAND;
@@ -61,6 +67,7 @@ test("/villani sends command notification and only reports run started after run
       { sendMessage: (m: string) => notes.push(m) },
       {
         ui: { notify: (m: string) => notes.push(m) },
+        bridgeLaunchOptions: fakeBridgeLaunch(p),
         cwd: "/tmp",
         model: { id: "m" },
       },
@@ -93,7 +100,7 @@ test("/villani missing run_started timeout reports visible error instead of star
         runVillani(
           "task",
           {},
-          { ui: { notify: (m: string) => notes.push(m) }, cwd: "/tmp" },
+          { ui: { notify: (m: string) => notes.push(m) }, bridgeLaunchOptions: fakeBridgeLaunch(p), cwd: "/tmp" },
         ),
       /did not acknowledge run command within 10 seconds.*no ack/s,
     );
@@ -145,7 +152,7 @@ setInterval(()=>{},1000);
         runVillani(
           "task",
           {},
-          { ui: { notify: (m: string) => notes.push(m) }, cwd: "/tmp" },
+          { ui: { notify: (m: string) => notes.push(m) }, bridgeLaunchOptions: fakeBridgeLaunch(p), cwd: "/tmp" },
         ),
       /did not acknowledge run command within 10 seconds.*cleanup no ack/s,
     );
@@ -168,7 +175,7 @@ test("bridge exit before ready with ModuleNotFoundError produces pip install dia
   process.env.VILLANI_COMMAND = p;
   try {
     await assert.rejects(
-      () => bridgePing({ ui: { notify: () => {} } }),
+      () => bridgePing({ ui: { notify: () => {} }, bridgeLaunchOptions: fakeBridgeLaunch(p) }),
       /pip install -e/,
     );
   } finally {
@@ -186,7 +193,7 @@ test("/villani-bridge-ping succeeds with fake bridge", async () => {
   process.env.VILLANI_COMMAND = p;
   const notes: string[] = [];
   try {
-    await bridgePing({ ui: { notify: (m: string) => notes.push(m) } });
+    await bridgePing({ ui: { notify: (m: string) => notes.push(m) }, bridgeLaunchOptions: fakeBridgeLaunch(p) });
   } finally {
     if (old === undefined) delete process.env.VILLANI_COMMAND;
     else process.env.VILLANI_COMMAND = old;
@@ -200,7 +207,7 @@ test("/villani-bridge-ping surfaces stderr on failure", async () => {
   process.env.VILLANI_COMMAND = p;
   try {
     await assert.rejects(
-      () => bridgePing({ ui: { notify: () => {} } }),
+      () => bridgePing({ ui: { notify: () => {} }, bridgeLaunchOptions: fakeBridgeLaunch(p) }),
       /boom stderr/,
     );
   } finally {
@@ -225,7 +232,7 @@ test("/villani surfaces bridge error before run_started without waiting 10 secon
         runVillani(
           "task",
           {},
-          { ui: { notify: (m: string) => notes.push(m) }, cwd: "/tmp" },
+          { ui: { notify: (m: string) => notes.push(m) }, bridgeLaunchOptions: fakeBridgeLaunch(p), cwd: "/tmp" },
         ),
       /bad run command/,
     );
@@ -253,7 +260,7 @@ test("/villani launches bridge with ctx cwd", async () => {
     await runVillani(
       "task",
       { sendMessage: () => {} },
-      { ui: { notify: () => {} }, cwd: d, model: { id: "m" } },
+      { ui: { notify: () => {} }, bridgeLaunchOptions: fakeBridgeLaunch(p), cwd: d, model: { id: "m" } },
     );
     assert.equal(readFileSync(cwdFile, "utf8"), d);
   } finally {
@@ -359,7 +366,7 @@ test("/villani sends exactly one iterable final durable message with summary met
     await runVillani(
       "task",
       { sendMessage: (m: any) => sent.push(m) },
-      { ui: { notify: () => {} }, cwd: "/tmp", model: { id: "m" } },
+      { ui: { notify: () => {} }, bridgeLaunchOptions: fakeBridgeLaunch(p), cwd: "/tmp", model: { id: "m" } },
     );
   } finally {
     if (old === undefined) delete process.env.VILLANI_COMMAND;
@@ -448,6 +455,7 @@ test("/villani approval pending clears widget, sets status, confirms, and accept
             return true;
           },
         },
+        bridgeLaunchOptions: fakeBridgeLaunch(p),
         cwd: "/tmp",
         model: { id: "m" },
       },
@@ -526,6 +534,7 @@ test("/villani keeps waiting after nonzero tool_finished and renders next model 
           notify: (m: string) => notes.push(m),
           setStatus: (_: string, m: string) => statuses.push(m),
         },
+        bridgeLaunchOptions: fakeBridgeLaunch(p),
         cwd: "/tmp",
         model: { id: "m" },
       },
@@ -632,6 +641,7 @@ test("command lifecycle sets then clears widget through final result", async () 
           setWidget: (...a: any[]) => widgets.push(a),
           setStatus: () => {},
         },
+        bridgeLaunchOptions: fakeBridgeLaunch(p),
         cwd: "/tmp",
         model: { id: "m" },
       },
