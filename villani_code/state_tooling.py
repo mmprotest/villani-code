@@ -518,7 +518,13 @@ def execute_tool_with_policy(
     if policy.decision == Decision.DENY:
         return {"content": "Denied by permission policy", "is_error": True}
     if policy.decision == Decision.ASK:
-        if getattr(runner, "auto_approve", False):
+        if getattr(runner, "external_approval_mode", False):
+            runner.event_callback({"type": "approval_required", "name": tool_name, "input": tool_input})
+            approved = runner.approval_callback(tool_name, tool_input)
+            runner.event_callback({"type": "approval_resolved", "name": tool_name, "input": tool_input, "approved": approved})
+            if not approved:
+                return {"content": "User denied tool execution", "is_error": True}
+        elif getattr(runner, "auto_approve", False):
             runner.event_callback(
                 {
                     "type": "approval_auto_resolved",
@@ -671,6 +677,31 @@ def execute_tool_with_lifecycle(
         debug_callback = getattr(runner, "_debug_tool_callback", None)
         if callable(debug_callback):
             debug_callback(event_type, callback_payload)
+        if event_type == "command_started":
+            runner.event_callback(
+                {
+                    "type": "command_started",
+                    "name": "Bash",
+                    "command": payload.get("command"),
+                    "cwd": payload.get("cwd"),
+                    "tool_use_id": payload.get("tool_call_id"),
+                    "turn_index": emit_turn_index,
+                }
+            )
+        elif event_type == "command_finished":
+            runner.event_callback(
+                {
+                    "type": "command_finished",
+                    "name": "Bash",
+                    "command": payload.get("command"),
+                    "cwd": payload.get("cwd"),
+                    "exit_code": payload.get("exit_code"),
+                    "stdout_preview": str(payload.get("stdout") or "")[:500],
+                    "stderr_preview": str(payload.get("stderr") or "")[:500],
+                    "tool_use_id": payload.get("tool_call_id"),
+                    "turn_index": emit_turn_index,
+                }
+            )
 
     debug_recorder = getattr(runner, "_debug_recorder", None)
     debug_root = getattr(getattr(debug_recorder, "artifacts", None), "root", None)

@@ -272,7 +272,7 @@ def _run_grep(
         cmd = [rg_bin, "-n", data.pattern, str(base)]
         if data.include_hidden:
             cmd.append("--hidden")
-        proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env)
+        proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
         return "\n".join(proc.stdout.splitlines()[: data.max_results])
     return ""
 
@@ -295,7 +295,7 @@ def _run_search(
         return ""
     base = _safe_path(repo, data.path)
     cmd = [rg_bin, "-n", "-C", str(data.context_lines), data.query, str(base)]
-    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env)
+    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
     return proc.stdout
 
 
@@ -309,7 +309,7 @@ def _run_bash(data: BashInput, repo: Path, unsafe: bool, debug_callback: Any | N
     if callable(debug_callback):
         debug_callback("command_started", {"command": data.command, "cwd": data.cwd, "tool_call_id": tool_call_id})
     env = _command_environment(repo, data.command, cwd, debug_callback, tool_call_id, private_roots, shell=True)
-    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec, env=env)
+    proc = subprocess.run(data.command, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=data.timeout_sec, env=env, stdin=subprocess.DEVNULL)
     if callable(debug_callback):
         debug_callback(
             "command_finished",
@@ -414,5 +414,5 @@ def _run_git(name: str, data: GitSimpleInput, repo: Path, debug_callback: Any | 
     }
     cmd = ["git", *mapping[name], *data.args]
     env = _command_environment(repo, cmd, repo, debug_callback, tool_call_id, private_roots)
-    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env)
+    proc = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
     return proc.stdout or proc.stderr

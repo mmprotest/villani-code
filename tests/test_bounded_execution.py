@@ -209,3 +209,15 @@ def test_explicit_no_change_needed_allows_prose_only_completion(tmp_path: Path) 
     runner = _runner(tmp_path, [{"role": "assistant", "content": [{"type": "text", "text": "No code change is needed because behavior matches spec."}]}])
     result = runner.run("Fix the bug", execution_budget=_default_budget())
     assert result["execution"]["terminated_reason"] == "completed"
+
+
+def test_runner_treats_string_tool_input_as_empty_dict(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, [{"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Ls", "input": "repo"}]}])
+    result = runner.run("work", execution_budget=ExecutionBudget(max_turns=1, max_tool_calls=1, max_seconds=100.0, max_no_edit_turns=20, max_reconsecutive_recon_turns=20))
+    assert result["transcript"]["tool_invocations"][0]["input"] == {}
+
+
+def test_runner_treats_list_tool_input_as_empty_dict(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, [{"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "Ls", "input": ["repo"]}]}])
+    result = runner.run("work", execution_budget=ExecutionBudget(max_turns=1, max_tool_calls=1, max_seconds=100.0, max_no_edit_turns=20, max_reconsecutive_recon_turns=20))
+    assert result["transcript"]["tool_invocations"][0]["input"] == {}

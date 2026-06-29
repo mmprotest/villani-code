@@ -20,6 +20,7 @@ from villani_code.benchmark.runtime_config import BenchmarkRuntimeConfig
 from villani_code.debug_bundle import create_debug_bundle
 from villani_code.debug_mode import DebugMode, build_debug_config
 from villani_code.trace_summary import write_summary_from_events, write_tool_calls_from_events
+from villani_code.runner_factory import build_runner
 
 app = typer.Typer(help="Villani: constrained-inference coding agent with visible context governance")
 mcp_app = typer.Typer(help="Manage MCP servers")
@@ -95,28 +96,7 @@ def _resolve_villani_flag(repo: Path, cli_value: bool | None) -> bool:
 
 
 def _build_runner(base_url: str, model: str, repo: Path, max_tokens: int, stream: bool, thinking: Optional[str], unsafe: bool, verbose: bool, extra_json: Optional[str], redact: bool, dangerously_skip_permissions: bool, auto_accept_edits: bool, auto_approve: bool, plan_mode: Literal["off", "auto", "strict"], max_repair_attempts: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, benchmark_runtime_json: str | None = None, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None, memory_enabled: bool = False, memory_update_interval_tool_calls: int = 5) -> Runner:
-    resolved_repo = repo.resolve()
-    try:
-        ensure_runtime_dependencies_not_shadowed(resolved_repo)
-    except RuntimeError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    client: Any
-    if provider == "openai":
-        resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        client = OpenAIClient(base_url=base_url, api_key=resolved_api_key)
-    else:
-        _ = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        client = AnthropicClient(base_url=base_url)
-    thinking_obj = None
-    if thinking:
-        try:
-            thinking_obj = json.loads(thinking)
-        except json.JSONDecodeError:
-            thinking_obj = thinking
-    benchmark_config = BenchmarkRuntimeConfig.model_validate_json(benchmark_runtime_json) if benchmark_runtime_json else None
-    debug_config = build_debug_config(debug_mode.value if isinstance(debug_mode, DebugMode) else str(debug_mode), debug_dir=debug_dir)
-    return Runner(client=client, repo=resolved_repo, model=model, max_tokens=max_tokens, stream=stream, thinking=thinking_obj, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, bypass_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, auto_approve=auto_approve, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_config=benchmark_config, debug_config=debug_config, provider=provider, memory_enabled=memory_enabled, memory_update_interval_tool_calls=memory_update_interval_tool_calls)
+    return build_runner(base_url=base_url, model=model, repo=repo, max_tokens=max_tokens, stream=stream, thinking=thinking, unsafe=unsafe, verbose=verbose, extra_json=extra_json, redact=redact, dangerously_skip_permissions=dangerously_skip_permissions, auto_accept_edits=auto_accept_edits, auto_approve=auto_approve, plan_mode=plan_mode, max_repair_attempts=max_repair_attempts, small_model=small_model, provider=provider, api_key=api_key, villani_mode=villani_mode, villani_objective=villani_objective, benchmark_runtime_json=benchmark_runtime_json, debug_mode=debug_mode, debug_dir=debug_dir, memory_enabled=memory_enabled, memory_update_interval_tool_calls=memory_update_interval_tool_calls)
 
 
 def _run_interactive(base_url: str, model: str, repo: Path, max_tokens: int, small_model: bool, provider: Literal["anthropic", "openai"], api_key: Optional[str], villani_mode: bool = False, villani_objective: str | None = None, auto_approve: bool = False, debug_mode: DebugMode = DebugMode.OFF, debug_dir: Optional[Path] = None) -> None:
@@ -174,6 +154,15 @@ def main(
         resolved_villani = _resolve_villani_flag(repo, villani_mode)
         _run_interactive(base_url, model, repo, max_tokens, small_model, provider, api_key, villani_mode=resolved_villani, auto_approve=auto_approve)
 
+
+@app.command()
+def bridge(
+    stdio: bool = typer.Option(False, "--stdio", help="Run the JSONL stdio bridge for external integrations."),
+) -> None:
+    if not stdio:
+        raise typer.BadParameter("Only --stdio is supported for the bridge command")
+    from villani_code.integrations.pi_bridge import main_stdio
+    main_stdio()
 
 @app.command()
 def run(

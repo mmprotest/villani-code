@@ -1,3 +1,11 @@
+# Keep the Pi runtime PyInstaller spec tracked
+!packaging/villani_runtime.spec
+
+# Node
+node_modules/
+npm-debug.log*
+*.tgz
+
 __pycache__/
 *.pyc
 .venv/
